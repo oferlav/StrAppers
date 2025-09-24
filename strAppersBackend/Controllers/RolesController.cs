@@ -124,8 +124,8 @@ namespace strAppersBackend.Controllers
                 var students = await _context.Students
                     .Include(s => s.Major)
                     .Include(s => s.Year)
-                    .Include(s => s.Organization)
-                    .Include(s => s.Project)
+                    .Include(s => s.ProjectBoard)
+                .ThenInclude(pb => pb.Project)
                     .Include(s => s.StudentRoles)
                     .Where(s => s.StudentRoles.Any(sr => sr.RoleId == id))
                     .OrderBy(s => s.LastName)

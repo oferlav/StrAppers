@@ -24,7 +24,6 @@ namespace strAppersBackend.Models
         public bool Success { get; set; }
         public string? SlackUserId { get; set; }
         public string? ErrorMessage { get; set; }
-        public string? Message { get; set; }
     }
 
     public class SlackTeamInfo

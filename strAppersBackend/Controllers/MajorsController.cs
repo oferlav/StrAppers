@@ -43,7 +43,7 @@ namespace strAppersBackend.Controllers
         /// <summary>
         /// Get all majors (including inactive)
         /// </summary>
-        [HttpGet("all")]
+        [HttpGet("use/all")]
         public async Task<ActionResult<IEnumerable<Major>>> GetAllMajors()
         {
             try
@@ -60,6 +60,7 @@ namespace strAppersBackend.Controllers
                 return StatusCode(500, "An error occurred while retrieving all majors");
             }
         }
+
 
         /// <summary>
         /// Get a specific major by ID

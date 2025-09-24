@@ -6,8 +6,9 @@ using strAppersBackend.Services;
 
 namespace strAppersBackend.Controllers
 {
-    [ApiController]
-    [Route("api/[controller]")]
+    // DISABLED - Slack functionality temporarily disabled
+    // [ApiController]
+    // [Route("api/[controller]")]
     public class SlackDiagnosticController : ControllerBase
     {
         private readonly IConfiguration _cfg;

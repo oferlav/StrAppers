@@ -11,3 +11,4 @@ FROM information_schema.columns
 WHERE table_name = 'Projects' 
 AND column_name IN ('SystemDesign', 'SystemDesignDoc')
 ORDER BY column_name;
+

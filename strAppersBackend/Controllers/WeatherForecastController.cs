@@ -2,8 +2,9 @@ using Microsoft.AspNetCore.Mvc;
 
 namespace strAppersBackend.Controllers;
 
-[ApiController]
-[Route("[controller]")]
+// DISABLED - Default template controller
+// [ApiController]
+// [Route("[controller]")]
 public class WeatherForecastController : ControllerBase
 {
     private static readonly string[] Summaries = new[]

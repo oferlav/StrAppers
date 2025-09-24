@@ -1,5 +1,6 @@
 using Microsoft.EntityFrameworkCore;
 using strAppersBackend.Data;
+using strAppersBackend.Models;
 using strAppersBackend.Services;
 using System.Text.Json;
 
@@ -24,14 +25,23 @@ builder.Services.AddDbContext<ApplicationDbContext>(options =>
     options.UseNpgsql(builder.Configuration.GetConnectionString("DefaultConnection")));
 
 // Add database initialization service
-builder.Services.AddScoped<DatabaseInitializationService>();
-builder.Services.AddScoped<SlackService>();
+// builder.Services.AddScoped<DatabaseInitializationService>();
+// builder.Services.AddScoped<SlackService>(); // SLACK TEMPORARILY DISABLED
 
 // Add AI services
 builder.Services.AddScoped<IAIService, AIService>();
 builder.Services.AddScoped<IDesignDocumentService, DesignDocumentService>();
 
-// Add HttpClientFactory for Slack API calls and OpenAI API calls
+// Add Trello services
+builder.Services.AddScoped<ITrelloService, TrelloService>();
+
+// Configure Trello settings
+builder.Services.Configure<TrelloConfig>(builder.Configuration.GetSection("Trello"));
+
+// Configure Business Logic settings
+builder.Services.Configure<BusinessLogicConfig>(builder.Configuration.GetSection("BusinessLogicConfig"));
+
+// Add HttpClientFactory for Slack API calls, OpenAI API calls, and Trello API calls
 builder.Services.AddHttpClient();
 
 var app = builder.Build();

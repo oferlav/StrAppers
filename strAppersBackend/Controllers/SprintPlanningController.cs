@@ -1,26 +1,31 @@
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Options;
 using strAppersBackend.Data;
 using strAppersBackend.Models;
 using strAppersBackend.Services;
 
 namespace strAppersBackend.Controllers;
 
+// DISABLED - Functionality moved to BoardsController
 [ApiController]
 [Route("api/[controller]")]
 public class SprintPlanningController : ControllerBase
 {
     private readonly IAIService _aiService;
     private readonly ApplicationDbContext _context;
+    private readonly BusinessLogicConfig _businessLogicConfig;
     private readonly ILogger<SprintPlanningController> _logger;
 
     public SprintPlanningController(
         IAIService aiService,
         ApplicationDbContext context,
+        IOptions<BusinessLogicConfig> businessLogicConfig,
         ILogger<SprintPlanningController> logger)
     {
         _aiService = aiService;
         _context = context;
+        _businessLogicConfig = businessLogicConfig.Value;
         _logger = logger;
     }
 
@@ -28,6 +33,7 @@ public class SprintPlanningController : ControllerBase
     /// Generate sprint plan for a project based on its system design (for frontend use)
     /// </summary>
     [HttpPost("use/generate-project-sprints")]
+    [Obsolete("This method is disabled. Use BoardsController instead.")]
     public async Task<ActionResult<SprintPlanningResponse>> GenerateProjectSprints(SprintPlanningRequest request)
     {
         try
@@ -42,9 +48,6 @@ public class SprintPlanningController : ControllerBase
 
             // Validate project exists and has system design
             var project = await _context.Projects
-                .Include(p => p.Students)
-                .ThenInclude(s => s.StudentRoles)
-                .ThenInclude(sr => sr.Role)
                 .FirstOrDefaultAsync(p => p.Id == request.ProjectId);
 
             if (project == null)
@@ -62,16 +65,17 @@ public class SprintPlanningController : ControllerBase
             }
 
             // Build team roles from allocated students
-            var teamRoles = project.Students
-                .SelectMany(s => s.StudentRoles)
-                .GroupBy(sr => sr.RoleId)
-                .Select(g => new RoleInfo
-                {
-                    RoleId = g.Key,
-                    RoleName = g.First().Role.Name,
-                    StudentCount = g.Count()
-                })
-                .ToList();
+            // var teamRoles = project.Students // DISABLED - Project.Students removed
+            var teamRoles = new List<RoleInfo>(); // Empty for now
+            // .SelectMany(s => s.StudentRoles)
+            // .GroupBy(sr => sr.RoleId)
+            // .Select(g => new RoleInfo
+            // {
+            //     RoleId = g.Key,
+            //     RoleName = g.First().Role.Name,
+            //     StudentCount = g.Count()
+            // })
+            // .ToList();
 
             if (!teamRoles.Any())
             {
@@ -82,8 +86,9 @@ public class SprintPlanningController : ControllerBase
                 });
             }
 
-            // Update request with actual team roles
+            // Update request with actual team roles and project length
             request.TeamRoles = teamRoles;
+            request.ProjectLengthWeeks = _businessLogicConfig.ProjectLengthInWeeks;
 
             // Generate sprint plan
             var result = await _aiService.GenerateSprintPlanAsync(request);
@@ -112,38 +117,36 @@ public class SprintPlanningController : ControllerBase
     /// Get project team composition for sprint planning (for frontend use)
     /// </summary>
     [HttpGet("use/project/{projectId}/team-composition")]
+    [Obsolete("This method is disabled. Use BoardsController instead.")]
     public async Task<ActionResult<object>> GetProjectTeamComposition(int projectId)
     {
         try
         {
             var project = await _context.Projects
-                .Include(p => p.Students)
-                .ThenInclude(s => s.StudentRoles)
-                .ThenInclude(sr => sr.Role)
                 .Where(p => p.Id == projectId)
                 .Select(p => new
                 {
                     ProjectId = p.Id,
                     ProjectTitle = p.Title,
                     HasSystemDesign = !string.IsNullOrEmpty(p.SystemDesign),
-                    TeamRoles = p.Students
-                        .SelectMany(s => s.StudentRoles)
-                        .GroupBy(sr => sr.RoleId)
-                        .Select(g => new
-                        {
-                            RoleId = g.Key,
-                            RoleName = g.First().Role.Name,
-                            StudentCount = g.Count(),
-                            Students = g.Select(sr => new
-                            {
-                                sr.Student.Id,
-                                sr.Student.FirstName,
-                                sr.Student.LastName,
-                                sr.Student.Email
-                            }).ToList()
-                        })
+                    TeamRoles = new List<RoleInfo>() // DISABLED - Project.Students removed
+                    // .SelectMany(s => s.StudentRoles)
+                    // .GroupBy(sr => sr.RoleId)
+                    // .Select(g => new
+                    // {
+                    //     RoleId = g.Key,
+                    //     RoleName = g.First().Role.Name,
+                    //     StudentCount = g.Count(),
+                    //     Students = g.Select(sr => new
+                    //     {
+                    //         sr.Student.Id,
+                    //         sr.Student.FirstName,
+                    //         sr.Student.LastName,
+                    //         sr.Student.Email
+                    //     }).ToList()
+                    // })
                         .ToList(),
-                    TotalStudents = p.Students.Count
+                    TotalStudents = 0 // DISABLED - Project.Students removed
                 })
                 .FirstOrDefaultAsync();
 
@@ -165,14 +168,12 @@ public class SprintPlanningController : ControllerBase
     /// Validate project readiness for sprint planning (for frontend use)
     /// </summary>
     [HttpGet("use/project/{projectId}/sprint-readiness")]
+    [Obsolete("This method is disabled. Use BoardsController instead.")]
     public async Task<ActionResult<object>> ValidateSprintReadiness(int projectId)
     {
         try
         {
             var project = await _context.Projects
-                .Include(p => p.Students)
-                .ThenInclude(s => s.StudentRoles)
-                .ThenInclude(sr => sr.Role)
                 .FirstOrDefaultAsync(p => p.Id == projectId);
 
             if (project == null)
@@ -181,8 +182,8 @@ public class SprintPlanningController : ControllerBase
             }
 
             var hasSystemDesign = !string.IsNullOrEmpty(project.SystemDesign);
-            var hasAllocatedStudents = project.Students.Any();
-            var hasStudentRoles = project.Students.Any(s => s.StudentRoles.Any());
+            var hasAllocatedStudents = false; // DISABLED - Project.Students removed
+            var hasStudentRoles = false; // DISABLED - Project.Students removed
 
             var readiness = new
             {
@@ -194,8 +195,8 @@ public class SprintPlanningController : ControllerBase
                     HasSystemDesign = hasSystemDesign,
                     HasAllocatedStudents = hasAllocatedStudents,
                     HasStudentRoles = hasStudentRoles,
-                    StudentCount = project.Students.Count,
-                    RoleCount = project.Students.SelectMany(s => s.StudentRoles).Select(sr => sr.RoleId).Distinct().Count()
+                    StudentCount = 0, // DISABLED - Project.Students removed
+                    RoleCount = 0 // DISABLED - Project.Students removed
                 },
                 MissingRequirements = new List<string>
                 {

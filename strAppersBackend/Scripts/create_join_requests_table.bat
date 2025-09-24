@@ -25,3 +25,4 @@ psql -h localhost -p 5432 -U postgres -d StrAppersDB_Dev -c "ALTER TABLE \"JoinR
 
 echo Done! JoinRequests table created successfully.
 pause
+

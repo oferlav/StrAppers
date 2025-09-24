@@ -2,6 +2,7 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using strAppersBackend.Data;
 using strAppersBackend.Models;
+using strAppersBackend.Services;
 
 namespace strAppersBackend.Controllers;
 
@@ -11,25 +12,26 @@ public class ProjectsController : ControllerBase
 {
     private readonly ApplicationDbContext _context;
     private readonly ILogger<ProjectsController> _logger;
+    private readonly IDesignDocumentService _designDocumentService;
 
-    public ProjectsController(ApplicationDbContext context, ILogger<ProjectsController> logger)
+    public ProjectsController(ApplicationDbContext context, ILogger<ProjectsController> logger, IDesignDocumentService designDocumentService)
     {
         _context = context;
         _logger = logger;
+        _designDocumentService = designDocumentService;
     }
 
     /// <summary>
     /// Get all projects
     /// </summary>
     [HttpGet]
+    [Obsolete("This method is disabled. Use /use/ routing instead.")]
     public async Task<ActionResult<IEnumerable<Project>>> GetProjects()
     {
         try
         {
             var projects = await _context.Projects
                 .Include(p => p.Organization)
-                .Include(p => p.Status)
-                .Include(p => p.Students)
                 .ToListAsync();
 
             return Ok(projects);
@@ -45,14 +47,13 @@ public class ProjectsController : ControllerBase
     /// Get a specific project by ID
     /// </summary>
     [HttpGet("{id}")]
+    [Obsolete("This method is disabled. Use /use/ routing instead.")]
     public async Task<ActionResult<Project>> GetProject(int id)
     {
         try
         {
             var project = await _context.Projects
                 .Include(p => p.Organization)
-                .Include(p => p.Status)
-                .Include(p => p.Students)
                 .FirstOrDefaultAsync(p => p.Id == id);
 
             if (project == null)
@@ -69,86 +70,69 @@ public class ProjectsController : ControllerBase
         }
     }
 
-    /// <summary>
-    /// Get all projects with 'New' status
-    /// </summary>
-    [HttpGet("new")]
-    public async Task<ActionResult<IEnumerable<Project>>> GetNewProjects()
-    {
-        try
-        {
-            var newProjects = await _context.Projects
-                .Include(p => p.Organization)
-                .Include(p => p.Status)
-                .Include(p => p.Students)
-                .Where(p => p.Status.Name == "New")
-                .OrderBy(p => p.CreatedAt)
-                .ToListAsync();
-
-            return Ok(newProjects);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Error retrieving new projects");
-            return StatusCode(500, "An error occurred while retrieving new projects");
-        }
-    }
-
-    /// <summary>
-    /// Get projects by status
-    /// </summary>
-    [HttpGet("by-status/{statusName}")]
-    public async Task<ActionResult<IEnumerable<Project>>> GetProjectsByStatus(string statusName)
-    {
-        try
-        {
-            var projects = await _context.Projects
-                .Include(p => p.Organization)
-                .Include(p => p.Status)
-                .Include(p => p.Students)
-                .Where(p => p.Status.Name.ToLower() == statusName.ToLower())
-                .OrderBy(p => p.CreatedAt)
-                .ToListAsync();
-
-            return Ok(projects);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Error retrieving projects with status {StatusName}", statusName);
-            return StatusCode(500, "An error occurred while retrieving projects by status");
-        }
-    }
 
     /// <summary>
     /// Get projects by organization
     /// </summary>
-    [HttpGet("by-organization/{organizationId}")]
+    [HttpGet("use/by-organization/{organizationId}")]
     public async Task<ActionResult<IEnumerable<Project>>> GetProjectsByOrganization(int organizationId)
     {
         try
         {
+            _logger.LogInformation("Getting projects for organization {OrganizationId}", organizationId);
+            
+            // Test database connection first
+            var totalProjects = await _context.Projects.CountAsync();
+            _logger.LogInformation("Database connection successful. Total projects in database: {Count}", totalProjects);
+            
+            // First check if organization exists
+            var organizationExists = await _context.Organizations.AnyAsync(o => o.Id == organizationId);
+            _logger.LogInformation("Organization {OrganizationId} exists: {Exists}", organizationId, organizationExists);
+            
+            if (!organizationExists)
+            {
+                _logger.LogWarning("Organization {OrganizationId} not found", organizationId);
+                return NotFound($"Organization with ID {organizationId} not found");
+            }
+            
+            // Get all projects first to see what we have
+            var allProjects = await _context.Projects.ToListAsync();
+            _logger.LogInformation("All projects in database: {Projects}", 
+                string.Join(", ", allProjects.Select(p => $"ID:{p.Id}, OrgId:{p.OrganizationId}")));
+            
             var projects = await _context.Projects
-                .Include(p => p.Organization)
-                .Include(p => p.Status)
-                .Include(p => p.Students)
                 .Where(p => p.OrganizationId == organizationId)
                 .OrderBy(p => p.CreatedAt)
+                .Select(p => new Project
+                {
+                    Id = p.Id,
+                    Title = p.Title,
+                    Description = p.Description,
+                    ExtendedDescription = p.ExtendedDescription,
+                    Priority = p.Priority,
+                    OrganizationId = p.OrganizationId,
+                    IsAvailable = p.IsAvailable,
+                    CreatedAt = p.CreatedAt,
+                    UpdatedAt = p.UpdatedAt
+                    // Exclude SystemDesign, SystemDesignDoc, and Organization to avoid serialization issues
+                })
                 .ToListAsync();
 
+            _logger.LogInformation("Found {Count} projects for organization {OrganizationId}", projects.Count, organizationId);
             return Ok(projects);
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Error retrieving projects for organization {OrganizationId}", organizationId);
-            return StatusCode(500, "An error occurred while retrieving projects for the organization");
+            _logger.LogError(ex, "Error retrieving projects for organization {OrganizationId}: {Message}", organizationId, ex.Message);
+            return StatusCode(500, $"An error occurred while retrieving projects for the organization: {ex.Message}");
         }
     }
 
     /// <summary>
     /// Create a new project
     /// </summary>
-    [HttpPost("use/create")]
-    public async Task<ActionResult<Project>> CreateProject(CreateProjectRequest request)
+    [HttpPost("use/create/{organizationId}")]
+    public async Task<ActionResult<Project>> CreateProject(int organizationId, CreateProjectRequest request)
     {
         try
         {
@@ -158,64 +142,96 @@ public class ProjectsController : ControllerBase
                 return BadRequest(ModelState);
             }
 
-            // Validate organization exists (if provided)
-            if (request.OrganizationId.HasValue)
+            // Validate organization exists
+            var organization = await _context.Organizations
+                .FirstOrDefaultAsync(o => o.Id == organizationId);
+
+            if (organization == null)
             {
-                var organization = await _context.Organizations
-                    .FirstOrDefaultAsync(o => o.Id == request.OrganizationId.Value);
-
-                if (organization == null)
-                {
-                    return BadRequest($"Organization with ID {request.OrganizationId} not found");
-                }
-
-                if (!organization.IsActive)
-                {
-                    return BadRequest($"Organization '{organization.Name}' is not active");
-                }
+                return BadRequest($"Organization with ID {organizationId} not found");
             }
 
-            // Validate status exists
-            var status = await _context.ProjectStatuses
-                .FirstOrDefaultAsync(ps => ps.Id == request.StatusId);
-
-            if (status == null)
+            if (!organization.IsActive)
             {
-                return BadRequest($"Project status with ID {request.StatusId} not found");
+                return BadRequest($"Organization '{organization.Name}' is not active");
             }
 
-            if (!status.IsActive)
-            {
-                return BadRequest($"Project status '{status.Name}' is not active");
-            }
 
             // Create new project
             var project = new Project
             {
                 Title = request.Title,
                 Description = request.Description,
-                StatusId = request.StatusId,
+                ExtendedDescription = request.ExtendedDescription,
                 Priority = request.Priority,
-                StartDate = request.StartDate,
-                EndDate = request.EndDate,
-                DueDate = request.DueDate,
-                OrganizationId = request.OrganizationId,
+                OrganizationId = organizationId,
+                IsAvailable = request.IsAvailable,
                 CreatedAt = DateTime.UtcNow
             };
 
             _context.Projects.Add(project);
             await _context.SaveChangesAsync();
 
-            // Load the project with related data for response
+            // Load the project with related data for response (excluding problematic fields)
             var createdProject = await _context.Projects
-                .Include(p => p.Organization)
-                .Include(p => p.Status)
-                .FirstOrDefaultAsync(p => p.Id == project.Id);
+                .Where(p => p.Id == project.Id)
+                .Select(p => new Project
+                {
+                    Id = p.Id,
+                    Title = p.Title,
+                    Description = p.Description,
+                    ExtendedDescription = p.ExtendedDescription,
+                    Priority = p.Priority,
+                    OrganizationId = p.OrganizationId,
+                    IsAvailable = p.IsAvailable,
+                    CreatedAt = p.CreatedAt,
+                    UpdatedAt = p.UpdatedAt
+                    // Exclude SystemDesign, SystemDesignDoc, and Organization to avoid serialization issues
+                })
+                .FirstOrDefaultAsync();
 
             _logger.LogInformation("Project created successfully with ID {ProjectId} and title {Title}", 
                 project.Id, project.Title);
 
-            return CreatedAtAction(nameof(GetProject), new { id = project.Id }, createdProject);
+            // Generate system design for the project
+            try
+            {
+                _logger.LogInformation("Generating system design for project {ProjectId}", project.Id);
+                
+                var systemDesignRequest = new SystemDesignRequest
+                {
+                    ProjectId = project.Id,
+                    ExtendedDescription = project.ExtendedDescription ?? project.Description ?? "",
+                    CreatedBy = null,
+                    TeamRoles = new List<RoleInfo>() // Empty for now since students aren't allocated yet
+                };
+
+                var systemDesignResponse = await _designDocumentService.CreateSystemDesignAsync(systemDesignRequest);
+                
+                if (systemDesignResponse != null && systemDesignResponse.Success)
+                {
+                    // Update the project with the generated system design
+                    project.SystemDesign = systemDesignResponse.DesignDocument;
+                    project.SystemDesignDoc = systemDesignResponse.DesignDocumentPdf;
+                    project.UpdatedAt = DateTime.UtcNow;
+                    
+                    await _context.SaveChangesAsync();
+                    _logger.LogInformation("System design generated and saved for project {ProjectId}", project.Id);
+                }
+                else
+                {
+                    _logger.LogWarning("Failed to generate system design for project {ProjectId}: {Message}", 
+                        project.Id, systemDesignResponse?.Message ?? "Unknown error");
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error generating system design for project {ProjectId}: {Message}", 
+                    project.Id, ex.Message);
+                // Don't fail the project creation if system design generation fails
+            }
+
+            return Ok(createdProject);
         }
         catch (DbUpdateException ex)
         {
@@ -229,96 +245,12 @@ public class ProjectsController : ControllerBase
         }
     }
 
-    /// <summary>
-    /// Update an existing project
-    /// </summary>
-    [HttpPut("{id}")]
-    public async Task<IActionResult> UpdateProject(int id, UpdateProjectRequest request)
-    {
-        try
-        {
-            var project = await _context.Projects.FindAsync(id);
-            if (project == null)
-            {
-                return NotFound($"Project with ID {id} not found");
-            }
-
-            // Validate organization exists (if provided)
-            if (request.OrganizationId.HasValue)
-            {
-                var organization = await _context.Organizations
-                    .FirstOrDefaultAsync(o => o.Id == request.OrganizationId.Value);
-
-                if (organization == null)
-                {
-                    return BadRequest($"Organization with ID {request.OrganizationId} not found");
-                }
-
-                if (!organization.IsActive)
-                {
-                    return BadRequest($"Organization '{organization.Name}' is not active");
-                }
-            }
-
-            // Validate status exists (if provided)
-            if (request.StatusId.HasValue)
-            {
-                var status = await _context.ProjectStatuses
-                    .FirstOrDefaultAsync(ps => ps.Id == request.StatusId.Value);
-
-                if (status == null)
-                {
-                    return BadRequest($"Project status with ID {request.StatusId} not found");
-                }
-
-                if (!status.IsActive)
-                {
-                    return BadRequest($"Project status '{status.Name}' is not active");
-                }
-            }
-
-            // Update project properties
-            if (!string.IsNullOrEmpty(request.Title))
-                project.Title = request.Title;
-            if (request.Description != null)
-                project.Description = request.Description;
-            if (request.StatusId.HasValue)
-                project.StatusId = request.StatusId.Value;
-            if (!string.IsNullOrEmpty(request.Priority))
-                project.Priority = request.Priority;
-            if (request.StartDate.HasValue)
-                project.StartDate = request.StartDate;
-            if (request.EndDate.HasValue)
-                project.EndDate = request.EndDate;
-            if (request.DueDate.HasValue)
-                project.DueDate = request.DueDate;
-            if (request.OrganizationId.HasValue)
-                project.OrganizationId = request.OrganizationId;
-
-            project.UpdatedAt = DateTime.UtcNow;
-
-            await _context.SaveChangesAsync();
-
-            _logger.LogInformation("Project with ID {ProjectId} updated successfully", id);
-
-            return NoContent();
-        }
-        catch (DbUpdateException ex)
-        {
-            _logger.LogError(ex, "Database error while updating project with ID {ProjectId}", id);
-            return StatusCode(500, "An error occurred while updating the project in the database");
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Unexpected error while updating project with ID {ProjectId}", id);
-            return StatusCode(500, "An unexpected error occurred while updating the project");
-        }
-    }
 
     /// <summary>
     /// Delete a project
     /// </summary>
     [HttpDelete("{id}")]
+    [Obsolete("This method is disabled. Use /use/ routing instead.")]
     public async Task<IActionResult> DeleteProject(int id)
     {
         try
@@ -349,50 +281,239 @@ public class ProjectsController : ControllerBase
     }
 
     /// <summary>
-    /// Get all project statuses
+    /// Get all available projects
     /// </summary>
-    [HttpGet("statuses")]
-    public async Task<ActionResult<IEnumerable<ProjectStatus>>> GetProjectStatuses()
+    [HttpGet("use/available")]
+    public async Task<ActionResult<IEnumerable<Project>>> GetAvailableProjects()
     {
         try
         {
-            var statuses = await _context.ProjectStatuses
-                .Where(ps => ps.IsActive)
-                .OrderBy(ps => ps.SortOrder)
+            var projects = await _context.Projects
+                .Where(p => p.IsAvailable)
+                .Select(p => new Project
+                {
+                    Id = p.Id,
+                    Title = p.Title,
+                    Description = p.Description,
+                    ExtendedDescription = p.ExtendedDescription,
+                    Priority = p.Priority,
+                    OrganizationId = p.OrganizationId,
+                    IsAvailable = p.IsAvailable,
+                    CreatedAt = p.CreatedAt,
+                    UpdatedAt = p.UpdatedAt
+                    // Exclude SystemDesign, SystemDesignDoc, and Organization to avoid serialization issues
+                })
                 .ToListAsync();
 
-            return Ok(statuses);
+            return Ok(projects);
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Error retrieving project statuses");
-            return StatusCode(500, "An error occurred while retrieving project statuses");
+            _logger.LogError(ex, "Error retrieving available projects");
+            return StatusCode(500, "An error occurred while retrieving available projects");
         }
     }
 
     /// <summary>
-    /// Get a specific project status by ID (for frontend use)
+    /// Suspend a project (set IsAvailable to false)
     /// </summary>
-    [HttpGet("use/status/{statusId}")]
-    public async Task<ActionResult<ProjectStatus>> GetProjectStatusById(int statusId)
+    [HttpPost("use/suspend/{id}")]
+    public async Task<ActionResult> SuspendProject(int id)
     {
         try
         {
-            var status = await _context.ProjectStatuses
-                .FirstOrDefaultAsync(ps => ps.Id == statusId && ps.IsActive);
-
-            if (status == null)
+            var project = await _context.Projects.FindAsync(id);
+            if (project == null)
             {
-                return NotFound($"Project status with ID {statusId} not found");
+                return NotFound($"Project with ID {id} not found.");
             }
 
-            return Ok(status);
+            project.IsAvailable = false;
+            project.UpdatedAt = DateTime.UtcNow;
+
+            await _context.SaveChangesAsync();
+
+            _logger.LogInformation("Project {ProjectId} suspended successfully", id);
+            return Ok(new { Success = true, Message = "Project suspended successfully." });
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Error retrieving project status with ID {StatusId}", statusId);
-            return StatusCode(500, "An error occurred while retrieving the project status");
+            _logger.LogError(ex, "Error suspending project {ProjectId}", id);
+            return StatusCode(500, "An error occurred while suspending the project");
         }
     }
+
+    /// <summary>
+    /// Activate a project (set IsAvailable to true)
+    /// </summary>
+    [HttpPost("use/activate/{id}")]
+    public async Task<ActionResult> ActivateProject(int id)
+    {
+        try
+        {
+            var project = await _context.Projects.FindAsync(id);
+            if (project == null)
+            {
+                return NotFound($"Project with ID {id} not found.");
+            }
+
+            project.IsAvailable = true;
+            project.UpdatedAt = DateTime.UtcNow;
+
+            await _context.SaveChangesAsync();
+
+            _logger.LogInformation("Project {ProjectId} activated successfully", id);
+            return Ok(new { Success = true, Message = "Project activated successfully." });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error activating project {ProjectId}", id);
+            return StatusCode(500, "An error occurred while activating the project");
+        }
+    }
+
+    /// <summary>
+    /// Update a project
+    /// </summary>
+    [HttpPost("use/update/{id}")]
+    public async Task<ActionResult> UpdateProject(int id, [FromBody] UpdateProjectRequest request)
+    {
+        try
+        {
+            var project = await _context.Projects.FindAsync(id);
+            if (project == null)
+            {
+                return NotFound($"Project with ID {id} not found.");
+            }
+
+            // Update fields if provided
+            if (!string.IsNullOrEmpty(request.Title))
+                project.Title = request.Title;
+
+            if (request.Description != null)
+                project.Description = request.Description;
+
+            if (request.ExtendedDescription != null)
+                project.ExtendedDescription = request.ExtendedDescription;
+
+            if (!string.IsNullOrEmpty(request.Priority))
+                project.Priority = request.Priority;
+
+            if (request.IsAvailable.HasValue)
+                project.IsAvailable = request.IsAvailable.Value;
+
+            project.UpdatedAt = DateTime.UtcNow;
+
+            await _context.SaveChangesAsync();
+
+            _logger.LogInformation("Project {ProjectId} updated successfully", id);
+
+            // Generate system design for the updated project
+            try
+            {
+                _logger.LogInformation("Generating system design for updated project {ProjectId}", id);
+                
+                var systemDesignRequest = new SystemDesignRequest
+                {
+                    ProjectId = id,
+                    ExtendedDescription = project.ExtendedDescription ?? project.Description ?? "",
+                    CreatedBy = null,
+                    TeamRoles = new List<RoleInfo>() // Empty for now since students aren't allocated yet
+                };
+
+                var systemDesignResponse = await _designDocumentService.CreateSystemDesignAsync(systemDesignRequest);
+                
+                if (systemDesignResponse != null && systemDesignResponse.Success)
+                {
+                    // Update the project with the generated system design
+                    project.SystemDesign = systemDesignResponse.DesignDocument;
+                    project.SystemDesignDoc = systemDesignResponse.DesignDocumentPdf;
+                    project.UpdatedAt = DateTime.UtcNow;
+                    
+                    await _context.SaveChangesAsync();
+                    _logger.LogInformation("System design generated and saved for updated project {ProjectId}", id);
+                }
+                else
+                {
+                    _logger.LogWarning("Failed to generate system design for updated project {ProjectId}: {Message}", 
+                        id, systemDesignResponse?.Message ?? "Unknown error");
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error generating system design for updated project {ProjectId}: {Message}", 
+                    id, ex.Message);
+                // Don't fail the project update if system design generation fails
+            }
+
+            return Ok(new { Success = true, Message = "Project updated successfully." });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error updating project {ProjectId}", id);
+            return StatusCode(500, "An error occurred while updating the project");
+        }
+    }
+
+    /// <summary>
+    /// Get system design JSON content for a specific project
+    /// </summary>
+    [HttpGet("use/DesignContent/{id}")]
+    public async Task<ActionResult<string>> GetProjectDesignContent(int id)
+    {
+        try
+        {
+            var project = await _context.Projects.FindAsync(id);
+            if (project == null)
+            {
+                return NotFound($"Project with ID {id} not found.");
+            }
+
+            if (string.IsNullOrEmpty(project.SystemDesign))
+            {
+                return NotFound($"No system design content found for project {id}.");
+            }
+
+            _logger.LogInformation("Retrieved system design content for project {ProjectId}", id);
+            return Ok(project.SystemDesign);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error retrieving system design content for project {ProjectId}", id);
+            return StatusCode(500, "An error occurred while retrieving the system design content");
+        }
+    }
+
+    /// <summary>
+    /// Get system design document (PDF) for a specific project
+    /// </summary>
+    [HttpGet("use/DesignDocument/{id}")]
+    public async Task<ActionResult> GetProjectDesignDocument(int id)
+    {
+        try
+        {
+            var project = await _context.Projects.FindAsync(id);
+            if (project == null)
+            {
+                return NotFound($"Project with ID {id} not found.");
+            }
+
+            if (project.SystemDesignDoc == null || project.SystemDesignDoc.Length == 0)
+            {
+                return NotFound($"No system design document found for project {id}.");
+            }
+
+            _logger.LogInformation("Retrieved system design document for project {ProjectId}", id);
+            
+            // Return the PDF document
+            return File(project.SystemDesignDoc, "application/pdf", $"project_{id}_system_design.pdf");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error retrieving system design document for project {ProjectId}", id);
+            return StatusCode(500, "An error occurred while retrieving the system design document");
+        }
+    }
+
 }
 

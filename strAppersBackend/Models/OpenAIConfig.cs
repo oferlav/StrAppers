@@ -49,7 +49,15 @@ public class SprintPlanningRequest
     public int SprintLengthWeeks { get; set; }
     
     [Required]
+    public int ProjectLengthWeeks { get; set; }
+    
+    [Required]
+    public DateTime StartDate { get; set; }
+    
+    [Required]
     public List<RoleInfo> TeamRoles { get; set; } = new List<RoleInfo>();
+    
+    public List<StudentInfo> Students { get; set; } = new List<StudentInfo>();
     
     [MaxLength(255)]
     public string? CreatedBy { get; set; }
@@ -112,4 +120,12 @@ public class Sprint
     public List<ProjectTask> Tasks { get; set; } = new List<ProjectTask>();
     public int TotalStoryPoints { get; set; }
     public Dictionary<int, int> RoleWorkload { get; set; } = new Dictionary<int, int>();
+}
+
+public class StudentInfo
+{
+    public int Id { get; set; }
+    public string Name { get; set; } = string.Empty;
+    public string Email { get; set; } = string.Empty;
+    public List<string> Roles { get; set; } = new();
 }

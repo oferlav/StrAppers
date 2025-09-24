@@ -40,3 +40,6 @@ namespace strAppersBackend.Models
         public Project? Project { get; set; }
     }
 }
+
+
+

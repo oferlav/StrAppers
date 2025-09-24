@@ -37,9 +37,6 @@ public class DesignDocumentService : IDesignDocumentService
 
             // Validate project exists
             var project = await _context.Projects
-                .Include(p => p.Students)
-                .ThenInclude(s => s.StudentRoles)
-                .ThenInclude(sr => sr.Role)
                 .FirstOrDefaultAsync(p => p.Id == request.ProjectId);
 
             if (project == null)
@@ -185,3 +182,4 @@ public class DesignDocumentService : IDesignDocumentService
         }
     }
 }
+

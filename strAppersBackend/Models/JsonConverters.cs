@@ -29,3 +29,6 @@ public class CleanTextJsonConverter : JsonConverter<string>
         writer.WriteStringValue(value);
     }
 }
+
+
+

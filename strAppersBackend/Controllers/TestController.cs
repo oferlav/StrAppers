@@ -2,23 +2,24 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using strAppersBackend.Data;
 using strAppersBackend.Models;
-using strAppersBackend.Services;
+// using strAppersBackend.Services; // SLACK TEMPORARILY DISABLED
 
 namespace strAppersBackend.Controllers
 {
-    [ApiController]
-    [Route("api/[controller]")]
+    // DISABLED - Test controller for development only
+    // [ApiController]
+    // [Route("api/[controller]")]
     public class TestController : ControllerBase
     {
         private readonly ApplicationDbContext _context;
         private readonly ILogger<TestController> _logger;
-        private readonly SlackService _slackService;
+        // private readonly SlackService _slackService; // SLACK TEMPORARILY DISABLED
 
-        public TestController(ApplicationDbContext context, ILogger<TestController> logger, SlackService slackService)
+        public TestController(ApplicationDbContext context, ILogger<TestController> logger) // SlackService slackService - SLACK TEMPORARILY DISABLED
         {
             _context = context;
             _logger = logger;
-            _slackService = slackService;
+            // _slackService = slackService; // SLACK TEMPORARILY DISABLED
         }
 
         #region Database Test Methods
@@ -81,10 +82,10 @@ namespace strAppersBackend.Controllers
                     studentsWithRelations = await _context.Students
                         .Include(s => s.Major)
                         .Include(s => s.Year)
-                        .Include(s => s.Organization)
-                        .Include(s => s.Project)
+                        .Include(s => s.ProjectBoard)
+                    .ThenInclude(pb => pb.Project)
                         .Include(s => s.StudentRoles)
-                            .ThenInclude(sr => sr.Role)
+                    .ThenInclude(sr => sr.Role)
                         .Take(5)
                         .Select(s => new
                         {
@@ -94,23 +95,21 @@ namespace strAppersBackend.Controllers
                             s.Email,
                             MajorName = s.Major != null ? s.Major.Name : "No Major",
                             YearName = s.Year != null ? s.Year.Name : "No Year",
-                            OrganizationName = s.Organization != null ? s.Organization.Name : "No Organization",
-                            ProjectTitle = s.Project != null ? s.Project.Title : "No Project",
-                            RoleCount = s.StudentRoles.Count
+                            OrganizationName = "No Organization", // Organization removed from Student model
+                            ProjectTitle = s.ProjectBoard != null ? s.ProjectBoard.Project.Title : "No Project",
+                            RoleCount = s.StudentRoles.Count()
                         })
                         .ToListAsync(),
                     projectsWithRelations = await _context.Projects
                         .Include(p => p.Organization)
-                        .Include(p => p.Status)
-                        .Include(p => p.Students)
                         .Take(5)
                         .Select(p => new
                         {
                             p.Id,
                             p.Title,
                             OrganizationName = p.Organization != null ? p.Organization.Name : "No Organization",
-                            StatusName = p.Status != null ? p.Status.Name : "No Status",
-                            StudentCount = p.Students.Count
+                            StatusName = "No Status", // Status now in ProjectBoards
+                            StudentCount = 0 // Students now linked via ProjectBoards
                         })
                         .ToListAsync()
                 };
@@ -149,9 +148,9 @@ namespace strAppersBackend.Controllers
                 var testResults = new
                 {
                     timestamp = DateTime.UtcNow,
-                    serviceInitialized = _slackService != null,
-                    connectionTest = await _slackService.TestConnectionAsync(),
-                    botInfoTest = await _slackService.TestBotInfoAsync()
+                    serviceInitialized = false, // _slackService != null, // SLACK TEMPORARILY DISABLED
+                    connectionTest = "SLACK_DISABLED", // await _slackService.TestConnectionAsync(), // SLACK TEMPORARILY DISABLED
+                    botInfoTest = "SLACK_DISABLED" // await _slackService.TestBotInfoAsync() // SLACK TEMPORARILY DISABLED
                 };
 
                 return Ok(new
@@ -184,11 +183,11 @@ namespace strAppersBackend.Controllers
                 var testResults = new
                 {
                     timestamp = DateTime.UtcNow,
-                    connectionTest = await _slackService.TestConnectionAsync(),
-                    botInfoTest = await _slackService.TestBotInfoAsync(),
-                    usersListTest = await _slackService.TestUsersListAsync(),
-                    channelsListTest = await _slackService.TestChannelsListAsync(),
-                    botPermissionsTest = await _slackService.TestBotPermissionsAsync()
+                    connectionTest = "SLACK_DISABLED", // await _slackService.TestConnectionAsync(), // SLACK TEMPORARILY DISABLED
+                    botInfoTest = "SLACK_DISABLED", // await _slackService.TestBotInfoAsync(), // SLACK TEMPORARILY DISABLED
+                    usersListTest = "SLACK_DISABLED", // await _slackService.TestUsersListAsync(), // SLACK TEMPORARILY DISABLED
+                    channelsListTest = "SLACK_DISABLED", // await _slackService.TestChannelsListAsync(), // SLACK TEMPORARILY DISABLED
+                    botPermissionsTest = "SLACK_DISABLED" // await _slackService.TestBotPermissionsAsync() // SLACK TEMPORARILY DISABLED
                 };
 
                 return Ok(new
@@ -336,8 +335,8 @@ namespace strAppersBackend.Controllers
                     },
                     businessRuleValidation = new
                     {
-                        studentsWithProjects = await _context.Students.CountAsync(s => s.ProjectId.HasValue),
-                        projectsWithAdmins = await _context.Projects.CountAsync(p => p.HasAdmin),
+                        studentsWithProjects = await _context.Students.CountAsync(s => s.BoardId != null),
+                        projectsWithAdmins = 0, // DISABLED - HasAdmin removed
                         studentsWithRoles = await _context.Students.CountAsync(s => s.StudentRoles.Any()),
                         pendingJoinRequests = await _context.JoinRequests.CountAsync(jr => !jr.Added)
                     }
@@ -380,14 +379,12 @@ namespace strAppersBackend.Controllers
                 var students = await _context.Students
                     .Include(s => s.Major)
                     .Include(s => s.Year)
-                    .Include(s => s.Organization)
-                    .Include(s => s.Project)
+                    .Include(s => s.ProjectBoard)
+                    .ThenInclude(pb => pb.Project)
                     .ToListAsync();
 
                 var projects = await _context.Projects
                     .Include(p => p.Organization)
-                    .Include(p => p.Status)
-                    .Include(p => p.Students)
                     .ToListAsync();
 
                 var endTime = DateTime.UtcNow;
@@ -397,10 +394,10 @@ namespace strAppersBackend.Controllers
                 {
                     timestamp = DateTime.UtcNow,
                     executionTimeMs = executionTime.TotalMilliseconds,
-                    studentsLoaded = students.Count,
-                    projectsLoaded = projects.Count,
-                    averageStudentLoadTime = students.Count > 0 ? executionTime.TotalMilliseconds / students.Count : 0,
-                    averageProjectLoadTime = projects.Count > 0 ? executionTime.TotalMilliseconds / projects.Count : 0
+                    studentsLoaded = students.Count(),
+                    projectsLoaded = projects.Count(),
+                    averageStudentLoadTime = students.Count() > 0 ? executionTime.TotalMilliseconds / students.Count() : 0,
+                    averageProjectLoadTime = projects.Count() > 0 ? executionTime.TotalMilliseconds / projects.Count() : 0
                 };
 
                 return Ok(new
@@ -436,7 +433,7 @@ namespace strAppersBackend.Controllers
             {
                 _logger.LogInformation("=== SystemDesign Debug Test Started ===");
                 _logger.LogInformation("Request: ProjectId={ProjectId}, ExtendedDescription length={DescLength}, TeamRoles count={TeamRolesCount}", 
-                    request.ProjectId, request.ExtendedDescription?.Length ?? 0, request.TeamRoles?.Count ?? 0);
+                    request.ProjectId, request.ExtendedDescription?.Length ?? 0, request.TeamRoles?.Count() ?? 0);
 
                 // Step 1: Validate request
                 _logger.LogInformation("Step 1: Validating request");
@@ -449,9 +446,6 @@ namespace strAppersBackend.Controllers
                 // Step 2: Check if project exists
                 _logger.LogInformation("Step 2: Checking if project {ProjectId} exists", request.ProjectId);
                 var project = await _context.Projects
-                    .Include(p => p.Students)
-                    .ThenInclude(s => s.StudentRoles)
-                    .ThenInclude(sr => sr.Role)
                     .FirstOrDefaultAsync(p => p.Id == request.ProjectId);
 
                 if (project == null)
@@ -460,12 +454,18 @@ namespace strAppersBackend.Controllers
                     return NotFound(new { error = $"Project with ID {request.ProjectId} not found" });
                 }
 
-                _logger.LogInformation("Project found: {ProjectTitle}, Students: {StudentCount}", 
-                    project.Title, project.Students?.Count ?? 0);
+                _logger.LogInformation("Project found: {ProjectTitle}", project.Title);
 
                 // Step 3: Build team roles
                 _logger.LogInformation("Step 3: Building team roles from allocated students");
-                var teamRoles = project.Students
+                // Get students through ProjectBoards
+                var students = await _context.Students
+                    .Where(s => s.BoardId != null)
+                    .Include(s => s.StudentRoles)
+                    .ThenInclude(sr => sr.Role)
+                    .ToListAsync();
+                
+                var teamRoles = students
                     .SelectMany(s => s.StudentRoles)
                     .GroupBy(sr => sr.RoleId)
                     .Select(g => new RoleInfo
@@ -476,7 +476,7 @@ namespace strAppersBackend.Controllers
                     })
                     .ToList();
 
-                _logger.LogInformation("Team roles built: {RoleCount} roles", teamRoles.Count);
+                _logger.LogInformation("Team roles built: {RoleCount} roles", teamRoles.Count());
                 foreach (var role in teamRoles)
                 {
                     _logger.LogInformation("Role: {RoleName} (ID: {RoleId}), Students: {StudentCount}", 
@@ -488,8 +488,8 @@ namespace strAppersBackend.Controllers
                 try
                 {
                     // Check if AIService is registered
-                    var aiService = HttpContext.RequestServices.GetService<IAIService>();
-                    if (aiService == null)
+                    // var aiService = HttpContext.RequestServices.GetService<IAIService>(); // TEMPORARILY DISABLED
+                    if (true) // aiService == null) // TEMPORARILY DISABLED
                     {
                         _logger.LogError("AIService is not registered in dependency injection");
                         return StatusCode(500, new { error = "AIService not available" });
@@ -506,8 +506,8 @@ namespace strAppersBackend.Controllers
                 _logger.LogInformation("Step 5: Testing DesignDocumentService availability");
                 try
                 {
-                    var designService = HttpContext.RequestServices.GetService<IDesignDocumentService>();
-                    if (designService == null)
+                    // var designService = HttpContext.RequestServices.GetService<IDesignDocumentService>(); // TEMPORARILY DISABLED
+                    if (true) // designService == null) // TEMPORARILY DISABLED
                     {
                         _logger.LogError("DesignDocumentService is not registered in dependency injection");
                         return StatusCode(500, new { error = "DesignDocumentService not available" });
@@ -549,7 +549,7 @@ namespace strAppersBackend.Controllers
                     {
                         id = project.Id,
                         title = project.Title,
-                        studentCount = project.Students?.Count ?? 0
+                        studentCount = await _context.Students.CountAsync(s => s.BoardId != null)
                     },
                     teamRoles = teamRoles,
                     services = new
@@ -589,9 +589,6 @@ namespace strAppersBackend.Controllers
                 _logger.LogInformation("Testing with project ID: {ProjectId}", testProjectId);
 
                 var project = await _context.Projects
-                    .Include(p => p.Students)
-                    .ThenInclude(s => s.StudentRoles)
-                    .ThenInclude(sr => sr.Role)
                     .FirstOrDefaultAsync(p => p.Id == testProjectId);
 
                 if (project == null)
@@ -612,7 +609,7 @@ namespace strAppersBackend.Controllers
                     {
                         id = project.Id,
                         title = project.Title,
-                        studentCount = project.Students?.Count ?? 0,
+                        studentCount = await _context.Students.CountAsync(s => s.BoardId != null),
                         hasExtendedDescription = !string.IsNullOrEmpty(project.ExtendedDescription)
                     }
                 });

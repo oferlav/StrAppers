@@ -36,3 +36,4 @@ SELECT 'Indexes' as check_type, indexname, tablename, indexdef
 FROM pg_indexes 
 WHERE tablename IN ('Projects', 'DesignVersions')
 ORDER BY tablename, indexname;
+

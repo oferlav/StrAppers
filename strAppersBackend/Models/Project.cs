@@ -22,27 +22,20 @@ public class Project
     
     public byte[]? SystemDesignDoc { get; set; }
     
-    public int StatusId { get; set; }
-    public ProjectStatus Status { get; set; } = null!;
-    
     [MaxLength(50)]
     public string Priority { get; set; } = "Medium"; // Low, Medium, High, Critical
-    
-    public DateTime? StartDate { get; set; }
-    public DateTime? EndDate { get; set; }
-    public DateTime? DueDate { get; set; }
     
     public int? OrganizationId { get; set; }
     public Organization? Organization { get; set; }
     
-    // Project allocation fields
-    public bool HasAdmin { get; set; } = false;
+    // Project availability
+    [Column("isAvailable")]
+    public bool IsAvailable { get; set; } = true;
     
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
     public DateTime? UpdatedAt { get; set; }
     
     // Navigation properties
-    public ICollection<Student> Students { get; set; } = new List<Student>();
     public ICollection<DesignVersion> DesignVersions { get; set; } = new List<DesignVersion>();
 }
 
@@ -55,17 +48,13 @@ public class CreateProjectRequest
     [MaxLength(1000)]
     public string? Description { get; set; }
     
-    public int StatusId { get; set; }
+    [Column(TypeName = "TEXT")]
+    public string? ExtendedDescription { get; set; }
     
     [MaxLength(50)]
     public string Priority { get; set; } = "Medium";
     
-    public DateTime? StartDate { get; set; }
-    public DateTime? EndDate { get; set; }
-    public DateTime? DueDate { get; set; }
-    
-    public int? OrganizationId { get; set; }
-    public bool HasAdmin { get; set; } = false;
+    public bool IsAvailable { get; set; } = true;
 }
 
 public class UpdateProjectRequest
@@ -76,15 +65,11 @@ public class UpdateProjectRequest
     [MaxLength(1000)]
     public string? Description { get; set; }
     
-    public int? StatusId { get; set; }
+    [Column(TypeName = "TEXT")]
+    public string? ExtendedDescription { get; set; }
     
     [MaxLength(50)]
     public string? Priority { get; set; }
     
-    public DateTime? StartDate { get; set; }
-    public DateTime? EndDate { get; set; }
-    public DateTime? DueDate { get; set; }
-    
-    public int? OrganizationId { get; set; }
-    public bool? HasAdmin { get; set; }
+    public bool? IsAvailable { get; set; }
 }

@@ -19,7 +19,7 @@ public class Student
     [EmailAddress]
     public string Email { get; set; } = string.Empty;
     
-    [MaxLength(20)]
+    [MaxLength(255)]
     public string? StudentId { get; set; } // University student ID
     
     [Required]
@@ -35,13 +35,18 @@ public class Student
     [Url]
     public string LinkedInUrl { get; set; } = string.Empty;
     
-    public int? OrganizationId { get; set; }
-    public Organization? Organization { get; set; }
-    
     // Project allocation fields
     public int? ProjectId { get; set; }
     public Project? Project { get; set; }
     public bool IsAdmin { get; set; } = false;
+    
+    // Trello board relationship
+    [MaxLength(50)]
+    public string? BoardId { get; set; }
+    public ProjectBoard? ProjectBoard { get; set; }
+    
+    // Availability status
+    public bool IsAvailable { get; set; } = true;
     
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
     public DateTime? UpdatedAt { get; set; }
@@ -65,9 +70,6 @@ public class CreateStudentRequest
     [EmailAddress]
     public string Email { get; set; } = string.Empty;
     
-    [MaxLength(20)]
-    public string? StudentId { get; set; }
-    
     [Required]
     public int MajorId { get; set; }
     
@@ -79,9 +81,8 @@ public class CreateStudentRequest
     [Url]
     public string LinkedInUrl { get; set; } = string.Empty;
     
-    public int? OrganizationId { get; set; }
-    public int? ProjectId { get; set; }
-    public bool IsAdmin { get; set; } = false;
+    [Required]
+    public int RoleId { get; set; }
 }
 
 public class UpdateStudentRequest
@@ -96,9 +97,6 @@ public class UpdateStudentRequest
     [EmailAddress]
     public string? Email { get; set; }
     
-    [MaxLength(20)]
-    public string? StudentId { get; set; }
-    
     public int? MajorId { get; set; }
     
     public int? YearId { get; set; }
@@ -107,7 +105,5 @@ public class UpdateStudentRequest
     [Url]
     public string? LinkedInUrl { get; set; }
     
-    public int? OrganizationId { get; set; }
-    public int? ProjectId { get; set; }
-    public bool? IsAdmin { get; set; }
+    public int? RoleId { get; set; }
 }

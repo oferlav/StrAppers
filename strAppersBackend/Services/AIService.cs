@@ -73,7 +73,10 @@ public class AIService : IAIService
         
         try
         {
+            _logger.LogInformation("=== STARTING SPRINT PLAN GENERATION ===");
             _logger.LogInformation("Generating sprint plan for Project {ProjectId}", request.ProjectId);
+            _logger.LogInformation("Request details: ProjectLength={ProjectLength}, SprintLength={SprintLength}, StartDate={StartDate}, Students={StudentCount}", 
+                request.ProjectLengthWeeks, request.SprintLengthWeeks, request.StartDate, request.Students?.Count ?? 0);
 
             var prompt = BuildSprintPlanningPrompt(request);
             aiResponse = await CallOpenAIAsync(prompt, "gpt-4o");
@@ -87,6 +90,9 @@ public class AIService : IAIService
                 };
             }
 
+            _logger.LogInformation("AI response received. Content length: {ContentLength}", aiResponse.Content?.Length ?? 0);
+            _logger.LogInformation("AI response preview: {ContentPreview}", aiResponse.Content?.Substring(0, Math.Min(200, aiResponse.Content?.Length ?? 0)) ?? "No content");
+            
             var sprintPlanJson = ExtractJsonFromResponse(aiResponse.Content);
             _logger.LogInformation("Extracted JSON for sprint plan: {Json}", sprintPlanJson);
             
@@ -99,6 +105,18 @@ public class AIService : IAIService
             };
             
             var sprintPlan = JsonSerializer.Deserialize<SprintPlan>(sprintPlanJson, options);
+            
+            if (sprintPlan == null)
+            {
+                _logger.LogError("Failed to deserialize SprintPlan from JSON: {Json}", sprintPlanJson);
+                return new SprintPlanningResponse
+                {
+                    Success = false,
+                    Message = "Failed to deserialize sprint plan from AI response"
+                };
+            }
+            
+            _logger.LogInformation("Successfully deserialized SprintPlan with {SprintCount} sprints", sprintPlan.Sprints?.Count ?? 0);
 
             return new SprintPlanningResponse
             {
@@ -182,15 +200,35 @@ Return the response as a well-structured JSON object that can be easily parsed a
     private string BuildSprintPlanningPrompt(SprintPlanningRequest request)
     {
         var teamRolesText = string.Join(", ", request.TeamRoles.Select(r => $"{r.RoleName} ({r.StudentCount} students)"));
+        var totalSprints = request.ProjectLengthWeeks / request.SprintLengthWeeks;
         
         return $@"You are an agile project manager. Generate a comprehensive sprint plan based on the system design document for this project.
 
+PROJECT LENGTH: {request.ProjectLengthWeeks} weeks total
 SPRINT LENGTH: {request.SprintLengthWeeks} weeks per sprint
 TEAM COMPOSITION: {teamRolesText}
 
 IMPORTANT: You must respond with ONLY valid JSON. Do not include any explanatory text, markdown formatting, or code blocks. Start your response directly with the opening curly brace {{ and end with the closing curly brace }}.
 
 CRITICAL: The tasks array in each sprint must contain FULL ProjectTask objects with all required fields (id, title, description, roleId, roleName, estimatedHours, priority, dependencies). Do NOT use task IDs or references.
+
+PLANNING CONSTRAINTS:
+- The total project duration is {request.ProjectLengthWeeks} weeks
+- Each sprint is {request.SprintLengthWeeks} weeks long
+- You MUST create exactly {totalSprints} sprints to fill the entire project timeline
+- Start date: {request.StartDate:yyyy-MM-dd}
+- Plan the sprints to fit within the {request.ProjectLengthWeeks}-week project timeline
+- Consider the project length when determining the scope and number of sprints
+- Ensure all critical features can be delivered within the project timeline
+
+CRITICAL SPRINT FILLING REQUIREMENTS:
+- EVERY sprint must have tasks assigned to it - NO EMPTY SPRINTS ALLOWED
+- EVERY role in the team must have tasks in EVERY sprint - NO ROLE LEFT WITHOUT WORK
+- If you don't have enough information from the SystemDesign, INVENT realistic tasks for each role
+- Distribute work evenly across all sprints so no sprint is overloaded or empty
+- Each sprint should have a balanced mix of tasks for all team roles
+- Include tasks like: research, planning, documentation, testing, code review, deployment, maintenance
+- Make sure every role has meaningful work in every sprint
 
 Generate a sprint plan in JSON format with the following structure:
 
@@ -205,6 +243,13 @@ For each task, consider:
 - Estimated hours (realistic for student developers)
 - Dependencies between tasks
 - Priority levels
+
+TASK DISTRIBUTION RULES:
+- Each sprint must have at least 2-3 tasks per role to keep everyone busy
+- Include a mix of: development tasks, testing tasks, documentation tasks, research tasks, code review tasks
+- If you run out of specific features, add generic tasks like: ""Code review and testing"", ""Documentation updates"", ""Performance optimization"", ""Bug fixes"", ""User training materials""
+- Make sure every role has meaningful work in every single sprint
+- Balance the workload so no role is overloaded or underutilized
 
 Return ONLY the JSON object matching this structure:
 {{
@@ -247,22 +292,32 @@ Return ONLY the JSON object matching this structure:
       ""tasks"": [
         {{
           ""id"": ""task1"",
-          ""title"": ""Task Title"",
+          ""title"": ""Task for Role 1"",
           ""description"": ""Task description"",
           ""roleId"": 1,
-          ""roleName"": ""Role Name"",
+          ""roleName"": ""Role 1"",
+          ""estimatedHours"": 8,
+          ""priority"": 1,
+          ""dependencies"": []
+        }},
+        {{
+          ""id"": ""task2"",
+          ""title"": ""Task for Role 2"",
+          ""description"": ""Task description"",
+          ""roleId"": 2,
+          ""roleName"": ""Role 2"",
           ""estimatedHours"": 8,
           ""priority"": 1,
           ""dependencies"": []
         }}
       ],
       ""totalStoryPoints"": 5,
-      ""roleWorkload"": {{""1"": 8}}
+      ""roleWorkload"": {{""1"": 8, ""2"": 8}}
     }}
   ],
-  ""totalSprints"": 0,
+  ""totalSprints"": {totalSprints},
   ""totalTasks"": 0,
-  ""estimatedWeeks"": 0
+  ""estimatedWeeks"": {request.ProjectLengthWeeks}
 }}";
     }
 
@@ -313,8 +368,12 @@ Return ONLY the JSON object matching this structure:
             var json = JsonSerializer.Serialize(requestBody);
             var content = new StringContent(json, Encoding.UTF8, "application/json");
 
+            _logger.LogInformation("Calling OpenAI API with model {Model}", model);
             var response = await _httpClient.PostAsync("https://api.openai.com/v1/chat/completions", content);
             var responseContent = await response.Content.ReadAsStringAsync();
+            
+            _logger.LogInformation("OpenAI API response status: {StatusCode}", response.StatusCode);
+            _logger.LogInformation("OpenAI API response content length: {ContentLength}", responseContent?.Length ?? 0);
 
             if (!response.IsSuccessStatusCode)
             {
@@ -327,12 +386,27 @@ Return ONLY the JSON object matching this structure:
                 PropertyNameCaseInsensitive = true
             });
 
-            if (openAIResponse?.Choices?.FirstOrDefault()?.Message?.Content == null)
+            if (openAIResponse == null)
             {
-                return (false, string.Empty, "Invalid response from OpenAI API");
+                _logger.LogError("Failed to deserialize OpenAI response: {Content}", responseContent);
+                return (false, string.Empty, "Failed to deserialize OpenAI response");
             }
 
-            return (true, openAIResponse.Choices.First().Message.Content, null);
+            if (openAIResponse.Choices == null || !openAIResponse.Choices.Any())
+            {
+                _logger.LogError("No choices in OpenAI response: {Content}", responseContent);
+                return (false, string.Empty, "No choices in OpenAI response");
+            }
+
+            var messageContent = openAIResponse.Choices.First().Message?.Content;
+            if (string.IsNullOrEmpty(messageContent))
+            {
+                _logger.LogError("Empty message content in OpenAI response: {Content}", responseContent);
+                return (false, string.Empty, "Empty message content in OpenAI response");
+            }
+
+            _logger.LogInformation("OpenAI API returned content length: {ContentLength}", messageContent.Length);
+            return (true, messageContent, null);
         }
         catch (Exception ex)
         {

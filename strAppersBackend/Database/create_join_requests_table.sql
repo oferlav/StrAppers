@@ -29,3 +29,4 @@ CREATE INDEX IF NOT EXISTS "IX_JoinRequests_JoinDate" ON "JoinRequests"("JoinDat
 CREATE INDEX IF NOT EXISTS "IX_JoinRequests_ProjectId" ON "JoinRequests"("ProjectId");
 CREATE INDEX IF NOT EXISTS "IX_JoinRequests_StudentEmail" ON "JoinRequests"("StudentEmail");
 CREATE INDEX IF NOT EXISTS "IX_JoinRequests_StudentId" ON "JoinRequests"("StudentId");
+

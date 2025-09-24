@@ -1,8 +1,10 @@
+// SLACK CONTROLLER TEMPORARILY DISABLED
+/*
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using strAppersBackend.Data;
 using strAppersBackend.Models;
-using strAppersBackend.Services;
+// using strAppersBackend.Services; // SLACK TEMPORARILY DISABLED
 using System.ComponentModel.DataAnnotations;
 
 namespace strAppersBackend.Controllers
@@ -13,13 +15,13 @@ namespace strAppersBackend.Controllers
     {
         private readonly ApplicationDbContext _context;
         private readonly ILogger<SlackController> _logger;
-        private readonly SlackService _slackService;
+        // private readonly SlackService _slackService; // SLACK TEMPORARILY DISABLED
 
-        public SlackController(ApplicationDbContext context, ILogger<SlackController> logger, SlackService slackService)
+        public SlackController(ApplicationDbContext context, ILogger<SlackController> logger) // SlackService slackService - SLACK TEMPORARILY DISABLED
         {
             _context = context;
             _logger = logger;
-            _slackService = slackService;
+            // _slackService = slackService; // SLACK TEMPORARILY DISABLED
         }
 
         #region Debug Methods
@@ -1260,3 +1262,4 @@ namespace strAppersBackend.Controllers
 
     #endregion
 }
+*/

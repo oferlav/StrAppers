@@ -19,6 +19,7 @@ public class ApplicationDbContext : DbContext
     public DbSet<Year> Years { get; set; }
     public DbSet<JoinRequest> JoinRequests { get; set; }
     public DbSet<DesignVersion> DesignVersions { get; set; }
+    public DbSet<ProjectBoard> ProjectBoards { get; set; }
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -128,24 +129,27 @@ public class ApplicationDbContext : DbContext
                   .HasForeignKey(e => e.YearId)
                   .OnDelete(DeleteBehavior.Restrict);
 
-            entity.HasOne(e => e.Organization)
-                  .WithMany(o => o.Students)
-                  .HasForeignKey(e => e.OrganizationId)
+            // Organization relationship removed - Students no longer have OrganizationId
+
+            // Direct relationship with Project (student can be allocated to one project)
+            entity.HasOne(e => e.Project)
+                  .WithMany()
+                  .HasForeignKey(e => e.ProjectId)
                   .OnDelete(DeleteBehavior.SetNull);
 
-            // One-to-one relationship with Project (student can only be allocated to one project)
-            entity.HasOne(e => e.Project)
-                  .WithMany(p => p.Students)
-                  .HasForeignKey(e => e.ProjectId)
+            // Foreign key relationship to ProjectBoard (Trello board)
+            entity.HasOne(e => e.ProjectBoard)
+                  .WithMany()
+                  .HasForeignKey(e => e.BoardId)
                   .OnDelete(DeleteBehavior.SetNull);
 
             // Seed test data
             entity.HasData(
-                new Student { Id = 1, FirstName = "Alex", LastName = "Johnson", Email = "alex.johnson@techuniversity.edu", StudentId = "TU001", MajorId = 1, YearId = 3, LinkedInUrl = "https://linkedin.com/in/alexjohnson", OrganizationId = 1, ProjectId = 1, IsAdmin = true, CreatedAt = DateTime.UtcNow.AddDays(-45) },
-                new Student { Id = 2, FirstName = "Sarah", LastName = "Williams", Email = "sarah.williams@techuniversity.edu", StudentId = "TU002", MajorId = 2, YearId = 4, LinkedInUrl = "https://linkedin.com/in/sarahwilliams", OrganizationId = 1, ProjectId = 2, IsAdmin = false, CreatedAt = DateTime.UtcNow.AddDays(-40) },
-                new Student { Id = 3, FirstName = "Michael", LastName = "Brown", Email = "michael.brown@techuniversity.edu", StudentId = "TU003", MajorId = 3, YearId = 5, LinkedInUrl = "https://linkedin.com/in/michaelbrown", OrganizationId = 1, ProjectId = 3, IsAdmin = true, CreatedAt = DateTime.UtcNow.AddDays(-35) },
-                new Student { Id = 4, FirstName = "Emily", LastName = "Davis", Email = "emily.davis@techuniversity.edu", StudentId = "TU004", MajorId = 4, YearId = 2, LinkedInUrl = "https://linkedin.com/in/emilydavis", OrganizationId = 1, CreatedAt = DateTime.UtcNow.AddDays(-30) },
-                new Student { Id = 5, FirstName = "David", LastName = "Miller", Email = "david.miller@techuniversity.edu", StudentId = "TU005", MajorId = 1, YearId = 1, LinkedInUrl = "https://linkedin.com/in/davidmiller", OrganizationId = 1, CreatedAt = DateTime.UtcNow.AddDays(-25) }
+                new Student { Id = 1, FirstName = "Alex", LastName = "Johnson", Email = "alex.johnson@techuniversity.edu", StudentId = "TU001", MajorId = 1, YearId = 3, LinkedInUrl = "https://linkedin.com/in/alexjohnson", IsAdmin = true, CreatedAt = DateTime.UtcNow.AddDays(-45) },
+                new Student { Id = 2, FirstName = "Sarah", LastName = "Williams", Email = "sarah.williams@techuniversity.edu", StudentId = "TU002", MajorId = 2, YearId = 4, LinkedInUrl = "https://linkedin.com/in/sarahwilliams", IsAdmin = false, CreatedAt = DateTime.UtcNow.AddDays(-40) },
+                new Student { Id = 3, FirstName = "Michael", LastName = "Brown", Email = "michael.brown@techuniversity.edu", StudentId = "TU003", MajorId = 3, YearId = 5, LinkedInUrl = "https://linkedin.com/in/michaelbrown", IsAdmin = true, CreatedAt = DateTime.UtcNow.AddDays(-35) },
+                new Student { Id = 4, FirstName = "Emily", LastName = "Davis", Email = "emily.davis@techuniversity.edu", StudentId = "TU004", MajorId = 4, YearId = 2, LinkedInUrl = "https://linkedin.com/in/emilydavis", CreatedAt = DateTime.UtcNow.AddDays(-30) },
+                new Student { Id = 5, FirstName = "David", LastName = "Miller", Email = "david.miller@techuniversity.edu", StudentId = "TU005", MajorId = 1, YearId = 1, LinkedInUrl = "https://linkedin.com/in/davidmiller", CreatedAt = DateTime.UtcNow.AddDays(-25) }
             );
         });
 
@@ -159,6 +163,7 @@ public class ApplicationDbContext : DbContext
             entity.Property(e => e.SystemDesign).HasColumnType("TEXT");
             entity.Property(e => e.Priority).HasMaxLength(50);
             entity.Property(e => e.CreatedAt).HasDefaultValueSql("CURRENT_TIMESTAMP");
+            entity.Property(e => e.IsAvailable).HasDefaultValue(true);
 
             // Foreign key relationships
             entity.HasOne(e => e.Organization)
@@ -166,22 +171,18 @@ public class ApplicationDbContext : DbContext
                   .HasForeignKey(e => e.OrganizationId)
                   .OnDelete(DeleteBehavior.SetNull);
 
-            entity.HasOne(e => e.Status)
-                  .WithMany(ps => ps.Projects)
-                  .HasForeignKey(e => e.StatusId)
-                  .OnDelete(DeleteBehavior.Restrict);
 
             // Seed test data
             entity.HasData(
-                new Project { Id = 1, Title = "Student Management System", Description = "Web application for managing student records and academic progress", StatusId = 3, Priority = "High", StartDate = DateTime.UtcNow.AddDays(-30), DueDate = DateTime.UtcNow.AddDays(30), OrganizationId = 1, HasAdmin = true, CreatedAt = DateTime.UtcNow.AddDays(-30) },
-                new Project { Id = 2, Title = "AI Research Platform", Description = "Machine learning platform for academic research", StatusId = 2, Priority = "Medium", StartDate = DateTime.UtcNow.AddDays(-20), DueDate = DateTime.UtcNow.AddDays(60), OrganizationId = 2, HasAdmin = false, CreatedAt = DateTime.UtcNow.AddDays(-20) },
-                new Project { Id = 3, Title = "Community Outreach App", Description = "Mobile app connecting volunteers with local community needs", StatusId = 5, Priority = "High", StartDate = DateTime.UtcNow.AddDays(-90), EndDate = DateTime.UtcNow.AddDays(-10), OrganizationId = 3, HasAdmin = true, CreatedAt = DateTime.UtcNow.AddDays(-90) },
-                new Project { Id = 4, Title = "Online Learning Platform", Description = "E-learning platform with video streaming and assessments", StatusId = 3, Priority = "Critical", StartDate = DateTime.UtcNow.AddDays(-15), DueDate = DateTime.UtcNow.AddDays(45), OrganizationId = 1, HasAdmin = false, CreatedAt = DateTime.UtcNow.AddDays(-15) },
-                new Project { Id = 5, Title = "Data Analytics Dashboard", Description = "Real-time dashboard for analyzing student performance metrics", StatusId = 4, Priority = "Medium", StartDate = DateTime.UtcNow.AddDays(-10), OrganizationId = 1, HasAdmin = false, CreatedAt = DateTime.UtcNow.AddDays(-10) },
-                new Project { Id = 6, Title = "Mobile App for Campus Events", Description = "Mobile application for students to discover and register for campus events", StatusId = 1, Priority = "Medium", StartDate = DateTime.UtcNow.AddDays(-5), DueDate = DateTime.UtcNow.AddDays(60), OrganizationId = 1, HasAdmin = false, CreatedAt = DateTime.UtcNow.AddDays(-5) },
-                new Project { Id = 7, Title = "Virtual Reality Learning Lab", Description = "VR environment for immersive learning experiences", StatusId = 1, Priority = "High", StartDate = DateTime.UtcNow.AddDays(-3), DueDate = DateTime.UtcNow.AddDays(90), OrganizationId = 2, HasAdmin = false, CreatedAt = DateTime.UtcNow.AddDays(-3) },
-                new Project { Id = 8, Title = "Blockchain Voting System", Description = "Secure voting system using blockchain technology", StatusId = 1, Priority = "High", StartDate = DateTime.UtcNow.AddDays(-1), DueDate = DateTime.UtcNow.AddDays(75), OrganizationId = 1, HasAdmin = false, CreatedAt = DateTime.UtcNow.AddDays(-1) },
-                new Project { Id = 9, Title = "IoT Smart Campus", Description = "Internet of Things system for campus management", StatusId = 1, Priority = "Medium", StartDate = DateTime.UtcNow.AddDays(-2), DueDate = DateTime.UtcNow.AddDays(120), OrganizationId = 2, HasAdmin = false, CreatedAt = DateTime.UtcNow.AddDays(-2) }
+                new Project { Id = 1, Title = "Student Management System", Description = "Web application for managing student records and academic progress", Priority = "High", OrganizationId = 1, IsAvailable = true, CreatedAt = DateTime.UtcNow.AddDays(-30) },
+                new Project { Id = 2, Title = "AI Research Platform", Description = "Machine learning platform for academic research", Priority = "Medium", OrganizationId = 2, IsAvailable = true, CreatedAt = DateTime.UtcNow.AddDays(-20) },
+                new Project { Id = 3, Title = "Community Outreach App", Description = "Mobile app connecting volunteers with local community needs", Priority = "High", OrganizationId = 3, IsAvailable = true, CreatedAt = DateTime.UtcNow.AddDays(-90) },
+                new Project { Id = 4, Title = "Online Learning Platform", Description = "E-learning platform with video streaming and assessments", Priority = "Critical", OrganizationId = 1, IsAvailable = true, CreatedAt = DateTime.UtcNow.AddDays(-15) },
+                new Project { Id = 5, Title = "Data Analytics Dashboard", Description = "Real-time dashboard for analyzing student performance metrics", Priority = "Medium", OrganizationId = 1, IsAvailable = true, CreatedAt = DateTime.UtcNow.AddDays(-10) },
+                new Project { Id = 6, Title = "Mobile App for Campus Events", Description = "Mobile application for students to discover and register for campus events", Priority = "Medium", OrganizationId = 1, IsAvailable = true, CreatedAt = DateTime.UtcNow.AddDays(-5) },
+                new Project { Id = 7, Title = "Virtual Reality Learning Lab", Description = "VR environment for immersive learning experiences", Priority = "High", OrganizationId = 2, IsAvailable = true, CreatedAt = DateTime.UtcNow.AddDays(-3) },
+                new Project { Id = 8, Title = "Blockchain Voting System", Description = "Secure voting system using blockchain technology", Priority = "High", OrganizationId = 1, IsAvailable = true, CreatedAt = DateTime.UtcNow.AddDays(-1) },
+                new Project { Id = 9, Title = "IoT Smart Campus", Description = "Internet of Things system for campus management", Priority = "Medium", OrganizationId = 2, IsAvailable = true, CreatedAt = DateTime.UtcNow.AddDays(-2) }
             );
         });
 
@@ -288,6 +289,45 @@ public class ApplicationDbContext : DbContext
             entity.HasIndex(e => e.ProjectId);
             entity.HasIndex(e => e.VersionNumber);
             entity.HasIndex(e => e.IsActive);
+        });
+
+        // Configure ProjectBoard entity
+        modelBuilder.Entity<ProjectBoard>(entity =>
+        {
+            entity.HasKey(e => e.Id);
+            entity.Property(e => e.Id).HasMaxLength(50);
+            entity.Property(e => e.CreatedAt).HasDefaultValueSql("CURRENT_TIMESTAMP");
+            entity.Property(e => e.UpdatedAt).HasDefaultValueSql("CURRENT_TIMESTAMP");
+            
+            // Explicit column mappings
+            entity.Property(e => e.Id).HasColumnName("BoardId");
+            entity.Property(e => e.ProjectId).HasColumnName("ProjectId");
+            entity.Property(e => e.StatusId).HasColumnName("StatusId");
+            entity.Property(e => e.AdminId).HasColumnName("AdminId");
+            entity.Property(e => e.BoardUrl).HasColumnName("BoardURL").HasMaxLength(500);
+            // Foreign key relationships
+            entity.HasOne(e => e.Project)
+                  .WithMany()
+                  .HasForeignKey(e => e.ProjectId)
+                  .OnDelete(DeleteBehavior.Cascade);
+
+            // Temporarily disable Status foreign key relationship
+            // entity.HasOne(e => e.Status)
+            //       .WithMany()
+            //       .HasForeignKey(e => e.StatusId)
+            //       .HasConstraintName("FK_ProjectBoards_ProjectStatuses")
+            //       .OnDelete(DeleteBehavior.SetNull);
+
+            // Temporarily disable Admin foreign key relationship
+            // entity.HasOne(e => e.Admin)
+            //       .WithMany()
+            //       .HasForeignKey(e => e.AdminId)
+            //       .OnDelete(DeleteBehavior.NoAction);
+
+            // Indexes for better performance
+            entity.HasIndex(e => e.ProjectId);
+            entity.HasIndex(e => e.CreatedAt);
+            entity.HasIndex(e => e.StatusId);
         });
     }
 }

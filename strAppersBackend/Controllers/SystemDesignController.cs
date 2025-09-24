@@ -29,7 +29,7 @@ public class SystemDesignController : ControllerBase
     /// Generate a system design document for a project (for frontend use)
     /// </summary>
     [HttpPost("use/generate-design-document")]
-    public async Task<ActionResult<SystemDesignResponse>> GenerateDesignDocument([FromForm] int projectId, [FromForm] string extendedDescription, [FromForm] string? createdBy = null)
+    public async Task<ActionResult<SystemDesignResponse>> GenerateDesignDocument([FromForm] int projectId, [FromForm] string extendedDescription)
     {
         try
         {
@@ -49,7 +49,7 @@ public class SystemDesignController : ControllerBase
             {
                 ProjectId = projectId,
                 ExtendedDescription = cleanedDescription,
-                CreatedBy = createdBy,
+                CreatedBy = null,
                 TeamRoles = new List<RoleInfo>() // Will be populated from database
             };
 
@@ -63,9 +63,6 @@ public class SystemDesignController : ControllerBase
 
             // Validate project exists and get team roles
             var project = await _context.Projects
-                .Include(p => p.Students)
-                .ThenInclude(s => s.StudentRoles)
-                .ThenInclude(sr => sr.Role)
                 .FirstOrDefaultAsync(p => p.Id == request.ProjectId);
 
             if (project == null)
@@ -74,16 +71,16 @@ public class SystemDesignController : ControllerBase
             }
 
             // Build team roles from allocated students
-            var teamRoles = project.Students
-                .SelectMany(s => s.StudentRoles)
-                .GroupBy(sr => sr.RoleId)
-                .Select(g => new RoleInfo
-                {
-                    RoleId = g.Key,
-                    RoleName = g.First().Role.Name,
-                    StudentCount = g.Count()
-                })
-                .ToList();
+            var teamRoles = new List<RoleInfo>(); // DISABLED - Project.Students removed
+            // .SelectMany(s => s.StudentRoles)
+            // .GroupBy(sr => sr.RoleId)
+            // .Select(g => new RoleInfo
+            // {
+            //     RoleId = g.Key,
+            //     RoleName = g.First().Role.Name,
+            //     StudentCount = g.Count()
+            // })
+            // .ToList();
 
             // Update request with actual team roles
             request.TeamRoles = teamRoles;
@@ -140,6 +137,7 @@ public class SystemDesignController : ControllerBase
     /// Get all design versions for a project (for frontend use)
     /// </summary>
     [HttpGet("use/project/{projectId}/design-versions")]
+    [Obsolete("This method is disabled.")]
     public async Task<ActionResult<List<DesignVersion>>> GetDesignVersions(int projectId)
     {
         try
@@ -158,6 +156,7 @@ public class SystemDesignController : ControllerBase
     /// Get a specific design version by ID (for frontend use)
     /// </summary>
     [HttpGet("use/design-version/{designVersionId}")]
+    [Obsolete("This method is disabled.")]
     public async Task<ActionResult<DesignVersion>> GetDesignVersionById(int designVersionId)
     {
         try
@@ -182,6 +181,7 @@ public class SystemDesignController : ControllerBase
     /// Get project's current system design (for frontend use)
     /// </summary>
     [HttpGet("use/project/{projectId}/current-design")]
+    [Obsolete("This method is disabled.")]
     public async Task<ActionResult<object>> GetCurrentSystemDesign(int projectId)
     {
         try
@@ -216,7 +216,7 @@ public class SystemDesignController : ControllerBase
     /// Generate a system design document for a project (alternative endpoint that accepts form data)
     /// </summary>
     [HttpPost("use/generate-design-document-form")]
-    public async Task<ActionResult<SystemDesignResponse>> GenerateDesignDocumentForm([FromForm] int projectId, [FromForm] string extendedDescription, [FromForm] string? createdBy = null)
+    public async Task<ActionResult<SystemDesignResponse>> GenerateDesignDocumentForm([FromForm] int projectId, [FromForm] string extendedDescription)
     {
         try
         {
@@ -236,7 +236,7 @@ public class SystemDesignController : ControllerBase
             {
                 ProjectId = projectId,
                 ExtendedDescription = cleanedDescription,
-                CreatedBy = createdBy,
+                CreatedBy = null,
                 TeamRoles = new List<RoleInfo>() // Will be populated from database
             };
 
@@ -250,9 +250,6 @@ public class SystemDesignController : ControllerBase
 
             // Validate project exists and get team roles
             var project = await _context.Projects
-                .Include(p => p.Students)
-                .ThenInclude(s => s.StudentRoles)
-                .ThenInclude(sr => sr.Role)
                 .FirstOrDefaultAsync(p => p.Id == request.ProjectId);
 
             if (project == null)
@@ -261,16 +258,16 @@ public class SystemDesignController : ControllerBase
             }
 
             // Build team roles from allocated students
-            var teamRoles = project.Students
-                .SelectMany(s => s.StudentRoles)
-                .GroupBy(sr => sr.RoleId)
-                .Select(g => new RoleInfo
-                {
-                    RoleId = g.Key,
-                    RoleName = g.First().Role.Name,
-                    StudentCount = g.Count()
-                })
-                .ToList();
+            var teamRoles = new List<RoleInfo>(); // DISABLED - Project.Students removed
+            // .SelectMany(s => s.StudentRoles)
+            // .GroupBy(sr => sr.RoleId)
+            // .Select(g => new RoleInfo
+            // {
+            //     RoleId = g.Key,
+            //     RoleName = g.First().Role.Name,
+            //     StudentCount = g.Count()
+            // })
+            // .ToList();
 
             // Update request with actual team roles
             request.TeamRoles = teamRoles;
