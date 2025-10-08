@@ -315,6 +315,100 @@ public class ProjectsController : ControllerBase
     }
 
     /// <summary>
+    /// Get all projects for an organization by email address
+    /// </summary>
+    [HttpGet("use/by-email/{email}")]
+    public async Task<ActionResult<IEnumerable<Project>>> GetProjectsByEmail(string email)
+    {
+        try
+        {
+            _logger.LogInformation("Getting projects for organization with email {Email}", email);
+
+            // First, find the organization by email
+            var organization = await _context.Organizations
+                .FirstOrDefaultAsync(o => o.ContactEmail == email);
+
+            if (organization == null)
+            {
+                _logger.LogWarning("Organization not found for email {Email}", email);
+                return NotFound($"Organization with email {email} not found.");
+            }
+
+            _logger.LogInformation("Found organization {OrganizationId} for email {Email}", organization.Id, email);
+
+            // Get all projects for this organization
+            var projects = await _context.Projects
+                .Where(p => p.OrganizationId == organization.Id)
+                .Select(p => new Project
+                {
+                    Id = p.Id,
+                    Title = p.Title,
+                    Description = p.Description,
+                    ExtendedDescription = p.ExtendedDescription,
+                    Priority = p.Priority,
+                    OrganizationId = p.OrganizationId,
+                    IsAvailable = p.IsAvailable,
+                    CreatedAt = p.CreatedAt,
+                    UpdatedAt = p.UpdatedAt
+                    // Exclude SystemDesign, SystemDesignDoc, and Organization to avoid serialization issues
+                })
+                .ToListAsync();
+
+            _logger.LogInformation("Found {ProjectCount} projects for organization {OrganizationId}", projects.Count, organization.Id);
+
+            return Ok(projects);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error retrieving projects for email {Email}", email);
+            return StatusCode(500, "An error occurred while retrieving projects for the organization");
+        }
+    }
+
+    /// <summary>
+    /// Get a single project by ID
+    /// </summary>
+    [HttpGet("use/{id}")]
+    public async Task<ActionResult<Project>> GetProjectById(int id)
+    {
+        try
+        {
+            _logger.LogInformation("Getting project with ID {ProjectId}", id);
+
+            var project = await _context.Projects
+                .Where(p => p.Id == id)
+                .Select(p => new Project
+                {
+                    Id = p.Id,
+                    Title = p.Title,
+                    Description = p.Description,
+                    ExtendedDescription = p.ExtendedDescription,
+                    Priority = p.Priority,
+                    OrganizationId = p.OrganizationId,
+                    IsAvailable = p.IsAvailable,
+                    CreatedAt = p.CreatedAt,
+                    UpdatedAt = p.UpdatedAt
+                    // Exclude SystemDesign, SystemDesignDoc, and Organization to avoid serialization issues
+                })
+                .FirstOrDefaultAsync();
+
+            if (project == null)
+            {
+                _logger.LogWarning("Project with ID {ProjectId} not found", id);
+                return NotFound($"Project with ID {id} not found.");
+            }
+
+            _logger.LogInformation("Found project {ProjectTitle} with ID {ProjectId}", project.Title, project.Id);
+            return Ok(project);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error retrieving project with ID {ProjectId}", id);
+            return StatusCode(500, "An error occurred while retrieving the project");
+        }
+    }
+
+    /// <summary>
     /// Suspend a project (set IsAvailable to false)
     /// </summary>
     [HttpPost("use/suspend/{id}")]

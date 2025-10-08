@@ -295,4 +295,66 @@ public class SystemDesignController : ControllerBase
             });
         }
     }
+
+    /// <summary>
+    /// Get the base64 encoded SystemDesign for a project (for frontend use)
+    /// </summary>
+    [HttpGet("use/base64/{projectId}")]
+    public async Task<ActionResult<object>> GetSystemDesignBase64(int projectId)
+    {
+        try
+        {
+            _logger.LogInformation("Getting SystemDesign base64 for Project {ProjectId}", projectId);
+
+            // Validate project exists
+            var project = await _context.Projects
+                .FirstOrDefaultAsync(p => p.Id == projectId);
+
+            if (project == null)
+            {
+                _logger.LogWarning("Project {ProjectId} not found", projectId);
+                return NotFound(new
+                {
+                    Success = false,
+                    Message = $"Project with ID {projectId} not found"
+                });
+            }
+
+            if (string.IsNullOrEmpty(project.SystemDesign))
+            {
+                _logger.LogWarning("No SystemDesign found for Project {ProjectId}", projectId);
+                return NotFound(new
+                {
+                    Success = false,
+                    Message = $"No SystemDesign found for project {projectId}"
+                });
+            }
+
+            // Convert SystemDesign to base64
+            var systemDesignBytes = System.Text.Encoding.UTF8.GetBytes(project.SystemDesign);
+            var base64String = Convert.ToBase64String(systemDesignBytes);
+
+            _logger.LogInformation("Successfully converted SystemDesign to base64 for Project {ProjectId}. Length: {Length}", 
+                projectId, base64String.Length);
+
+            return Ok(new
+            {
+                Success = true,
+                ProjectId = projectId,
+                ProjectTitle = project.Title,
+                SystemDesignBase64 = base64String,
+                OriginalLength = project.SystemDesign.Length,
+                Base64Length = base64String.Length
+            });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error getting SystemDesign base64 for Project {ProjectId}: {Message}", projectId, ex.Message);
+            return StatusCode(500, new
+            {
+                Success = false,
+                Message = $"An error occurred while getting SystemDesign base64: {ex.Message}"
+            });
+        }
+    }
 }

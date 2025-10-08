@@ -61,6 +61,8 @@ public class SprintPlanningRequest
     
     [MaxLength(255)]
     public string? CreatedBy { get; set; }
+    
+    public string? SystemDesign { get; set; }
 }
 
 public class SprintPlanningResponse

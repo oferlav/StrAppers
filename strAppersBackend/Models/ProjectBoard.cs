@@ -80,6 +80,40 @@ namespace strAppersBackend.Models
         [Column("BoardURL")]
         public string? BoardUrl { get; set; }
 
+        /// <summary>
+        /// Project publish URL
+        /// </summary>
+        [MaxLength(500)]
+        [Column("PublishUrl")]
+        public string? PublishUrl { get; set; }
+
+        /// <summary>
+        /// Project movie/demo URL
+        /// </summary>
+        [MaxLength(500)]
+        [Column("MovieUrl")]
+        public string? MovieUrl { get; set; }
+
+        /// <summary>
+        /// Next meeting time for the project board
+        /// </summary>
+        [Column("NextMeetingTime")]
+        public DateTime? NextMeetingTime { get; set; }
+
+        /// <summary>
+        /// Next meeting URL for the project board
+        /// </summary>
+        [MaxLength(1000)]
+        [Column("NextMeetingUrl")]
+        public string? NextMeetingUrl { get; set; }
+
+        /// <summary>
+        /// GitHub repository URL for the project board
+        /// </summary>
+        [MaxLength(1000)]
+        [Column("GithubUrl")]
+        public string? GithubUrl { get; set; }
+
         // Navigation properties
         /// <summary>
         /// Navigation property to the associated project

@@ -2,6 +2,7 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using strAppersBackend.Data;
 using strAppersBackend.Models;
+using strAppersBackend.Services;
 using System.ComponentModel;
 using System.ComponentModel.DataAnnotations;
 
@@ -13,11 +14,13 @@ public class StudentsController : ControllerBase
 {
     private readonly ApplicationDbContext _context;
     private readonly ILogger<StudentsController> _logger;
+    private readonly IGitHubService _githubService;
 
-    public StudentsController(ApplicationDbContext context, ILogger<StudentsController> logger)
+    public StudentsController(ApplicationDbContext context, ILogger<StudentsController> logger, IGitHubService githubService)
     {
         _context = context;
         _logger = logger;
+        _githubService = githubService;
     }
 
     /// <summary>
@@ -141,6 +144,24 @@ public class StudentsController : ControllerBase
                 return BadRequest($"Role with ID {request.RoleId} not found");
             }
 
+            // Validate GitHub username
+            if (string.IsNullOrWhiteSpace(request.GithubUser))
+            {
+                _logger.LogWarning("GitHub username is required but was not provided");
+                return BadRequest("GitHub username is required");
+            }
+
+            _logger.LogInformation("Validating GitHub user: {GithubUser}", request.GithubUser);
+            var isValidGitHubUser = await _githubService.ValidateGitHubUserAsync(request.GithubUser);
+
+            if (!isValidGitHubUser)
+            {
+                _logger.LogWarning("GitHub user {GithubUser} does not exist", request.GithubUser);
+                return BadRequest($"GitHub user '{request.GithubUser}' does not exist. Please provide a valid GitHub username.");
+            }
+
+            _logger.LogInformation("GitHub user {GithubUser} validated successfully", request.GithubUser);
+
             // Create new student
             _logger.LogInformation("Creating new student with email {Email}", request.Email);
             var student = new Student
@@ -152,6 +173,8 @@ public class StudentsController : ControllerBase
                 MajorId = request.MajorId,
                 YearId = request.YearId,
                 LinkedInUrl = request.LinkedInUrl,
+                GithubUser = request.GithubUser, // GitHub username
+                Photo = request.Photo, // Base64 encoded image or URL
                 ProjectId = null, // Default to null
                 IsAdmin = false, // Default to false
                 BoardId = null, // Default to null
@@ -193,6 +216,7 @@ public class StudentsController : ControllerBase
                 MajorId = student.MajorId,
                 YearId = student.YearId,
                 LinkedInUrl = student.LinkedInUrl,
+                GithubUser = student.GithubUser,
                 IsAdmin = student.IsAdmin,
                 IsAvailable = student.IsAvailable,
                 CreatedAt = student.CreatedAt
@@ -442,6 +466,33 @@ public class StudentsController : ControllerBase
             if (!string.IsNullOrEmpty(request.LinkedInUrl))
                 student.LinkedInUrl = request.LinkedInUrl;
 
+            // Update photo if provided (can be base64 or URL)
+            if (request.Photo != null)
+                student.Photo = request.Photo;
+
+            // Validate and update GitHub username if provided
+            if (request.GithubUser != null)
+            {
+                // Check if GitHub user is not empty
+                if (string.IsNullOrWhiteSpace(request.GithubUser))
+                {
+                    return BadRequest("GitHub username cannot be empty. Provide a valid username or omit the field.");
+                }
+
+                // Validate GitHub user exists
+                _logger.LogInformation("Validating GitHub user: {GithubUser}", request.GithubUser);
+                var isValidGitHubUser = await _githubService.ValidateGitHubUserAsync(request.GithubUser);
+
+                if (!isValidGitHubUser)
+                {
+                    _logger.LogWarning("GitHub user {GithubUser} does not exist", request.GithubUser);
+                    return BadRequest($"GitHub user '{request.GithubUser}' does not exist. Please provide a valid GitHub username.");
+                }
+
+                student.GithubUser = request.GithubUser;
+                _logger.LogInformation("GitHub user {GithubUser} validated and updated successfully", request.GithubUser);
+            }
+
             // Handle role update if provided
             if (request.RoleId.HasValue)
             {
@@ -518,6 +569,8 @@ public class StudentsController : ControllerBase
             var student = await _context.Students
                 .Include(s => s.Major)
                 .Include(s => s.Year)
+                .Include(s => s.StudentRoles)
+                    .ThenInclude(sr => sr.Role)
                 .FirstOrDefaultAsync(s => s.Email == email);
 
             if (student == null)
@@ -527,6 +580,9 @@ public class StudentsController : ControllerBase
             }
 
             _logger.LogInformation("Student found with ID {StudentId} and email {Email}", student.Id, student.Email);
+            
+            // Get role information
+            var roleInfo = student.StudentRoles?.FirstOrDefault(sr => sr.IsActive);
             
             // Return a simplified response to avoid serialization issues
             return Ok(new
@@ -541,10 +597,14 @@ public class StudentsController : ControllerBase
                 YearId = student.YearId,
                 YearName = student.Year?.Name,
                 LinkedInUrl = student.LinkedInUrl,
+                GithubUser = student.GithubUser,
+                Photo = student.Photo,
                 ProjectId = student.ProjectId,
                 IsAdmin = student.IsAdmin,
                 BoardId = student.BoardId,
                 IsAvailable = student.IsAvailable,
+                RoleId = roleInfo?.RoleId,
+                RoleName = roleInfo?.Role?.Name,
                 CreatedAt = student.CreatedAt,
                 UpdatedAt = student.UpdatedAt
             });
@@ -560,11 +620,18 @@ public class StudentsController : ControllerBase
     /// Get students by board ID
     /// </summary>
     [HttpGet("use/by-board/{boardId}")]
-    public async Task<ActionResult<IEnumerable<Student>>> GetStudentsByBoard(string boardId)
+    public async Task<ActionResult<IEnumerable<object>>> GetStudentsByBoard(string boardId)
     {
         try
         {
             _logger.LogInformation("Starting GetStudentsByBoard method with boardId: {BoardId}", boardId);
+            
+            // Validate boardId parameter
+            if (string.IsNullOrEmpty(boardId))
+            {
+                _logger.LogWarning("BoardId parameter is null or empty");
+                return BadRequest("BoardId parameter is required");
+            }
             
             // Test database connection first
             var totalStudents = await _context.Students.CountAsync();
@@ -577,19 +644,187 @@ public class StudentsController : ControllerBase
             
             _logger.LogInformation("Searching for students with boardId: {BoardId} and IsAvailable: true", boardId);
             
+            // Get students with role information
             var students = await _context.Students
-                .Include(s => s.Major)
-                .Include(s => s.Year)
+                .Include(s => s.StudentRoles)
+                    .ThenInclude(sr => sr.Role)
                 .Where(s => s.BoardId == boardId && s.IsAvailable)
+                .Select(s => new
+                {
+                    Id = s.Id,
+                    FirstName = s.FirstName,
+                    LastName = s.LastName,
+                    Email = s.Email,
+                    StudentId = s.StudentId,
+                    MajorId = s.MajorId,
+                    YearId = s.YearId,
+                    LinkedInUrl = s.LinkedInUrl,
+                    GithubUser = s.GithubUser,
+                    ProjectId = s.ProjectId,
+                    IsAdmin = s.IsAdmin,
+                    BoardId = s.BoardId,
+                    IsAvailable = s.IsAvailable,
+                    RoleId = s.StudentRoles.FirstOrDefault(sr => sr.IsActive).RoleId,
+                    RoleName = s.StudentRoles.FirstOrDefault(sr => sr.IsActive).Role.Name,
+                    CreatedAt = s.CreatedAt,
+                    UpdatedAt = s.UpdatedAt
+                })
                 .ToListAsync();
 
             _logger.LogInformation("Found {Count} students for board {BoardId}", students.Count, boardId);
             return Ok(students);
         }
+        catch (DbUpdateException ex)
+        {
+            _logger.LogError(ex, "Database error while retrieving students for board {BoardId}: {Message}", boardId, ex.Message);
+            return StatusCode(500, "Database error occurred while retrieving students for the board");
+        }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error retrieving students for board {BoardId}: {Message}", boardId, ex.Message);
             return StatusCode(500, $"An error occurred while retrieving students for the board: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Get students who are allocated to projects but not to boards
+    /// </summary>
+    [HttpGet("use/project-allocated-no-board")]
+    public async Task<ActionResult<IEnumerable<object>>> GetStudentsAllocatedToProjectButNotBoard()
+    {
+        try
+        {
+            _logger.LogInformation("Getting students allocated to projects but not to boards");
+
+            // Get students who have ProjectId (allocated to project) but no BoardId (not allocated to board)
+            var students = await _context.Students
+                .Include(s => s.StudentRoles)
+                    .ThenInclude(sr => sr.Role)
+                .Where(s => s.ProjectId.HasValue && s.ProjectId > 0 && (s.BoardId == null || s.BoardId == ""))
+                .Select(s => new
+                {
+                    StudentId = s.Id,
+                    ProjectId = s.ProjectId,
+                    IsAdmin = s.IsAdmin,
+                    FirstName = s.FirstName,
+                    LastName = s.LastName,
+                    Email = s.Email,
+                    LinkedInUrl = s.LinkedInUrl,
+                    GithubUser = s.GithubUser,
+                    IsAvailable = s.IsAvailable,
+                    RoleId = s.StudentRoles.FirstOrDefault(sr => sr.IsActive).RoleId,
+                    RoleName = s.StudentRoles.FirstOrDefault(sr => sr.IsActive).Role.Name
+                })
+                .ToListAsync();
+
+            _logger.LogInformation("Found {Count} students allocated to projects but not to boards", students.Count);
+
+            return Ok(new
+            {
+                Success = true,
+                Count = students.Count,
+                Students = students
+            });
+        }
+        catch (DbUpdateException ex)
+        {
+            _logger.LogError(ex, "Database error while retrieving students allocated to projects but not to boards: {Message}", ex.Message);
+            return StatusCode(500, "Database error occurred while retrieving students");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error retrieving students allocated to projects but not to boards: {Message}", ex.Message);
+            return StatusCode(500, $"An error occurred while retrieving students: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Set a student as admin for a project and set all other students in the same project as non-admin
+    /// </summary>
+    /// <param name="studentId">The student ID to set as admin</param>
+    /// <param name="projectId">The project ID</param>
+    /// <returns>Success response</returns>
+    [HttpPost("use/set-project-admin/{studentId}/{projectId}")]
+    public async Task<ActionResult> SetProjectAdmin(int studentId, int projectId)
+    {
+        try
+        {
+            _logger.LogInformation("Setting student {StudentId} as admin for project {ProjectId}", studentId, projectId);
+
+            // Validate that the student exists and is allocated to the specified project
+            var targetStudent = await _context.Students
+                .FirstOrDefaultAsync(s => s.Id == studentId && s.ProjectId == projectId);
+
+            if (targetStudent == null)
+            {
+                _logger.LogWarning("Student {StudentId} not found or not allocated to project {ProjectId}", studentId, projectId);
+                return NotFound(new
+                {
+                    Success = false,
+                    Message = $"Student with ID {studentId} not found or not allocated to project {projectId}"
+                });
+            }
+
+            // Get all students in the project
+            var studentsInProject = await _context.Students
+                .Where(s => s.ProjectId == projectId)
+                .ToListAsync();
+
+            if (!studentsInProject.Any())
+            {
+                _logger.LogWarning("No students found for project {ProjectId}", projectId);
+                return NotFound(new
+                {
+                    Success = false,
+                    Message = $"No students found for project {projectId}"
+                });
+            }
+
+            // Set all students in the project to non-admin first
+            foreach (var student in studentsInProject)
+            {
+                student.IsAdmin = false;
+                student.UpdatedAt = DateTime.UtcNow;
+            }
+
+            // Set the target student as admin
+            targetStudent.IsAdmin = true;
+            targetStudent.UpdatedAt = DateTime.UtcNow;
+
+            // Save changes to database
+            await _context.SaveChangesAsync();
+
+            _logger.LogInformation("Successfully set student {StudentId} as admin for project {ProjectId}. Updated {TotalStudents} students total", 
+                studentId, projectId, studentsInProject.Count);
+
+            return Ok(new
+            {
+                Success = true,
+                Message = $"Student {targetStudent.FirstName} {targetStudent.LastName} has been set as admin for project {projectId}",
+                StudentId = studentId,
+                ProjectId = projectId,
+                StudentName = $"{targetStudent.FirstName} {targetStudent.LastName}",
+                TotalStudentsUpdated = studentsInProject.Count,
+                PreviousAdminCount = studentsInProject.Count(s => s.IsAdmin) - 1 // Subtract 1 since we just set one as admin
+            });
+        }
+        catch (DbUpdateException ex)
+        {
+            _logger.LogError(ex, "Database error while setting student {StudentId} as admin for project {ProjectId}: {Message}", studentId, projectId, ex.Message);
+            return StatusCode(500, new
+            {
+                Success = false,
+                Message = "Database error occurred while updating admin status"
+            });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error setting student {StudentId} as admin for project {ProjectId}: {Message}", studentId, projectId, ex.Message);
+            return StatusCode(500, new
+            {
+                Success = false,
+                Message = $"An error occurred while setting admin status: {ex.Message}"
+            });
         }
     }
 }

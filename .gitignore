@@ -393,8 +393,21 @@ $RECYCLE.BIN/
 # API Keys and sensitive configuration
 appsettings.Production.json
 appsettings.*.json
-!appsettings.json
-!appsettings.Development.json
+# Exclude main appsettings.json to protect sensitive data
+appsettings.json
+appsettings.Development.json
+
+# Exclude credentials and service account files
+**/Credentials/
+*.json
+!package.json
+!package-lock.json
+!tsconfig.json
+!**/Migrations/*.json
+
+# Exclude publish and build artifacts
+**/publish-azure/
+*.zip
 
 # Database files
 *.db

@@ -1,4 +1,5 @@
 using System.ComponentModel.DataAnnotations;
+using System.ComponentModel.DataAnnotations.Schema;
 
 namespace strAppersBackend.Models;
 
@@ -29,6 +30,10 @@ public class Organization
     public string? Address { get; set; }
     
     public bool IsActive { get; set; } = true;
+    
+    // Logo field (base64 encoded image or URL)
+    [Column("Logo")]
+    public string? Logo { get; set; }
     
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
     public DateTime? UpdatedAt { get; set; }
@@ -62,6 +67,8 @@ public class CreateOrganizationRequest
     public string? Address { get; set; }
     
     public bool IsActive { get; set; } = true;
+    
+    public string? Logo { get; set; }  // Base64 encoded image or URL
 }
 
 public class UpdateOrganizationRequest
@@ -80,4 +87,6 @@ public class UpdateOrganizationRequest
     
     [MaxLength(200)]
     public string? Address { get; set; }
+    
+    public string? Logo { get; set; }  // Base64 encoded image or URL
 }

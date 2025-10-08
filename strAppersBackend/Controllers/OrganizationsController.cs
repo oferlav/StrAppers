@@ -134,6 +134,7 @@ namespace strAppersBackend.Controllers
                     Address = request.Address,
                     Type = request.Type,
                     IsActive = request.IsActive,
+                    Logo = request.Logo, // Base64 encoded image or URL
                     CreatedAt = DateTime.UtcNow
                 };
 
@@ -288,6 +289,7 @@ namespace strAppersBackend.Controllers
                 organization.Address = request.Address;
                 organization.Type = request.Type;
                 organization.IsActive = request.IsActive;
+                organization.Logo = request.Logo; // Base64 encoded image or URL
                 organization.UpdatedAt = DateTime.UtcNow;
 
                 await _context.SaveChangesAsync();
@@ -374,6 +376,71 @@ namespace strAppersBackend.Controllers
             {
                 _logger.LogError(ex, "Unexpected error while activating organization with ID {OrganizationId}", id);
                 return StatusCode(500, "An unexpected error occurred while activating the organization");
+            }
+        }
+
+        /// <summary>
+        /// Get a specific organization by ID (for frontend use)
+        /// </summary>
+        [HttpGet("use/{id}")]
+        public async Task<ActionResult<object>> GetOrganizationById(int id)
+        {
+            try
+            {
+                _logger.LogInformation("Getting organization by ID {OrganizationId}", id);
+
+                var organization = await _context.Organizations
+                    .Include(o => o.Projects)
+                    .FirstOrDefaultAsync(o => o.Id == id);
+
+                if (organization == null)
+                {
+                    _logger.LogWarning("Organization with ID {OrganizationId} not found", id);
+                    return NotFound(new
+                    {
+                        Success = false,
+                        Message = $"Organization with ID {id} not found"
+                    });
+                }
+
+                _logger.LogInformation("Found organization {OrganizationId}: {Name}", id, organization.Name);
+
+                // Return a simplified response to avoid serialization issues
+                return Ok(new
+                {
+                    Success = true,
+                    Id = organization.Id,
+                    Name = organization.Name,
+                    Description = organization.Description,
+                    Website = organization.Website,
+                    ContactEmail = organization.ContactEmail,
+                    Phone = organization.Phone,
+                    Address = organization.Address,
+                    Type = organization.Type,
+                    IsActive = organization.IsActive,
+                    Logo = organization.Logo,
+                    CreatedAt = organization.CreatedAt,
+                    UpdatedAt = organization.UpdatedAt,
+                    ProjectCount = organization.Projects?.Count ?? 0
+                });
+            }
+            catch (DbUpdateException ex)
+            {
+                _logger.LogError(ex, "Database error while retrieving organization {OrganizationId}: {Message}", id, ex.Message);
+                return StatusCode(500, new
+                {
+                    Success = false,
+                    Message = "Database error occurred while retrieving the organization"
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error retrieving organization {OrganizationId}: {Message}", id, ex.Message);
+                return StatusCode(500, new
+                {
+                    Success = false,
+                    Message = $"An error occurred while retrieving the organization: {ex.Message}"
+                });
             }
         }
     }

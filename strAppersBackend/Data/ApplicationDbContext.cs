@@ -74,6 +74,7 @@ public class ApplicationDbContext : DbContext
             entity.Property(e => e.Phone).HasMaxLength(20);
             entity.Property(e => e.Address).HasMaxLength(200);
             entity.Property(e => e.Type).HasMaxLength(50);
+            entity.Property(e => e.Logo).HasColumnName("Logo").HasColumnType("text");
             entity.Property(e => e.CreatedAt).HasDefaultValueSql("CURRENT_TIMESTAMP");
 
             // Seed test data
@@ -111,8 +112,10 @@ public class ApplicationDbContext : DbContext
             entity.Property(e => e.FirstName).IsRequired().HasMaxLength(100);
             entity.Property(e => e.LastName).IsRequired().HasMaxLength(100);
             entity.Property(e => e.Email).IsRequired().HasMaxLength(255);
-            entity.Property(e => e.StudentId).HasMaxLength(20);
+            entity.Property(e => e.StudentId).HasMaxLength(255);
             entity.Property(e => e.LinkedInUrl).IsRequired().HasMaxLength(200);
+            entity.Property(e => e.GithubUser).IsRequired().HasMaxLength(255);
+            entity.Property(e => e.Photo).HasColumnName("Photo").HasColumnType("text");
             entity.Property(e => e.CreatedAt).HasDefaultValueSql("CURRENT_TIMESTAMP");
             
             entity.HasIndex(e => e.Email).IsUnique();
@@ -305,6 +308,12 @@ public class ApplicationDbContext : DbContext
             entity.Property(e => e.StatusId).HasColumnName("StatusId");
             entity.Property(e => e.AdminId).HasColumnName("AdminId");
             entity.Property(e => e.BoardUrl).HasColumnName("BoardURL").HasMaxLength(500);
+            entity.Property(e => e.PublishUrl).HasColumnName("PublishUrl").HasMaxLength(500);
+            entity.Property(e => e.MovieUrl).HasColumnName("MovieUrl").HasMaxLength(500);
+            entity.Property(e => e.NextMeetingTime).HasColumnName("NextMeetingTime").HasColumnType("timestamp with time zone");
+            entity.Property(e => e.NextMeetingUrl).HasColumnName("NextMeetingUrl").HasMaxLength(1000);
+            entity.Property(e => e.GithubUrl).HasColumnName("GithubUrl").HasMaxLength(1000);
+            
             // Foreign key relationships
             entity.HasOne(e => e.Project)
                   .WithMany()

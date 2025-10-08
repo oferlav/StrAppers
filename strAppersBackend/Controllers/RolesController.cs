@@ -43,7 +43,7 @@ namespace strAppersBackend.Controllers
         /// <summary>
         /// Get all roles (including inactive)
         /// </summary>
-        [HttpGet("all")]
+        [HttpGet("use/all")]
         public async Task<ActionResult<IEnumerable<Role>>> GetAllRoles()
         {
             try
