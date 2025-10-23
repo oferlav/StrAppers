@@ -15,12 +15,14 @@ public class StudentsController : ControllerBase
     private readonly ApplicationDbContext _context;
     private readonly ILogger<StudentsController> _logger;
     private readonly IGitHubService _githubService;
+    private readonly IKickoffService _kickoffService;
 
-    public StudentsController(ApplicationDbContext context, ILogger<StudentsController> logger, IGitHubService githubService)
+    public StudentsController(ApplicationDbContext context, ILogger<StudentsController> logger, IGitHubService githubService, IKickoffService kickoffService)
     {
         _context = context;
         _logger = logger;
         _githubService = githubService;
+        _kickoffService = kickoffService;
     }
 
     /// <summary>
@@ -328,10 +330,39 @@ public class StudentsController : ControllerBase
             student.IsAdmin = request.IsAdmin; // Set IsAdmin flag based on request
             student.UpdatedAt = DateTime.UtcNow;
 
+            _logger.LogInformation("ALLOCATE: Student {StudentId} ProjectId set to {ProjectId}, IsAdmin set to {IsAdmin}", 
+                studentId, projectId, request.IsAdmin);
+
+            // IMPORTANT: Save changes first so the database reflects the allocation
+            await _context.SaveChangesAsync();
+            
+            _logger.LogInformation("ALLOCATE: Changes saved to database");
+
+            // Now get all students in the project (including the one just allocated)
+            var allProjectStudentIds = await _context.Students
+                .Where(s => s.ProjectId == projectId)
+                .Select(s => s.Id)
+                .ToListAsync();
+
+            _logger.LogInformation("ALLOCATE: All students in project {ProjectId} (after allocation): [{StudentIds}]", 
+                projectId, string.Join(", ", allProjectStudentIds));
+            _logger.LogInformation("ALLOCATE: Total students in project: {Count}", allProjectStudentIds.Count);
+
+            // Use centralized service to determine Kickoff status
+            project.Kickoff = await _kickoffService.ShouldKickoffBeTrue(projectId, allProjectStudentIds);
+            
+            _logger.LogInformation("ALLOCATE: Kickoff flag set to {Kickoff} for project {ProjectId}", project.Kickoff, projectId);
+
+            // Save the Kickoff status
             await _context.SaveChangesAsync();
 
             _logger.LogInformation("Student {StudentId} allocated to project {ProjectId}", studentId, projectId);
-            return Ok(new { Success = true, Message = "Student allocated to project successfully." });
+            return Ok(new 
+            { 
+                Success = true, 
+                Message = "Student allocated to project successfully.",
+                KickoffStatus = project.Kickoff
+            });
         }
         catch (Exception ex)
         {
@@ -359,14 +390,42 @@ public class StudentsController : ControllerBase
                 return BadRequest("Student is not allocated to this project.");
             }
 
+            var project = await _context.Projects.FindAsync(projectId);
+            if (project == null)
+            {
+                return NotFound($"Project with ID {projectId} not found.");
+            }
+
             student.ProjectId = null;
             student.IsAdmin = false; // Set IsAdmin to false when deallocating
             student.UpdatedAt = DateTime.UtcNow;
 
+            _logger.LogInformation("DEALLOCATE: Student {StudentId} ProjectId set to NULL", studentId);
+
+            // Get remaining students allocated to the project (AFTER deallocation - exclude the deallocated student)
+            var remainingProjectStudentIds = await _context.Students
+                .Where(s => s.ProjectId == projectId && s.Id != studentId)
+                .Select(s => s.Id)
+                .ToListAsync();
+
+            _logger.LogInformation("DEALLOCATE: Remaining students in project {ProjectId}: [{StudentIds}]", 
+                projectId, string.Join(", ", remainingProjectStudentIds));
+            _logger.LogInformation("DEALLOCATE: Total remaining students: {Count}", remainingProjectStudentIds.Count);
+
+            // Use centralized service to determine Kickoff status
+            project.Kickoff = await _kickoffService.ShouldKickoffBeTrue(projectId, remainingProjectStudentIds);
+            
+            _logger.LogInformation("DEALLOCATE: Kickoff flag set to {Kickoff} for project {ProjectId}", project.Kickoff, projectId);
+
             await _context.SaveChangesAsync();
 
             _logger.LogInformation("Student {StudentId} deallocated from project {ProjectId}", studentId, projectId);
-            return Ok(new { Success = true, Message = "Student deallocated from project successfully." });
+            return Ok(new 
+            { 
+                Success = true, 
+                Message = "Student deallocated from project successfully.",
+                KickoffStatus = project.Kickoff
+            });
         }
         catch (Exception ex)
         {
@@ -660,6 +719,7 @@ public class StudentsController : ControllerBase
                     YearId = s.YearId,
                     LinkedInUrl = s.LinkedInUrl,
                     GithubUser = s.GithubUser,
+                    Photo = s.Photo,
                     ProjectId = s.ProjectId,
                     IsAdmin = s.IsAdmin,
                     BoardId = s.BoardId,
@@ -687,10 +747,62 @@ public class StudentsController : ControllerBase
     }
 
     /// <summary>
-    /// Get students who are allocated to projects but not to boards
+    /// Get students allocated to a specific project but not to any board
+    /// </summary>
+    [HttpGet("use/project-allocated-no-board/{projectId}")]
+    public async Task<ActionResult<IEnumerable<object>>> GetStudentsAllocatedToProjectButNotBoard(int projectId)
+    {
+        try
+        {
+            _logger.LogInformation("Getting students allocated to project {ProjectId} but not to any board", projectId);
+
+            // Get students who have this ProjectId but no BoardId
+            var students = await _context.Students
+                .Include(s => s.Major)
+                .Include(s => s.Year)
+                .Include(s => s.StudentRoles)
+                    .ThenInclude(sr => sr.Role)
+                .Where(s => s.ProjectId == projectId && (s.BoardId == null || s.BoardId == "") && s.IsAvailable)
+                .Select(s => new
+                {
+                    Id = s.Id,
+                    FirstName = s.FirstName,
+                    LastName = s.LastName,
+                    Email = s.Email,
+                    StudentId = s.StudentId,
+                    MajorId = s.MajorId,
+                    MajorName = s.Major != null ? s.Major.Name : null,
+                    YearId = s.YearId,
+                    YearName = s.Year != null ? s.Year.Name : null,
+                    LinkedInUrl = s.LinkedInUrl,
+                    GithubUser = s.GithubUser,
+                    Photo = s.Photo,
+                    ProjectId = s.ProjectId,
+                    IsAdmin = s.IsAdmin,
+                    BoardId = s.BoardId,
+                    IsAvailable = s.IsAvailable,
+                    RoleId = s.StudentRoles.FirstOrDefault(sr => sr.IsActive) != null ? s.StudentRoles.FirstOrDefault(sr => sr.IsActive).RoleId : (int?)null,
+                    RoleName = s.StudentRoles.FirstOrDefault(sr => sr.IsActive) != null ? s.StudentRoles.FirstOrDefault(sr => sr.IsActive).Role.Name : null,
+                    CreatedAt = s.CreatedAt,
+                    UpdatedAt = s.UpdatedAt
+                })
+                .ToListAsync();
+
+            _logger.LogInformation("Found {Count} students allocated to project {ProjectId} but not to any board", students.Count, projectId);
+            return Ok(students);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error retrieving students for project {ProjectId} without board: {Message}", projectId, ex.Message);
+            return StatusCode(500, $"An error occurred while retrieving students: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Get students who are allocated to projects but not to boards (all projects)
     /// </summary>
     [HttpGet("use/project-allocated-no-board")]
-    public async Task<ActionResult<IEnumerable<object>>> GetStudentsAllocatedToProjectButNotBoard()
+    public async Task<ActionResult<IEnumerable<object>>> GetAllStudentsAllocatedToProjectButNotBoard()
     {
         try
         {

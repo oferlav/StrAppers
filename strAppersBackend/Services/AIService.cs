@@ -8,6 +8,10 @@ public interface IAIService
 {
     Task<SystemDesignResponse> GenerateSystemDesignAsync(SystemDesignRequest request);
     Task<SprintPlanningResponse> GenerateSprintPlanAsync(SprintPlanningRequest request);
+    Task<InitiateModulesResponse> InitiateModulesAsync(int projectId, string extendedDescription);
+    Task<CreateDataModelResponse> CreateDataModelAsync(int projectId, string modulesData);
+    Task<UpdateModuleResponse> UpdateModuleAsync(int moduleId, string currentDescription, string userInput);
+    Task<UpdateDataModelResponse> UpdateDataModelAsync(int projectId, string currentSqlScript, string userInput);
 }
 
 public class AIService : IAIService
@@ -33,19 +37,33 @@ public class AIService : IAIService
         {
             _logger.LogInformation("Generating system design for Project {ProjectId}", request.ProjectId);
 
-            var prompt = BuildSystemDesignPrompt(request);
-            var aiResponse = await CallOpenAIAsync(prompt, "gpt-4o");
+            // Generate JSON system design
+            var jsonPrompt = BuildSystemDesignPrompt(request);
+            var jsonAiResponse = await CallOpenAIAsync(jsonPrompt, "gpt-4o");
             
-            if (!aiResponse.Success)
+            if (!jsonAiResponse.Success)
             {
                 return new SystemDesignResponse
                 {
                     Success = false,
-                    Message = aiResponse.ErrorMessage
+                    Message = jsonAiResponse.ErrorMessage
                 };
             }
 
-            var designDocument = aiResponse.Content;
+            var designDocument = jsonAiResponse.Content;
+            
+            // Generate formatted (human-readable) system design
+            _logger.LogInformation("Generating formatted system design for Project {ProjectId}", request.ProjectId);
+            var formattedPrompt = BuildFormattedSystemDesignPrompt(request);
+            var formattedAiResponse = await CallOpenAIAsync(formattedPrompt, "gpt-4o");
+            
+            var designDocumentFormatted = formattedAiResponse.Success ? formattedAiResponse.Content : null;
+            
+            if (!formattedAiResponse.Success)
+            {
+                _logger.LogWarning("Failed to generate formatted design document, but JSON version succeeded");
+            }
+
             var pdfBytes = await GeneratePDFAsync(designDocument);
 
             return new SystemDesignResponse
@@ -53,6 +71,7 @@ public class AIService : IAIService
                 Success = true,
                 Message = "System design generated successfully",
                 DesignDocument = designDocument,
+                DesignDocumentFormatted = designDocumentFormatted,
                 DesignDocumentPdf = pdfBytes
             };
         }
@@ -195,6 +214,31 @@ Please generate a structured system design document in JSON format with the foll
    - CI/CD recommendations
 
 Return the response as a well-structured JSON object that can be easily parsed and stored in a database.";
+    }
+
+    private string BuildFormattedSystemDesignPrompt(SystemDesignRequest request)
+    {
+        var teamRolesText = string.Join(", ", request.TeamRoles.Select(r => $"{r.RoleName} ({r.StudentCount} students)"));
+        
+        return $@"You are a senior software architect. Generate a concise, human-readable system design summary for the following project:
+
+PROJECT DESCRIPTION:
+{request.ExtendedDescription}
+
+TEAM COMPOSITION:
+{teamRolesText}
+
+Please generate a brief, professional summary (maximum 2000 characters) that covers:
+
+1. System Type & Architecture Pattern
+2. Key Technologies Recommended
+3. Main Components & Their Purpose
+4. Database & Data Strategy
+5. Deployment & Infrastructure
+
+Format the response as clear, readable text with bullet points and short paragraphs. This will be displayed to stakeholders and team members who need a quick overview of the system design.
+
+Keep it concise, professional, and easy to understand. DO NOT use JSON format - use plain text with formatting.";
     }
 
     private string BuildSprintPlanningPrompt(SprintPlanningRequest request)
@@ -422,6 +466,455 @@ Return ONLY the JSON object matching this structure:
         var textBytes = Encoding.UTF8.GetBytes(content);
         return textBytes;
     }
+
+    /// <summary>
+    /// Cleans AI response to extract JSON from markdown code blocks
+    /// </summary>
+    private string CleanJsonFromMarkdown(string content)
+    {
+        if (string.IsNullOrEmpty(content))
+            return content;
+
+        // Remove markdown code block markers
+        content = content.Trim();
+        
+        // Remove ```json and ``` markers
+        if (content.StartsWith("```json"))
+        {
+            content = content.Substring(7);
+        }
+        else if (content.StartsWith("```"))
+        {
+            content = content.Substring(3);
+        }
+        
+        if (content.EndsWith("```"))
+        {
+            content = content.Substring(0, content.Length - 3);
+        }
+        
+        // Remove any leading/trailing whitespace and newlines
+        content = content.Trim();
+        
+        // If the content still doesn't start with {, try to find the first { character
+        if (!content.StartsWith("{"))
+        {
+            var jsonStart = content.IndexOf('{');
+            if (jsonStart >= 0)
+            {
+                content = content.Substring(jsonStart);
+            }
+        }
+        
+        // Find the last } character to ensure we have complete JSON
+        if (content.Contains("}"))
+        {
+            var jsonEnd = content.LastIndexOf('}');
+            if (jsonEnd >= 0)
+            {
+                content = content.Substring(0, jsonEnd + 1);
+            }
+        }
+        
+        return content;
+    }
+
+    /// <summary>
+    /// Cleans AI response to extract SQL from markdown code blocks
+    /// </summary>
+    private string CleanSqlFromMarkdown(string content)
+    {
+        if (string.IsNullOrEmpty(content))
+            return content;
+
+        // Remove markdown code block markers
+        content = content.Trim();
+        
+        // Remove ```sql and ``` markers
+        if (content.StartsWith("```sql"))
+        {
+            content = content.Substring(6);
+        }
+        else if (content.StartsWith("```"))
+        {
+            content = content.Substring(3);
+        }
+        
+        if (content.EndsWith("```"))
+        {
+            content = content.Substring(0, content.Length - 3);
+        }
+        
+        // Remove any leading/trailing whitespace and newlines
+        content = content.Trim();
+        
+        return content;
+    }
+
+    public async Task<InitiateModulesResponse> InitiateModulesAsync(int projectId, string extendedDescription)
+    {
+        try
+        {
+            _logger.LogInformation("Initiating modules for Project {ProjectId}", projectId);
+
+            var promptConfig = _configuration.GetSection("PromptConfig:ProjectModules:InitiateModules");
+            var systemPrompt = promptConfig["SystemPrompt"] ?? "You are an expert software architect.";
+            var userPromptTemplate = promptConfig["UserPromptTemplate"] ?? "Project Description: {0}";
+            var userPrompt = string.Format(userPromptTemplate, extendedDescription);
+
+            var messages = new[]
+            {
+                new { role = "system", content = systemPrompt },
+                new { role = "user", content = userPrompt }
+            };
+
+            var requestBody = new
+            {
+                model = "gpt-4o",
+                messages = messages,
+                max_tokens = 4000,
+                temperature = 0.7
+            };
+
+            var json = JsonSerializer.Serialize(requestBody);
+            var content = new StringContent(json, Encoding.UTF8, "application/json");
+
+            _logger.LogInformation("Calling OpenAI API for module initiation");
+            var response = await _httpClient.PostAsync("https://api.openai.com/v1/chat/completions", content);
+            var responseContent = await response.Content.ReadAsStringAsync();
+
+            if (!response.IsSuccessStatusCode)
+            {
+                _logger.LogError("OpenAI API error: {StatusCode} - {Content}", response.StatusCode, responseContent);
+                return new InitiateModulesResponse
+                {
+                    Success = false,
+                    Message = $"OpenAI API error: {response.StatusCode}"
+                };
+            }
+
+            var openAIResponse = JsonSerializer.Deserialize<OpenAIResponse>(responseContent, new JsonSerializerOptions
+            {
+                PropertyNameCaseInsensitive = true
+            });
+
+            if (openAIResponse?.Choices?.FirstOrDefault()?.Message?.Content == null)
+            {
+                return new InitiateModulesResponse
+                {
+                    Success = false,
+                    Message = "Failed to get response from AI service"
+                };
+            }
+
+            var aiContent = openAIResponse.Choices.First().Message.Content;
+            _logger.LogInformation("AI response received for module initiation");
+
+            // Clean the AI response to extract JSON from markdown code blocks
+            var cleanedContent = CleanJsonFromMarkdown(aiContent);
+            _logger.LogInformation("Cleaned AI content: {Content}", cleanedContent);
+
+            // Parse the JSON response
+            var modulesResponse = JsonSerializer.Deserialize<ModulesResponse>(cleanedContent, new JsonSerializerOptions
+            {
+                PropertyNameCaseInsensitive = true
+            });
+
+            if (modulesResponse?.Modules == null)
+            {
+                return new InitiateModulesResponse
+                {
+                    Success = false,
+                    Message = "Failed to parse modules from AI response"
+                };
+            }
+
+            // Validate that all modules have required fields
+            var invalidModules = modulesResponse.Modules.Where(m => 
+                string.IsNullOrWhiteSpace(m.Title) || 
+                string.IsNullOrWhiteSpace(m.Description) || 
+                string.IsNullOrWhiteSpace(m.Inputs) || 
+                string.IsNullOrWhiteSpace(m.Outputs)).ToList();
+
+            if (invalidModules.Any())
+            {
+                _logger.LogWarning("Found {Count} modules with missing inputs or outputs", invalidModules.Count);
+                return new InitiateModulesResponse
+                {
+                    Success = false,
+                    Message = $"AI response incomplete: {invalidModules.Count} modules are missing inputs or outputs. Please try again."
+                };
+            }
+
+            _logger.LogInformation("Successfully parsed {Count} modules with complete inputs and outputs", modulesResponse.Modules.Count);
+
+            return new InitiateModulesResponse
+            {
+                Success = true,
+                Modules = modulesResponse.Modules
+            };
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error initiating modules for Project {ProjectId}", projectId);
+            return new InitiateModulesResponse
+            {
+                Success = false,
+                Message = $"Error initiating modules: {ex.Message}"
+            };
+        }
+    }
+
+    public async Task<CreateDataModelResponse> CreateDataModelAsync(int projectId, string modulesData)
+    {
+        try
+        {
+            _logger.LogInformation("Creating data model for Project {ProjectId}", projectId);
+
+            var promptConfig = _configuration.GetSection("PromptConfig:ProjectModules:CreateDataModel");
+            var systemPrompt = promptConfig["SystemPrompt"] ?? "You are an expert database architect.";
+            var userPromptTemplate = promptConfig["UserPromptTemplate"] ?? "Based on the following project modules, create a comprehensive database schema:\n\n{0}";
+            var userPrompt = string.Format(userPromptTemplate, modulesData);
+
+            var messages = new[]
+            {
+                new { role = "system", content = systemPrompt },
+                new { role = "user", content = userPrompt }
+            };
+
+            var requestBody = new
+            {
+                model = "gpt-4o",
+                messages = messages,
+                max_tokens = 6000,
+                temperature = 0.3
+            };
+
+            var json = JsonSerializer.Serialize(requestBody);
+            var content = new StringContent(json, Encoding.UTF8, "application/json");
+
+            _logger.LogInformation("Calling OpenAI API for data model creation");
+            var response = await _httpClient.PostAsync("https://api.openai.com/v1/chat/completions", content);
+            var responseContent = await response.Content.ReadAsStringAsync();
+
+            if (!response.IsSuccessStatusCode)
+            {
+                _logger.LogError("OpenAI API error: {StatusCode} - {Content}", response.StatusCode, responseContent);
+                return new CreateDataModelResponse
+                {
+                    Success = false,
+                    Message = $"OpenAI API error: {response.StatusCode}"
+                };
+            }
+
+            var openAIResponse = JsonSerializer.Deserialize<OpenAIResponse>(responseContent, new JsonSerializerOptions
+            {
+                PropertyNameCaseInsensitive = true
+            });
+
+            if (openAIResponse?.Choices?.FirstOrDefault()?.Message?.Content == null)
+            {
+                return new CreateDataModelResponse
+                {
+                    Success = false,
+                    Message = "Failed to get response from AI service"
+                };
+            }
+
+            var sqlScript = openAIResponse.Choices.First().Message.Content;
+            _logger.LogInformation("AI response received for data model creation");
+
+            // Clean the SQL script from markdown code blocks
+            var cleanedSqlScript = CleanSqlFromMarkdown(sqlScript);
+            _logger.LogInformation("Cleaned SQL script length: {Length}", cleanedSqlScript.Length);
+
+            return new CreateDataModelResponse
+            {
+                Success = true,
+                SqlScript = cleanedSqlScript
+            };
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error creating data model for Project {ProjectId}", projectId);
+            return new CreateDataModelResponse
+            {
+                Success = false,
+                Message = $"Error creating data model: {ex.Message}"
+            };
+        }
+    }
+
+    public async Task<UpdateModuleResponse> UpdateModuleAsync(int moduleId, string currentDescription, string userInput)
+    {
+        try
+        {
+            _logger.LogInformation("Updating module {ModuleId}", moduleId);
+
+            var promptConfig = _configuration.GetSection("PromptConfig:ProjectModules:UpdateModule");
+            var systemPrompt = promptConfig["SystemPrompt"] ?? "You are an expert software architect and technical writer.";
+            var userPromptTemplate = promptConfig["UserPromptTemplate"] ?? "Current Module Description:\n{0}\n\nUser Feedback:\n{1}";
+            var userPrompt = string.Format(userPromptTemplate, currentDescription, userInput);
+
+            var messages = new[]
+            {
+                new { role = "system", content = systemPrompt },
+                new { role = "user", content = userPrompt }
+            };
+
+            var requestBody = new
+            {
+                model = "gpt-4o",
+                messages = messages,
+                max_tokens = 3000,
+                temperature = 0.5
+            };
+
+            var json = JsonSerializer.Serialize(requestBody);
+            var content = new StringContent(json, Encoding.UTF8, "application/json");
+
+            _logger.LogInformation("Calling OpenAI API for module update");
+            var response = await _httpClient.PostAsync("https://api.openai.com/v1/chat/completions", content);
+            var responseContent = await response.Content.ReadAsStringAsync();
+
+            if (!response.IsSuccessStatusCode)
+            {
+                _logger.LogError("OpenAI API error: {StatusCode} - {Content}", response.StatusCode, responseContent);
+                return new UpdateModuleResponse
+                {
+                    Success = false,
+                    Message = $"OpenAI API error: {response.StatusCode}"
+                };
+            }
+
+            var openAIResponse = JsonSerializer.Deserialize<OpenAIResponse>(responseContent, new JsonSerializerOptions
+            {
+                PropertyNameCaseInsensitive = true
+            });
+
+            if (openAIResponse?.Choices?.FirstOrDefault()?.Message?.Content == null)
+            {
+                return new UpdateModuleResponse
+                {
+                    Success = false,
+                    Message = "Failed to get response from AI service"
+                };
+            }
+
+            var updatedDescription = openAIResponse.Choices.First().Message.Content;
+            
+            // Remove the "Is this what you meant?" section
+            var questionIndex = updatedDescription.IndexOf("Is this what you meant?", StringComparison.OrdinalIgnoreCase);
+            if (questionIndex > 0)
+            {
+                updatedDescription = updatedDescription.Substring(0, questionIndex).Trim();
+            }
+
+            _logger.LogInformation("AI response received for module update");
+
+            return new UpdateModuleResponse
+            {
+                Success = true,
+                UpdatedDescription = updatedDescription
+            };
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error updating module {ModuleId}", moduleId);
+            return new UpdateModuleResponse
+            {
+                Success = false,
+                Message = $"Error updating module: {ex.Message}"
+            };
+        }
+    }
+
+    public async Task<UpdateDataModelResponse> UpdateDataModelAsync(int projectId, string currentSqlScript, string userInput)
+    {
+        try
+        {
+            _logger.LogInformation("Updating data model for Project {ProjectId}", projectId);
+
+            var promptConfig = _configuration.GetSection("PromptConfig:ProjectModules:UpdateDataModel");
+            var systemPrompt = promptConfig["SystemPrompt"] ?? "You are an expert database architect. Update the SQL script based on user feedback.";
+            var userPromptTemplate = promptConfig["UserPromptTemplate"] ?? "Current SQL Script:\n{0}\n\nUser Feedback:\n{1}\n\nPlease update the SQL script based on the user feedback.";
+
+            var userPrompt = string.Format(userPromptTemplate, currentSqlScript, userInput);
+
+            var messages = new[]
+            {
+                new { role = "system", content = systemPrompt },
+                new { role = "user", content = userPrompt }
+            };
+
+            var requestBody = new
+            {
+                model = "gpt-4o",
+                messages = messages,
+                max_tokens = 6000,
+                temperature = 0.3
+            };
+
+            var json = JsonSerializer.Serialize(requestBody);
+            var content = new StringContent(json, Encoding.UTF8, "application/json");
+
+            _logger.LogInformation("Calling OpenAI API for data model update");
+            var response = await _httpClient.PostAsync("https://api.openai.com/v1/chat/completions", content);
+            var responseContent = await response.Content.ReadAsStringAsync();
+
+            if (!response.IsSuccessStatusCode)
+            {
+                _logger.LogError("OpenAI API error: {StatusCode} - {Content}", response.StatusCode, responseContent);
+                return new UpdateDataModelResponse
+                {
+                    Success = false,
+                    Message = $"OpenAI API error: {response.StatusCode}"
+                };
+            }
+
+            var openAIResponse = JsonSerializer.Deserialize<OpenAIResponse>(responseContent, new JsonSerializerOptions
+            {
+                PropertyNameCaseInsensitive = true
+            });
+
+            if (openAIResponse?.Choices?.FirstOrDefault()?.Message?.Content == null)
+            {
+                return new UpdateDataModelResponse
+                {
+                    Success = false,
+                    Message = "Failed to get response from AI service"
+                };
+            }
+
+            var updatedSqlScript = openAIResponse.Choices.First().Message.Content;
+            
+            // Clean the SQL script from markdown formatting
+            var cleanedSqlScript = CleanSqlFromMarkdown(updatedSqlScript);
+
+            _logger.LogInformation("AI response received for data model update");
+
+            return new UpdateDataModelResponse
+            {
+                Success = true,
+                UpdatedSqlScript = cleanedSqlScript
+            };
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error updating data model for Project {ProjectId}", projectId);
+            return new UpdateDataModelResponse
+            {
+                Success = false,
+                Message = $"Error updating data model: {ex.Message}"
+            };
+        }
+    }
+}
+
+// Helper class for parsing modules response
+public class ModulesResponse
+{
+    public List<ModuleInfo> Modules { get; set; } = new();
 }
 
 public class OpenAIResponse

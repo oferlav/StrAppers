@@ -1,5 +1,6 @@
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Options;
 using strAppersBackend.Data;
 using strAppersBackend.Models;
 using strAppersBackend.Services;
@@ -13,12 +14,18 @@ public class ProjectsController : ControllerBase
     private readonly ApplicationDbContext _context;
     private readonly ILogger<ProjectsController> _logger;
     private readonly IDesignDocumentService _designDocumentService;
+    private readonly BusinessLogicConfig _businessLogicConfig;
+    private readonly KickoffConfig _kickoffConfig;
+    private readonly EngagementRulesConfig _engagementRulesConfig;
 
-    public ProjectsController(ApplicationDbContext context, ILogger<ProjectsController> logger, IDesignDocumentService designDocumentService)
+    public ProjectsController(ApplicationDbContext context, ILogger<ProjectsController> logger, IDesignDocumentService designDocumentService, IOptions<BusinessLogicConfig> businessLogicConfig, IOptions<KickoffConfig> kickoffConfig, IOptions<EngagementRulesConfig> engagementRulesConfig)
     {
         _context = context;
         _logger = logger;
         _designDocumentService = designDocumentService;
+        _businessLogicConfig = businessLogicConfig.Value;
+        _kickoffConfig = kickoffConfig.Value;
+        _engagementRulesConfig = engagementRulesConfig.Value;
     }
 
     /// <summary>
@@ -299,6 +306,7 @@ public class ProjectsController : ControllerBase
                     Priority = p.Priority,
                     OrganizationId = p.OrganizationId,
                     IsAvailable = p.IsAvailable,
+                    Kickoff = p.Kickoff,
                     CreatedAt = p.CreatedAt,
                     UpdatedAt = p.UpdatedAt
                     // Exclude SystemDesign, SystemDesignDoc, and Organization to avoid serialization issues
@@ -366,6 +374,107 @@ public class ProjectsController : ControllerBase
     }
 
     /// <summary>
+    /// Get Project Engagement Rules - informative rules for project participation
+    /// </summary>
+    [HttpGet("use/engagement-rules")]
+    public ActionResult<object> GetProjectEngagementRules()
+    {
+        try
+        {
+            _logger.LogInformation("Retrieving Project Engagement Rules");
+
+            // Build sections from configuration
+            var sections = new List<object>();
+
+            // Project Structure section with dynamic values
+            if (_engagementRulesConfig.Sections.ContainsKey("ProjectStructure"))
+            {
+                var projectStructure = _engagementRulesConfig.Sections["ProjectStructure"];
+                var projectStructureRules = new List<string>(projectStructure.Rules);
+                projectStructureRules.Insert(0, $"Project Duration: {_businessLogicConfig.ProjectLengthInWeeks} weeks");
+                projectStructureRules.Insert(1, $"Sprint Length: {_businessLogicConfig.SprintLengthInWeeks} week per sprint");
+                projectStructureRules.Insert(2, $"Total Sprints: {_businessLogicConfig.ProjectLengthInWeeks / _businessLogicConfig.SprintLengthInWeeks} sprints per project");
+
+                sections.Add(new
+                {
+                    title = projectStructure.Title,
+                    description = projectStructure.Description,
+                    rules = projectStructureRules
+                });
+            }
+
+            // Kickoff Requirements section with dynamic values
+            if (_engagementRulesConfig.Sections.ContainsKey("KickoffRequirements"))
+            {
+                var kickoffRequirements = _engagementRulesConfig.Sections["KickoffRequirements"];
+                var kickoffRules = new List<string>(kickoffRequirements.Rules);
+                kickoffRules.Insert(0, $"Minimum Juniors: {_kickoffConfig.MinimumStudents} juniors must be allocated");
+                kickoffRules.Insert(1, _kickoffConfig.RequireAdmin ? "Admin Required: At least one junior must be an admin" : "Admin Required: Not required");
+                kickoffRules.Insert(2, _kickoffConfig.RequireUIUXDesigner ? "UI/UX Designer Required: At least one junior must have UI/UX Designer role" : "UI/UX Designer Required: Not required");
+                kickoffRules.Insert(3, _kickoffConfig.RequireDeveloperRule ? "Developer Rule: At least 1 Full-stack Developer OR at least one Backend and one Frontend developers" : "Developer Rule: Not required");
+
+                sections.Add(new
+                {
+                    title = kickoffRequirements.Title,
+                    description = kickoffRequirements.Description,
+                    rules = kickoffRules
+                });
+            }
+
+            // Add other sections from configuration
+            foreach (var sectionKey in new[] { "RoleTypes", "ProjectStatusFlow", "TechnicalRequirements", "JuniorAllocationProcess" })
+            {
+                if (_engagementRulesConfig.Sections.ContainsKey(sectionKey))
+                {
+                    var section = _engagementRulesConfig.Sections[sectionKey];
+                    sections.Add(new
+                    {
+                        title = section.Title,
+                        description = section.Description,
+                        rules = section.Rules
+                    });
+                }
+            }
+
+            var rules = new
+            {
+                title = _engagementRulesConfig.Title,
+                description = _engagementRulesConfig.Description,
+                lastUpdated = DateTime.UtcNow,
+                sections = sections,
+                configuration = new
+                {
+                    businessLogic = new
+                    {
+                        projectLengthInWeeks = _businessLogicConfig.ProjectLengthInWeeks,
+                        sprintLengthInWeeks = _businessLogicConfig.SprintLengthInWeeks
+                    },
+                    kickoff = new
+                    {
+                        minimumStudents = _kickoffConfig.MinimumStudents,
+                        requireAdmin = _kickoffConfig.RequireAdmin,
+                        requireUIUXDesigner = _kickoffConfig.RequireUIUXDesigner,
+                        requireDeveloperRule = _kickoffConfig.RequireDeveloperRule
+                    }
+                },
+                summary = _engagementRulesConfig.Summary
+            };
+
+            _logger.LogInformation("Project Engagement Rules retrieved successfully");
+            return Ok(rules);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error retrieving Project Engagement Rules");
+            return StatusCode(500, new
+            {
+                error = "An error occurred while retrieving the Project Engagement Rules",
+                message = ex.Message
+            });
+        }
+    }
+
+    /// <summary>
     /// Get a single project by ID
     /// </summary>
     [HttpGet("use/{id}")]
@@ -386,6 +495,7 @@ public class ProjectsController : ControllerBase
                     Priority = p.Priority,
                     OrganizationId = p.OrganizationId,
                     IsAvailable = p.IsAvailable,
+                    Kickoff = p.Kickoff,
                     CreatedAt = p.CreatedAt,
                     UpdatedAt = p.UpdatedAt
                     // Exclude SystemDesign, SystemDesignDoc, and Organization to avoid serialization issues

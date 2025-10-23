@@ -102,15 +102,35 @@ namespace strAppersBackend.Controllers
         [HttpPost("use/create")]
         public async Task<ActionResult<Organization>> CreateOrganization(CreateOrganizationRequest request)
         {
+            Console.WriteLine("=== CreateOrganization method called ===");
+            _logger.LogError("=== CreateOrganization method called ===");
             try
             {
                 _logger.LogInformation("Starting CreateOrganization method with request: {Request}", 
                     System.Text.Json.JsonSerializer.Serialize(request));
                 
+                // Log individual field values for debugging
+                _logger.LogInformation("Field values - Name: '{Name}', Description: '{Description}', Website: '{Website}', ContactEmail: '{ContactEmail}', Phone: '{Phone}', Type: '{Type}', Address: '{Address}', IsActive: {IsActive}, Logo: '{Logo}'", 
+                    request.Name, request.Description, request.Website, request.ContactEmail, request.Phone, request.Type, request.Address, request.IsActive, request.Logo);
+                
                 // Validate the request
+                Console.WriteLine($"ModelState.IsValid: {ModelState.IsValid}");
+                _logger.LogError($"ModelState.IsValid: {ModelState.IsValid}");
+                
                 if (!ModelState.IsValid)
                 {
-                    _logger.LogWarning("ModelState is invalid: {ModelState}", ModelState);
+                    Console.WriteLine("ModelState is invalid. Validation errors:");
+                    _logger.LogError("ModelState is invalid. Validation errors:");
+                    foreach (var error in ModelState)
+                    {
+                        Console.WriteLine($"Field: {error.Key}, Errors: {string.Join(", ", error.Value.Errors.Select(e => e.ErrorMessage))}");
+                        _logger.LogError("Field: {Field}, Errors: {Errors}", 
+                            error.Key, 
+                            string.Join(", ", error.Value.Errors.Select(e => e.ErrorMessage)));
+                    }
+                    
+                    Console.WriteLine($"Full ModelState: {ModelState}");
+                    _logger.LogError("Full ModelState: {ModelState}", ModelState);
                     return BadRequest(ModelState);
                 }
 
@@ -440,6 +460,73 @@ namespace strAppersBackend.Controllers
                 {
                     Success = false,
                     Message = $"An error occurred while retrieving the organization: {ex.Message}"
+                });
+            }
+        }
+
+        /// <summary>
+        /// Get organization info by project ID (for frontend use)
+        /// </summary>
+        [HttpGet("use/by-project/{projectId}")]
+        public async Task<ActionResult<object>> GetOrganizationByProjectId(int projectId)
+        {
+            try
+            {
+                _logger.LogInformation("Getting organization by project ID {ProjectId}", projectId);
+
+                // Query the project with its organization
+                var project = await _context.Projects
+                    .Include(p => p.Organization)
+                    .FirstOrDefaultAsync(p => p.Id == projectId);
+
+                if (project == null)
+                {
+                    _logger.LogWarning("Project with ID {ProjectId} not found", projectId);
+                    return NotFound(new
+                    {
+                        Success = false,
+                        Message = $"Project with ID {projectId} not found"
+                    });
+                }
+
+                if (project.OrganizationId == null || project.Organization == null)
+                {
+                    _logger.LogWarning("Project {ProjectId} has no associated organization", projectId);
+                    return NotFound(new
+                    {
+                        Success = false,
+                        Message = $"Project with ID {projectId} has no associated organization"
+                    });
+                }
+
+                _logger.LogInformation("Found organization {OrganizationId}: {Name} for project {ProjectId}", 
+                    project.Organization.Id, project.Organization.Name, projectId);
+
+                // Return organization info (id, name, logo)
+                return Ok(new
+                {
+                    Success = true,
+                    Id = project.Organization.Id,
+                    Name = project.Organization.Name,
+                    Logo = project.Organization.Logo
+                });
+            }
+            catch (DbUpdateException ex)
+            {
+                _logger.LogError(ex, "Database error while retrieving organization for project {ProjectId}: {Message}", projectId, ex.Message);
+                return StatusCode(500, new
+                {
+                    Success = false,
+                    Message = "Database error occurred while retrieving the organization"
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error retrieving organization for project {ProjectId}: {Message}", projectId, ex.Message);
+                return StatusCode(500, new
+                {
+                    Success = false,
+                    Message = "An error occurred while retrieving the organization"
                 });
             }
         }

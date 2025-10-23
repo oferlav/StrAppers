@@ -397,7 +397,7 @@ public class BoardsController : ControllerBase
             {
                 var githubRequest = new CreateRepositoryRequest
                 {
-                    Name = $"{project.Title.Replace(" ", "-").ToLower()}-{trelloBoardId}",
+                    Name = trelloBoardId,
                     Description = project.Description ?? $"Project repository for {project.Title}",
                     IsPrivate = false,  // Public repository to enable GitHub Pages on free plan
                     Collaborators = githubUsernames,
@@ -672,6 +672,104 @@ public class BoardsController : ControllerBase
         {
             _logger.LogError(ex, "Error setting admin for board {BoardId}", request.BoardId);
             return StatusCode(500, "An error occurred while setting the admin");
+        }
+    }
+
+    /// <summary>
+    /// Add a message to the board's group chat
+    /// </summary>
+    /// <param name="request">Chat message request</param>
+    /// <returns>Success response</returns>
+    [HttpPost("chat-add")]
+    public async Task<ActionResult<object>> AddChatMessage([FromBody] AddChatMessageRequest request)
+    {
+        try
+        {
+            _logger.LogInformation("Adding chat message for BoardId {BoardId} from {Email}", request.BoardId, request.Email);
+
+            var board = await _context.ProjectBoards
+                .FirstOrDefaultAsync(pb => pb.Id == request.BoardId);
+
+            if (board == null)
+            {
+                _logger.LogWarning("Board with ID {BoardId} not found", request.BoardId);
+                return NotFound(new
+                {
+                    success = false,
+                    message = $"Board with ID {request.BoardId} not found"
+                });
+            }
+
+            // Get current chat content
+            var currentChat = board.GroupChat ?? "";
+            
+            // Create new chat message
+            var timestamp = DateTime.UtcNow.ToString("yyyy-MM-dd HH:mm:ss");
+            var newMessage = $"[{timestamp}] {request.Email}: {request.Text}\n";
+            
+            // Append to existing chat
+            board.GroupChat = currentChat + newMessage;
+            board.UpdatedAt = DateTime.UtcNow;
+
+            await _context.SaveChangesAsync();
+
+            _logger.LogInformation("Successfully added chat message for BoardId {BoardId}", request.BoardId);
+
+            return Ok(new
+            {
+                success = true,
+                message = "Chat message added successfully",
+                boardId = request.BoardId,
+                timestamp = timestamp
+            });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error adding chat message for board {BoardId}", request.BoardId);
+            return StatusCode(500, "An error occurred while adding chat message");
+        }
+    }
+
+    /// <summary>
+    /// Get chat information for a board
+    /// </summary>
+    /// <param name="boardId">The Board ID to retrieve chat for</param>
+    /// <returns>Chat information</returns>
+    [HttpGet("chat")]
+    public async Task<ActionResult<object>> GetChat([FromQuery] string boardId)
+    {
+        try
+        {
+            _logger.LogInformation("Getting chat information for BoardId {BoardId}", boardId);
+
+            var board = await _context.ProjectBoards
+                .Include(pb => pb.Project)
+                .Include(pb => pb.Admin)
+                .FirstOrDefaultAsync(pb => pb.Id == boardId);
+
+            if (board == null)
+            {
+                _logger.LogWarning("Board with ID {BoardId} not found", boardId);
+                return NotFound(new
+                {
+                    success = false,
+                    message = $"Board with ID {boardId} not found"
+                });
+            }
+
+            return Ok(new
+            {
+                success = true,
+                boardId = board.Id,
+                groupChat = board.GroupChat,
+                projectTitle = board.Project?.Title,
+                adminName = board.Admin != null ? $"{board.Admin.FirstName} {board.Admin.LastName}" : null
+            });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error getting chat information for board {BoardId}", boardId);
+            return StatusCode(500, "An error occurred while retrieving chat information");
         }
     }
 
@@ -1173,4 +1271,14 @@ public class DebugPromptRequest
 {
     public int ProjectId { get; set; }
     public List<int> Users { get; set; } = new List<int>();
+}
+
+/// <summary>
+/// Request model for adding chat messages
+/// </summary>
+public class AddChatMessageRequest
+{
+    public string BoardId { get; set; } = string.Empty;
+    public string Email { get; set; } = string.Empty;
+    public string Text { get; set; } = string.Empty;
 }

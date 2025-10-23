@@ -10,6 +10,7 @@ public interface IMicrosoftGraphService
     Task<TeamsMeetingResponse> CreateTeamsMeetingAsync(CreateTeamsMeetingRequest request);
     Task<TeamsMeetingResponse> CreateTeamsMeetingWithoutAttendeesAsync(CreateTeamsMeetingRequest request);
     Task<bool> ForwardMeetingInviteAsync(string eventId, List<string> attendees);
+    Task<bool> SendCustomMeetingInviteAsync(List<string> attendees, string subject, string meetingUrl, DateTime startTime, DateTime endTime, string customSenderName);
     Task<EventValidationResult> VerifyEventCreationAsync(string eventId);
     Task<bool> TestConnectionAsync();
 }
@@ -146,6 +147,10 @@ public class MicrosoftGraphService : IMicrosoftGraphService
             
             // Use Calendar Events API to create event with attendees (auto-sends invites)
             var transactionId = $"strappers-{Guid.NewGuid()}";
+            
+            // Get custom sender name from configuration
+            var customSenderName = _configuration["Smtp:FromName"] ?? "Skill-In Meetings";
+            
             var meetingRequest = new
             {
                 subject = request.Title,
@@ -167,6 +172,14 @@ public class MicrosoftGraphService : IMicrosoftGraphService
                 location = new
                 {
                     displayName = "Microsoft Teams"
+                },
+                organizer = new
+                {
+                    emailAddress = new
+                    {
+                        name = customSenderName,  // Custom display name
+                        address = _serviceAccountEmail
+                    }
                 },
                 attendees = request.Attendees.Select(email => new
                 {
@@ -545,6 +558,208 @@ public class MicrosoftGraphService : IMicrosoftGraphService
             _logger.LogError(ex, "Error testing Microsoft Graph connection: {Message}", ex.Message);
             return false;
         }
+    }
+
+    public async Task<bool> SendCustomMeetingInviteAsync(List<string> attendees, string subject, string meetingUrl, DateTime startTime, DateTime endTime, string customSenderName)
+    {
+        try
+        {
+            var accessToken = await GetAccessTokenAsync();
+            
+            _logger.LogInformation("Sending custom meeting invites to {Count} attendees with sender name: {SenderName}", 
+                attendees.Count, customSenderName);
+
+            // Create iCalendar content
+            var icsContent = GenerateIcsContent(subject, startTime, endTime, meetingUrl, _serviceAccountEmail ?? "noreply@skill-in.com");
+            var icsBase64 = Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(icsContent));
+
+            foreach (var attendee in attendees)
+            {
+                // Create the email payload using a dictionary to handle @odata.type correctly
+                var attachmentDict = new Dictionary<string, object>
+                {
+                    { "@odata.type", "#microsoft.graph.fileAttachment" },
+                    { "name", "meeting.ics" },
+                    { "contentType", "text/calendar" },
+                    { "contentBytes", icsBase64 }
+                };
+
+                var messageDict = new Dictionary<string, object>
+                {
+                    { "subject", $"Meeting Invitation: {subject}" },
+                    { "body", new Dictionary<string, string>
+                        {
+                            { "contentType", "HTML" },
+                            { "content", GenerateMeetingEmailBody(subject, startTime, endTime, meetingUrl) }
+                        }
+                    },
+                    { "from", new Dictionary<string, object>
+                        {
+                            { "emailAddress", new Dictionary<string, string>
+                                {
+                                    { "name", customSenderName },
+                                    { "address", _serviceAccountEmail ?? "" }
+                                }
+                            }
+                        }
+                    },
+                    { "toRecipients", new[]
+                        {
+                            new Dictionary<string, object>
+                            {
+                                { "emailAddress", new Dictionary<string, string>
+                                    {
+                                        { "address", attendee }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    { "attachments", new[] { attachmentDict } }
+                };
+
+                var emailPayload = new Dictionary<string, object>
+                {
+                    { "message", messageDict },
+                    { "saveToSentItems", true }
+                };
+
+                var json = JsonSerializer.Serialize(emailPayload, new JsonSerializerOptions
+                {
+                    PropertyNamingPolicy = JsonNamingPolicy.CamelCase
+                });
+
+                var content = new StringContent(json, System.Text.Encoding.UTF8, "application/json");
+
+                _httpClient.DefaultRequestHeaders.Authorization = 
+                    new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", accessToken);
+
+                var response = await _httpClient.PostAsync(
+                    $"https://graph.microsoft.com/v1.0/users/{_serviceAccountEmail}/sendMail",
+                    content);
+
+                if (!response.IsSuccessStatusCode)
+                {
+                    var error = await response.Content.ReadAsStringAsync();
+                    _logger.LogWarning("Failed to send custom invite to {Attendee}: {Error}", attendee, error);
+                }
+                else
+                {
+                    _logger.LogInformation("Custom meeting invite sent successfully to {Attendee}", attendee);
+                }
+            }
+
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error sending custom meeting invites: {Message}", ex.Message);
+            return false;
+        }
+    }
+
+    private string GenerateIcsContent(string subject, DateTime startTime, DateTime endTime, string meetingUrl, string organizerEmail)
+    {
+        var uid = Guid.NewGuid().ToString();
+        var startUtc = startTime.ToUniversalTime().ToString("yyyyMMddTHHmmssZ");
+        var endUtc = endTime.ToUniversalTime().ToString("yyyyMMddTHHmmssZ");
+        var nowUtc = DateTime.UtcNow.ToString("yyyyMMddTHHmmssZ");
+
+        return $@"BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//Skill-In//Meeting Invitation//EN
+METHOD:REQUEST
+BEGIN:VEVENT
+UID:{uid}
+DTSTAMP:{nowUtc}
+DTSTART:{startUtc}
+DTEND:{endUtc}
+SUMMARY:{subject}
+DESCRIPTION:Join the meeting: {meetingUrl}
+LOCATION:{meetingUrl}
+URL:{meetingUrl}
+ORGANIZER:MAILTO:{organizerEmail}
+STATUS:CONFIRMED
+SEQUENCE:0
+BEGIN:VALARM
+TRIGGER:-PT15M
+ACTION:DISPLAY
+DESCRIPTION:Reminder
+END:VALARM
+END:VEVENT
+END:VCALENDAR";
+    }
+
+    private string GenerateMeetingEmailBody(string subject, DateTime startTime, DateTime endTime, string meetingUrl)
+    {
+        var startFormatted = startTime.ToString("MMMM dd, yyyy 'at' h:mm tt");
+        var endFormatted = endTime.ToString("h:mm tt");
+        var duration = (endTime - startTime).TotalMinutes;
+
+        // Generate Google Calendar link
+        var googleCalendarLink = BuildGoogleCalendarLink(subject, startTime, endTime, $"Join Teams Meeting: {meetingUrl}", meetingUrl);
+
+        return $@"
+<html>
+<body style='font-family: Arial, sans-serif; line-height: 1.6; color: #333;'>
+    <div style='max-width: 600px; margin: 0 auto; padding: 20px;'>
+        <h2 style='color: #2c3e50;'>📅 Meeting Invitation</h2>
+        
+        <h3 style='color: #667eea;'>{subject}</h3>
+        
+        <div style='background-color: #f0f4ff; padding: 15px; border-radius: 5px; margin: 20px 0;'>
+            <p style='margin: 5px 0;'><strong>📅 Date & Time:</strong> {startFormatted}</p>
+            <p style='margin: 5px 0;'><strong>⏱️ Duration:</strong> {duration} minutes</p>
+        </div>
+        
+        <div style='margin: 20px 0;'>
+            <a href='{meetingUrl}' style='display:inline-block;padding:12px 24px;background-color:#667eea;color:#fff;text-decoration:none;border-radius:5px;font-weight:bold;'>Join Teams Meeting</a>
+        </div>
+
+        <div style='background-color: #f8f9fa; padding: 15px; border-radius: 5px; margin: 20px 0; border-left: 4px solid #28a745;'>
+            <h3 style='color: #28a745; margin-top: 0;'>📅 Add to Calendar</h3>
+            <p style='margin: 10px 0;'><strong>Choose your preferred calendar app:</strong></p>
+            <p style='margin: 10px 0;'>
+                <a href='{googleCalendarLink}' target='_blank' style='display:inline-block;padding:10px 16px;border-radius:6px;background:#1a73e8;color:#fff;text-decoration:none;font-weight:600;margin-right:10px;'>Add to Google Calendar</a>
+                <span style='color: #666; font-size: 14px;'>or download the .ics file attachment for Outlook, Apple Calendar, etc.</span>
+            </p>
+        </div>
+        
+        <div style='background-color: #e8f5e8; padding: 15px; border-radius: 5px; margin: 20px 0;'>
+            <h3 style='color: #27ae60; margin-top: 0;'>📋 What to Expect</h3>
+            <ul style='margin: 10px 0; padding-left: 20px;'>
+                <li>Click the meeting link above to join</li>
+                <li>Test your camera and microphone before the meeting</li>
+                <li>Join a few minutes early to ensure everything works</li>
+                <li>Have a stable internet connection</li>
+            </ul>
+        </div>
+        
+        <div style='margin-top: 30px; padding-top: 20px; border-top: 1px solid #eee; color: #666; font-size: 14px;'>
+            <p>This meeting invitation was sent by Skill-In Platform.</p>
+            <p>If you have any questions, please contact your project administrator.</p>
+        </div>
+    </div>
+</body>
+</html>";
+    }
+
+    private string BuildGoogleCalendarLink(string title, DateTime startTime, DateTime endTime, string description, string location)
+    {
+        // Convert to UTC and format as YYYYMMDDTHHMMSSZ
+        var startUtc = startTime.ToUniversalTime().ToString("yyyyMMdd'T'HHmmss'Z'");
+        var endUtc = endTime.ToUniversalTime().ToString("yyyyMMdd'T'HHmmss'Z'");
+        var dates = $"{startUtc}/{endUtc}";
+
+        var baseUrl = "https://calendar.google.com/calendar/render?action=TEMPLATE";
+        var url = baseUrl
+            + "&text=" + System.Net.WebUtility.UrlEncode(title ?? "")
+            + "&dates=" + dates
+            + "&details=" + System.Net.WebUtility.UrlEncode(description ?? "")
+            + "&location=" + System.Net.WebUtility.UrlEncode(location ?? "");
+
+        _logger.LogInformation("Generated Google Calendar link for meeting: {Title}", title);
+        return url;
     }
 }
 

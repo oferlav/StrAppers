@@ -198,7 +198,8 @@ namespace strAppersBackend.Services
                 // Step 1: Create the main board using the generated board name
                 // Add defaultLists=false to avoid creating default lists initially
                 // Use organization ID for Standard plan
-                var createBoardUrl = $"https://api.trello.com/1/boards?name={Uri.EscapeDataString(boardName)}&desc={Uri.EscapeDataString(request.ProjectDescription ?? "")}&defaultLists=false&key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
+                // Set prefs_permissionLevel=public to make the board public (not private)
+                var createBoardUrl = $"https://api.trello.com/1/boards?name={Uri.EscapeDataString(boardName)}&desc={Uri.EscapeDataString(request.ProjectDescription ?? "")}&defaultLists=false&prefs_permissionLevel=public&key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
                 
                 if (!string.IsNullOrEmpty(organizationId))
                 {

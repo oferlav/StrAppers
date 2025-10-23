@@ -257,6 +257,7 @@ END:VCALENDAR";
 
 public class SmtpConfig
 {
+    public bool UseSmtp { get; set; } = false; // Default: use Teams API for emails, set to true to use SMTP
     public string Host { get; set; } = string.Empty;
     public int Port { get; set; } = 587;
     public string Security { get; set; } = "StartTls"; // Options: None, StartTls, Ssl

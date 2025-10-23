@@ -37,6 +37,7 @@ public class SystemDesignResponse
     public string? Message { get; set; }
     public int? DesignVersionId { get; set; }
     public string? DesignDocument { get; set; }
+    public string? DesignDocumentFormatted { get; set; }
     public byte[]? DesignDocumentPdf { get; set; }
 }
 
@@ -130,4 +131,41 @@ public class StudentInfo
     public string Name { get; set; } = string.Empty;
     public string Email { get; set; } = string.Empty;
     public List<string> Roles { get; set; } = new();
+}
+
+// New response models for ProjectModules AI methods
+public class InitiateModulesResponse
+{
+    public bool Success { get; set; }
+    public string? Message { get; set; }
+    public List<ModuleInfo>? Modules { get; set; }
+}
+
+public class ModuleInfo
+{
+    public string Title { get; set; } = string.Empty;
+    public string Description { get; set; } = string.Empty;
+    public string Inputs { get; set; } = string.Empty;
+    public string Outputs { get; set; } = string.Empty;
+}
+
+public class CreateDataModelResponse
+{
+    public bool Success { get; set; }
+    public string? Message { get; set; }
+    public string? SqlScript { get; set; }
+}
+
+public class UpdateModuleResponse
+{
+    public bool Success { get; set; }
+    public string? Message { get; set; }
+    public string? UpdatedDescription { get; set; }
+}
+
+public class UpdateDataModelResponse
+{
+    public bool Success { get; set; }
+    public string? Message { get; set; }
+    public string? UpdatedSqlScript { get; set; }
 }

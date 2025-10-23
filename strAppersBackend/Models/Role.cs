@@ -16,6 +16,11 @@ public class Role
     [MaxLength(50)]
     public string? Category { get; set; } // e.g., "Development", "Design", "Management"
     
+    /// <summary>
+    /// Role type: 0=Default, 1=Developer, 2=Junior Developer, 3=UI/UX Designer, 4=Leadership
+    /// </summary>
+    public int Type { get; set; } = 0;
+    
     public bool IsActive { get; set; } = true;
     
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;

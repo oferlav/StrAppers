@@ -114,6 +114,12 @@ namespace strAppersBackend.Models
         [Column("GithubUrl")]
         public string? GithubUrl { get; set; }
 
+        /// <summary>
+        /// Group chat information for the project board
+        /// </summary>
+        [Column("GroupChat", TypeName = "text")]
+        public string? GroupChat { get; set; }
+
         // Navigation properties
         /// <summary>
         /// Navigation property to the associated project

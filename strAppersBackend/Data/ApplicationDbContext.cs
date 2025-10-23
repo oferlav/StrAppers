@@ -20,6 +20,9 @@ public class ApplicationDbContext : DbContext
     public DbSet<JoinRequest> JoinRequests { get; set; }
     public DbSet<DesignVersion> DesignVersions { get; set; }
     public DbSet<ProjectBoard> ProjectBoards { get; set; }
+        public DbSet<ModuleType> ModuleTypes { get; set; }
+        public DbSet<ProjectModule> ProjectModules { get; set; }
+        public DbSet<Figma> Figma { get; set; }
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -164,9 +167,11 @@ public class ApplicationDbContext : DbContext
             entity.Property(e => e.Description).HasMaxLength(1000);
             entity.Property(e => e.ExtendedDescription).HasColumnType("TEXT");
             entity.Property(e => e.SystemDesign).HasColumnType("TEXT");
+            entity.Property(e => e.SystemDesignFormatted).HasColumnName("SystemDesignFormatted").HasMaxLength(2000);
             entity.Property(e => e.Priority).HasMaxLength(50);
             entity.Property(e => e.CreatedAt).HasDefaultValueSql("CURRENT_TIMESTAMP");
             entity.Property(e => e.IsAvailable).HasDefaultValue(true);
+            entity.Property(e => e.Kickoff).HasColumnName("Kickoff").HasDefaultValue(false);
 
             // Foreign key relationships
             entity.HasOne(e => e.Organization)
@@ -196,18 +201,19 @@ public class ApplicationDbContext : DbContext
             entity.Property(e => e.Name).IsRequired().HasMaxLength(100);
             entity.Property(e => e.Description).HasMaxLength(500);
             entity.Property(e => e.Category).HasMaxLength(50);
+            entity.Property(e => e.Type).IsRequired().HasDefaultValue(0);
             entity.Property(e => e.CreatedAt).HasDefaultValueSql("CURRENT_TIMESTAMP");
 
             // Seed test data
             entity.HasData(
-                new Role { Id = 1, Name = "Project Manager", Description = "Leads project planning and execution", Category = "Leadership", IsActive = true, CreatedAt = DateTime.UtcNow.AddDays(-40) },
-                new Role { Id = 2, Name = "Frontend Developer", Description = "Develops user interface and user experience", Category = "Technical", IsActive = true, CreatedAt = DateTime.UtcNow.AddDays(-40) },
-                new Role { Id = 3, Name = "Backend Developer", Description = "Develops server-side logic and database integration", Category = "Technical", IsActive = true, CreatedAt = DateTime.UtcNow.AddDays(-40) },
-                new Role { Id = 4, Name = "UI/UX Designer", Description = "Designs user interface and user experience", Category = "Technical", IsActive = true, CreatedAt = DateTime.UtcNow.AddDays(-40) },
-                new Role { Id = 5, Name = "Quality Assurance", Description = "Tests software and ensures quality standards", Category = "Technical", IsActive = true, CreatedAt = DateTime.UtcNow.AddDays(-40) },
-                new Role { Id = 6, Name = "Team Lead", Description = "Provides guidance and mentorship to team members", Category = "Leadership", IsActive = true, CreatedAt = DateTime.UtcNow.AddDays(-40) },
-                new Role { Id = 7, Name = "Research Assistant", Description = "Conducts research and data analysis", Category = "Academic", IsActive = true, CreatedAt = DateTime.UtcNow.AddDays(-40) },
-                new Role { Id = 8, Name = "Documentation Specialist", Description = "Creates and maintains project documentation", Category = "Administrative", IsActive = true, CreatedAt = DateTime.UtcNow.AddDays(-40) }
+                new Role { Id = 1, Name = "Project Manager", Description = "Leads project planning and execution", Category = "Leadership", Type = 4, IsActive = true, CreatedAt = DateTime.UtcNow.AddDays(-40) },
+                new Role { Id = 2, Name = "Frontend Developer", Description = "Develops user interface and user experience", Category = "Technical", Type = 1, IsActive = true, CreatedAt = DateTime.UtcNow.AddDays(-40) },
+                new Role { Id = 3, Name = "Backend Developer", Description = "Develops server-side logic and database integration", Category = "Technical", Type = 1, IsActive = true, CreatedAt = DateTime.UtcNow.AddDays(-40) },
+                new Role { Id = 4, Name = "UI/UX Designer", Description = "Designs user interface and user experience", Category = "Technical", Type = 3, IsActive = true, CreatedAt = DateTime.UtcNow.AddDays(-40) },
+                new Role { Id = 5, Name = "Quality Assurance", Description = "Tests software and ensures quality standards", Category = "Technical", Type = 2, IsActive = true, CreatedAt = DateTime.UtcNow.AddDays(-40) },
+                new Role { Id = 6, Name = "Team Lead", Description = "Provides guidance and mentorship to team members", Category = "Leadership", Type = 4, IsActive = true, CreatedAt = DateTime.UtcNow.AddDays(-40) },
+                new Role { Id = 7, Name = "Research Assistant", Description = "Conducts research and data analysis", Category = "Academic", Type = 2, IsActive = true, CreatedAt = DateTime.UtcNow.AddDays(-40) },
+                new Role { Id = 8, Name = "Documentation Specialist", Description = "Creates and maintains project documentation", Category = "Administrative", Type = 2, IsActive = true, CreatedAt = DateTime.UtcNow.AddDays(-40) }
             );
         });
 
@@ -313,6 +319,7 @@ public class ApplicationDbContext : DbContext
             entity.Property(e => e.NextMeetingTime).HasColumnName("NextMeetingTime").HasColumnType("timestamp with time zone");
             entity.Property(e => e.NextMeetingUrl).HasColumnName("NextMeetingUrl").HasMaxLength(1000);
             entity.Property(e => e.GithubUrl).HasColumnName("GithubUrl").HasMaxLength(1000);
+            entity.Property(e => e.GroupChat).HasColumnName("GroupChat").HasColumnType("text");
             
             // Foreign key relationships
             entity.HasOne(e => e.Project)
@@ -337,6 +344,75 @@ public class ApplicationDbContext : DbContext
             entity.HasIndex(e => e.ProjectId);
             entity.HasIndex(e => e.CreatedAt);
             entity.HasIndex(e => e.StatusId);
+        });
+
+        // Configure ModuleType entity
+        modelBuilder.Entity<ModuleType>(entity =>
+        {
+            entity.HasKey(e => e.Id);
+            entity.Property(e => e.Name).IsRequired().HasMaxLength(100);
+
+            // Seed test data
+            entity.HasData(
+                new ModuleType { Id = 1, Name = "Frontend" },
+                new ModuleType { Id = 2, Name = "Backend" },
+                new ModuleType { Id = 3, Name = "Database" },
+                new ModuleType { Id = 4, Name = "Authentication" },
+                new ModuleType { Id = 5, Name = "API" },
+                new ModuleType { Id = 6, Name = "Mobile" },
+                new ModuleType { Id = 7, Name = "DevOps" },
+                new ModuleType { Id = 8, Name = "Testing" }
+            );
+        });
+
+        // Configure ProjectModule entity
+        modelBuilder.Entity<ProjectModule>(entity =>
+        {
+            entity.HasKey(e => e.Id);
+            entity.Property(e => e.Title).HasMaxLength(100);
+            entity.Property(e => e.Description).HasColumnType("text");
+            entity.Property(e => e.Sequence).HasColumnName("Sequence");
+
+            // Foreign key relationships
+            entity.HasOne(e => e.Project)
+                  .WithMany()
+                  .HasForeignKey(e => e.ProjectId)
+                  .OnDelete(DeleteBehavior.Cascade);
+
+            entity.HasOne(e => e.ModuleTypeNavigation)
+                  .WithMany(mt => mt.ProjectModules)
+                  .HasForeignKey(e => e.ModuleType)
+                  .OnDelete(DeleteBehavior.Cascade);
+
+            // Indexes for better performance
+            entity.HasIndex(e => e.ProjectId);
+            entity.HasIndex(e => e.ModuleType);
+            entity.HasIndex(e => e.Sequence);
+        });
+
+        // Configure Figma entity
+        modelBuilder.Entity<Figma>(entity =>
+        {
+            entity.HasKey(e => e.Id);
+            entity.Property(e => e.BoardId).IsRequired().HasMaxLength(50);
+            entity.Property(e => e.FigmaAccessToken).HasMaxLength(512);
+            entity.Property(e => e.FigmaRefreshToken).HasMaxLength(512);
+            entity.Property(e => e.FigmaUserId).HasMaxLength(64);
+            entity.Property(e => e.FigmaFileUrl).HasMaxLength(1024);
+            entity.Property(e => e.FigmaFileKey).HasMaxLength(64);
+            entity.Property(e => e.CreatedAt).HasDefaultValueSql("NOW()");
+            entity.Property(e => e.UpdatedAt).HasDefaultValueSql("NOW()");
+
+            // Foreign key relationship
+            entity.HasOne(e => e.ProjectBoard)
+                  .WithMany()
+                  .HasForeignKey(e => e.BoardId)
+                  .HasPrincipalKey(pb => pb.Id)
+                  .OnDelete(DeleteBehavior.Cascade);
+
+            // Indexes for better performance
+            entity.HasIndex(e => e.BoardId);
+            entity.HasIndex(e => e.FigmaFileKey).IsUnique();
         });
     }
 }

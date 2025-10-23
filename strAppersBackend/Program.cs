@@ -14,8 +14,10 @@ builder.Services.AddCors(options =>
     options.AddPolicy(name: "AllowFrontend",
                       policy =>
                       {
-                          // Allow requests from the specific frontend domain
-                          policy.WithOrigins("https://preview--skill-in-ce9dcf39.base44.app")
+                          // Allow requests from the specific frontend domain and localhost for development
+                          policy.WithOrigins("https://preview--skill-in-ce9dcf39.base44.app", 
+                                            "http://localhost:9001",
+                                            "https://localhost:9001")
                                 .AllowAnyHeader()
                                 .AllowAnyMethod();
                       });
@@ -29,6 +31,7 @@ builder.Services.AddControllers()
         options.JsonSerializerOptions.PropertyNameCaseInsensitive = true;
         options.JsonSerializerOptions.WriteIndented = true;
         options.JsonSerializerOptions.ReferenceHandler = System.Text.Json.Serialization.ReferenceHandler.IgnoreCycles;
+        options.JsonSerializerOptions.PropertyNamingPolicy = JsonNamingPolicy.CamelCase;
     });
 // Learn more about configuring Swagger/OpenAPI at https://aka.ms/aspnetcore/swashbuckle
 builder.Services.AddEndpointsApiExplorer();
@@ -62,6 +65,9 @@ builder.Services.AddScoped<ISmtpEmailService, SmtpEmailService>();
 // Add GitHub validation service
 builder.Services.AddScoped<IGitHubService, GitHubService>();
 
+// Add Kickoff service
+builder.Services.AddScoped<IKickoffService, KickoffService>();
+
 // Add session support for GitHub OAuth
 builder.Services.AddDistributedMemoryCache();
 builder.Services.AddSession(options =>
@@ -82,6 +88,15 @@ builder.Services.Configure<GoogleWorkspaceConfig>(builder.Configuration.GetSecti
 
 // Configure SMTP settings
 builder.Services.Configure<SmtpConfig>(builder.Configuration.GetSection("Smtp"));
+
+// Configure Kickoff settings
+builder.Services.Configure<KickoffConfig>(builder.Configuration.GetSection("KickoffConfig"));
+
+// Configure Engagement Rules settings
+builder.Services.Configure<EngagementRulesConfig>(builder.Configuration.GetSection("EngagementRules"));
+
+// Configure Prompt settings
+builder.Services.Configure<PromptConfig>(builder.Configuration.GetSection("PromptConfig"));
 
 // Add HttpClientFactory for Slack API calls, OpenAI API calls, Trello API calls, and Microsoft Graph API calls
 builder.Services.AddHttpClient();

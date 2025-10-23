@@ -9,6 +9,11 @@ namespace strAppersBackend.Models
         /// Default project length in weeks
         /// </summary>
         public int ProjectLengthInWeeks { get; set; } = 12;
+
+        /// <summary>
+        /// Default sprint length in weeks
+        /// </summary>
+        public int SprintLengthInWeeks { get; set; } = 1;
     }
 }
 

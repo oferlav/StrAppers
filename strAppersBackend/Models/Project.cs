@@ -22,6 +22,10 @@ public class Project
     
     public byte[]? SystemDesignDoc { get; set; }
     
+    [MaxLength(2000)]
+    [Column("SystemDesignFormatted")]
+    public string? SystemDesignFormatted { get; set; }
+    
     [MaxLength(50)]
     public string Priority { get; set; } = "Medium"; // Low, Medium, High, Critical
     
@@ -31,6 +35,9 @@ public class Project
     // Project availability
     [Column("isAvailable")]
     public bool IsAvailable { get; set; } = true;
+    
+    [Column("Kickoff")]
+    public bool? Kickoff { get; set; } = false;
     
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
     public DateTime? UpdatedAt { get; set; }

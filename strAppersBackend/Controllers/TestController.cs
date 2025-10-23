@@ -2,23 +2,25 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using strAppersBackend.Data;
 using strAppersBackend.Models;
+using strAppersBackend.Services;
 // using strAppersBackend.Services; // SLACK TEMPORARILY DISABLED
 
 namespace strAppersBackend.Controllers
 {
-    // DISABLED - Test controller for development only
-    // [ApiController]
-    // [Route("api/[controller]")]
+    [ApiController]
+    [Route("api/[controller]")]
     public class TestController : ControllerBase
     {
         private readonly ApplicationDbContext _context;
         private readonly ILogger<TestController> _logger;
+        private readonly IKickoffService _kickoffService;
         // private readonly SlackService _slackService; // SLACK TEMPORARILY DISABLED
 
-        public TestController(ApplicationDbContext context, ILogger<TestController> logger) // SlackService slackService - SLACK TEMPORARILY DISABLED
+        public TestController(ApplicationDbContext context, ILogger<TestController> logger, IKickoffService kickoffService) // SlackService slackService - SLACK TEMPORARILY DISABLED
         {
             _context = context;
             _logger = logger;
+            _kickoffService = kickoffService;
             // _slackService = slackService; // SLACK TEMPORARILY DISABLED
         }
 
@@ -623,6 +625,405 @@ namespace strAppersBackend.Controllers
                     error = ex.Message,
                     message = "Simple SystemDesign test failed"
                 });
+            }
+        }
+
+        #endregion
+
+        #region Kickoff Test Methods
+
+        /// <summary>
+        /// Test kickoff logic with different scenarios
+        /// Optional parameters: projectId, studentIds (comma-separated)
+        /// Examples:
+        /// GET /api/test/kickoff - Test all projects
+        /// GET /api/test/kickoff?projectId=1 - Test specific project
+        /// GET /api/test/kickoff?projectId=1&studentIds=1,2,3 - Test specific project with specific students
+        /// </summary>
+        [HttpGet("kickoff")]
+        public async Task<ActionResult> TestKickoffLogic([FromQuery] int? projectId = null, [FromQuery] string? studentIds = null)
+        {
+            try
+            {
+                _logger.LogInformation("=== KICKOFF LOGIC TEST STARTED ===");
+                _logger.LogInformation("Parameters: projectId={ProjectId}, studentIds={StudentIds}", projectId, studentIds);
+
+                var scenarios = new List<object>();
+
+                // Parse student IDs if provided
+                var parsedStudentIds = new List<int>();
+                if (!string.IsNullOrEmpty(studentIds))
+                {
+                    try
+                    {
+                        parsedStudentIds = studentIds.Split(',')
+                            .Select(id => int.Parse(id.Trim()))
+                            .ToList();
+                        _logger.LogInformation("Parsed student IDs: [{StudentIds}]", string.Join(", ", parsedStudentIds));
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogError(ex, "Error parsing student IDs: {StudentIds}", studentIds);
+                        return BadRequest(new
+                        {
+                            success = false,
+                            error = "Invalid student IDs format. Use comma-separated integers (e.g., '1,2,3')",
+                            providedStudentIds = studentIds
+                        });
+                    }
+                }
+
+                // Scenario 1: Test specific project with specific students
+                if (projectId.HasValue && parsedStudentIds.Any())
+                {
+                    _logger.LogInformation("Testing specific project {ProjectId} with specific students: [{StudentIds}]", 
+                        projectId.Value, string.Join(", ", parsedStudentIds));
+
+                    var project = await _context.Projects.FindAsync(projectId.Value);
+                    if (project == null)
+                    {
+                        return NotFound(new
+                        {
+                            success = false,
+                            error = $"Project with ID {projectId.Value} not found"
+                        });
+                    }
+
+                    // Validate student IDs exist
+                    var existingStudents = await _context.Students
+                        .Where(s => parsedStudentIds.Contains(s.Id))
+                        .Select(s => s.Id)
+                        .ToListAsync();
+
+                    var missingStudents = parsedStudentIds.Except(existingStudents).ToList();
+                    if (missingStudents.Any())
+                    {
+                        return BadRequest(new
+                        {
+                            success = false,
+                            error = $"Students not found: [{string.Join(", ", missingStudents)}]",
+                            validStudentIds = existingStudents
+                        });
+                    }
+
+                    var kickoffResult = await _kickoffService.ShouldKickoffBeTrue(projectId.Value, parsedStudentIds);
+
+                    // Get detailed explanation for kickoff result
+                    var explanation = await GetKickoffExplanation(projectId.Value, parsedStudentIds);
+
+                    scenarios.Add(new
+                    {
+                        testType = "Specific Project + Specific Students",
+                        projectId = projectId.Value,
+                        projectTitle = project.Title,
+                        studentIds = parsedStudentIds,
+                        kickoffResult = kickoffResult,
+                        currentKickoffStatus = project.Kickoff,
+                        explanation = explanation
+                    });
+                }
+                // Scenario 2: Test specific project with its actual students
+                else if (projectId.HasValue)
+                {
+                    _logger.LogInformation("Testing specific project {ProjectId} with its actual students", projectId.Value);
+
+                    var project = await _context.Projects.FindAsync(projectId.Value);
+                    if (project == null)
+                    {
+                        return NotFound(new
+                        {
+                            success = false,
+                            error = $"Project with ID {projectId.Value} not found"
+                        });
+                    }
+
+                    var projectStudents = await _context.Students
+                        .Where(s => s.ProjectId == projectId.Value)
+                        .Select(s => s.Id)
+                        .ToListAsync();
+
+                    _logger.LogInformation("Project {ProjectId} has {StudentCount} students: [{StudentIds}]", 
+                        projectId.Value, projectStudents.Count, string.Join(", ", projectStudents));
+
+                    var kickoffResult = await _kickoffService.ShouldKickoffBeTrue(projectId.Value, projectStudents);
+
+                    // Get detailed explanation for kickoff result
+                    var explanation = await GetKickoffExplanation(projectId.Value, projectStudents);
+
+                    scenarios.Add(new
+                    {
+                        testType = "Specific Project + Actual Students",
+                        projectId = projectId.Value,
+                        projectTitle = project.Title,
+                        studentCount = projectStudents.Count,
+                        studentIds = projectStudents,
+                        kickoffResult = kickoffResult,
+                        currentKickoffStatus = project.Kickoff,
+                        explanation = explanation
+                    });
+                }
+                // Scenario 3: Test all projects (default behavior)
+                else
+                {
+                    _logger.LogInformation("Testing all projects");
+
+                    var projects = await _context.Projects.Take(5).ToListAsync();
+
+                    foreach (var project in projects)
+                    {
+                        _logger.LogInformation("Testing kickoff for project {ProjectId}: {ProjectTitle}", project.Id, project.Title);
+
+                        var projectStudents = await _context.Students
+                            .Where(s => s.ProjectId == project.Id)
+                            .Select(s => s.Id)
+                            .ToListAsync();
+
+                        _logger.LogInformation("Project {ProjectId} has {StudentCount} students: [{StudentIds}]", 
+                            project.Id, projectStudents.Count, string.Join(", ", projectStudents));
+
+                        var kickoffResult = await _kickoffService.ShouldKickoffBeTrue(project.Id, projectStudents);
+
+                        // Get detailed explanation for kickoff result
+                        var explanation = await GetKickoffExplanation(project.Id, projectStudents);
+
+                        scenarios.Add(new
+                        {
+                            testType = "All Projects Test",
+                            projectId = project.Id,
+                            projectTitle = project.Title,
+                            studentCount = projectStudents.Count,
+                            studentIds = projectStudents,
+                            kickoffResult = kickoffResult,
+                            currentKickoffStatus = project.Kickoff,
+                            explanation = explanation
+                        });
+                    }
+
+                    // Add some additional test scenarios
+                    var emptyTestResult = await _kickoffService.ShouldKickoffBeTrue(1, new List<int>());
+                    var emptyExplanation = await GetKickoffExplanation(1, new List<int>());
+
+                    scenarios.Add(new
+                    {
+                        testType = "Empty Student List Test",
+                        projectId = 1,
+                        studentIds = new List<int>(),
+                        kickoffResult = emptyTestResult,
+                        explanation = emptyExplanation
+                    });
+
+                    var nonExistentTestResult = await _kickoffService.ShouldKickoffBeTrue(99999, new List<int> { 1, 2 });
+                    var nonExistentExplanation = await GetKickoffExplanation(99999, new List<int> { 1, 2 });
+
+                    scenarios.Add(new
+                    {
+                        testType = "Non-existent Project Test",
+                        projectId = 99999,
+                        studentIds = new List<int> { 1, 2 },
+                        kickoffResult = nonExistentTestResult,
+                        explanation = nonExistentExplanation
+                    });
+                }
+
+                _logger.LogInformation("=== KICKOFF LOGIC TEST COMPLETED ===");
+
+                return Ok(new
+                {
+                    success = true,
+                    message = "Kickoff logic test completed successfully",
+                    parameters = new
+                    {
+                        projectId = projectId,
+                        studentIds = studentIds,
+                        parsedStudentIds = parsedStudentIds
+                    },
+                    results = new
+                    {
+                        timestamp = DateTime.UtcNow,
+                        testScenarios = scenarios,
+                        summary = new
+                        {
+                            totalTests = scenarios.Count,
+                            successfulTests = scenarios.Count(s => s.GetType().GetProperty("kickoffResult")?.GetValue(s) != null),
+                            testTypes = scenarios.Select(s => s.GetType().GetProperty("testType")?.GetValue(s)?.ToString() ?? "Unknown").Distinct()
+                        }
+                    }
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error in kickoff logic test: {ErrorMessage}", ex.Message);
+                return StatusCode(500, new
+                {
+                    success = false,
+                    error = ex.Message,
+                    stackTrace = ex.StackTrace,
+                    message = "Kickoff logic test failed"
+                });
+            }
+        }
+
+        #endregion
+
+        #region Helper Methods
+
+        /// <summary>
+        /// Get detailed explanation for kickoff logic result
+        /// </summary>
+        private async Task<object> GetKickoffExplanation(int projectId, List<int> studentIds)
+        {
+            try
+            {
+                // Get project details
+                var project = await _context.Projects.FindAsync(projectId);
+                if (project == null)
+                {
+                    return new
+                    {
+                        message = "Project not found",
+                        details = $"Project with ID {projectId} does not exist in the database"
+                    };
+                }
+
+                // Get student details with roles - only students without board (same logic as KickoffService)
+                var students = await _context.Students
+                    .Where(s => studentIds.Contains(s.Id) && 
+                               s.ProjectId == projectId && 
+                               (s.BoardId == null || s.BoardId == ""))
+                    .Include(s => s.StudentRoles)
+                        .ThenInclude(sr => sr.Role)
+                    .ToListAsync();
+
+                if (!students.Any())
+                {
+                    return new
+                    {
+                        message = "No students found",
+                        details = $"No students with IDs [{string.Join(", ", studentIds)}] found in the database that are assigned to project {projectId} and don't have a board",
+                        studentCount = 0,
+                        requirements = new
+                        {
+                            minimumStudents = "At least 2 students required",
+                            adminRequired = "At least one admin student required",
+                            uiuxRequired = "At least one UI/UX Designer required",
+                            developerRequired = "At least one Developer or 2+ Junior Developers required",
+                            boardRequirement = "Students must not have a board assigned (BoardId is null or empty)"
+                        }
+                    };
+                }
+
+                // Analyze student roles
+                var studentDetails = students.Select(s => new
+                {
+                    id = s.Id,
+                    name = $"{s.FirstName} {s.LastName}",
+                    email = s.Email,
+                    isAdmin = s.IsAdmin,
+                    roles = s.StudentRoles.Select(sr => new
+                    {
+                        id = sr.Role.Id,
+                        name = sr.Role.Name,
+                        type = sr.Role.Type
+                    }).ToList()
+                }).ToList();
+
+                // Check kickoff requirements using the same logic as KickoffService
+                var totalStudents = students.Count;
+                var adminCount = students.Count(s => s.IsAdmin);
+                var uiuxCount = students.Count(s => s.StudentRoles.Any(sr => sr.IsActive && sr.Role?.Type == 3));
+                var developerCount = students.Count(s => s.StudentRoles.Any(sr => sr.IsActive && sr.Role?.Type == 1));
+                var juniorDeveloperCount = students.Count(s => s.StudentRoles.Any(sr => sr.IsActive && sr.Role?.Type == 2));
+
+                // Apply the same rules as KickoffService
+                var hasMinimumStudents = totalStudents >= 2;
+                var hasAdmin = adminCount > 0;
+                var hasUIUX = uiuxCount > 0;
+                var hasDeveloper = developerCount >= 1 || juniorDeveloperCount >= 2;
+
+                // Determine why kickoff is true/false
+                var reasons = new List<string>();
+                var requirements = new List<string>();
+
+                if (!hasMinimumStudents)
+                {
+                    reasons.Add($"Insufficient students: {totalStudents} (minimum 2 required)");
+                    requirements.Add("Need at least 2 students");
+                }
+                else
+                {
+                    requirements.Add($"✓ Student count: {totalStudents} (meets minimum of 2)");
+                }
+
+                if (!hasAdmin)
+                {
+                    reasons.Add($"No admin students: {adminCount} (at least 1 required)");
+                    requirements.Add("Need at least one admin student");
+                }
+                else
+                {
+                    requirements.Add($"✓ Admin students: {adminCount} (meets requirement)");
+                }
+
+                if (!hasUIUX)
+                {
+                    reasons.Add($"No UI/UX Designer: {uiuxCount} (at least 1 required)");
+                    requirements.Add("Need at least one UI/UX Designer (Type=3)");
+                }
+                else
+                {
+                    requirements.Add($"✓ UI/UX Designers: {uiuxCount} (meets requirement)");
+                }
+
+                if (!hasDeveloper)
+                {
+                    reasons.Add($"Insufficient developers: {developerCount} Developer(s) and {juniorDeveloperCount} Junior Developer(s) (need 1+ Developer OR 2+ Junior Developers)");
+                    requirements.Add("Need at least 1 Developer (Type=1) OR 2+ Junior Developers (Type=2)");
+                }
+                else
+                {
+                    requirements.Add($"✓ Developers: {developerCount} Developer(s) and {juniorDeveloperCount} Junior Developer(s) (meets requirement)");
+                }
+
+                var kickoffResult = hasMinimumStudents && hasAdmin && hasUIUX && hasDeveloper;
+                var message = kickoffResult 
+                    ? "Kickoff requirements are met" 
+                    : "Kickoff requirements are not met";
+
+                return new
+                {
+                    message = message,
+                    kickoffResult = kickoffResult,
+                    studentCount = totalStudents,
+                    studentDetails = studentDetails,
+                    roleAnalysis = new
+                    {
+                        adminCount = adminCount,
+                        uiuxCount = uiuxCount,
+                        developerCount = developerCount,
+                        juniorDeveloperCount = juniorDeveloperCount,
+                        hasAdmin = hasAdmin,
+                        hasUIUX = hasUIUX,
+                        hasDeveloper = hasDeveloper,
+                        hasMinimumStudents = hasMinimumStudents
+                    },
+                    requirements = requirements,
+                    reasons = reasons,
+                    summary = kickoffResult 
+                        ? "All kickoff requirements are satisfied" 
+                        : $"Kickoff blocked: {string.Join(", ", reasons)}"
+                };
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error generating kickoff explanation for project {ProjectId} with students [{StudentIds}]", 
+                    projectId, string.Join(", ", studentIds));
+                
+                return new
+                {
+                    message = "Error generating explanation",
+                    error = ex.Message,
+                    details = "An error occurred while analyzing kickoff requirements"
+                };
             }
         }
 

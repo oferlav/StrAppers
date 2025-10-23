@@ -81,6 +81,7 @@ public class DesignDocumentService : IDesignDocumentService
             // Update project with design document
             project.SystemDesign = aiResponse.DesignDocument;
             project.SystemDesignDoc = aiResponse.DesignDocumentPdf;
+            project.SystemDesignFormatted = aiResponse.DesignDocumentFormatted;
             project.UpdatedAt = DateTime.UtcNow;
 
             await _context.SaveChangesAsync();
@@ -94,6 +95,7 @@ public class DesignDocumentService : IDesignDocumentService
                 Message = "System design created successfully",
                 DesignVersionId = designVersion.Id,
                 DesignDocument = aiResponse.DesignDocument,
+                DesignDocumentFormatted = aiResponse.DesignDocumentFormatted,
                 DesignDocumentPdf = aiResponse.DesignDocumentPdf
             };
         }
