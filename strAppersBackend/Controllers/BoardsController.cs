@@ -544,6 +544,10 @@ public class BoardsController : ControllerBase
                 _logger.LogInformation("Setting NextMeetingTime to: {MeetingTime} (UTC)", nextMeetingTime);
             }
 
+            // Set project Kickoff flag to false when board is created
+            project.Kickoff = false;
+            _logger.LogInformation("Set Kickoff flag to false for project {ProjectId} when board was created", request.ProjectId);
+
             // Create ProjectBoard record
             var projectBoard = new ProjectBoard
             {

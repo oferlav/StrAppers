@@ -98,6 +98,9 @@ builder.Services.Configure<EngagementRulesConfig>(builder.Configuration.GetSecti
 // Configure Prompt settings
 builder.Services.Configure<PromptConfig>(builder.Configuration.GetSection("PromptConfig"));
 
+// Configure SystemDesign AI Agent settings
+builder.Services.Configure<SystemDesignAIAgentConfig>(builder.Configuration.GetSection("SystemDesignAIAgent"));
+
 // Add HttpClientFactory for Slack API calls, OpenAI API calls, Trello API calls, and Microsoft Graph API calls
 builder.Services.AddHttpClient();
 

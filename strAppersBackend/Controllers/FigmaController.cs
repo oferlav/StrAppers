@@ -4,6 +4,7 @@ using strAppersBackend.Data;
 using strAppersBackend.Models;
 using System.Text.Json;
 using System.Text;
+using System.Text.Json.Serialization;
 
 namespace strAppersBackend.Controllers
 {
@@ -329,9 +330,10 @@ namespace strAppersBackend.Controllers
                 // Use the first redirect URL (or you could make this configurable)
                 var redirectUri = redirectUrls[0];
                 
-                var oauthUrl = $"https://www.figma.com/oauth?client_id={clientId}&redirect_uri={Uri.EscapeDataString(redirectUri)}&scope=file_content:read&state={state}&response_type=code";
+                var oauthUrl = $"https://www.figma.com/oauth?client_id={clientId}&redirect_uri={Uri.EscapeDataString(redirectUri)}&scope=file_content:read,current_user:read,projects:read,team_library_content:read,file_metadata:read,file_versions:read,library_assets:read,library_content:read&state={state}&response_type=code";
 
                 _logger.LogInformation("Generated OAuth URL for Figma authentication");
+                _logger.LogInformation("Requested scopes: file_content:read,current_user:read,projects:read,team_library_content:read,file_metadata:read,file_versions:read,library_assets:read,library_content:read (file_variables:read and library_analytics:read removed - Enterprise only)");
 
                 return Ok(new
                 {
@@ -381,8 +383,10 @@ namespace strAppersBackend.Controllers
 
                 var content = new FormUrlEncodedContent(formData);
 
-                var response = await _httpClient.PostAsync("https://www.figma.com/oauth/token", content);
+                var response = await _httpClient.PostAsync("https://api.figma.com/v1/oauth/token", content);
                 var responseContent = await response.Content.ReadAsStringAsync();
+
+                _logger.LogInformation("Figma OAuth response: {StatusCode} - {Content}", response.StatusCode, responseContent);
 
                 if (!response.IsSuccessStatusCode)
                 {
@@ -395,8 +399,15 @@ namespace strAppersBackend.Controllers
                     PropertyNameCaseInsensitive = true
                 });
 
+                _logger.LogInformation("Parsed token response - AccessToken: {AccessToken}, RefreshToken: {RefreshToken}, ExpiresIn: {ExpiresIn}", 
+                    tokenResponse?.AccessToken, tokenResponse?.RefreshToken, tokenResponse?.ExpiresIn);
+                
+                // Log the raw response for debugging
+                _logger.LogInformation("Raw Figma OAuth response content: {RawContent}", responseContent);
+
                 if (tokenResponse?.AccessToken == null)
                 {
+                    _logger.LogError("Invalid token response from Figma: {Response}", responseContent);
                     return BadRequest("Invalid token response from Figma");
                 }
 
@@ -407,15 +418,20 @@ namespace strAppersBackend.Controllers
                 if (existingFigma != null)
                 {
                     // Update existing record
+                    _logger.LogInformation("Updating existing Figma record for board {BoardId}", request.BoardId);
                     existingFigma.FigmaAccessToken = tokenResponse.AccessToken;
                     existingFigma.FigmaRefreshToken = tokenResponse.RefreshToken;
                     existingFigma.FigmaTokenExpiry = DateTime.UtcNow.AddSeconds(tokenResponse.ExpiresIn);
                     existingFigma.FigmaLastSync = DateTime.UtcNow;
                     existingFigma.UpdatedAt = DateTime.UtcNow;
+                    
+                    _logger.LogInformation("Updated Figma record - AccessToken: {AccessToken}, RefreshToken: {RefreshToken}", 
+                        existingFigma.FigmaAccessToken, existingFigma.FigmaRefreshToken);
                 }
                 else
                 {
                     // Create new record
+                    _logger.LogInformation("Creating new Figma record for board {BoardId}", request.BoardId);
                     var figma = new Figma
                     {
                         BoardId = request.BoardId,
@@ -427,10 +443,14 @@ namespace strAppersBackend.Controllers
                         UpdatedAt = DateTime.UtcNow
                     };
 
+                    _logger.LogInformation("New Figma record - AccessToken: {AccessToken}, RefreshToken: {RefreshToken}", 
+                        figma.FigmaAccessToken, figma.FigmaRefreshToken);
+
                     _context.Figma.Add(figma);
                 }
 
                 await _context.SaveChangesAsync();
+                _logger.LogInformation("Successfully saved Figma tokens to database for board {BoardId}", request.BoardId);
 
                 _logger.LogInformation("Successfully stored Figma tokens for board {BoardId}", request.BoardId);
 
@@ -448,6 +468,57 @@ namespace strAppersBackend.Controllers
         }
 
         /// <summary>
+        /// Get list of available Figma files for the user
+        /// </summary>
+        [HttpGet("use/get-public-files")]
+        public async Task<ActionResult<object>> GetPublicFiles([FromQuery] string boardId)
+        {
+            try
+            {
+                _logger.LogInformation("Getting public files for board {BoardId}", boardId);
+
+                // Get Figma integration for this board
+                var figma = await _context.Figma
+                    .FirstOrDefaultAsync(f => f.BoardId == boardId);
+
+                if (figma == null)
+                {
+                    return NotFound($"Figma integration not found for board {boardId}");
+                }
+
+                // Check if access token is expired and refresh if needed
+                await RefreshTokenIfNeeded(figma);
+
+                // Log token information for debugging
+                _logger.LogInformation("Figma token details - AccessToken: {AccessToken}, RefreshToken: {RefreshToken}, Expiry: {Expiry}, LastSync: {LastSync}", 
+                    figma.FigmaAccessToken?.Substring(0, Math.Min(10, figma.FigmaAccessToken.Length)) + "...",
+                    figma.FigmaRefreshToken?.Substring(0, Math.Min(10, figma.FigmaRefreshToken.Length)) + "...",
+                    figma.FigmaTokenExpiry,
+                    figma.FigmaLastSync);
+
+                // Fetch user's teams/projects/files structure from Figma API
+                var teamsStructure = await GetUserFigmaStructure(figma.FigmaAccessToken!);
+                if (teamsStructure == null)
+                {
+                    return BadRequest("Failed to fetch structure from Figma. The existing token may not have the required scopes. Please re-authenticate with Figma to get updated permissions.");
+                }
+
+                _logger.LogInformation("Successfully retrieved structure for board {BoardId}", boardId);
+
+                return Ok(new
+                {
+                    success = true,
+                    teams = teamsStructure
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error getting public files for board {BoardId}", boardId);
+                return StatusCode(500, "An error occurred while fetching files");
+            }
+        }
+
+        /// <summary>
         /// Store the Figma file URL after user selection
         /// </summary>
         [HttpPost("use/set-public-file")]
@@ -456,6 +527,15 @@ namespace strAppersBackend.Controllers
             try
             {
                 _logger.LogInformation("Setting public file for board {BoardId}", request.BoardId);
+
+                // Extract file key from URL
+                var fileKey = ExtractFileKeyFromUrl(request.FileUrl);
+                if (string.IsNullOrEmpty(fileKey))
+                {
+                    return BadRequest("Could not extract file key from the provided URL");
+                }
+
+                _logger.LogInformation("Extracted file key: {FileKey}", fileKey);
 
                 // Get Figma integration for this board
                 var figma = await _context.Figma
@@ -470,15 +550,24 @@ namespace strAppersBackend.Controllers
                 await RefreshTokenIfNeeded(figma);
 
                 // Validate the file using Figma API
-                var isValid = await ValidateFigmaFile(figma.FigmaAccessToken!, request.FileKey);
+                var isValid = await ValidateFigmaFile(figma.FigmaAccessToken!, fileKey);
                 if (!isValid)
                 {
-                    return BadRequest("Invalid or inaccessible Figma file");
+                    _logger.LogWarning("File validation failed, attempting forced token refresh and retry");
+                    
+                    // Force refresh the token (ignore expiry check) and validate again
+                    await ForceRefreshToken(figma);
+                    var retryIsValid = await ValidateFigmaFile(figma.FigmaAccessToken!, fileKey);
+                    
+                    if (!retryIsValid)
+                    {
+                        return BadRequest("Invalid or inaccessible Figma file. Please re-authenticate with Figma.");
+                    }
                 }
 
                 // Update the file information
                 figma.FigmaFileUrl = request.FileUrl;
-                figma.FigmaFileKey = request.FileKey;
+                figma.FigmaFileKey = fileKey;
                 figma.UpdatedAt = DateTime.UtcNow;
 
                 await _context.SaveChangesAsync();
@@ -495,6 +584,139 @@ namespace strAppersBackend.Controllers
             {
                 _logger.LogError(ex, "Error setting public file for board {BoardId}", request.BoardId);
                 return StatusCode(500, "An error occurred while setting public file");
+            }
+        }
+
+        /// <summary>
+        /// Extract file key from Figma URL
+        /// </summary>
+        private string ExtractFileKeyFromUrl(string url)
+        {
+            try
+            {
+                _logger.LogInformation("Extracting file key from URL: {Url}", url);
+                
+                // Parse the URL to get the path
+                var uri = new Uri(url);
+                var path = uri.AbsolutePath;
+                
+                _logger.LogInformation("URL path: {Path}", path);
+                
+                // Split the path by /
+                var segments = path.Split('/', StringSplitOptions.RemoveEmptyEntries);
+                
+                _logger.LogInformation("Path segments: {Segments}", string.Join(", ", segments));
+                
+                // Scan segments from left to right for Figma file_key pattern
+                foreach (var segment in segments)
+                {
+                    // Figma file_key is usually 20-40 alphanumeric characters
+                    if (segment.Length >= 20 && segment.Length <= 40 && 
+                        segment.All(c => char.IsLetterOrDigit(c)))
+                    {
+                        _logger.LogInformation("Found file key: {FileKey}", segment);
+                        return segment;
+                    }
+                }
+                
+                _logger.LogWarning("No valid file key found in URL: {Url}", url);
+                return string.Empty;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error extracting file key from URL: {Url}", url);
+                return string.Empty;
+            }
+        }
+
+        /// <summary>
+        /// Get Figma file URL for a board
+        /// </summary>
+        [HttpGet("use/get-url")]
+        public async Task<ActionResult<object>> GetFigmaUrl([FromQuery] string boardId)
+        {
+            try
+            {
+                _logger.LogInformation("Getting Figma URL for board {BoardId}", boardId);
+
+                var figma = await _context.Figma
+                    .FirstOrDefaultAsync(f => f.BoardId == boardId);
+
+                if (figma == null)
+                {
+                    _logger.LogInformation("No Figma integration found for board {BoardId}, returning empty result", boardId);
+                    return Ok(new
+                    {
+                        success = true,
+                        boardId = boardId,
+                        figmaFileUrl = string.Empty
+                    });
+                }
+
+                return Ok(new
+                {
+                    success = true,
+                    boardId = boardId,
+                    figmaFileUrl = figma.FigmaFileUrl ?? string.Empty
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error getting Figma URL for board {BoardId}", boardId);
+                return StatusCode(500, "An error occurred while getting Figma URL");
+            }
+        }
+
+        /// <summary>
+        /// Set Figma file URL for a board
+        /// </summary>
+        [HttpPost("use/set-url")]
+        public async Task<ActionResult<object>> SetFigmaUrl([FromBody] SetFigmaUrlRequest request)
+        {
+            try
+            {
+                _logger.LogInformation("Setting Figma URL for board {BoardId}", request.BoardId);
+
+                var figma = await _context.Figma
+                    .FirstOrDefaultAsync(f => f.BoardId == request.BoardId);
+
+                if (figma == null)
+                {
+                    // Create new Figma record
+                    _logger.LogInformation("Creating new Figma record for board {BoardId}", request.BoardId);
+                    figma = new Figma
+                    {
+                        BoardId = request.BoardId,
+                        FigmaFileUrl = request.Url,
+                        CreatedAt = DateTime.UtcNow,
+                        UpdatedAt = DateTime.UtcNow
+                    };
+                    _context.Figma.Add(figma);
+                }
+                else
+                {
+                    // Update existing Figma record
+                    _logger.LogInformation("Updating existing Figma record for board {BoardId}", request.BoardId);
+                    figma.FigmaFileUrl = request.Url;
+                    figma.UpdatedAt = DateTime.UtcNow;
+                }
+
+                await _context.SaveChangesAsync();
+
+                _logger.LogInformation("Successfully set Figma URL for board {BoardId}", request.BoardId);
+
+                return Ok(new
+                {
+                    success = true,
+                    message = "Figma URL set successfully",
+                    boardId = request.BoardId,
+                    figmaFileUrl = request.Url
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error setting Figma URL for board {BoardId}", request.BoardId);
+                return StatusCode(500, "An error occurred while setting Figma URL");
             }
         }
 
@@ -554,15 +776,24 @@ namespace strAppersBackend.Controllers
         /// </summary>
         private async Task RefreshTokenIfNeeded(Figma figma)
         {
+            _logger.LogInformation("Checking token expiry - Current time: {CurrentTime}, Token expiry: {TokenExpiry}, Is expired: {IsExpired}", 
+                DateTime.UtcNow, figma.FigmaTokenExpiry, 
+                figma.FigmaTokenExpiry.HasValue ? figma.FigmaTokenExpiry.Value <= DateTime.UtcNow : true);
+
             if (figma.FigmaTokenExpiry.HasValue && figma.FigmaTokenExpiry.Value > DateTime.UtcNow)
             {
+                _logger.LogInformation("Token is still valid, no refresh needed");
                 return; // Token is still valid
             }
 
             if (string.IsNullOrEmpty(figma.FigmaRefreshToken))
             {
+                _logger.LogError("No refresh token available for token refresh");
                 throw new InvalidOperationException("No refresh token available");
             }
+
+            _logger.LogInformation("Token expired, attempting refresh with refresh token: {RefreshToken}", 
+                figma.FigmaRefreshToken.Substring(0, Math.Min(10, figma.FigmaRefreshToken.Length)) + "...");
 
             var clientId = _configuration["Figma:ClientId"];
             var clientSecret = _configuration["Figma:ClientSecret"];
@@ -577,11 +808,14 @@ namespace strAppersBackend.Controllers
 
             var content = new FormUrlEncodedContent(formData);
 
-            var response = await _httpClient.PostAsync("https://www.figma.com/oauth/token", content);
+            var response = await _httpClient.PostAsync("https://api.figma.com/v1/oauth/token", content);
             var responseContent = await response.Content.ReadAsStringAsync();
+
+            _logger.LogInformation("Token refresh response - Status: {StatusCode}, Content: {Content}", response.StatusCode, responseContent);
 
             if (!response.IsSuccessStatusCode)
             {
+                _logger.LogError("Failed to refresh token: {StatusCode} - {Content}", response.StatusCode, responseContent);
                 throw new InvalidOperationException($"Failed to refresh token: {responseContent}");
             }
 
@@ -603,19 +837,268 @@ namespace strAppersBackend.Controllers
         }
 
         /// <summary>
+        /// Force refresh token regardless of expiry time
+        /// </summary>
+        private async Task ForceRefreshToken(Figma figma)
+        {
+            if (string.IsNullOrEmpty(figma.FigmaRefreshToken))
+            {
+                _logger.LogError("No refresh token available for forced token refresh");
+                throw new InvalidOperationException("No refresh token available");
+            }
+
+            _logger.LogInformation("Force refreshing token with refresh token: {RefreshToken}", 
+                figma.FigmaRefreshToken.Substring(0, Math.Min(10, figma.FigmaRefreshToken.Length)) + "...");
+
+            var clientId = _configuration["Figma:ClientId"];
+            var clientSecret = _configuration["Figma:ClientSecret"];
+
+            var formData = new List<KeyValuePair<string, string>>
+            {
+                new KeyValuePair<string, string>("client_id", clientId),
+                new KeyValuePair<string, string>("client_secret", clientSecret),
+                new KeyValuePair<string, string>("refresh_token", figma.FigmaRefreshToken),
+                new KeyValuePair<string, string>("grant_type", "refresh_token")
+            };
+
+            var content = new FormUrlEncodedContent(formData);
+
+            var response = await _httpClient.PostAsync("https://api.figma.com/v1/oauth/token", content);
+            var responseContent = await response.Content.ReadAsStringAsync();
+
+            _logger.LogInformation("Force token refresh response - Status: {StatusCode}, Content: {Content}", response.StatusCode, responseContent);
+
+            if (!response.IsSuccessStatusCode)
+            {
+                _logger.LogError("Failed to force refresh token: {StatusCode} - {Content}", response.StatusCode, responseContent);
+                throw new InvalidOperationException($"Failed to force refresh token: {responseContent}");
+            }
+
+            var tokenResponse = JsonSerializer.Deserialize<FigmaTokenResponse>(responseContent, new JsonSerializerOptions
+            {
+                PropertyNameCaseInsensitive = true
+            });
+
+            if (tokenResponse?.AccessToken != null)
+            {
+                figma.FigmaAccessToken = tokenResponse.AccessToken;
+                figma.FigmaTokenExpiry = DateTime.UtcNow.AddSeconds(tokenResponse.ExpiresIn);
+                if (!string.IsNullOrEmpty(tokenResponse.RefreshToken))
+                {
+                    figma.FigmaRefreshToken = tokenResponse.RefreshToken;
+                }
+                figma.UpdatedAt = DateTime.UtcNow;
+                
+                _logger.LogInformation("Successfully force refreshed token");
+            }
+        }
+
+        /// <summary>
         /// Validate Figma file accessibility
         /// </summary>
         private async Task<bool> ValidateFigmaFile(string accessToken, string fileKey)
         {
             try
             {
-                _httpClient.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", accessToken);
+                _httpClient.DefaultRequestHeaders.Clear();
+                _httpClient.DefaultRequestHeaders.Add("X-Figma-Token", accessToken);
+                
+                _logger.LogInformation("Validating Figma file with key: {FileKey}", fileKey);
+                _logger.LogInformation("Request headers: {Headers}", string.Join(", ", _httpClient.DefaultRequestHeaders.Select(h => $"{h.Key}: {string.Join(", ", h.Value)}")));
+                
                 var response = await _httpClient.GetAsync($"https://api.figma.com/v1/files/{fileKey}");
+                var content = await response.Content.ReadAsStringAsync();
+                
+                _logger.LogInformation("Figma file validation response - Status: {StatusCode}, Content: {Content}", response.StatusCode, content);
+                _logger.LogInformation("Response headers: {Headers}", string.Join(", ", response.Headers.Select(h => $"{h.Key}: {string.Join(", ", h.Value)}")));
+                
                 return response.IsSuccessStatusCode;
             }
-            catch
+            catch (Exception ex)
             {
+                _logger.LogError(ex, "Error validating Figma file {FileKey}", fileKey);
                 return false;
+            }
+        }
+
+        /// <summary>
+        /// Get user's Figma structure (teams/projects/files)
+        /// </summary>
+        private async Task<List<FigmaTeamStructure>?> GetUserFigmaStructure(string accessToken)
+        {
+            try
+            {
+                _httpClient.DefaultRequestHeaders.Clear();
+
+                // Try both authentication methods
+                _httpClient.DefaultRequestHeaders.Add("X-Figma-Token", accessToken);
+                _httpClient.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", accessToken);
+
+                // Try to get user info first to see what scopes we have
+                _logger.LogInformation("Making request to Figma API with token: {Token}", accessToken.Substring(0, Math.Min(10, accessToken.Length)) + "...");
+                
+                // First try to get user info
+                var meResponse = await _httpClient.GetAsync("https://api.figma.com/v1/me");
+                var meContent = await meResponse.Content.ReadAsStringAsync();
+                _logger.LogInformation("User info response - Status: {StatusCode}, Content: {Content}", meResponse.StatusCode, meContent);
+                
+                if (!meResponse.IsSuccessStatusCode)
+                {
+                    _logger.LogError("Failed to get user info from Figma API: {StatusCode} - {Content}", meResponse.StatusCode, meContent);
+                    
+                    // If we can't get user info, try a different approach - use a known file key
+                    _logger.LogInformation("Trying alternative approach with known file key");
+                    
+                    // For now, return a simple structure indicating the user needs to re-authenticate
+                    return new List<FigmaTeamStructure>
+                    {
+                        new FigmaTeamStructure
+                        {
+                            Id = "re-auth-required",
+                            Name = "Re-authentication Required",
+                            Projects = new List<FigmaProjectStructure>
+                            {
+                                new FigmaProjectStructure
+                                {
+                                    Id = "re-auth-project",
+                                    Name = "Please re-authenticate to access your Figma files",
+                                    Files = new List<FigmaFileInfo>()
+                                }
+                            }
+                        }
+                    };
+                }
+
+                var userInfo = JsonSerializer.Deserialize<FigmaUserInfo>(meContent, new JsonSerializerOptions
+                {
+                    PropertyNameCaseInsensitive = true
+                });
+
+                _logger.LogInformation("User info - ID: {UserId}, Email: {Email}", userInfo?.Id, userInfo?.Email);
+
+                // If we have user info, try to get teams using the teams endpoint
+                _logger.LogInformation("User authentication successful, trying to get teams");
+                
+                var teamsStructure = new List<FigmaTeamStructure>();
+                
+                // Try to get teams directly using /v1/teams endpoint
+                _logger.LogInformation("Attempting to call /v1/teams endpoint with current token");
+                _logger.LogInformation("Request headers: {Headers}", string.Join(", ", _httpClient.DefaultRequestHeaders.Select(h => $"{h.Key}: {string.Join(", ", h.Value)}")));
+                
+                var teamsResponse = await _httpClient.GetAsync("https://api.figma.com/v1/teams");
+                var teamsContent = await teamsResponse.Content.ReadAsStringAsync();
+                
+                _logger.LogInformation("Teams response - Status: {StatusCode}, Content: {Content}", teamsResponse.StatusCode, teamsContent);
+                _logger.LogInformation("Response headers: {Headers}", string.Join(", ", teamsResponse.Headers.Select(h => $"{h.Key}: {string.Join(", ", h.Value)}")));
+                
+                if (teamsResponse.IsSuccessStatusCode)
+                {
+                    var teams = JsonSerializer.Deserialize<FigmaTeamsResponse>(teamsContent, new JsonSerializerOptions
+                    {
+                        PropertyNameCaseInsensitive = true
+                    });
+
+                    _logger.LogInformation("Found {TeamsCount} teams", teams?.Teams?.Count ?? 0);
+
+                    if (teams?.Teams != null)
+                    {
+                        foreach (var team in teams.Teams)
+                        {
+                            _logger.LogInformation("Processing team {TeamId} ({TeamName})", team.Id, team.Name);
+                            
+                            var teamStructure = new FigmaTeamStructure
+                            {
+                                Id = team.Id,
+                                Name = team.Name,
+                                Projects = new List<FigmaProjectStructure>()
+                            };
+
+                            // Get projects for each team
+                            var projectsResponse = await _httpClient.GetAsync($"https://api.figma.com/v1/teams/{team.Id}/projects");
+                            var projectsContent = await projectsResponse.Content.ReadAsStringAsync();
+                            _logger.LogInformation("Projects response for team {TeamId} - Status: {StatusCode}, Content: {Content}",
+                                team.Id, projectsResponse.StatusCode, projectsContent);
+
+                            if (projectsResponse.IsSuccessStatusCode)
+                            {
+                                var projects = JsonSerializer.Deserialize<FigmaProjectsResponse>(projectsContent, new JsonSerializerOptions
+                                {
+                                    PropertyNameCaseInsensitive = true
+                                });
+
+                                _logger.LogInformation("Found {ProjectsCount} projects in team {TeamId}", projects?.Projects?.Count ?? 0, team.Id);
+
+                                if (projects?.Projects != null)
+                                {
+                                    foreach (var project in projects.Projects)
+                                    {
+                                        var projectStructure = new FigmaProjectStructure
+                                        {
+                                            Id = project.Id,
+                                            Name = project.Name,
+                                            Files = new List<FigmaFileInfo>()
+                                        };
+
+                                        // Get files for each project
+                                        var projectFilesResponse = await _httpClient.GetAsync($"https://api.figma.com/v1/projects/{project.Id}/files");
+                                        var projectFilesContent = await projectFilesResponse.Content.ReadAsStringAsync();
+                                        _logger.LogInformation("Files response for project {ProjectId} - Status: {StatusCode}, Content: {Content}",
+                                            project.Id, projectFilesResponse.StatusCode, projectFilesContent);
+
+                                        if (projectFilesResponse.IsSuccessStatusCode)
+                                        {
+                                            var projectFiles = JsonSerializer.Deserialize<FigmaFilesResponse>(projectFilesContent, new JsonSerializerOptions
+                                            {
+                                                PropertyNameCaseInsensitive = true
+                                            });
+
+                                            _logger.LogInformation("Found {FilesCount} files in project {ProjectId}", projectFiles?.Files?.Count ?? 0, project.Id);
+
+                                            if (projectFiles?.Files != null)
+                                            {
+                                                projectStructure.Files = projectFiles.Files;
+                                            }
+                                        }
+
+                                        teamStructure.Projects.Add(projectStructure);
+                                    }
+                                }
+                            }
+
+                            teamsStructure.Add(teamStructure);
+                        }
+                    }
+
+                    return teamsStructure;
+                }
+                else
+                {
+                    _logger.LogError("Failed to get teams from Figma API: {StatusCode} - {Content}", teamsResponse.StatusCode, teamsContent);
+                    
+                    // Return re-authentication message if teams endpoint fails
+                    return new List<FigmaTeamStructure>
+                    {
+                        new FigmaTeamStructure
+                        {
+                            Id = "re-auth-required",
+                            Name = "Re-authentication Required",
+                            Projects = new List<FigmaProjectStructure>
+                            {
+                                new FigmaProjectStructure
+                                {
+                                    Id = "re-auth-project",
+                                    Name = "Please re-authenticate with updated scopes to access your Figma files",
+                                    Files = new List<FigmaFileInfo>()
+                                }
+                            }
+                        }
+                    };
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error fetching Figma structure");
+                return null;
             }
         }
 
@@ -626,7 +1109,8 @@ namespace strAppersBackend.Controllers
         {
             try
             {
-                _httpClient.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", accessToken);
+                _httpClient.DefaultRequestHeaders.Clear();
+                _httpClient.DefaultRequestHeaders.Add("X-Figma-Token", accessToken);
                 var response = await _httpClient.GetAsync($"https://api.figma.com/v1/files/{fileKey}");
                 
                 if (!response.IsSuccessStatusCode)
@@ -655,7 +1139,12 @@ namespace strAppersBackend.Controllers
     {
         public string BoardId { get; set; } = string.Empty;
         public string FileUrl { get; set; } = string.Empty;
-        public string FileKey { get; set; } = string.Empty;
+    }
+
+    public class SetFigmaUrlRequest
+    {
+        public string BoardId { get; set; } = string.Empty;
+        public string Url { get; set; } = string.Empty;
     }
 
     public class DownloadMetadataRequest
@@ -665,8 +1154,132 @@ namespace strAppersBackend.Controllers
 
     public class FigmaTokenResponse
     {
+        [JsonPropertyName("access_token")]
         public string AccessToken { get; set; } = string.Empty;
+        
+        [JsonPropertyName("refresh_token")]
         public string RefreshToken { get; set; } = string.Empty;
+        
+        [JsonPropertyName("expires_in")]
         public int ExpiresIn { get; set; }
+        
+        [JsonPropertyName("token_type")]
+        public string TokenType { get; set; } = string.Empty;
+    }
+
+    public class FigmaFilesResponse
+    {
+        [JsonPropertyName("files")]
+        public List<FigmaFileInfo> Files { get; set; } = new List<FigmaFileInfo>();
+    }
+
+    public class FigmaFileInfo
+    {
+        [JsonPropertyName("key")]
+        public string Key { get; set; } = string.Empty;
+        
+        [JsonPropertyName("name")]
+        public string Name { get; set; } = string.Empty;
+        
+        [JsonPropertyName("thumbnail_url")]
+        public string ThumbnailUrl { get; set; } = string.Empty;
+        
+        [JsonPropertyName("last_modified")]
+        public string LastModified { get; set; } = string.Empty;
+        
+        [JsonPropertyName("url")]
+        public string Url { get; set; } = string.Empty;
+    }
+
+    public class FigmaTeamsResponse
+    {
+        [JsonPropertyName("teams")]
+        public List<FigmaTeam> Teams { get; set; } = new List<FigmaTeam>();
+    }
+
+    public class FigmaTeam
+    {
+        [JsonPropertyName("id")]
+        public string Id { get; set; } = string.Empty;
+        
+        [JsonPropertyName("name")]
+        public string Name { get; set; } = string.Empty;
+    }
+
+    public class FigmaProjectsResponse
+    {
+        [JsonPropertyName("projects")]
+        public List<FigmaProject> Projects { get; set; } = new List<FigmaProject>();
+    }
+
+    public class FigmaProject
+    {
+        [JsonPropertyName("id")]
+        public string Id { get; set; } = string.Empty;
+        
+        [JsonPropertyName("name")]
+        public string Name { get; set; } = string.Empty;
+    }
+
+    public class FigmaTeamStructure
+    {
+        public string Id { get; set; } = string.Empty;
+        public string Name { get; set; } = string.Empty;
+        public List<FigmaProjectStructure> Projects { get; set; } = new List<FigmaProjectStructure>();
+    }
+
+    public class FigmaProjectStructure
+    {
+        public string Id { get; set; } = string.Empty;
+        public string Name { get; set; } = string.Empty;
+        public List<FigmaFileInfo> Files { get; set; } = new List<FigmaFileInfo>();
+    }
+
+    public class FigmaUserInfo
+    {
+        [JsonPropertyName("id")]
+        public string Id { get; set; } = string.Empty;
+        
+        [JsonPropertyName("email")]
+        public string Email { get; set; } = string.Empty;
+        
+        [JsonPropertyName("handle")]
+        public string Handle { get; set; } = string.Empty;
+        
+        [JsonPropertyName("img_url")]
+        public string ImgUrl { get; set; } = string.Empty;
+        
+        [JsonPropertyName("teams")]
+        public List<FigmaTeam> Teams { get; set; } = new List<FigmaTeam>();
+    }
+
+    public class FigmaRecentFilesResponse
+    {
+        [JsonPropertyName("files")]
+        public List<FigmaRecentFile> Files { get; set; } = new List<FigmaRecentFile>();
+    }
+
+    public class FigmaRecentFile
+    {
+        [JsonPropertyName("key")]
+        public string Key { get; set; } = string.Empty;
+        
+        [JsonPropertyName("name")]
+        public string Name { get; set; } = string.Empty;
+        
+        [JsonPropertyName("thumbnail_url")]
+        public string ThumbnailUrl { get; set; } = string.Empty;
+        
+        [JsonPropertyName("last_modified")]
+        public string LastModified { get; set; } = string.Empty;
+        
+        [JsonPropertyName("url")]
+        public string Url { get; set; } = string.Empty;
+        
+        [JsonPropertyName("team_id")]
+        public string TeamId { get; set; } = string.Empty;
+        
+        [JsonPropertyName("team_name")]
+        public string TeamName { get; set; } = string.Empty;
     }
 }

@@ -8,7 +8,7 @@ public interface IAIService
 {
     Task<SystemDesignResponse> GenerateSystemDesignAsync(SystemDesignRequest request);
     Task<SprintPlanningResponse> GenerateSprintPlanAsync(SprintPlanningRequest request);
-    Task<InitiateModulesResponse> InitiateModulesAsync(int projectId, string extendedDescription);
+    Task<InitiateModulesResponse> InitiateModulesAsync(int projectId, string extendedDescription, int maxModules, int minWordsPerModule);
     Task<CreateDataModelResponse> CreateDataModelAsync(int projectId, string modulesData);
     Task<UpdateModuleResponse> UpdateModuleAsync(int moduleId, string currentDescription, string userInput);
     Task<UpdateDataModelResponse> UpdateDataModelAsync(int projectId, string currentSqlScript, string userInput);
@@ -551,16 +551,54 @@ Return ONLY the JSON object matching this structure:
         return content;
     }
 
-    public async Task<InitiateModulesResponse> InitiateModulesAsync(int projectId, string extendedDescription)
+    public async Task<InitiateModulesResponse> InitiateModulesAsync(int projectId, string extendedDescription, int maxModules, int minWordsPerModule)
     {
         try
         {
             _logger.LogInformation("Initiating modules for Project {ProjectId}", projectId);
 
             var promptConfig = _configuration.GetSection("PromptConfig:ProjectModules:InitiateModules");
-            var systemPrompt = promptConfig["SystemPrompt"] ?? "You are an expert software architect.";
+            var baseSystemPrompt = promptConfig["SystemPrompt"] ?? "You are an expert software architect.";
+            
+            // Enhance system prompt to emphasize word count requirements
+            var systemPrompt = $"{baseSystemPrompt}\n\n" +
+                             $"🚨 CRITICAL WORD COUNT REQUIREMENT 🚨\n" +
+                             $"Each module description MUST be EXACTLY {minWordsPerModule} words or MORE.\n" +
+                             $"This is NON-NEGOTIABLE - descriptions under {minWordsPerModule} words will be REJECTED.\n" +
+                             $"Write extremely detailed, comprehensive descriptions that include:\n" +
+                             $"- Specific implementation details and technical specifications\n" +
+                             $"- Detailed use cases and scenarios\n" +
+                             $"- Architecture and integration points\n" +
+                             $"- User interactions and data flows\n" +
+                             $"- Examples and detailed explanations\n" +
+                             $"Be verbose, thorough, and comprehensive - aim for {minWordsPerModule}+ words per description.\n" +
+                             $"🌍 LANGUAGE CONSISTENCY: Always respond in the SAME language as the project description provided by the user.";
             var userPromptTemplate = promptConfig["UserPromptTemplate"] ?? "Project Description: {0}";
-            var userPrompt = string.Format(userPromptTemplate, extendedDescription);
+            
+            // Enhance the user prompt with MaxModules and MinWordsPerModule constraints
+            var enhancedUserPrompt = $"{string.Format(userPromptTemplate, extendedDescription)}\n\n" +
+                                   $"🚨 CRITICAL REQUIREMENTS - NON-NEGOTIABLE 🚨\n" +
+                                   $"- Generate modules based on the given content, but do not exceed {maxModules} modules\n" +
+                                   $"- Each module description MUST be EXACTLY {minWordsPerModule} words or MORE\n" +
+                                   $"- Count your words carefully - descriptions under {minWordsPerModule} words will be REJECTED\n" +
+                                   $"- Write extremely detailed, comprehensive descriptions for each module\n" +
+                                   $"- Include specific implementation details, technical specifications, and use cases\n" +
+                                   $"- Explain the module's purpose, functionality, architecture, and integration points\n" +
+                                   $"- Describe user interactions, data flows, and system behaviors\n" +
+                                   $"- Add examples, scenarios, and detailed explanations\n" +
+                                   $"- Be verbose and thorough - aim for {minWordsPerModule}+ words per description\n" +
+                                   $"- Ensure each module has detailed inputs and outputs\n" +
+                                   $"- DO NOT write brief or concise descriptions - be comprehensive and detailed\n" +
+                                   $"- 🌍 LANGUAGE CONSISTENCY: Respond in the SAME language as the project description provided above";
+            
+            var userPrompt = enhancedUserPrompt;
+            
+            // Log the complete prompt being sent to AI
+            _logger.LogInformation("=== AI PROMPT DEBUG ===");
+            _logger.LogInformation("System Prompt: {SystemPrompt}", systemPrompt);
+            _logger.LogInformation("User Prompt: {UserPrompt}", userPrompt);
+            _logger.LogInformation("MaxModules: {MaxModules}, MinWordsPerModule: {MinWordsPerModule}", maxModules, minWordsPerModule);
+            _logger.LogInformation("=== END AI PROMPT DEBUG ===");
 
             var messages = new[]
             {
@@ -572,7 +610,7 @@ Return ONLY the JSON object matching this structure:
             {
                 model = "gpt-4o",
                 messages = messages,
-                max_tokens = 4000,
+                max_tokens = 12000, // Increased to 12000 to allow for much more detailed module descriptions
                 temperature = 0.7
             };
 
@@ -609,6 +647,10 @@ Return ONLY the JSON object matching this structure:
 
             var aiContent = openAIResponse.Choices.First().Message.Content;
             _logger.LogInformation("AI response received for module initiation");
+            _logger.LogInformation("=== AI RESPONSE DEBUG ===");
+            _logger.LogInformation("AI Response Length: {Length} characters", aiContent?.Length ?? 0);
+            _logger.LogInformation("AI Response Content: {Content}", aiContent);
+            _logger.LogInformation("=== END AI RESPONSE DEBUG ===");
 
             // Clean the AI response to extract JSON from markdown code blocks
             var cleanedContent = CleanJsonFromMarkdown(aiContent);
@@ -647,6 +689,14 @@ Return ONLY the JSON object matching this structure:
             }
 
             _logger.LogInformation("Successfully parsed {Count} modules with complete inputs and outputs", modulesResponse.Modules.Count);
+            
+            // Log details about each module for debugging
+            for (int i = 0; i < modulesResponse.Modules.Count; i++)
+            {
+                var module = modulesResponse.Modules[i];
+                var wordCount = module.Description?.Split(' ', StringSplitOptions.RemoveEmptyEntries).Length ?? 0;
+                _logger.LogInformation("Module {Index}: '{Title}' - {WordCount} words", i + 1, module.Title, wordCount);
+            }
 
             return new InitiateModulesResponse
             {
@@ -752,9 +802,18 @@ Return ONLY the JSON object matching this structure:
             _logger.LogInformation("Updating module {ModuleId}", moduleId);
 
             var promptConfig = _configuration.GetSection("PromptConfig:ProjectModules:UpdateModule");
-            var systemPrompt = promptConfig["SystemPrompt"] ?? "You are an expert software architect and technical writer.";
+            var baseSystemPrompt = promptConfig["SystemPrompt"] ?? "You are an expert software architect and technical writer.";
+            
+            // Enhance system prompt to include language consistency
+            var systemPrompt = $"{baseSystemPrompt}\n\n" +
+                             $"🌍 LANGUAGE CONSISTENCY: Always respond in the SAME language as the user input provided below.";
+            
             var userPromptTemplate = promptConfig["UserPromptTemplate"] ?? "Current Module Description:\n{0}\n\nUser Feedback:\n{1}";
-            var userPrompt = string.Format(userPromptTemplate, currentDescription, userInput);
+            var baseUserPrompt = string.Format(userPromptTemplate, currentDescription, userInput);
+            
+            // Enhance user prompt to emphasize language consistency
+            var userPrompt = $"{baseUserPrompt}\n\n" +
+                           $"🌍 IMPORTANT: Respond in the SAME language as the user feedback provided above.";
 
             var messages = new[]
             {

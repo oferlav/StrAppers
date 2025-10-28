@@ -1,9 +1,14 @@
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Options;
 using strAppersBackend.Data;
 using strAppersBackend.Models;
 using strAppersBackend.Services;
+using System.Drawing;
+using System.Drawing.Imaging;
+using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 
 namespace strAppersBackend.Controllers;
 
@@ -12,20 +17,23 @@ namespace strAppersBackend.Controllers;
 public class SystemDesignController : ControllerBase
 {
     private readonly IDesignDocumentService _designDocumentService;
+    private readonly IAIService _aiService;
     private readonly ApplicationDbContext _context;
     private readonly ILogger<SystemDesignController> _logger;
-    private readonly IAIService _aiService;
+    private readonly IConfiguration _configuration;
 
     public SystemDesignController(
         IDesignDocumentService designDocumentService,
+        IAIService aiService,
         ApplicationDbContext context,
         ILogger<SystemDesignController> logger,
-        IAIService aiService)
+        IConfiguration configuration)
     {
         _designDocumentService = designDocumentService;
+        _aiService = aiService;
         _context = context;
         _logger = logger;
-        _aiService = aiService;
+        _configuration = configuration;
     }
 
     /// <summary>
@@ -113,38 +121,45 @@ public class SystemDesignController : ControllerBase
     }
 
     /// <summary>
-    /// Get the latest design version for a project (for frontend use)
+    /// Get project's current system design from Projects.SystemDesign field
     /// </summary>
     [HttpGet("use/project/{projectId}/latest-design")]
-    public async Task<ActionResult> GetLatestDesignVersion(int projectId)
+    public async Task<ActionResult<object>> GetLatestDesignVersion(int projectId)
     {
         try
         {
+            // Get project with SystemDesign field
             var project = await _context.Projects
-                .FirstOrDefaultAsync(p => p.Id == projectId);
+                .Where(p => p.Id == projectId)
+                .Select(p => new
+                {
+                    p.Id,
+                    p.Title,
+                    p.SystemDesign,
+                    HasSystemDesign = !string.IsNullOrEmpty(p.SystemDesign),
+                    CreatedAt = DateTime.UtcNow, // Since we don't have versioning, use current time
+                    UpdatedAt = DateTime.UtcNow
+                })
+                .FirstOrDefaultAsync();
 
             if (project == null)
             {
                 return NotFound($"Project with ID {projectId} not found");
             }
 
-            if (string.IsNullOrEmpty(project.SystemDesignFormatted))
+            if (string.IsNullOrEmpty(project.SystemDesign))
             {
-                return NotFound($"No design document found for project {projectId}");
+                return NotFound($"No system design found for project {projectId}");
             }
 
-            return Ok(new
-            {
-                projectId = project.Id,
-                designDocument = project.SystemDesignFormatted,
-                createdAt = project.CreatedAt,
-                updatedAt = project.UpdatedAt
-            });
+            _logger.LogInformation("Retrieved system design for Project {ProjectId} from Projects.SystemDesign", projectId);
+
+            return Ok(project);
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Error retrieving latest design version for Project {ProjectId}", projectId);
-            return StatusCode(500, "An error occurred while retrieving the design version");
+            _logger.LogError(ex, "Error retrieving system design for Project {ProjectId}", projectId);
+            return StatusCode(500, "An error occurred while retrieving the system design");
         }
     }
 
@@ -335,9 +350,9 @@ public class SystemDesignController : ControllerBase
                 });
             }
 
-            if (string.IsNullOrEmpty(project.SystemDesignFormatted))
+            if (string.IsNullOrEmpty(project.SystemDesign))
             {
-                _logger.LogWarning("No SystemDesignFormatted found for Project {ProjectId}", projectId);
+                _logger.LogWarning("No SystemDesign found for Project {ProjectId}", projectId);
                 return NotFound(new
                 {
                     Success = false,
@@ -345,11 +360,11 @@ public class SystemDesignController : ControllerBase
                 });
             }
 
-            // Convert SystemDesignFormatted to base64
-            var systemDesignBytes = System.Text.Encoding.UTF8.GetBytes(project.SystemDesignFormatted);
+            // Convert SystemDesign to base64
+            var systemDesignBytes = System.Text.Encoding.UTF8.GetBytes(project.SystemDesign);
             var base64String = Convert.ToBase64String(systemDesignBytes);
 
-            _logger.LogInformation("Successfully converted SystemDesignFormatted to base64 for Project {ProjectId}. Length: {Length}", 
+            _logger.LogInformation("Successfully converted SystemDesign to base64 for Project {ProjectId}. Length: {Length}", 
                 projectId, base64String.Length);
 
             return Ok(new
@@ -358,7 +373,7 @@ public class SystemDesignController : ControllerBase
                 ProjectId = projectId,
                 ProjectTitle = project.Title,
                 SystemDesignBase64 = base64String,
-                OriginalLength = project.SystemDesignFormatted.Length,
+                OriginalLength = project.SystemDesign.Length,
                 Base64Length = base64String.Length
             });
         }
@@ -405,8 +420,12 @@ public class SystemDesignController : ControllerBase
                 });
             }
 
-            // Call AI service to generate modules
-            var aiResponse = await _aiService.InitiateModulesAsync(request.ProjectId, extendedDescription);
+            // Get configuration values
+            var maxModules = _configuration.GetValue<int>("SystemDesignAIAgent:MaxModules", 10);
+            var minWordsPerModule = _configuration.GetValue<int>("SystemDesignAIAgent:MinWordsPerModule", 100);
+
+            // Call AI service to generate modules with constraints
+            var aiResponse = await _aiService.InitiateModulesAsync(request.ProjectId, extendedDescription, maxModules, minWordsPerModule);
             if (!aiResponse.Success)
             {
                 return BadRequest(aiResponse);
@@ -415,6 +434,9 @@ public class SystemDesignController : ControllerBase
             // Save modules to database with 1-based sequence
             var savedModules = new List<ProjectModule>();
             var sequence = 1; // Start with 1-based index
+            
+            _logger.LogInformation("Processing {Count} modules for Project {ProjectId}", 
+                aiResponse.Modules?.Count ?? 0, request.ProjectId);
             
             foreach (var module in aiResponse.Modules ?? new List<ModuleInfo>())
             {
@@ -455,79 +477,115 @@ public class SystemDesignController : ControllerBase
     }
 
     /// <summary>
-    /// Create data model for a project using AI
+    /// Get the count of modules for a specific project
     /// </summary>
-    [HttpPost("use/create-data-model")]
-    public async Task<ActionResult<CreateDataModelResponse>> CreateDataModel([FromBody] CreateDataModelRequest request)
+    [HttpGet("use/ModuleCount")]
+    public async Task<ActionResult<ModuleCountResponse>> GetModuleCount([FromQuery] int projectId)
     {
         try
         {
-            _logger.LogInformation("Creating data model for Project {ProjectId}", request.ProjectId);
+            _logger.LogInformation("Getting module count for Project {ProjectId}", projectId);
 
             // Validate project exists
-            var project = await _context.Projects.FindAsync(request.ProjectId);
+            var project = await _context.Projects.FindAsync(projectId);
             if (project == null)
             {
-                return NotFound(new CreateDataModelResponse
+                return NotFound(new ModuleCountResponse
                 {
                     Success = false,
-                    Message = $"Project with ID {request.ProjectId} not found"
+                    Message = $"Project with ID {projectId} not found",
+                    ModuleCount = 0
                 });
             }
 
-            // Get all modules except DataModel type (type != 1)
-            var modules = await _context.ProjectModules
-                .Where(pm => pm.ProjectId == request.ProjectId && pm.ModuleType != 1)
-                .Include(pm => pm.ModuleTypeNavigation)
-                .ToListAsync();
+            // Get module count for the project
+            var moduleCount = await _context.ProjectModules
+                .Where(pm => pm.ProjectId == projectId)
+                .CountAsync();
 
-            if (!modules.Any())
-            {
-                return BadRequest(new CreateDataModelResponse
-                {
-                    Success = false,
-                    Message = "No modules found for this project. Please initiate modules first."
-                });
-            }
+            _logger.LogInformation("Project {ProjectId} has {ModuleCount} modules", projectId, moduleCount);
 
-            // Format modules data for AI
-            var modulesData = string.Join("\n\n", modules.Select(m => 
-                $"Module: {m.Title}\nType: {m.ModuleTypeNavigation?.Name ?? "Unknown"}\nDescription: {m.Description}"));
-
-            // Call AI service to generate data model
-            var aiResponse = await _aiService.CreateDataModelAsync(request.ProjectId, modulesData);
-            if (!aiResponse.Success)
-            {
-                return BadRequest(aiResponse);
-            }
-
-            // Save data model as a module with type = 1 (DataModel)
-            var dataModelModule = new ProjectModule
-            {
-                ProjectId = request.ProjectId,
-                ModuleType = 1, // DataModel type
-                Title = "Database Schema",
-                Description = aiResponse.SqlScript ?? ""
-            };
-
-            _context.ProjectModules.Add(dataModelModule);
-            await _context.SaveChangesAsync();
-
-            _logger.LogInformation("Successfully created data model for Project {ProjectId}", request.ProjectId);
-
-            return Ok(new CreateDataModelResponse
+            return Ok(new ModuleCountResponse
             {
                 Success = true,
-                SqlScript = aiResponse.SqlScript
+                ModuleCount = moduleCount,
+                ProjectId = projectId
             });
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Error creating data model for Project {ProjectId}", request.ProjectId);
-            return StatusCode(500, new CreateDataModelResponse
+            _logger.LogError(ex, "Error getting module count for Project {ProjectId}", projectId);
+            return StatusCode(500, new ModuleCountResponse
             {
                 Success = false,
-                Message = $"An error occurred while creating data model: {ex.Message}"
+                Message = $"An error occurred while getting module count: {ex.Message}",
+                ModuleCount = 0
+            });
+        }
+    }
+
+    /// <summary>
+    /// Get the description of a specific module by project ID and sequence
+    /// </summary>
+    [HttpGet("use/ModuleDescription")]
+    public async Task<ActionResult<ModuleDescriptionResponse>> GetModuleDescription([FromQuery] int projectId, [FromQuery] int sequence)
+    {
+        try
+        {
+            _logger.LogInformation("Getting module description for Project {ProjectId}, Sequence {Sequence}", projectId, sequence);
+
+            // Validate project exists
+            var project = await _context.Projects.FindAsync(projectId);
+            if (project == null)
+            {
+                return NotFound(new ModuleDescriptionResponse
+                {
+                    Success = false,
+                    Message = $"Project with ID {projectId} not found",
+                    ModuleDescription = null
+                });
+            }
+
+            // Get the specific module by project ID and sequence
+            var module = await _context.ProjectModules
+                .Where(pm => pm.ProjectId == projectId && pm.Sequence == sequence)
+                .FirstOrDefaultAsync();
+
+            if (module == null)
+            {
+                return NotFound(new ModuleDescriptionResponse
+                {
+                    Success = false,
+                    Message = $"Module with sequence {sequence} not found for project {projectId}",
+                    ModuleDescription = null
+                });
+            }
+
+            _logger.LogInformation("Found module for Project {ProjectId}, Sequence {Sequence}: {Title}", 
+                projectId, sequence, module.Title);
+
+            return Ok(new ModuleDescriptionResponse
+            {
+                Success = true,
+                ModuleDescription = new ModuleDescriptionInfo
+                {
+                    Id = module.Id,
+                    ProjectId = module.ProjectId ?? 0,
+                    Sequence = module.Sequence ?? 0,
+                    Title = module.Title ?? string.Empty,
+                    Description = module.Description ?? string.Empty,
+                    ModuleType = module.ModuleType ?? 0
+                }
+            });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error getting module description for Project {ProjectId}, Sequence {Sequence}", projectId, sequence);
+            return StatusCode(500, new ModuleDescriptionResponse
+            {
+                Success = false,
+                Message = $"An error occurred while getting module description: {ex.Message}",
+                ModuleDescription = null
             });
         }
     }
@@ -608,6 +666,220 @@ public class SystemDesignController : ControllerBase
     }
 
     /// <summary>
+    /// Bind all modules for a project into a single text content and store in Projects.SystemDesign
+    /// </summary>
+    [HttpPost("use/bind-modules")]
+    public async Task<ActionResult<BindModulesResponse>> BindModules([FromBody] BindModulesRequest request)
+    {
+        try
+        {
+            _logger.LogInformation("Binding modules for Project {ProjectId}", request.ProjectId);
+
+            // Validate project exists
+            var project = await _context.Projects.FindAsync(request.ProjectId);
+            if (project == null)
+            {
+                return NotFound(new BindModulesResponse
+                {
+                    Success = false,
+                    Message = $"Project with ID {request.ProjectId} not found"
+                });
+            }
+
+            // Get all modules for the project, ordered by sequence
+            var modules = await _context.ProjectModules
+                .Where(pm => pm.ProjectId == request.ProjectId)
+                .OrderBy(pm => pm.Sequence)
+                .ToListAsync();
+
+            if (!modules.Any())
+            {
+                return NotFound(new BindModulesResponse
+                {
+                    Success = false,
+                    Message = $"No modules found for project {request.ProjectId}"
+                });
+            }
+
+            _logger.LogInformation("Found {Count} modules for Project {ProjectId}", modules.Count, request.ProjectId);
+
+            // Build the bound content
+            var boundContent = new StringBuilder();
+            boundContent.AppendLine($"# System Design for {project.Title}");
+            boundContent.AppendLine();
+            boundContent.AppendLine($"**Project Description:** {project.Description ?? "No description available"}");
+            boundContent.AppendLine();
+            boundContent.AppendLine($"**Extended Description:** {project.ExtendedDescription ?? "No extended description available"}");
+            boundContent.AppendLine();
+            boundContent.AppendLine("---");
+            boundContent.AppendLine();
+
+            // Group modules by type for better organization
+            var screenModules = modules.Where(m => m.ModuleType == 2).OrderBy(m => m.Sequence).ToList();
+            var dataModelModules = modules.Where(m => m.ModuleType == 1).OrderBy(m => m.Sequence).ToList();
+
+            // Add screen modules first
+            if (screenModules.Any())
+            {
+                boundContent.AppendLine("## System Modules");
+                boundContent.AppendLine();
+
+                for (int i = 0; i < screenModules.Count; i++)
+                {
+                    var module = screenModules[i];
+                    boundContent.AppendLine($"### Module {i + 1}: {module.Title}");
+                    boundContent.AppendLine();
+                    boundContent.AppendLine(module.Description ?? "No description available");
+                    boundContent.AppendLine();
+                    
+                    // Add inputs and outputs if they exist in the description
+                    if (!string.IsNullOrEmpty(module.Description) && module.Description.Contains("Inputs:") && module.Description.Contains("Outputs:"))
+                    {
+                        // Extract inputs and outputs from the description
+                        var descriptionParts = module.Description.Split(new[] { "\n\nInputs:", "\n\nOutputs:" }, StringSplitOptions.None);
+                        if (descriptionParts.Length >= 3)
+                        {
+                            boundContent.AppendLine($"**Inputs:** {descriptionParts[1].Trim()}");
+                            boundContent.AppendLine();
+                            boundContent.AppendLine($"**Outputs:** {descriptionParts[2].Trim()}");
+                            boundContent.AppendLine();
+                        }
+                    }
+                    
+                    boundContent.AppendLine("---");
+                    boundContent.AppendLine();
+                }
+            }
+
+            // Add data model modules last (ModuleType 1)
+            if (dataModelModules.Any())
+            {
+                boundContent.AppendLine("## Data Model");
+                boundContent.AppendLine();
+
+                for (int i = 0; i < dataModelModules.Count; i++)
+                {
+                    var module = dataModelModules[i];
+                    boundContent.AppendLine($"### Data Model {i + 1}: {module.Title}");
+                    boundContent.AppendLine();
+                    boundContent.AppendLine(module.Description ?? "No description available");
+                    boundContent.AppendLine();
+                    boundContent.AppendLine("---");
+                    boundContent.AppendLine();
+                }
+            }
+
+            // Store the bound content in Projects.SystemDesign
+            project.SystemDesign = boundContent.ToString();
+            await _context.SaveChangesAsync();
+
+            _logger.LogInformation("Successfully bound {Count} modules for Project {ProjectId} and stored in SystemDesign", 
+                modules.Count, request.ProjectId);
+
+            return Ok(new BindModulesResponse
+            {
+                Success = true,
+                Message = $"Successfully bound {modules.Count} modules into system design",
+                BoundContent = boundContent.ToString(),
+                ModuleCount = modules.Count
+            });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error binding modules for Project {ProjectId}", request.ProjectId);
+            return StatusCode(500, new BindModulesResponse
+            {
+                Success = false,
+                Message = $"An error occurred while binding modules: {ex.Message}"
+            });
+        }
+    }
+
+    /// <summary>
+    /// Create data model for a project using AI
+    /// </summary>
+    [HttpPost("use/create-data-model")]
+    public async Task<ActionResult<CreateDataModelResponse>> CreateDataModel([FromBody] CreateDataModelRequest request)
+    {
+        try
+        {
+            _logger.LogInformation("Creating data model for Project {ProjectId}", request.ProjectId);
+
+            // Validate project exists
+            var project = await _context.Projects.FindAsync(request.ProjectId);
+            if (project == null)
+            {
+                return NotFound(new CreateDataModelResponse
+                {
+                    Success = false,
+                    Message = $"Project with ID {request.ProjectId} not found"
+                });
+            }
+
+            // Get all modules except DataModel type (type != 1)
+            var modules = await _context.ProjectModules
+                .Where(pm => pm.ProjectId == request.ProjectId && pm.ModuleType != 1)
+                .Include(pm => pm.ModuleTypeNavigation)
+                .ToListAsync();
+
+            if (!modules.Any())
+            {
+                return BadRequest(new CreateDataModelResponse
+                {
+                    Success = false,
+                    Message = "No modules found for this project. Please initiate modules first."
+                });
+            }
+
+            // Format modules data for AI
+            var modulesData = string.Join("\n\n", modules.Select(m => 
+                $"Module: {m.Title}\nType: {m.ModuleTypeNavigation?.Name ?? "Unknown"}\nDescription: {m.Description}"));
+
+            // Call AI service to generate data model
+            var aiResponse = await _aiService.CreateDataModelAsync(request.ProjectId, modulesData);
+            if (!aiResponse.Success)
+            {
+                return BadRequest(aiResponse);
+            }
+
+            // Save data model as a module with type = 1 (DataModel)
+            var dataModelModule = new ProjectModule
+            {
+                ProjectId = request.ProjectId,
+                ModuleType = 1, // DataModel type
+                Title = "Database Schema",
+                Description = aiResponse.SqlScript ?? ""
+            };
+
+            _context.ProjectModules.Add(dataModelModule);
+            
+            // Generate HTML schema and convert to PNG base64
+            var htmlSchema = GenerateVisualSchema(aiResponse.SqlScript ?? "", project.Title ?? $"Project {request.ProjectId}");
+            var pngBase64 = await ConvertHtmlToPngBase64(htmlSchema);
+            project.DataSchema = pngBase64; // Store base64 PNG
+            
+            await _context.SaveChangesAsync();
+
+            _logger.LogInformation("Successfully created data model for Project {ProjectId}", request.ProjectId);
+
+            return Ok(new CreateDataModelResponse
+            {
+                Success = true,
+                SqlScript = aiResponse.SqlScript
+            });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error creating data model for Project {ProjectId}", request.ProjectId);
+            return StatusCode(500, new CreateDataModelResponse
+            {
+                Success = false,
+                Message = $"An error occurred while creating data model: {ex.Message}"
+            });
+        }
+    }
+
+    /// <summary>
     /// Update data model using AI feedback
     /// </summary>
     [HttpPost("use/update-data-model/{projectId}")]
@@ -662,6 +934,12 @@ public class SystemDesignController : ControllerBase
 
             // Update the data model module description with the new SQL script
             dataModelModule.Description = cleanedSqlScript;
+            
+            // Generate HTML schema and convert to PNG base64
+            var htmlSchema = GenerateVisualSchema(cleanedSqlScript, project.Title ?? $"Project {projectId}");
+            var pngBase64 = await ConvertHtmlToPngBase64(htmlSchema);
+            project.DataSchema = pngBase64; // Store base64 PNG
+            
             await _context.SaveChangesAsync();
 
             _logger.LogInformation("Successfully updated data model for Project {ProjectId}", projectId);
@@ -682,6 +960,335 @@ public class SystemDesignController : ControllerBase
             });
         }
     }
+
+    /// <summary>
+    /// Get visual HTML schema for data model
+    /// </summary>
+    [HttpGet("use/data-schema/{projectId}")]
+    public async Task<ActionResult<string>> GetDataSchema(int projectId)
+    {
+        try
+        {
+            _logger.LogInformation("Generating data schema for Project {ProjectId}", projectId);
+
+            // Validate project exists
+            var project = await _context.Projects.FindAsync(projectId);
+            if (project == null)
+            {
+                return NotFound($"Project with ID {projectId} not found");
+            }
+
+            // Get the data model module (ModuleType = 1)
+            var dataModelModule = await _context.ProjectModules
+                .FirstOrDefaultAsync(pm => pm.ProjectId == projectId && pm.ModuleType == 1);
+
+            if (dataModelModule == null)
+            {
+                return NotFound($"Data model not found for project {projectId}. Please create a data model first.");
+            }
+
+            // Get the SQL script from the database
+            var sqlScript = dataModelModule.Description ?? "";
+            if (string.IsNullOrEmpty(sqlScript))
+            {
+                return NotFound($"No SQL script found for project {projectId}");
+            }
+
+            _logger.LogInformation("Generating visual schema from SQL script of length {Length}", sqlScript.Length);
+
+            // Generate the visual HTML schema
+            var htmlSchema = GenerateVisualSchema(sqlScript, project.Title ?? $"Project {projectId}");
+
+            return Content(htmlSchema, "text/html");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error generating data schema for Project {ProjectId}", projectId);
+            return StatusCode(500, $"An error occurred while generating data schema: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Get data schema as base64 PNG string
+    /// </summary>
+    [HttpGet("use/data-schema-png/{projectId}")]
+    public async Task<ActionResult<DataSchemaPngResponse>> GetDataSchemaPng(int projectId)
+    {
+        try
+        {
+            _logger.LogInformation("Getting data schema PNG for Project {ProjectId}", projectId);
+
+            // Validate project exists
+            var project = await _context.Projects.FindAsync(projectId);
+            if (project == null)
+            {
+                return NotFound(new DataSchemaPngResponse
+                {
+                    Success = false,
+                    Message = $"Project with ID {projectId} not found"
+                });
+            }
+
+            // Check if DataSchema exists
+            if (string.IsNullOrEmpty(project.DataSchema))
+            {
+                return NotFound(new DataSchemaPngResponse
+                {
+                    Success = false,
+                    Message = $"Data schema not found for project {projectId}. Please create a data model first."
+                });
+            }
+
+            // Return the stored base64 PNG string directly
+            _logger.LogInformation("Successfully retrieved PNG for Project {ProjectId}", projectId);
+
+            return Ok(new DataSchemaPngResponse
+            {
+                Success = true,
+                PngBase64 = project.DataSchema, // Directly return stored base64 PNG
+                ProjectId = projectId
+            });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error retrieving PNG for Project {ProjectId}", projectId);
+            return StatusCode(500, new DataSchemaPngResponse
+            {
+                Success = false,
+                Message = $"An error occurred while retrieving PNG: {ex.Message}"
+            });
+        }
+    }
+
+    /// <summary>
+    /// Converts HTML content to PNG base64 string using System.Drawing
+    /// </summary>
+    private async Task<string> ConvertHtmlToPngBase64(string htmlContent)
+    {
+        try
+        {
+            // Extract Mermaid diagram from HTML
+            var mermaidDiagram = ExtractMermaidDiagram(htmlContent);
+            
+            if (string.IsNullOrEmpty(mermaidDiagram))
+            {
+                _logger.LogWarning("No Mermaid diagram found in HTML content");
+                return GeneratePlaceholderImageBase64();
+            }
+            
+            // Parse the Mermaid diagram to extract table information
+            var tables = ParseMermaidDiagram(mermaidDiagram);
+            
+            // Generate PNG image from table data
+            var pngBase64 = GenerateSchemaImage(tables);
+            
+            _logger.LogInformation("Successfully converted HTML to PNG using System.Drawing");
+            
+            return pngBase64;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error converting HTML to PNG: {Message}", ex.Message);
+            
+            // Fallback: return a simple placeholder image
+            return GeneratePlaceholderImageBase64();
+        }
+    }
+
+    /// <summary>
+    /// Generates PNG image from table information
+    /// </summary>
+    private string GenerateSchemaImage(List<TableInfo> tables)
+    {
+        try
+        {
+            const int tableWidth = 200;
+            const int tableHeight = 100;
+            const int margin = 50;
+            const int spacing = 50;
+            
+            var imageWidth = Math.Max(800, tables.Count * (tableWidth + spacing) + margin);
+            var imageHeight = Math.Max(600, tableHeight + margin * 2);
+            
+            using var bitmap = new Bitmap(imageWidth, imageHeight);
+            using var graphics = Graphics.FromImage(bitmap);
+            
+            // Fill background
+            graphics.Clear(Color.White);
+            
+            // Draw title
+            using var titleFont = new Font("Arial", 20, FontStyle.Bold);
+            using var titleBrush = new SolidBrush(Color.Black);
+            graphics.DrawString("Database Schema", titleFont, titleBrush, margin, margin);
+            
+            var startY = margin + 40;
+            
+            // Draw tables
+            for (int i = 0; i < tables.Count; i++)
+            {
+                var table = tables[i];
+                var x = margin + i * (tableWidth + spacing);
+                var y = startY;
+                
+                // Draw table rectangle
+                using var tablePen = new Pen(Color.Black, 2);
+                graphics.DrawRectangle(tablePen, x, y, tableWidth, tableHeight);
+                
+                // Draw table name
+                using var nameFont = new Font("Arial", 12, FontStyle.Bold);
+                using var nameBrush = new SolidBrush(Color.Blue);
+                var nameSize = graphics.MeasureString(table.Name, nameFont);
+                var nameX = x + (tableWidth - nameSize.Width) / 2;
+                graphics.DrawString(table.Name, nameFont, nameBrush, nameX, y + 5);
+                
+                // Draw columns
+                using var columnFont = new Font("Arial", 9);
+                using var columnBrush = new SolidBrush(Color.Black);
+                var columnY = y + 25;
+                
+                foreach (var column in table.Columns.Take(5)) // Limit to 5 columns for space
+                {
+                    var columnText = $"{column.DataType} {column.Name}";
+                    if (column.IsPrimaryKey) columnText += " PK";
+                    if (column.IsForeignKey) columnText += " FK";
+                    
+                    graphics.DrawString(columnText, columnFont, columnBrush, x + 5, columnY);
+                    columnY += 15;
+                }
+                
+                if (table.Columns.Count > 5)
+                {
+                    graphics.DrawString("...", columnFont, columnBrush, x + 5, columnY);
+                }
+            }
+            
+            // Convert to base64
+            using var stream = new MemoryStream();
+            bitmap.Save(stream, ImageFormat.Png);
+            var bytes = stream.ToArray();
+            
+            return Convert.ToBase64String(bytes);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error generating schema image: {Message}", ex.Message);
+            return GeneratePlaceholderImageBase64();
+        }
+    }
+
+    /// <summary>
+    /// Generates a placeholder PNG image as base64 when conversion fails
+    /// </summary>
+    private string GeneratePlaceholderImageBase64()
+    {
+        try
+        {
+            using var bitmap = new Bitmap(800, 600);
+            using var graphics = Graphics.FromImage(bitmap);
+            
+            // Fill background
+            graphics.Clear(Color.White);
+            
+            // Draw placeholder text
+            using var font = new Font("Arial", 24, FontStyle.Bold);
+            using var brush = new SolidBrush(Color.Black);
+            
+            var text = "Data Schema Image\n(HTML to PNG conversion failed)";
+            var textSize = graphics.MeasureString(text, font);
+            var x = (bitmap.Width - textSize.Width) / 2;
+            var y = (bitmap.Height - textSize.Height) / 2;
+            
+            graphics.DrawString(text, font, brush, x, y);
+            
+            // Convert to base64
+            using var stream = new MemoryStream();
+            bitmap.Save(stream, ImageFormat.Png);
+            var bytes = stream.ToArray();
+            
+            return Convert.ToBase64String(bytes);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error generating placeholder image: {Message}", ex.Message);
+            return Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes("Error generating image"));
+        }
+    }
+
+    /// <summary>
+    /// Extracts Mermaid diagram from HTML content
+    /// </summary>
+    private string ExtractMermaidDiagram(string htmlContent)
+    {
+        try
+        {
+            var mermaidMatch = Regex.Match(htmlContent, @"<div class=""mermaid"">\s*(.*?)\s*</div>", RegexOptions.Singleline);
+            return mermaidMatch.Success ? mermaidMatch.Groups[1].Value.Trim() : string.Empty;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error extracting Mermaid diagram: {Message}", ex.Message);
+            return string.Empty;
+        }
+    }
+
+    /// <summary>
+    /// Parses Mermaid diagram to extract table information
+    /// </summary>
+    private List<TableInfo> ParseMermaidDiagram(string mermaidDiagram)
+    {
+        var tables = new List<TableInfo>();
+        
+        try
+        {
+            var lines = mermaidDiagram.Split('\n', StringSplitOptions.RemoveEmptyEntries);
+            
+            foreach (var line in lines)
+            {
+                var trimmedLine = line.Trim();
+                
+                // Skip erDiagram declaration
+                if (trimmedLine.StartsWith("erDiagram"))
+                    continue;
+                
+                // Parse table definition
+                if (trimmedLine.Contains("{"))
+                {
+                    var tableName = trimmedLine.Split('{')[0].Trim();
+                    var table = new TableInfo { Name = tableName, Columns = new List<ColumnInfo>() };
+                    tables.Add(table);
+                }
+                // Parse column definition
+                else if (trimmedLine.Contains(" ") && tables.Any())
+                {
+                    var parts = trimmedLine.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+                    if (parts.Length >= 2)
+                    {
+                        var dataType = parts[0];
+                        var columnName = parts[1];
+                        var isPrimaryKey = trimmedLine.Contains("PK");
+                        var isForeignKey = trimmedLine.Contains("FK");
+                        
+                        tables.Last().Columns.Add(new ColumnInfo
+                        {
+                            Name = columnName,
+                            DataType = dataType,
+                            IsPrimaryKey = isPrimaryKey,
+                            IsForeignKey = isForeignKey
+                        });
+                    }
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error parsing Mermaid diagram: {Message}", ex.Message);
+        }
+        
+        return tables;
+    }
+
+
+
 
     /// <summary>
     /// Cleans AI response to extract only the SQL script, removing any explanatory text
@@ -732,53 +1339,6 @@ public class SystemDesignController : ControllerBase
         }
 
         return cleanedResponse.Trim();
-    }
-
-    /// <summary>
-    /// Get visual HTML schema for data model
-    /// </summary>
-    [HttpGet("use/data-schema/{projectId}")]
-    public async Task<ActionResult<string>> GetDataSchema(int projectId)
-    {
-        try
-        {
-            _logger.LogInformation("Generating data schema for Project {ProjectId}", projectId);
-
-            // Validate project exists
-            var project = await _context.Projects.FindAsync(projectId);
-            if (project == null)
-            {
-                return NotFound($"Project with ID {projectId} not found");
-            }
-
-            // Get the data model module (ModuleType = 1)
-            var dataModelModule = await _context.ProjectModules
-                .FirstOrDefaultAsync(pm => pm.ProjectId == projectId && pm.ModuleType == 1);
-
-            if (dataModelModule == null)
-            {
-                return NotFound($"Data model not found for project {projectId}. Please create a data model first.");
-            }
-
-            // Get the SQL script from the database
-            var sqlScript = dataModelModule.Description ?? "";
-            if (string.IsNullOrEmpty(sqlScript))
-            {
-                return NotFound($"No SQL script found for project {projectId}");
-            }
-
-            _logger.LogInformation("Generating visual schema from SQL script of length {Length}", sqlScript.Length);
-
-            // Generate the visual HTML schema
-            var htmlSchema = GenerateVisualSchema(sqlScript, project.Title ?? $"Project {projectId}");
-
-            return Content(htmlSchema, "text/html");
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Error generating data schema for Project {ProjectId}", projectId);
-            return StatusCode(500, $"An error occurred while generating data schema: {ex.Message}");
-        }
     }
 
     /// <summary>
@@ -924,39 +1484,42 @@ public class SystemDesignController : ControllerBase
     {
         var tables = new List<TableInfo>();
         
-        // Split by CREATE TABLE statements (case insensitive)
-        var createTableMatches = System.Text.RegularExpressions.Regex.Matches(
-            sqlScript, 
-            @"CREATE\s+TABLE\s+(\w+)\s*\(", 
-            System.Text.RegularExpressions.RegexOptions.IgnoreCase
-        );
+        // Find CREATE TABLE statements with proper parenthesis matching
+        var createTablePattern = @"CREATE\s+TABLE\s+(\w+)\s*\(";
+        var createTableMatches = Regex.Matches(sqlScript, createTablePattern, RegexOptions.IgnoreCase);
 
-        foreach (System.Text.RegularExpressions.Match match in createTableMatches)
+        foreach (Match match in createTableMatches)
         {
             var tableName = match.Groups[1].Value;
-            var tableStart = match.Index;
+            var startIndex = match.Index + match.Length;
             
-            // Find the end of this CREATE TABLE statement
-            var nextCreateIndex = sqlScript.IndexOf("CREATE TABLE", tableStart + 1, StringComparison.OrdinalIgnoreCase);
-            var nextCreateIndex2 = sqlScript.IndexOf("CREATE ", tableStart + 1, StringComparison.OrdinalIgnoreCase);
-            var nextCreateIndex3 = sqlScript.IndexOf(");", tableStart);
+            // Find the matching closing parenthesis
+            var parenCount = 1;
+            var endIndex = startIndex;
             
-            var endIndex = sqlScript.Length;
-            if (nextCreateIndex > 0 && nextCreateIndex < endIndex) endIndex = nextCreateIndex;
-            if (nextCreateIndex2 > 0 && nextCreateIndex2 < endIndex) endIndex = nextCreateIndex2;
-            if (nextCreateIndex3 > 0 && nextCreateIndex3 < endIndex) endIndex = nextCreateIndex3 + 2;
-            
-            var tableDefinition = sqlScript.Substring(tableStart, endIndex - tableStart);
-            
-            var columns = ParseTableColumns(tableDefinition);
-            var relationships = ParseTableRelationships(tableDefinition);
-            
-            tables.Add(new TableInfo
+            while (endIndex < sqlScript.Length && parenCount > 0)
             {
-                Name = tableName,
-                Columns = columns,
-                Relationships = relationships
-            });
+                if (sqlScript[endIndex] == '(')
+                    parenCount++;
+                else if (sqlScript[endIndex] == ')')
+                    parenCount--;
+                endIndex++;
+            }
+            
+            if (parenCount == 0)
+            {
+                var tableBody = sqlScript.Substring(startIndex, endIndex - startIndex - 1);
+                
+                var columns = ParseTableColumns(tableBody);
+                var relationships = ParseTableRelationships(tableBody);
+                
+                tables.Add(new TableInfo
+                {
+                    Name = tableName,
+                    Columns = columns,
+                    Relationships = relationships
+                });
+            }
         }
         
         return tables;
@@ -969,38 +1532,100 @@ public class SystemDesignController : ControllerBase
     {
         var columns = new List<ColumnInfo>();
         
-        // Find column definitions between parentheses
-        var columnMatches = System.Text.RegularExpressions.Regex.Matches(
-            tableDefinition,
-            @"(\w+)\s+(\w+(?:\(\d+(?:,\d+)?\))?)\s*(?:PRIMARY\s+KEY|UNIQUE|NOT\s+NULL|NULL)?",
-            System.Text.RegularExpressions.RegexOptions.IgnoreCase
-        );
-
-        foreach (System.Text.RegularExpressions.Match match in columnMatches)
+        // Split by commas, but be careful with nested parentheses (like ENUM values)
+        var columnDefinitions = SplitTableDefinition(tableDefinition);
+        
+        foreach (var columnDef in columnDefinitions)
         {
-            var columnName = match.Groups[1].Value;
-            var dataType = match.Groups[2].Value;
+            var trimmedDef = columnDef.Trim();
             
-            // Skip if it's a constraint keyword
-            if (new[] { "PRIMARY", "FOREIGN", "KEY", "UNIQUE", "INDEX", "CONSTRAINT" }.Contains(columnName.ToUpper()))
+            // Skip constraint definitions
+            if (trimmedDef.StartsWith("PRIMARY KEY", StringComparison.OrdinalIgnoreCase) ||
+                trimmedDef.StartsWith("FOREIGN KEY", StringComparison.OrdinalIgnoreCase) ||
+                trimmedDef.StartsWith("UNIQUE", StringComparison.OrdinalIgnoreCase) ||
+                trimmedDef.StartsWith("INDEX", StringComparison.OrdinalIgnoreCase) ||
+                trimmedDef.StartsWith("CONSTRAINT", StringComparison.OrdinalIgnoreCase))
                 continue;
-                
-            var isPrimaryKey = tableDefinition.Contains($"PRIMARY KEY ({columnName})", StringComparison.OrdinalIgnoreCase) ||
-                              tableDefinition.Contains($"{columnName} PRIMARY KEY", StringComparison.OrdinalIgnoreCase);
             
-            var isForeignKey = tableDefinition.Contains($"FOREIGN KEY ({columnName})", StringComparison.OrdinalIgnoreCase) ||
-                              tableDefinition.Contains($"REFERENCES", StringComparison.OrdinalIgnoreCase);
+            // Parse column definition using regex
+            var columnMatch = Regex.Match(trimmedDef, @"^(\w+)\s+(ENUM\([^)]+\)|\w+(?:\(\d+(?:,\d+)?\))?)", RegexOptions.IgnoreCase);
             
-            columns.Add(new ColumnInfo
+            if (columnMatch.Success)
             {
-                Name = columnName,
-                DataType = dataType,
-                IsPrimaryKey = isPrimaryKey,
-                IsForeignKey = isForeignKey
-            });
+                var columnName = columnMatch.Groups[1].Value;
+                var dataType = columnMatch.Groups[2].Value;
+                
+                // Skip if it's a constraint keyword
+                if (new[] { "PRIMARY", "FOREIGN", "KEY", "UNIQUE", "INDEX", "CONSTRAINT", "CREATE", "TABLE" }.Contains(columnName.ToUpper()))
+                    continue;
+                
+                // Clean up data type - simplify ENUM to just "ENUM"
+                if (dataType.StartsWith("ENUM(", StringComparison.OrdinalIgnoreCase))
+                {
+                    dataType = "ENUM";
+                }
+                
+                // Check for primary key in the definition
+                var isPrimaryKey = trimmedDef.Contains("PRIMARY KEY", StringComparison.OrdinalIgnoreCase) ||
+                                  tableDefinition.Contains($"PRIMARY KEY ({columnName})", StringComparison.OrdinalIgnoreCase);
+                
+                // Check for foreign key in the definition
+                var isForeignKey = trimmedDef.Contains("REFERENCES", StringComparison.OrdinalIgnoreCase) ||
+                                  tableDefinition.Contains($"FOREIGN KEY ({columnName})", StringComparison.OrdinalIgnoreCase);
+                
+                columns.Add(new ColumnInfo
+                {
+                    Name = columnName,
+                    DataType = dataType,
+                    IsPrimaryKey = isPrimaryKey,
+                    IsForeignKey = isForeignKey
+                });
+            }
         }
         
         return columns;
+    }
+
+    /// <summary>
+    /// Splits table definition by commas, respecting nested parentheses
+    /// </summary>
+    private List<string> SplitTableDefinition(string tableDefinition)
+    {
+        var result = new List<string>();
+        var current = new StringBuilder();
+        var parenCount = 0;
+        
+        for (int i = 0; i < tableDefinition.Length; i++)
+        {
+            var c = tableDefinition[i];
+            
+            if (c == '(')
+            {
+                parenCount++;
+                current.Append(c);
+            }
+            else if (c == ')')
+            {
+                parenCount--;
+                current.Append(c);
+            }
+            else if (c == ',' && parenCount == 0)
+            {
+                result.Add(current.ToString());
+                current.Clear();
+            }
+            else
+            {
+                current.Append(c);
+            }
+        }
+        
+        if (current.Length > 0)
+        {
+            result.Add(current.ToString());
+        }
+        
+        return result;
     }
 
     /// <summary>
@@ -1011,13 +1636,13 @@ public class SystemDesignController : ControllerBase
         var relationships = new List<RelationshipInfo>();
         
         // Look for FOREIGN KEY constraints
-        var foreignKeyMatches = System.Text.RegularExpressions.Regex.Matches(
+        var foreignKeyMatches = Regex.Matches(
             tableDefinition,
             @"FOREIGN\s+KEY\s*\((\w+)\)\s*REFERENCES\s+(\w+)\s*\((\w+)\)",
-            System.Text.RegularExpressions.RegexOptions.IgnoreCase
+            RegexOptions.IgnoreCase
         );
 
-        foreach (System.Text.RegularExpressions.Match match in foreignKeyMatches)
+        foreach (Match match in foreignKeyMatches)
         {
             relationships.Add(new RelationshipInfo
             {
@@ -1028,90 +1653,6 @@ public class SystemDesignController : ControllerBase
         }
         
         return relationships;
-    }
-
-    /// <summary>
-    /// Get module description by project ID and sequence
-    /// </summary>
-    [HttpGet("use/ModuleDescription")]
-    public async Task<ActionResult<object>> GetModuleDescription(int projectId, int sequence)
-    {
-        try
-        {
-            _logger.LogInformation("Getting module description for Project {ProjectId}, Sequence {Sequence}", projectId, sequence);
-
-            // Validate project exists
-            var project = await _context.Projects.FindAsync(projectId);
-            if (project == null)
-            {
-                return NotFound(new { success = false, message = $"Project with ID {projectId} not found" });
-            }
-
-            // Get the module by sequence and project
-            var module = await _context.ProjectModules
-                .FirstOrDefaultAsync(pm => pm.ProjectId == projectId && pm.Sequence == sequence);
-
-            if (module == null)
-            {
-                return NotFound(new { success = false, message = $"Module with sequence {sequence} not found for project {projectId}" });
-            }
-
-            _logger.LogInformation("Found module {ModuleId} for Project {ProjectId}, Sequence {Sequence}", module.Id, projectId, sequence);
-
-            return Ok(new
-            {
-                success = true,
-                moduleId = module.Id,
-                projectId = module.ProjectId,
-                sequence = module.Sequence,
-                title = module.Title,
-                description = module.Description,
-                moduleType = module.ModuleType
-            });
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Error getting module description for Project {ProjectId}, Sequence {Sequence}", projectId, sequence);
-            return StatusCode(500, new { success = false, message = $"An error occurred while getting module description: {ex.Message}" });
-        }
-    }
-
-    /// <summary>
-    /// Get module count for a project (type = 2)
-    /// </summary>
-    [HttpGet("use/ModuleCount")]
-    public async Task<ActionResult<object>> GetModuleCount(int projectId)
-    {
-        try
-        {
-            _logger.LogInformation("Getting module count for Project {ProjectId}", projectId);
-
-            // Validate project exists
-            var project = await _context.Projects.FindAsync(projectId);
-            if (project == null)
-            {
-                return NotFound(new { success = false, message = $"Project with ID {projectId} not found" });
-            }
-
-            // Count modules with type = 2 (Screen type)
-            var moduleCount = await _context.ProjectModules
-                .CountAsync(pm => pm.ProjectId == projectId && pm.ModuleType == 2);
-
-            _logger.LogInformation("Found {Count} modules for Project {ProjectId}", moduleCount, projectId);
-
-            return Ok(new
-            {
-                success = true,
-                projectId = projectId,
-                moduleCount = moduleCount,
-                moduleType = 2
-            });
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Error getting module count for Project {ProjectId}", projectId);
-            return StatusCode(500, new { success = false, message = $"An error occurred while getting module count: {ex.Message}" });
-        }
     }
 
     /// <summary>
@@ -1129,11 +1670,17 @@ public class SystemDesignController : ControllerBase
             
             foreach (var column in table.Columns)
             {
-                var columnDef = $"        {column.DataType} {column.Name}";
+                // Build key indicators
+                var keyIndicators = new List<string>();
                 if (column.IsPrimaryKey)
-                    columnDef += " PK";
+                    keyIndicators.Add("PK");
                 if (column.IsForeignKey)
-                    columnDef += " FK";
+                    keyIndicators.Add("FK");
+                
+                var keyIndicatorStr = keyIndicators.Any() ? $" {string.Join(", ", keyIndicators)}" : "";
+                
+                // Format: Type field_name [PK/FK indicators] ["optional description"]
+                var columnDef = $"        {column.DataType} {column.Name}{keyIndicatorStr}";
                     
                 diagram.AppendLine(columnDef);
             }
@@ -1175,20 +1722,15 @@ public class SystemDesignController : ControllerBase
         public string ReferencedTable { get; set; } = string.Empty;
         public string ReferencedColumn { get; set; } = string.Empty;
     }
-
 }
 
-// Request models for the new endpoints
+// Request model for InitiateModules (Response model already exists in Models namespace)
 public class InitiateModulesRequest
 {
     public int ProjectId { get; set; }
 }
 
-public class CreateDataModelRequest
-{
-    public int ProjectId { get; set; }
-}
-
+// Request model for UpdateModule
 public class UpdateModuleRequest
 {
     public int ProjectId { get; set; }
@@ -1196,14 +1738,90 @@ public class UpdateModuleRequest
     public string UserInput { get; set; } = string.Empty;
 }
 
+// Response model for UpdateModule
+public class UpdateModuleResponse
+{
+    public bool Success { get; set; }
+    public string? Message { get; set; }
+    public string? UpdatedDescription { get; set; }
+}
+
+// Request model for BindModules
+public class BindModulesRequest
+{
+    public int ProjectId { get; set; }
+}
+
+// Response model for BindModules
+public class BindModulesResponse
+{
+    public bool Success { get; set; }
+    public string? Message { get; set; }
+    public string? BoundContent { get; set; }
+    public int ModuleCount { get; set; }
+}
+
+// Request model for CreateDataModel
+public class CreateDataModelRequest
+{
+    public int ProjectId { get; set; }
+}
+
+// Response model for CreateDataModel
+public class CreateDataModelResponse
+{
+    public bool Success { get; set; }
+    public string? Message { get; set; }
+    public string? SqlScript { get; set; }
+}
+
+// Request model for UpdateDataModel
 public class UpdateDataModelRequest
 {
     public string UserInput { get; set; } = string.Empty;
 }
 
+// Response model for UpdateDataModel
 public class UpdateDataModelResponse
 {
     public bool Success { get; set; }
     public string? Message { get; set; }
     public string? UpdatedSqlScript { get; set; }
+}
+
+// Response model for DataSchemaPng
+public class DataSchemaPngResponse
+{
+    public bool Success { get; set; }
+    public string? Message { get; set; }
+    public string? PngBase64 { get; set; }
+    public int ProjectId { get; set; }
+}
+
+// Response model for ModuleCount
+public class ModuleCountResponse
+{
+    public bool Success { get; set; }
+    public string? Message { get; set; }
+    public int ModuleCount { get; set; }
+    public int ProjectId { get; set; }
+}
+
+// Response model for ModuleDescription
+public class ModuleDescriptionResponse
+{
+    public bool Success { get; set; }
+    public string? Message { get; set; }
+    public ModuleDescriptionInfo? ModuleDescription { get; set; }
+}
+
+// Module description info
+public class ModuleDescriptionInfo
+{
+    public int Id { get; set; }
+    public int ProjectId { get; set; }
+    public int Sequence { get; set; }
+    public string Title { get; set; } = string.Empty;
+    public string Description { get; set; } = string.Empty;
+    public int ModuleType { get; set; }
 }

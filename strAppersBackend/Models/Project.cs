@@ -20,6 +20,9 @@ public class Project
     [Column(TypeName = "TEXT")]
     public string? SystemDesign { get; set; }
     
+    [Column(TypeName = "TEXT")]
+    public string? DataSchema { get; set; }
+    
     public byte[]? SystemDesignDoc { get; set; }
     
     [MaxLength(2000)]
@@ -62,6 +65,22 @@ public class CreateProjectRequest
     public string Priority { get; set; } = "Medium";
     
     public bool IsAvailable { get; set; } = true;
+}
+
+public class CreateProjectSimpleRequest
+{
+    [Required]
+    public int OrganizationId { get; set; }
+    
+    [Required]
+    [MaxLength(200)]
+    public string Title { get; set; } = string.Empty;
+    
+    [MaxLength(1000)]
+    public string? Description { get; set; }
+    
+    [Column(TypeName = "TEXT")]
+    public string? ExtendedDescription { get; set; }
 }
 
 public class UpdateProjectRequest

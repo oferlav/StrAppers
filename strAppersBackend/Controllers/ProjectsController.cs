@@ -252,6 +252,83 @@ public class ProjectsController : ControllerBase
         }
     }
 
+    /// <summary>
+    /// Create a project without generating system design
+    /// </summary>
+    [HttpPost("use/create")]
+    public async Task<ActionResult<Project>> CreateProjectSimple(CreateProjectSimpleRequest request)
+    {
+        try
+        {
+            // Validate the request
+            if (!ModelState.IsValid)
+            {
+                return BadRequest(ModelState);
+            }
+
+            // Validate organization exists
+            var organization = await _context.Organizations
+                .FirstOrDefaultAsync(o => o.Id == request.OrganizationId);
+
+            if (organization == null)
+            {
+                return BadRequest($"Organization with ID {request.OrganizationId} not found");
+            }
+
+            if (!organization.IsActive)
+            {
+                return BadRequest($"Organization '{organization.Name}' is not active");
+            }
+
+            // Create new project with default values
+            var project = new Project
+            {
+                Title = request.Title,
+                Description = request.Description,
+                ExtendedDescription = request.ExtendedDescription,
+                Priority = "high", // Default priority
+                OrganizationId = request.OrganizationId,
+                IsAvailable = true, // Default isAvailable
+                CreatedAt = DateTime.UtcNow
+            };
+
+            _context.Projects.Add(project);
+            await _context.SaveChangesAsync();
+
+            // Load the project with related data for response (excluding problematic fields)
+            var createdProject = await _context.Projects
+                .Where(p => p.Id == project.Id)
+                .Select(p => new Project
+                {
+                    Id = p.Id,
+                    Title = p.Title,
+                    Description = p.Description,
+                    ExtendedDescription = p.ExtendedDescription,
+                    Priority = p.Priority,
+                    OrganizationId = p.OrganizationId,
+                    IsAvailable = p.IsAvailable,
+                    CreatedAt = p.CreatedAt,
+                    UpdatedAt = p.UpdatedAt
+                    // Exclude SystemDesign, SystemDesignDoc, and Organization to avoid serialization issues
+                })
+                .FirstOrDefaultAsync();
+
+            _logger.LogInformation("Project created successfully (simple) with ID {ProjectId} and title {Title}", 
+                project.Id, project.Title);
+
+            return Ok(createdProject);
+        }
+        catch (DbUpdateException ex)
+        {
+            _logger.LogError(ex, "Database error while creating project (simple)");
+            return StatusCode(500, "An error occurred while saving the project to the database");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Unexpected error while creating project (simple)");
+            return StatusCode(500, "An unexpected error occurred while creating the project");
+        }
+    }
 
     /// <summary>
     /// Delete a project

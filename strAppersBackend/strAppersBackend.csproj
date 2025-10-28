@@ -16,6 +16,7 @@
     <PackageReference Include="Google.Apis.Auth" Version="1.65.0" />
     <PackageReference Include="Google.Apis.Calendar.v3" Version="1.65.0.3270" />
     <PackageReference Include="Google.Apis.Gmail.v1" Version="1.65.0.3287" />
+    <PackageReference Include="System.Drawing.Common" Version="9.0.10" />
   </ItemGroup>
 
 </Project>
