@@ -119,6 +119,7 @@ public class ApplicationDbContext : DbContext
             entity.Property(e => e.LinkedInUrl).IsRequired().HasMaxLength(200);
             entity.Property(e => e.GithubUser).IsRequired().HasMaxLength(255);
             entity.Property(e => e.Photo).HasColumnName("Photo").HasColumnType("text");
+            entity.Property(e => e.StartPendingAt).HasColumnType("timestamp with time zone");
             entity.Property(e => e.CreatedAt).HasDefaultValueSql("CURRENT_TIMESTAMP");
             
             entity.HasIndex(e => e.Email).IsUnique();
@@ -141,6 +142,27 @@ public class ApplicationDbContext : DbContext
             entity.HasOne(e => e.Project)
                   .WithMany()
                   .HasForeignKey(e => e.ProjectId)
+                  .OnDelete(DeleteBehavior.SetNull);
+
+            // Preferred projects relationships (nullable FKs to Projects)
+            entity.HasOne(e => e.ProjectPriority1Project)
+                  .WithMany()
+                  .HasForeignKey(e => e.ProjectPriority1)
+                  .OnDelete(DeleteBehavior.SetNull);
+
+            entity.HasOne(e => e.ProjectPriority2Project)
+                  .WithMany()
+                  .HasForeignKey(e => e.ProjectPriority2)
+                  .OnDelete(DeleteBehavior.SetNull);
+
+            entity.HasOne(e => e.ProjectPriority3Project)
+                  .WithMany()
+                  .HasForeignKey(e => e.ProjectPriority3)
+                  .OnDelete(DeleteBehavior.SetNull);
+
+            entity.HasOne(e => e.ProjectPriority4Project)
+                  .WithMany()
+                  .HasForeignKey(e => e.ProjectPriority4)
                   .OnDelete(DeleteBehavior.SetNull);
 
             // Foreign key relationship to ProjectBoard (Trello board)

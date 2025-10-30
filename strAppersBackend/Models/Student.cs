@@ -45,6 +45,20 @@ public class Student
     public Project? Project { get; set; }
     public bool IsAdmin { get; set; } = false;
     
+    // Status and project priorities
+    public int? Status { get; set; }
+    public DateTime? StartPendingAt { get; set; }
+    public int? ProjectPriority1 { get; set; }
+    public int? ProjectPriority2 { get; set; }
+    public int? ProjectPriority3 { get; set; }
+    public int? ProjectPriority4 { get; set; }
+    
+    // Navigation to preferred projects
+    [ForeignKey("ProjectPriority1")] public Project? ProjectPriority1Project { get; set; }
+    [ForeignKey("ProjectPriority2")] public Project? ProjectPriority2Project { get; set; }
+    [ForeignKey("ProjectPriority3")] public Project? ProjectPriority3Project { get; set; }
+    [ForeignKey("ProjectPriority4")] public Project? ProjectPriority4Project { get; set; }
+    
     // Trello board relationship
     [MaxLength(50)]
     public string? BoardId { get; set; }

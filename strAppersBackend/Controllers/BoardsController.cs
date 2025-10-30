@@ -5,6 +5,7 @@ using strAppersBackend.Data;
 using strAppersBackend.Models;
 using strAppersBackend.Services;
 using Microsoft.Extensions.Configuration;
+using System.Text.RegularExpressions;
 
 namespace strAppersBackend.Controllers;
 
@@ -398,7 +399,7 @@ public class BoardsController : ControllerBase
                 var githubRequest = new CreateRepositoryRequest
                 {
                     Name = trelloBoardId,
-                    Description = project.Description ?? $"Project repository for {project.Title}",
+                    Description = SanitizeRepoDescription(project.Description ?? $"Project repository for {project.Title}"),
                     IsPrivate = false,  // Public repository to enable GitHub Pages on free plan
                     Collaborators = githubUsernames,
                     ProjectTitle = project.Title  // Pass project title for HTML page headline
@@ -575,6 +576,7 @@ public class BoardsController : ControllerBase
             foreach (var student in students)
             {
                 student.BoardId = trelloBoardId;
+                student.Status = 3; // Set to pending/in-board status
                 student.UpdatedAt = DateTime.UtcNow;
             }
 
@@ -1225,6 +1227,19 @@ The actual prompt generation would require access to project details and student
             TotalTasks = sprints.Sum(s => s.Tasks?.Count ?? 0),
             EstimatedWeeks = totalSprints
         };
+    }
+
+    private static string SanitizeRepoDescription(string input)
+    {
+        if (string.IsNullOrWhiteSpace(input)) return string.Empty;
+        // Remove control characters
+        var cleaned = new string(input.Where(ch => !char.IsControl(ch) || ch == ' ').ToArray());
+        // Normalize whitespace
+        cleaned = Regex.Replace(cleaned, @"\s+", " ").Trim();
+        // Truncate to GitHub-friendly length
+        const int maxLen = 140;
+        if (cleaned.Length > maxLen) cleaned = cleaned.Substring(0, maxLen);
+        return cleaned;
     }
 }
 

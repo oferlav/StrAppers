@@ -26,6 +26,66 @@ public class StudentsController : ControllerBase
     }
 
     /// <summary>
+    /// Set prioritized projects for a student. The first project becomes the active ProjectId and Priority1.
+    /// </summary>
+    /// <remarks>
+    /// Route format:
+    /// POST /api/Students/use/set-project-priority/{studentId}/{projectId1}/{projectId2}/{projectId3}/{projectId4}
+    ///
+    /// Use 0 for any projectId you want to clear (set NULL).
+    /// </remarks>
+    [HttpPost("use/allocate-with-priority/{studentId}/{projectId1:int}/{projectId2:int}/{projectId3:int}/{projectId4:int}")]
+    public async Task<ActionResult> AllocateWithPriority(
+        int studentId,
+        int projectId1,
+        int projectId2,
+        int projectId3,
+        int projectId4)
+    {
+        try
+        {
+            var student = await _context.Students.FindAsync(studentId);
+            if (student == null)
+            {
+                return NotFound($"Student with ID {studentId} not found.");
+            }
+
+            // Helper to normalize 0 -> null
+            int? ToNullable(int value) => value <= 0 ? (int?)null : value;
+
+            student.ProjectId = ToNullable(projectId1); // Active allocation mirrors Priority1
+            student.ProjectPriority1 = ToNullable(projectId1);
+            student.ProjectPriority2 = ToNullable(projectId2);
+            student.ProjectPriority3 = ToNullable(projectId3);
+            student.ProjectPriority4 = ToNullable(projectId4);
+            student.Status = 1; // Pending
+            student.StartPendingAt = DateTime.UtcNow;
+            student.UpdatedAt = DateTime.UtcNow;
+
+            await _context.SaveChangesAsync();
+
+            return Ok(new
+            {
+                Success = true,
+                Message = "Student allocation with priorities set successfully (pending).",
+                StudentId = student.Id,
+                ProjectId = student.ProjectId,
+                Priority1 = student.ProjectPriority1,
+                Priority2 = student.ProjectPriority2,
+                Priority3 = student.ProjectPriority3,
+                Priority4 = student.ProjectPriority4,
+                Status = student.Status,
+                StartPendingAt = student.StartPendingAt
+            });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error setting project priorities for student {StudentId}", studentId);
+            return StatusCode(500, "An error occurred while updating project priorities.");
+        }
+    }
+
+    /// <summary>
     /// Get all students
     /// </summary>
     [HttpGet]
@@ -180,7 +240,8 @@ public class StudentsController : ControllerBase
                 ProjectId = null, // Default to null
                 IsAdmin = false, // Default to false
                 BoardId = null, // Default to null
-                CreatedAt = DateTime.UtcNow
+                CreatedAt = DateTime.UtcNow,
+                Status = 0
             };
 
             _logger.LogInformation("Adding student to context");
@@ -812,7 +873,7 @@ public class StudentsController : ControllerBase
             var students = await _context.Students
                 .Include(s => s.StudentRoles)
                     .ThenInclude(sr => sr.Role)
-                .Where(s => s.ProjectId.HasValue && s.ProjectId > 0 && (s.BoardId == null || s.BoardId == ""))
+                .Where(s => s.ProjectId.HasValue && s.ProjectId > 0 && (s.BoardId == null || s.BoardId == "") && s.Status < 2)
                 .Select(s => new
                 {
                     StudentId = s.Id,
