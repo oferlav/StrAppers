@@ -1,5 +1,6 @@
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Options;
 using strAppersBackend.Data;
 using strAppersBackend.Models;
 using strAppersBackend.Services;
@@ -14,13 +15,17 @@ namespace strAppersBackend.Controllers
         private readonly ApplicationDbContext _context;
         private readonly ILogger<TestController> _logger;
         private readonly IKickoffService _kickoffService;
+        private readonly IAIService _aiService;
+        private readonly IOptions<SystemDesignAIAgentConfig> _systemDesignConfig;
         // private readonly SlackService _slackService; // SLACK TEMPORARILY DISABLED
 
-        public TestController(ApplicationDbContext context, ILogger<TestController> logger, IKickoffService kickoffService) // SlackService slackService - SLACK TEMPORARILY DISABLED
+        public TestController(ApplicationDbContext context, ILogger<TestController> logger, IKickoffService kickoffService, IAIService aiService, IOptions<SystemDesignAIAgentConfig> systemDesignConfig) // SlackService slackService - SLACK TEMPORARILY DISABLED
         {
             _context = context;
             _logger = logger;
             _kickoffService = kickoffService;
+            _aiService = aiService;
+            _systemDesignConfig = systemDesignConfig;
             // _slackService = slackService; // SLACK TEMPORARILY DISABLED
         }
 
@@ -1024,6 +1029,314 @@ namespace strAppersBackend.Controllers
                     error = ex.Message,
                     details = "An error occurred while analyzing kickoff requirements"
                 };
+            }
+        }
+
+        /// <summary>
+        /// Test method to get the actual prompt sent to Trello planning AI
+        /// </summary>
+        [HttpGet("trello-planning-prompt")]
+        public async Task<ActionResult> TestTrelloPlanningPrompt([FromQuery] int projectId, [FromQuery] string? roleIds = null)
+        {
+            try
+            {
+                _logger.LogInformation("Testing Trello planning prompt for Project {ProjectId}", projectId);
+
+                // Get project with SystemDesign
+                var project = await _context.Projects
+                    .FirstOrDefaultAsync(p => p.Id == projectId);
+
+                if (project == null)
+                {
+                    return NotFound(new
+                    {
+                        success = false,
+                        message = $"Project with ID {projectId} not found"
+                    });
+                }
+
+                // Parse role IDs if provided
+                List<int> requestedRoleIds = new List<int>();
+                if (!string.IsNullOrEmpty(roleIds))
+                {
+                    try
+                    {
+                        requestedRoleIds = roleIds.Split(',')
+                            .Select(id => int.Parse(id.Trim()))
+                            .ToList();
+                    }
+                    catch (Exception ex)
+                    {
+                        return BadRequest(new
+                        {
+                            success = false,
+                            message = $"Invalid role IDs format: {ex.Message}. Expected format: '1,2,3'"
+                        });
+                    }
+                }
+
+                // Get students for the project
+                var students = await _context.Students
+                    .Include(s => s.StudentRoles)
+                    .ThenInclude(sr => sr.Role)
+                    .Where(s => s.ProjectId == projectId)
+                    .ToListAsync();
+
+                // Get roles from database
+                var roles = await _context.Roles.ToListAsync();
+                
+                List<RoleInfo> roleGroups;
+                
+                if (requestedRoleIds.Any())
+                {
+                    // Use provided role IDs and fetch role names from DB
+                    roleGroups = roles
+                        .Where(r => requestedRoleIds.Contains(r.Id))
+                        .Select(r => new RoleInfo
+                        {
+                            RoleId = r.Id,
+                            RoleName = r.Name,
+                            StudentCount = students
+                                .Where(s => s.StudentRoles != null)
+                                .SelectMany(s => s.StudentRoles)
+                                .Count(sr => sr.RoleId == r.Id)
+                        })
+                        .ToList();
+                        
+                    _logger.LogInformation("Using provided role IDs: {RoleIds}", string.Join(", ", requestedRoleIds));
+                }
+                else
+                {
+                    // Extract team roles from students (fallback)
+                    roleGroups = students
+                        .Where(s => s.StudentRoles != null)
+                        .SelectMany(s => s.StudentRoles)
+                        .Where(sr => sr?.Role != null)
+                        .GroupBy(sr => new { sr.RoleId, sr.Role.Name })
+                        .Select(g => new RoleInfo
+                        {
+                            RoleId = g.Key.RoleId,
+                            RoleName = g.Key.Name,
+                            StudentCount = g.Count()
+                        })
+                        .ToList();
+                        
+                    _logger.LogInformation("Extracted roles from students in project");
+                }
+
+                if (!roleGroups.Any())
+                {
+                    return BadRequest(new
+                    {
+                        success = false,
+                        message = requestedRoleIds.Any() 
+                            ? $"No roles found for provided role IDs: {string.Join(", ", requestedRoleIds)}"
+                            : $"No students or roles found for project {projectId}"
+                    });
+                }
+
+                // Create SprintPlanningRequest (same as in BoardsController)
+                var sprintPlanRequest = new SprintPlanningRequest
+                {
+                    ProjectId = projectId,
+                    ProjectLengthWeeks = 8, // Default project length
+                    SprintLengthWeeks = 1,  // Default sprint length
+                    StartDate = DateTime.UtcNow,
+                    SystemDesign = project.SystemDesign,
+                    TeamRoles = roleGroups,
+                    Students = students.Select(s => new StudentInfo
+                    {
+                        Id = s.Id,
+                        Name = $"{s.FirstName} {s.LastName}",
+                        Email = s.Email,
+                        Roles = s.StudentRoles?.Select(sr => sr.Role?.Name ?? "Unknown").ToList() ?? new List<string>()
+                    }).ToList()
+                };
+
+                // Get the actual prompt that would be sent to AI
+                var prompt = BuildSprintPlanningPrompt(sprintPlanRequest);
+
+                // Actually call the AI service to get the response
+                _logger.LogInformation("Calling AI service for sprint planning...");
+                var aiResponse = await _aiService.GenerateSprintPlanAsync(sprintPlanRequest);
+
+                return Ok(new
+                {
+                    success = true,
+                    projectId = projectId,
+                    projectTitle = project.Title,
+                    systemDesignLength = project.SystemDesign?.Length ?? 0,
+                    requestedRoleIds = requestedRoleIds,
+                    availableRoles = roles.Select(r => new { r.Id, r.Name }).ToList(),
+                    teamRoles = roleGroups,
+                    studentCount = students.Count,
+                    prompt = prompt,
+                    promptLength = prompt.Length,
+                    aiResponse = aiResponse,
+                    message = "Trello planning prompt and AI response generated successfully"
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error testing Trello planning prompt for Project {ProjectId}", projectId);
+                return StatusCode(500, new
+                {
+                    success = false,
+                    message = "Error generating Trello planning prompt or calling AI service",
+                    error = ex.Message
+                });
+            }
+        }
+
+        /// <summary>
+        /// Helper method to build sprint planning prompt (copied from AIService)
+        /// </summary>
+        private string BuildSprintPlanningPrompt(SprintPlanningRequest request)
+        {
+            var teamRolesText = string.Join(", ", request.TeamRoles.Select(r => $"{r.RoleName} ({r.StudentCount} students)"));
+            var totalSprints = _systemDesignConfig.Value.DefaultSprintCount; // Use configured sprint count
+            
+            // Filter out Data Model section to save tokens and focus on system modules
+            var filteredSystemDesign = FilterOutDataModelSection(request.SystemDesign);
+            
+            // Build role-specific task instructions
+            var roleInstructions = BuildRoleSpecificInstructions(request.TeamRoles);
+            
+            return $@"Generate a detailed sprint plan for a {request.ProjectLengthWeeks}-week project with {request.SprintLengthWeeks}-week sprints.
+
+TEAM: {teamRolesText}
+START DATE: {request.StartDate:yyyy-MM-dd}
+TOTAL SPRINTS: {totalSprints} (CONFIGURED - must fill ALL sprints even if fewer modules)
+
+SYSTEM DESIGN:
+{filteredSystemDesign ?? "No system design available"}
+
+CRITICAL REQUIREMENTS:
+- You MUST create exactly {totalSprints} sprints (configured number, not based on modules)
+- Each sprint must have tasks for ALL roles: {string.Join(", ", request.TeamRoles.Select(r => r.RoleName))}
+- Map system modules to sprints (distribute modules across sprints as needed)
+- Create MULTIPLE specific tasks per role per sprint based on module inputs/outputs
+- Tasks must be detailed and specific to the module's functionality
+- ONE sprint must include database layer tasks for Backend/Full Stack developers
+- Tasks must have: id, title, description, roleId, roleName, estimatedHours, priority, dependencies
+
+ROLE-SPECIFIC TASK GENERATION:
+{roleInstructions}
+
+TASK GENERATION RULES:
+- For each module, analyze the Inputs and Outputs described
+- Create specific tasks that implement those inputs/outputs
+- Each task should be specific and actionable (not generic)
+- Multiple tasks per role per sprint are expected and encouraged
+- If you run out of modules, create additional tasks like: testing, documentation, integration, optimization, deployment
+
+SPRINT DISTRIBUTION STRATEGY:
+- Distribute the {GetModuleCount(filteredSystemDesign)} system modules across {totalSprints} sprints
+- One sprint should focus on database layer implementation
+- Remaining sprints should cover all modules plus additional tasks
+- Ensure every sprint has meaningful work for all roles
+- If you have fewer modules than sprints, create additional tasks like: testing, documentation, integration, optimization, deployment
+
+Return ONLY valid JSON with exactly {totalSprints} sprints (NO EPICS):
+{{
+  ""sprints"": [{{""sprintNumber"": 1, ""name"": ""Sprint 1"", ""startDate"": ""{request.StartDate:yyyy-MM-dd}"", ""endDate"": ""{request.StartDate.AddDays(request.SprintLengthWeeks * 7 - 1):yyyy-MM-dd}"", ""tasks"": [{{""id"": ""task1"", ""title"": ""Specific Task Title"", ""description"": ""Detailed task description based on module inputs/outputs"", ""roleId"": 1, ""roleName"": ""Role"", ""estimatedHours"": 8, ""priority"": 1, ""dependencies"": []}}], ""totalStoryPoints"": 10, ""roleWorkload"": {{""1"": 8}}}}],
+  ""totalSprints"": {totalSprints},
+  ""totalTasks"": 0,
+  ""estimatedWeeks"": {request.ProjectLengthWeeks}
+}}";
+        }
+
+        /// <summary>
+        /// Builds role-specific task generation instructions (copied from AIService)
+        /// </summary>
+        private string BuildRoleSpecificInstructions(List<RoleInfo> teamRoles)
+        {
+            var instructions = new List<string>();
+            
+            foreach (var role in teamRoles)
+            {
+                switch (role.RoleName.ToLower())
+                {
+                    case "frontend developer":
+                        instructions.Add($"- Frontend Developer: Focus on React/Vue/Angular components, user interfaces, client-side logic, responsive design, user experience, form validation, state management, API integration from frontend");
+                        break;
+                    case "backend developer":
+                        instructions.Add($"- Backend Developer: Focus on API development, server-side logic, database design, authentication, authorization, data processing, business logic, microservices, database optimization");
+                        break;
+                    case "full stack developer":
+                        instructions.Add($"- Full Stack Developer: Focus on both frontend and backend tasks, API integration, database design, full application features, end-to-end functionality, system integration");
+                        break;
+                    case "ui/ux designer":
+                        instructions.Add($"- UI/UX Designer: Focus on user interface design, user experience research, wireframes, prototypes, visual design, accessibility, user testing, design systems, mockups");
+                        break;
+                    case "quality assurance":
+                        instructions.Add($"- Quality Assurance: Focus on testing strategies, test case creation, automated testing, bug tracking, quality metrics, user acceptance testing, performance testing, security testing");
+                        break;
+                    case "project manager":
+                        instructions.Add($"- Project Manager: Focus on project coordination, task management, stakeholder communication, progress tracking, risk management, resource planning, documentation, team coordination");
+                        break;
+                    case "marketing":
+                        instructions.Add($"- Marketing: Focus on user acquisition strategies, content creation, social media integration, analytics, user engagement features, promotional materials, market research, and ALWAYS include a task for creating a video demo of the application");
+                        break;
+                    case "documentation specialist":
+                        instructions.Add($"- Documentation Specialist: Focus on technical documentation, user guides, API documentation, code documentation, training materials, knowledge base, help systems");
+                        break;
+                    default:
+                        instructions.Add($"- {role.RoleName}: Create appropriate tasks based on the role's typical responsibilities and the module requirements");
+                        break;
+                }
+            }
+            
+            return string.Join("\n", instructions);
+        }
+
+        /// <summary>
+        /// Counts the number of modules in the system design (copied from AIService)
+        /// </summary>
+        private int GetModuleCount(string? systemDesign)
+        {
+            if (string.IsNullOrEmpty(systemDesign))
+                return 0;
+                
+            // Count occurrences of "### Module" pattern
+            var moduleCount = System.Text.RegularExpressions.Regex.Matches(systemDesign, @"### Module \d+").Count;
+            return moduleCount;
+        }
+
+        /// <summary>
+        /// Helper method to filter out Data Model section (copied from AIService)
+        /// </summary>
+        private string FilterOutDataModelSection(string? systemDesign)
+        {
+            if (string.IsNullOrEmpty(systemDesign))
+                return systemDesign ?? string.Empty;
+
+            try
+            {
+                // Split by "## Data Model" section
+                var dataModelIndex = systemDesign.IndexOf("## Data Model", StringComparison.OrdinalIgnoreCase);
+                
+                if (dataModelIndex >= 0)
+                {
+                    // Return only the content before the Data Model section
+                    var filteredContent = systemDesign.Substring(0, dataModelIndex).Trim();
+                    
+                    // Also remove any trailing "---" separators
+                    filteredContent = filteredContent.TrimEnd('-', ' ', '\n', '\r');
+                    
+                    _logger.LogInformation("Filtered out Data Model section. Original length: {OriginalLength}, Filtered length: {FilteredLength}", 
+                        systemDesign.Length, filteredContent.Length);
+                    
+                    return filteredContent;
+                }
+                
+                // If no Data Model section found, return original content
+                return systemDesign;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error filtering Data Model section: {Message}", ex.Message);
+                return systemDesign; // Return original content if filtering fails
             }
         }
 

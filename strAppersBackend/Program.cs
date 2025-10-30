@@ -101,8 +101,15 @@ builder.Services.Configure<PromptConfig>(builder.Configuration.GetSection("Promp
 // Configure SystemDesign AI Agent settings
 builder.Services.Configure<SystemDesignAIAgentConfig>(builder.Configuration.GetSection("SystemDesignAIAgent"));
 
+// Configure AI settings
+builder.Services.Configure<AIConfig>(builder.Configuration.GetSection("AIConfig"));
+
 // Add HttpClientFactory for Slack API calls, OpenAI API calls, Trello API calls, and Microsoft Graph API calls
 builder.Services.AddHttpClient();
+builder.Services.AddHttpClient<AIService>(client =>
+{
+    client.Timeout = TimeSpan.FromMinutes(10); // Increase timeout to 10 minutes for AI calls
+});
 
 var app = builder.Build();
 

@@ -1,5 +1,8 @@
 using System.Text;
 using System.Text.Json;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 using strAppersBackend.Models;
 
 namespace strAppersBackend.Services;
@@ -20,15 +23,22 @@ public class AIService : IAIService
     private readonly IConfiguration _configuration;
     private readonly ILogger<AIService> _logger;
     private readonly string _apiKey;
+    private readonly AIConfig _aiConfig;
+    private readonly SystemDesignAIAgentConfig _systemDesignConfig;
 
-    public AIService(HttpClient httpClient, IConfiguration configuration, ILogger<AIService> logger)
+    public AIService(HttpClient httpClient, IConfiguration configuration, ILogger<AIService> logger, IOptions<AIConfig> aiConfig, IOptions<SystemDesignAIAgentConfig> systemDesignConfig)
     {
         _httpClient = httpClient;
         _configuration = configuration;
         _logger = logger;
+        _aiConfig = aiConfig.Value;
+        _systemDesignConfig = systemDesignConfig.Value;
         _apiKey = _configuration["OpenAI:ApiKey"] ?? throw new InvalidOperationException("OpenAI API key not configured");
         
         _httpClient.DefaultRequestHeaders.Add("Authorization", $"Bearer {_apiKey}");
+        
+        // Set a longer timeout for AI calls
+        _httpClient.Timeout = TimeSpan.FromMinutes(10);
     }
 
     public async Task<SystemDesignResponse> GenerateSystemDesignAsync(SystemDesignRequest request)
@@ -39,7 +49,7 @@ public class AIService : IAIService
 
             // Generate JSON system design
             var jsonPrompt = BuildSystemDesignPrompt(request);
-            var jsonAiResponse = await CallOpenAIAsync(jsonPrompt, "gpt-4o");
+            var jsonAiResponse = await CallOpenAIAsync(jsonPrompt, _aiConfig.Model);
             
             if (!jsonAiResponse.Success)
             {
@@ -55,7 +65,7 @@ public class AIService : IAIService
             // Generate formatted (human-readable) system design
             _logger.LogInformation("Generating formatted system design for Project {ProjectId}", request.ProjectId);
             var formattedPrompt = BuildFormattedSystemDesignPrompt(request);
-            var formattedAiResponse = await CallOpenAIAsync(formattedPrompt, "gpt-4o");
+            var formattedAiResponse = await CallOpenAIAsync(formattedPrompt, _aiConfig.Model);
             
             var designDocumentFormatted = formattedAiResponse.Success ? formattedAiResponse.Content : null;
             
@@ -98,7 +108,7 @@ public class AIService : IAIService
                 request.ProjectLengthWeeks, request.SprintLengthWeeks, request.StartDate, request.Students?.Count ?? 0);
 
             var prompt = BuildSprintPlanningPrompt(request);
-            aiResponse = await CallOpenAIAsync(prompt, "gpt-4o");
+            aiResponse = await CallOpenAIAsync(prompt, _aiConfig.Model);
             
             if (!aiResponse.Success)
             {
@@ -136,6 +146,19 @@ public class AIService : IAIService
             }
             
             _logger.LogInformation("Successfully deserialized SprintPlan with {SprintCount} sprints", sprintPlan.Sprints?.Count ?? 0);
+
+            // Validate the sprint plan
+            var validationResult = ValidateSprintPlan(sprintPlan, request);
+            if (!validationResult.IsValid)
+            {
+                _logger.LogWarning("Sprint plan validation failed: {Errors}", string.Join(", ", validationResult.Errors));
+                return new SprintPlanningResponse
+                {
+                    Success = false,
+                    Message = $"Sprint plan validation failed: {string.Join(", ", validationResult.Errors)}",
+                    SprintPlan = sprintPlan // Return the plan anyway for debugging
+                };
+            }
 
             return new SprintPlanningResponse
             {
@@ -244,125 +267,202 @@ Keep it concise, professional, and easy to understand. DO NOT use JSON format - 
     private string BuildSprintPlanningPrompt(SprintPlanningRequest request)
     {
         var teamRolesText = string.Join(", ", request.TeamRoles.Select(r => $"{r.RoleName} ({r.StudentCount} students)"));
-        var totalSprints = request.ProjectLengthWeeks / request.SprintLengthWeeks;
+        var totalSprints = _systemDesignConfig.DefaultSprintCount; // Use configured sprint count instead of calculated
         
-        return $@"You are an agile project manager. Generate a comprehensive sprint plan based on the system design document for this project.
+        // Filter out Data Model section to save tokens and focus on system modules
+        var filteredSystemDesign = FilterOutDataModelSection(request.SystemDesign);
+        
+        // Build role-specific task instructions
+        var roleInstructions = BuildRoleSpecificInstructions(request.TeamRoles);
+        
+        return $@"Generate a detailed sprint plan for a {request.ProjectLengthWeeks}-week project with {request.SprintLengthWeeks}-week sprints.
 
-PROJECT LENGTH: {request.ProjectLengthWeeks} weeks total
-SPRINT LENGTH: {request.SprintLengthWeeks} weeks per sprint
-TEAM COMPOSITION: {teamRolesText}
+TEAM: {teamRolesText}
+START DATE: {request.StartDate:yyyy-MM-dd}
+TOTAL SPRINTS: {totalSprints} (CONFIGURED - must fill ALL sprints even if fewer modules)
 
-IMPORTANT: You must respond with ONLY valid JSON. Do not include any explanatory text, markdown formatting, or code blocks. Start your response directly with the opening curly brace {{ and end with the closing curly brace }}.
+SYSTEM DESIGN:
+{filteredSystemDesign ?? "No system design available"}
 
-CRITICAL: The tasks array in each sprint must contain FULL ProjectTask objects with all required fields (id, title, description, roleId, roleName, estimatedHours, priority, dependencies). Do NOT use task IDs or references.
+CRITICAL REQUIREMENTS:
+- You MUST create exactly {totalSprints} sprints (configured number, not based on modules)
+- Each sprint must have tasks for ALL roles: {string.Join(", ", request.TeamRoles.Select(r => r.RoleName))}
+- Map system modules to sprints (distribute modules across sprints as needed)
+- Create MULTIPLE specific tasks per role per sprint based on module inputs/outputs
+- Tasks must be detailed and specific to the module's functionality
+- ONE sprint must include database layer tasks for Backend/Full Stack developers
+- Tasks must have: id, title, description, roleId, roleName, estimatedHours, priority, dependencies
 
-PLANNING CONSTRAINTS:
-- The total project duration is {request.ProjectLengthWeeks} weeks
-- Each sprint is {request.SprintLengthWeeks} weeks long
-- You MUST create exactly {totalSprints} sprints to fill the entire project timeline
-- Start date: {request.StartDate:yyyy-MM-dd}
-- Plan the sprints to fit within the {request.ProjectLengthWeeks}-week project timeline
-- Consider the project length when determining the scope and number of sprints
-- Ensure all critical features can be delivered within the project timeline
+ROLE-SPECIFIC TASK GENERATION:
+{roleInstructions}
 
-CRITICAL SPRINT FILLING REQUIREMENTS:
-- EVERY sprint must have tasks assigned to it - NO EMPTY SPRINTS ALLOWED
-- EVERY role in the team must have tasks in EVERY sprint - NO ROLE LEFT WITHOUT WORK
-- If you don't have enough information from the SystemDesign, INVENT realistic tasks for each role
-- Distribute work evenly across all sprints so no sprint is overloaded or empty
-- Each sprint should have a balanced mix of tasks for all team roles
-- Include tasks like: research, planning, documentation, testing, code review, deployment, maintenance
-- Make sure every role has meaningful work in every sprint
+TASK GENERATION RULES:
+- For each module, analyze the Inputs and Outputs described
+- Create specific tasks that implement those inputs/outputs
+- Each task should be specific and actionable (not generic)
+- Multiple tasks per role per sprint are expected and encouraged
+- If you run out of modules, create additional tasks like: testing, documentation, integration, optimization, deployment
 
-Generate a sprint plan in JSON format with the following structure:
+SPRINT DISTRIBUTION STRATEGY:
+- Distribute the {GetModuleCount(filteredSystemDesign)} system modules across {totalSprints} sprints
+- One sprint should focus on database layer implementation
+- Remaining sprints should cover all modules plus additional tasks
+- Ensure every sprint has meaningful work for all roles
+- If you have fewer modules than sprints, create additional tasks like: testing, documentation, integration, optimization, deployment
 
-1. **Epics** - High-level feature groups
-2. **User Stories** - Detailed requirements under each epic
-3. **Tasks** - Specific development tasks for each user story
-4. **Sprints** - Sprint breakdown with task allocation
-5. **Role Allocation** - Tasks assigned to specific roles
-
-For each task, consider:
-- Role assignment based on team composition
-- Estimated hours (realistic for student developers)
-- Dependencies between tasks
-- Priority levels
-
-TASK DISTRIBUTION RULES:
-- Each sprint must have at least 2-3 tasks per role to keep everyone busy
-- Include a mix of: development tasks, testing tasks, documentation tasks, research tasks, code review tasks
-- If you run out of specific features, add generic tasks like: ""Code review and testing"", ""Documentation updates"", ""Performance optimization"", ""Bug fixes"", ""User training materials""
-- Make sure every role has meaningful work in every single sprint
-- Balance the workload so no role is overloaded or underutilized
-
-Return ONLY the JSON object matching this structure:
+Return ONLY valid JSON with exactly {totalSprints} sprints (NO EPICS):
 {{
-  ""epics"": [
-    {{
-      ""id"": ""epic1"",
-      ""name"": ""Epic Name"",
-      ""description"": ""Epic description"",
-      ""userStories"": [
-        {{
-          ""id"": ""story1"",
-          ""title"": ""Story Title"",
-          ""description"": ""Story description"",
-          ""acceptanceCriteria"": ""Acceptance criteria"",
-          ""tasks"": [
-            {{
-              ""id"": ""task1"",
-              ""title"": ""Task Title"",
-              ""description"": ""Task description"",
-              ""roleId"": 1,
-              ""roleName"": ""Role Name"",
-              ""estimatedHours"": 8,
-              ""priority"": 1,
-              ""dependencies"": []
-            }}
-          ],
-          ""storyPoints"": 5,
-          ""priority"": 1
-        }}
-      ],
-      ""priority"": 1
-    }}
-  ],
-  ""sprints"": [
-    {{
-      ""sprintNumber"": 1,
-      ""name"": ""Sprint 1"",
-      ""startDate"": ""2024-01-01"",
-      ""endDate"": ""2024-01-14"",
-      ""tasks"": [
-        {{
-          ""id"": ""task1"",
-          ""title"": ""Task for Role 1"",
-          ""description"": ""Task description"",
-          ""roleId"": 1,
-          ""roleName"": ""Role 1"",
-          ""estimatedHours"": 8,
-          ""priority"": 1,
-          ""dependencies"": []
-        }},
-        {{
-          ""id"": ""task2"",
-          ""title"": ""Task for Role 2"",
-          ""description"": ""Task description"",
-          ""roleId"": 2,
-          ""roleName"": ""Role 2"",
-          ""estimatedHours"": 8,
-          ""priority"": 1,
-          ""dependencies"": []
-        }}
-      ],
-      ""totalStoryPoints"": 5,
-      ""roleWorkload"": {{""1"": 8, ""2"": 8}}
-    }}
-  ],
+  ""sprints"": [{{""sprintNumber"": 1, ""name"": ""Sprint 1"", ""startDate"": ""{request.StartDate:yyyy-MM-dd}"", ""endDate"": ""{request.StartDate.AddDays(request.SprintLengthWeeks * 7 - 1):yyyy-MM-dd}"", ""tasks"": [{{""id"": ""task1"", ""title"": ""Specific Task Title"", ""description"": ""Detailed task description based on module inputs/outputs"", ""roleId"": 1, ""roleName"": ""Role"", ""estimatedHours"": 8, ""priority"": 1, ""dependencies"": []}}], ""totalStoryPoints"": 10, ""roleWorkload"": {{""1"": 8}}}}],
   ""totalSprints"": {totalSprints},
   ""totalTasks"": 0,
   ""estimatedWeeks"": {request.ProjectLengthWeeks}
 }}";
+    }
+
+    /// <summary>
+    /// Builds role-specific task generation instructions
+    /// </summary>
+    private string BuildRoleSpecificInstructions(List<RoleInfo> teamRoles)
+    {
+        var instructions = new List<string>();
+        
+        foreach (var role in teamRoles)
+        {
+            switch (role.RoleName.ToLower())
+            {
+                case "frontend developer":
+                    instructions.Add($"- Frontend Developer: Focus on React/Vue/Angular components, user interfaces, client-side logic, responsive design, user experience, form validation, state management, API integration from frontend");
+                    break;
+                case "backend developer":
+                    instructions.Add($"- Backend Developer: Focus on API development, server-side logic, database design, authentication, authorization, data processing, business logic, microservices, database optimization");
+                    break;
+                case "full stack developer":
+                    instructions.Add($"- Full Stack Developer: Focus on both frontend and backend tasks, API integration, database design, full application features, end-to-end functionality, system integration");
+                    break;
+                case "ui/ux designer":
+                    instructions.Add($"- UI/UX Designer: Focus on user interface design, user experience research, wireframes, prototypes, visual design, accessibility, user testing, design systems, mockups");
+                    break;
+                case "quality assurance":
+                    instructions.Add($"- Quality Assurance: Focus on testing strategies, test case creation, automated testing, bug tracking, quality metrics, user acceptance testing, performance testing, security testing");
+                    break;
+                case "project manager":
+                    instructions.Add($"- Project Manager: Focus on project coordination, task management, stakeholder communication, progress tracking, risk management, resource planning, documentation, team coordination");
+                    break;
+                case "marketing":
+                    instructions.Add($"- Marketing: Focus on user acquisition strategies, content creation, social media integration, analytics, user engagement features, promotional materials, market research, and ALWAYS include a task for creating a video demo of the application");
+                    break;
+                case "documentation specialist":
+                    instructions.Add($"- Documentation Specialist: Focus on technical documentation, user guides, API documentation, code documentation, training materials, knowledge base, help systems");
+                    break;
+                default:
+                    instructions.Add($"- {role.RoleName}: Create appropriate tasks based on the role's typical responsibilities and the module requirements");
+                    break;
+            }
+        }
+        
+        return string.Join("\n", instructions);
+    }
+
+    /// <summary>
+    /// Counts the number of modules in the system design
+    /// </summary>
+    private int GetModuleCount(string? systemDesign)
+    {
+        if (string.IsNullOrEmpty(systemDesign))
+            return 0;
+            
+        // Count occurrences of "### Module" pattern
+        var moduleCount = System.Text.RegularExpressions.Regex.Matches(systemDesign, @"### Module \d+").Count;
+        return moduleCount;
+    }
+
+    /// <summary>
+    /// Filters out the Data Model section from system design content to save tokens and focus on system modules
+    /// </summary>
+    private string FilterOutDataModelSection(string? systemDesign)
+    {
+        if (string.IsNullOrEmpty(systemDesign))
+            return systemDesign ?? string.Empty;
+
+        try
+        {
+            // Split by "## Data Model" section
+            var dataModelIndex = systemDesign.IndexOf("## Data Model", StringComparison.OrdinalIgnoreCase);
+            
+            if (dataModelIndex >= 0)
+            {
+                // Return only the content before the Data Model section
+                var filteredContent = systemDesign.Substring(0, dataModelIndex).Trim();
+                
+                // Also remove any trailing "---" separators
+                filteredContent = filteredContent.TrimEnd('-', ' ', '\n', '\r');
+                
+                _logger.LogInformation("Filtered out Data Model section. Original length: {OriginalLength}, Filtered length: {FilteredLength}", 
+                    systemDesign.Length, filteredContent.Length);
+                
+                return filteredContent;
+            }
+            
+            // If no Data Model section found, return original content
+            return systemDesign;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error filtering Data Model section: {Message}", ex.Message);
+            return systemDesign; // Return original content if filtering fails
+        }
+    }
+
+    /// <summary>
+    /// Validates that the sprint plan meets the requirements
+    /// </summary>
+    private (bool IsValid, List<string> Errors) ValidateSprintPlan(SprintPlan sprintPlan, SprintPlanningRequest request)
+    {
+        var errors = new List<string>();
+        var expectedSprints = _systemDesignConfig.DefaultSprintCount; // Use configured sprint count
+        
+        // Check sprint count
+        if (sprintPlan.Sprints?.Count != expectedSprints)
+        {
+            errors.Add($"Expected {expectedSprints} sprints (configured) but got {sprintPlan.Sprints?.Count ?? 0}");
+        }
+        
+        // Check that each sprint has tasks for all roles
+        var roleNames = request.TeamRoles.Select(r => r.RoleName).ToHashSet();
+        if (sprintPlan.Sprints != null)
+        {
+            for (int i = 0; i < sprintPlan.Sprints.Count; i++)
+            {
+                var sprint = sprintPlan.Sprints[i];
+                var sprintRoleNames = sprint.Tasks?.Select(t => t.RoleName).ToHashSet() ?? new HashSet<string>();
+                
+                foreach (var roleName in roleNames)
+                {
+                    if (!sprintRoleNames.Contains(roleName))
+                    {
+                        errors.Add($"Sprint {i + 1} is missing tasks for role: {roleName}");
+                    }
+                }
+                
+                // Check for multiple tasks per role (encouraged)
+                var roleTaskCounts = sprint.Tasks?.GroupBy(t => t.RoleName).ToDictionary(g => g.Key, g => g.Count()) ?? new Dictionary<string, int>();
+                foreach (var roleName in roleNames)
+                {
+                    if (roleTaskCounts.ContainsKey(roleName) && roleTaskCounts[roleName] < 2)
+                    {
+                        errors.Add($"Sprint {i + 1} has only {roleTaskCounts[roleName]} task(s) for {roleName} - consider adding more specific tasks");
+                    }
+                }
+            }
+        }
+        
+        // Check total sprints field
+        if (sprintPlan.TotalSprints != expectedSprints)
+        {
+            errors.Add($"TotalSprints field shows {sprintPlan.TotalSprints} but expected {expectedSprints}");
+        }
+        
+        return (errors.Count == 0, errors);
     }
 
     private string ExtractJsonFromResponse(string response)
@@ -405,8 +505,8 @@ Return ONLY the JSON object matching this structure:
                 {
                     new { role = "user", content = prompt }
                 },
-                max_tokens = 8000,
-                temperature = 0.7
+                max_tokens = _aiConfig.MaxTokens,
+                temperature = _aiConfig.Temperature
             };
 
             var json = JsonSerializer.Serialize(requestBody);
@@ -608,10 +708,10 @@ Return ONLY the JSON object matching this structure:
 
             var requestBody = new
             {
-                model = "gpt-4o",
+                model = _aiConfig.Model,
                 messages = messages,
-                max_tokens = 12000, // Increased to 12000 to allow for much more detailed module descriptions
-                temperature = 0.7
+                max_tokens = _aiConfig.MaxTokens,
+                temperature = _aiConfig.Temperature
             };
 
             var json = JsonSerializer.Serialize(requestBody);
@@ -823,10 +923,10 @@ Return ONLY the JSON object matching this structure:
 
             var requestBody = new
             {
-                model = "gpt-4o",
+                model = _aiConfig.Model,
                 messages = messages,
-                max_tokens = 3000,
-                temperature = 0.5
+                max_tokens = _aiConfig.MaxTokens,
+                temperature = _aiConfig.Temperature
             };
 
             var json = JsonSerializer.Serialize(requestBody);
