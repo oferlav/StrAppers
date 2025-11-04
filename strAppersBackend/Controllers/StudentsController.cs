@@ -224,6 +224,21 @@ public class StudentsController : ControllerBase
 
             _logger.LogInformation("GitHub user {GithubUser} validated successfully", request.GithubUser);
 
+            // Validate programming language if provided
+            if (request.ProgrammingLanguageId.HasValue)
+            {
+                _logger.LogInformation("Validating programming language with ID {ProgrammingLanguageId}", request.ProgrammingLanguageId.Value);
+                var programmingLanguage = await _context.ProgrammingLanguages
+                    .FirstOrDefaultAsync(pl => pl.Id == request.ProgrammingLanguageId.Value && pl.IsActive);
+
+                if (programmingLanguage == null)
+                {
+                    _logger.LogWarning("Programming language with ID {ProgrammingLanguageId} not found or not active", request.ProgrammingLanguageId.Value);
+                    return BadRequest($"Programming language with ID {request.ProgrammingLanguageId.Value} not found or not active");
+                }
+                _logger.LogInformation("Programming language {LanguageName} validated successfully", programmingLanguage.Name);
+            }
+
             // Create new student
             _logger.LogInformation("Creating new student with email {Email}", request.Email);
             var student = new Student
@@ -237,6 +252,7 @@ public class StudentsController : ControllerBase
                 LinkedInUrl = request.LinkedInUrl,
                 GithubUser = request.GithubUser, // GitHub username
                 Photo = request.Photo, // Base64 encoded image or URL
+                ProgrammingLanguageId = request.ProgrammingLanguageId, // Programming language preference
                 ProjectId = null, // Default to null
                 IsAdmin = false, // Default to false
                 BoardId = null, // Default to null
@@ -649,6 +665,25 @@ public class StudentsController : ControllerBase
                 }
             }
 
+            // Handle programming language update if provided
+            if (request.ProgrammingLanguageId.HasValue)
+            {
+                _logger.LogInformation("Validating programming language with ID {ProgrammingLanguageId}", request.ProgrammingLanguageId.Value);
+                
+                // Validate programming language exists and is active
+                var programmingLanguage = await _context.ProgrammingLanguages
+                    .FirstOrDefaultAsync(pl => pl.Id == request.ProgrammingLanguageId.Value && pl.IsActive);
+
+                if (programmingLanguage == null)
+                {
+                    _logger.LogWarning("Programming language with ID {ProgrammingLanguageId} not found or not active", request.ProgrammingLanguageId.Value);
+                    return BadRequest($"Programming language with ID {request.ProgrammingLanguageId.Value} not found or not active");
+                }
+
+                student.ProgrammingLanguageId = request.ProgrammingLanguageId.Value;
+                _logger.LogInformation("Programming language {LanguageName} updated successfully for student {StudentId}", programmingLanguage.Name, id);
+            }
+
             // StudentId, OrganizationId, ProjectId, IsAdmin, IsAvailable, BoardId are not updatable
 
             student.UpdatedAt = DateTime.UtcNow;
@@ -856,6 +891,40 @@ public class StudentsController : ControllerBase
         {
             _logger.LogError(ex, "Error retrieving students for project {ProjectId} without board: {Message}", projectId, ex.Message);
             return StatusCode(500, $"An error occurred while retrieving students: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Get all available programming languages
+    /// </summary>
+    [HttpGet("use/get-programming-language")]
+    public async Task<ActionResult<IEnumerable<object>>> GetProgrammingLanguages()
+    {
+        try
+        {
+            _logger.LogInformation("Getting all available programming languages");
+            
+            var languages = await _context.ProgrammingLanguages
+                .Where(l => l.IsActive)
+                .OrderBy(l => l.Name)
+                .Select(l => new
+                {
+                    l.Id,
+                    l.Name,
+                    l.ReleaseYear,
+                    l.Creator,
+                    l.Description,
+                    l.IsActive
+                })
+                .ToListAsync();
+
+            _logger.LogInformation("Found {Count} active programming languages", languages.Count);
+            return Ok(languages);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error retrieving programming languages");
+            return StatusCode(500, "An error occurred while retrieving programming languages");
         }
     }
 

@@ -142,34 +142,112 @@ public class GitHubService : IGitHubService
                 new KeyValuePair<string, string>("redirect_uri", redirectUri ?? "")
             });
 
-            var response = await _httpClient.PostAsync(GitHubTokenUrl, requestBody);
+            _logger.LogInformation("Sending token exchange request to GitHub. RedirectUri: {RedirectUri}", redirectUri);
+            
+            // GitHub OAuth token endpoint accepts form-encoded POST
+            // Add Accept header to request JSON response (optional, but helps with debugging)
+            var request = new HttpRequestMessage(HttpMethod.Post, GitHubTokenUrl)
+            {
+                Content = requestBody
+            };
+            request.Headers.Accept.Add(new System.Net.Http.Headers.MediaTypeWithQualityHeaderValue("application/json"));
+            
+            var response = await _httpClient.SendAsync(request);
+
+            var responseContent = await response.Content.ReadAsStringAsync();
+            _logger.LogInformation("GitHub token exchange response - Status: {StatusCode}, Content: {Response}", response.StatusCode, responseContent);
 
             if (!response.IsSuccessStatusCode)
             {
-                _logger.LogError("Failed to exchange GitHub OAuth code. Status: {StatusCode}", response.StatusCode);
+                _logger.LogError("Failed to exchange GitHub OAuth code. Status: {StatusCode}, Response: {Response}", response.StatusCode, responseContent);
+                
+                // Try to parse error from JSON response
+                try
+                {
+                    var errorJson = JsonSerializer.Deserialize<JsonElement>(responseContent);
+                    if (errorJson.TryGetProperty("error", out var errorProp))
+                    {
+                        var error = errorProp.GetString();
+                        var errorDesc = errorJson.TryGetProperty("error_description", out var descProp) ? descProp.GetString() : "Unknown error";
+                        _logger.LogError("GitHub OAuth error details: {Error} - {Description}", error, errorDesc);
+                    }
+                }
+                catch { }
+                
                 return null;
             }
 
-            var responseContent = await response.Content.ReadAsStringAsync();
-            _logger.LogDebug("GitHub token response: {Response}", responseContent);
+            // Parse the response - GitHub returns JSON when Accept: application/json header is sent
+            string? accessToken = null;
+            
+            // GitHub returns JSON when we send Accept: application/json header
+            try
+            {
+                var jsonResponse = JsonSerializer.Deserialize<JsonElement>(responseContent);
+                
+                if (jsonResponse.TryGetProperty("access_token", out var tokenProp))
+                {
+                    accessToken = tokenProp.GetString();
+                    _logger.LogInformation("Successfully extracted access token from JSON response");
+                }
+                else if (jsonResponse.TryGetProperty("error", out var errorProp))
+                {
+                    var error = errorProp.GetString();
+                    var errorDesc = jsonResponse.TryGetProperty("error_description", out var descProp) ? descProp.GetString() : "Unknown error";
+                    _logger.LogError("GitHub OAuth error (JSON): {Error} - {Description}", error, errorDesc);
+                    return null;
+                }
+            }
+            catch (JsonException jsonEx)
+            {
+                // Response might be form-encoded instead
+                _logger.LogWarning(jsonEx, "Failed to parse as JSON, trying form-encoded format. Response: {Response}", responseContent);
+                
+                try
+                {
+                    var parameters = responseContent.Split('&')
+                        .Where(p => p.Contains('='))
+                        .Select(p => 
+                        {
+                            var parts = p.Split(new[] { '=' }, 2);
+                            return parts.Length == 2 
+                                ? new { Key = parts[0], Value = Uri.UnescapeDataString(parts[1]) }
+                                : null;
+                        })
+                        .Where(p => p != null)
+                        .ToDictionary(p => p!.Key, p => p!.Value);
 
-            // Parse the response (GitHub returns form-encoded data by default)
-            var parameters = responseContent.Split('&')
-                .Select(p => p.Split('='))
-                .ToDictionary(p => p[0], p => Uri.UnescapeDataString(p[1]));
+                    if (parameters.TryGetValue("access_token", out var token))
+                    {
+                        accessToken = token;
+                        _logger.LogInformation("Successfully extracted access token from form-encoded response");
+                    }
+                    else if (parameters.TryGetValue("error", out var error))
+                    {
+                        var errorDescription = parameters.TryGetValue("error_description", out var desc) ? desc : "Unknown error";
+                        _logger.LogError("GitHub OAuth error (form-encoded): {Error} - {Description}", error, errorDescription);
+                        return null;
+                    }
+                }
+                catch (Exception parseEx)
+                {
+                    _logger.LogError(parseEx, "Failed to parse GitHub token response in both JSON and form-encoded formats. Content: {Response}", responseContent);
+                    return null;
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Unexpected error parsing GitHub token response. Content: {Response}", responseContent);
+                return null;
+            }
 
-            if (parameters.TryGetValue("access_token", out var accessToken))
+            if (!string.IsNullOrEmpty(accessToken))
             {
                 _logger.LogInformation("Successfully exchanged GitHub OAuth code for access token");
                 return accessToken;
             }
 
-            if (parameters.TryGetValue("error", out var error))
-            {
-                var errorDescription = parameters.TryGetValue("error_description", out var desc) ? desc : "Unknown error";
-                _logger.LogError("GitHub OAuth error: {Error} - {Description}", error, errorDescription);
-            }
-
+            _logger.LogError("No access token found in GitHub response. Content: {Response}", responseContent);
             return null;
         }
         catch (Exception ex)

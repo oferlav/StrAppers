@@ -35,3 +35,6 @@ UPDATE "Roles" SET "Type" = 2 WHERE "Type" IS NULL;
 SELECT "Id", "Name", "Type", "IsActive" FROM "Roles" ORDER BY "Id";
 
 
+
+
+

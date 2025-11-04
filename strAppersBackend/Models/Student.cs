@@ -74,6 +74,10 @@ public class Student
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
     public DateTime? UpdatedAt { get; set; }
     
+    // Programming language preference
+    public int? ProgrammingLanguageId { get; set; }
+    public ProgrammingLanguage? ProgrammingLanguage { get; set; }
+    
     // Navigation properties
     public ICollection<StudentRole> StudentRoles { get; set; } = new List<StudentRole>();
 }
@@ -112,6 +116,8 @@ public class CreateStudentRequest
     public int RoleId { get; set; }
     
     public string? Photo { get; set; }  // Base64 encoded image or URL
+    
+    public int? ProgrammingLanguageId { get; set; }  // Optional programming language preference
 }
 
 public class UpdateStudentRequest
@@ -140,4 +146,6 @@ public class UpdateStudentRequest
     public int? RoleId { get; set; }
     
     public string? Photo { get; set; }  // Base64 encoded image or URL
+    
+    public int? ProgrammingLanguageId { get; set; }  // Optional programming language preference
 }

@@ -23,6 +23,7 @@ public class ApplicationDbContext : DbContext
         public DbSet<ModuleType> ModuleTypes { get; set; }
         public DbSet<ProjectModule> ProjectModules { get; set; }
         public DbSet<Figma> Figma { get; set; }
+        public DbSet<ProgrammingLanguage> ProgrammingLanguages { get; set; }
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -120,6 +121,7 @@ public class ApplicationDbContext : DbContext
             entity.Property(e => e.GithubUser).IsRequired().HasMaxLength(255);
             entity.Property(e => e.Photo).HasColumnName("Photo").HasColumnType("text");
             entity.Property(e => e.StartPendingAt).HasColumnType("timestamp with time zone");
+            entity.Property(e => e.ProgrammingLanguageId).HasColumnName("ProgrammingLanguageId");
             entity.Property(e => e.CreatedAt).HasDefaultValueSql("CURRENT_TIMESTAMP");
             
             entity.HasIndex(e => e.Email).IsUnique();
@@ -169,6 +171,12 @@ public class ApplicationDbContext : DbContext
             entity.HasOne(e => e.ProjectBoard)
                   .WithMany()
                   .HasForeignKey(e => e.BoardId)
+                  .OnDelete(DeleteBehavior.SetNull);
+
+            // Foreign key relationship to ProgrammingLanguage
+            entity.HasOne(e => e.ProgrammingLanguage)
+                  .WithMany(pl => pl.Students)
+                  .HasForeignKey(e => e.ProgrammingLanguageId)
                   .OnDelete(DeleteBehavior.SetNull);
 
             // Seed test data
@@ -435,6 +443,19 @@ public class ApplicationDbContext : DbContext
             // Indexes for better performance
             entity.HasIndex(e => e.BoardId);
             entity.HasIndex(e => e.FigmaFileKey).IsUnique();
+        });
+
+        // Configure ProgrammingLanguage entity
+        modelBuilder.Entity<ProgrammingLanguage>(entity =>
+        {
+            entity.HasKey(e => e.Id);
+            entity.Property(e => e.Name).IsRequired().HasMaxLength(100);
+            entity.Property(e => e.Creator).HasMaxLength(200);
+            entity.Property(e => e.Description).HasColumnType("TEXT");
+            entity.Property(e => e.CreatedAt).HasDefaultValueSql("CURRENT_TIMESTAMP");
+            
+            entity.HasIndex(e => e.Name).IsUnique();
+            entity.HasIndex(e => e.IsActive);
         });
     }
 }

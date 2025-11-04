@@ -1,5 +1,6 @@
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -15,6 +16,7 @@ public interface IAIService
     Task<CreateDataModelResponse> CreateDataModelAsync(int projectId, string modulesData);
     Task<UpdateModuleResponse> UpdateModuleAsync(int moduleId, string currentDescription, string userInput);
     Task<UpdateDataModelResponse> UpdateDataModelAsync(int projectId, string currentSqlScript, string userInput);
+    Task<CodebaseStructureAIResponse> GenerateCodebaseStructureAsync(string systemPrompt, string userPrompt);
 }
 
 public class AIService : IAIService
@@ -1068,6 +1070,374 @@ Return ONLY valid JSON with exactly {totalSprints} sprints (NO EPICS):
             };
         }
     }
+
+    public async Task<CodebaseStructureAIResponse> GenerateCodebaseStructureAsync(string systemPrompt, string userPrompt)
+    {
+        try
+        {
+            var startTime = DateTime.UtcNow;
+            _logger.LogInformation("Generating codebase structure via Claude AI. System prompt length: {SysLen}, User prompt length: {UserLen}", 
+                systemPrompt?.Length ?? 0, userPrompt?.Length ?? 0);
+            
+            _logger.LogInformation("=== SYSTEM PROMPT ===\n{SystemPrompt}", systemPrompt ?? "");
+            _logger.LogInformation("=== USER PROMPT ===\n{UserPrompt}", userPrompt ?? "");
+
+            // Get Anthropic configuration
+            var anthropicApiKey = _configuration["Anthropic:ApiKey"] ?? throw new InvalidOperationException("Anthropic API key not configured");
+            var anthropicBaseUrl = _configuration["Anthropic:BaseUrl"] ?? "https://api.anthropic.com/v1";
+            var anthropicVersion = _configuration["Anthropic:ApiVersion"] ?? "2023-06-01";
+            var model = _configuration["Anthropic:Model"] ?? "claude-sonnet-4-5-20250929";
+            
+            _logger.LogDebug("Using Anthropic model: {Model}, BaseUrl: {BaseUrl}, Version: {Version}", model, anthropicBaseUrl, anthropicVersion);
+
+            // Create a new HttpClient for this request with Anthropic-specific headers
+            // Use longer timeout for large codebase generation (30 minutes)
+            using var client = new HttpClient();
+            client.DefaultRequestHeaders.Add("x-api-key", anthropicApiKey);
+            client.DefaultRequestHeaders.Add("anthropic-version", anthropicVersion);
+            client.Timeout = TimeSpan.FromMinutes(30);
+
+            // Claude API request format
+            var requestBody = new
+            {
+                model = model,
+                max_tokens = _aiConfig.MaxTokens,
+                system = systemPrompt,
+                messages = new[]
+                {
+                    new { role = "user", content = userPrompt }
+                },
+                temperature = _aiConfig.Temperature
+            };
+
+            var jsonContent = JsonSerializer.Serialize(requestBody);
+            var content = new StringContent(jsonContent, Encoding.UTF8, "application/json");
+
+            _logger.LogDebug("Calling Claude API for codebase structure generation with model {Model}", model);
+            var apiCallStart = DateTime.UtcNow;
+            var response = await client.PostAsync($"{anthropicBaseUrl}/messages", content);
+            var apiCallDuration = (DateTime.UtcNow - apiCallStart).TotalSeconds;
+            _logger.LogInformation("Claude API call completed in {Duration} seconds. Status: {StatusCode}", 
+                apiCallDuration, response.StatusCode);
+
+            if (!response.IsSuccessStatusCode)
+            {
+                var errorContent = await response.Content.ReadAsStringAsync();
+                _logger.LogError("Claude API error: {StatusCode} - {Error}", response.StatusCode, errorContent);
+                return new CodebaseStructureAIResponse
+                {
+                    Success = false,
+                    ErrorMessage = $"Error calling Claude API: {response.StatusCode}. {errorContent}"
+                };
+            }
+
+            var responseContent = await response.Content.ReadAsStringAsync();
+            _logger.LogDebug("Received response from Claude API. Length: {Length} chars", responseContent.Length);
+            
+            var claudeResponse = JsonSerializer.Deserialize<ClaudeResponse>(responseContent, new JsonSerializerOptions
+            {
+                PropertyNameCaseInsensitive = true
+            });
+
+            if (claudeResponse?.Content == null || claudeResponse.Content.Count == 0)
+            {
+                _logger.LogError("Empty response from Claude API. Response was: {Response}", responseContent);
+                return new CodebaseStructureAIResponse
+                {
+                    Success = false,
+                    ErrorMessage = "Empty response from Claude API"
+                };
+            }
+
+            // Claude returns content as an array with type="text"
+            var textContent = claudeResponse.Content.FirstOrDefault(c => c.Type == "text");
+            if (textContent == null || string.IsNullOrEmpty(textContent.Text))
+            {
+                _logger.LogError("No text content in Claude API response. Content count: {Count}", claudeResponse.Content.Count);
+                return new CodebaseStructureAIResponse
+                {
+                    Success = false,
+                    ErrorMessage = "No text content in Claude API response"
+                };
+            }
+
+            var aiContent = textContent.Text;
+            _logger.LogInformation("Received AI content. Length: {Length} chars. First 200 chars: {Preview}", 
+                aiContent.Length, aiContent.Length > 200 ? aiContent.Substring(0, 200) : aiContent);
+
+            // Try to parse the JSON response
+            try
+            {
+                // Remove markdown code blocks if present
+                var cleanedContent = aiContent.Trim();
+                
+                // Try to extract JSON from markdown code blocks
+                if (cleanedContent.StartsWith("```"))
+                {
+                    // Find the first ``` and last ```
+                    var firstIndex = cleanedContent.IndexOf("```");
+                    if (firstIndex >= 0)
+                    {
+                        var afterFirst = cleanedContent.Substring(firstIndex + 3);
+                        // Skip language identifier if present
+                        if (afterFirst.StartsWith("json", StringComparison.OrdinalIgnoreCase))
+                        {
+                            afterFirst = afterFirst.Substring(4);
+                        }
+                        // Trim whitespace after language identifier
+                        afterFirst = afterFirst.TrimStart();
+                        
+                        // Find the closing ```
+                        var lastIndex = afterFirst.LastIndexOf("```");
+                        if (lastIndex >= 0)
+                        {
+                            cleanedContent = afterFirst.Substring(0, lastIndex).Trim();
+                        }
+                        else
+                        {
+                            // No closing ```, try to find JSON start
+                            var jsonStart = afterFirst.IndexOf('{');
+                            if (jsonStart >= 0)
+                            {
+                                cleanedContent = afterFirst.Substring(jsonStart);
+                            }
+                        }
+                    }
+                }
+                
+                // Fallback: try regex patterns if simple extraction didn't work
+                if (cleanedContent.StartsWith("`") || !cleanedContent.TrimStart().StartsWith("{"))
+                {
+                    var jsonMatch = System.Text.RegularExpressions.Regex.Match(aiContent, @"```(?:json)?\s*(\{.*?\})\s*```", System.Text.RegularExpressions.RegexOptions.Singleline | System.Text.RegularExpressions.RegexOptions.Multiline);
+                    if (jsonMatch.Success && jsonMatch.Groups.Count > 1)
+                    {
+                        cleanedContent = jsonMatch.Groups[1].Value;
+                    }
+                    else
+                    {
+                        // Try to find JSON object that starts after ```json
+                        var jsonStartIndex = aiContent.IndexOf('{');
+                        if (jsonStartIndex >= 0)
+                        {
+                            // Find matching closing brace (simplified - might need proper JSON parsing)
+                            var jsonEndIndex = aiContent.LastIndexOf('}');
+                            if (jsonEndIndex > jsonStartIndex)
+                            {
+                                cleanedContent = aiContent.Substring(jsonStartIndex, jsonEndIndex - jsonStartIndex + 1);
+                            }
+                        }
+                    }
+                }
+                
+                _logger.LogDebug("Cleaned JSON content length: {Length} chars. First 100 chars: {Preview}", 
+                    cleanedContent.Length, cleanedContent.Length > 100 ? cleanedContent.Substring(0, 100) : cleanedContent);
+
+                CodebaseStructure? codebaseStructure = null;
+                try
+                {
+                    // Try to deserialize as new format first (devcontainer + files)
+                    var newStructure = JsonSerializer.Deserialize<NewCodebaseStructure>(cleanedContent, new JsonSerializerOptions
+                    {
+                        PropertyNameCaseInsensitive = true
+                    });
+                    
+                    if (newStructure != null)
+                    {
+                        // Transform new format to existing CodebaseStructure format
+                        codebaseStructure = TransformNewStructureToCodebaseStructure(newStructure);
+                        _logger.LogInformation("Successfully parsed new format structure and transformed it");
+                    }
+                    else
+                    {
+                        // Try old format
+                        codebaseStructure = JsonSerializer.Deserialize<CodebaseStructure>(cleanedContent, new JsonSerializerOptions
+                        {
+                            PropertyNameCaseInsensitive = true
+                        });
+                    }
+                }
+                catch (JsonException jsonEx)
+                {
+                    // Try to fix common JSON escaping issues
+                    _logger.LogWarning("Initial JSON parse failed, attempting to fix common escaping issues. Error: {Error}", jsonEx.Message);
+                    
+                    // Fix unescaped newlines in content strings (most common issue)
+                    // This regex finds "content": "..." patterns and replaces actual newlines with \n
+                    var fixedContent = System.Text.RegularExpressions.Regex.Replace(
+                        cleanedContent,
+                        @"""content"":\s*""([^""]*)",
+                        m =>
+                        {
+                            var content = m.Groups[1].Value;
+                            // Replace actual newlines with \n
+                            content = content.Replace("\r\n", "\\n").Replace("\n", "\\n").Replace("\r", "\\n");
+                            // Replace unescaped quotes with \"
+                            content = content.Replace("\"", "\\\"");
+                            // Replace unescaped backslashes (but not already escaped ones)
+                            content = System.Text.RegularExpressions.Regex.Replace(content, @"\\(?![nrt""\\])", @"\\\\");
+                            return $"\"content\": \"{content}";
+                        },
+                        System.Text.RegularExpressions.RegexOptions.Singleline);
+                    
+                    // Also fix the closing quote pattern
+                    fixedContent = System.Text.RegularExpressions.Regex.Replace(
+                        fixedContent,
+                        @"([^\\])""\s*([,\]])",
+                        @"$1\""$2");
+                    
+                    try
+                    {
+                        // Try new format first
+                        var newStructure = JsonSerializer.Deserialize<NewCodebaseStructure>(fixedContent, new JsonSerializerOptions
+                        {
+                            PropertyNameCaseInsensitive = true
+                        });
+                        
+                        if (newStructure != null)
+                        {
+                            codebaseStructure = TransformNewStructureToCodebaseStructure(newStructure);
+                            _logger.LogInformation("Successfully fixed and parsed new format JSON after escaping corrections");
+                        }
+                        else
+                        {
+                            // Try old format
+                            codebaseStructure = JsonSerializer.Deserialize<CodebaseStructure>(fixedContent, new JsonSerializerOptions
+                            {
+                                PropertyNameCaseInsensitive = true
+                            });
+                            _logger.LogInformation("Successfully fixed and parsed old format JSON after escaping corrections");
+                        }
+                    }
+                    catch
+                    {
+                        // If fixing doesn't work, rethrow original exception
+                        throw jsonEx;
+                    }
+                }
+
+                if (codebaseStructure == null)
+                {
+                    throw new JsonException("Failed to deserialize codebase structure");
+                }
+
+                var totalDuration = (DateTime.UtcNow - startTime).TotalSeconds;
+                _logger.LogInformation("Successfully generated codebase structure via AI in {Duration} seconds. Models: {ModelCount}, Services: {ServiceCount}, Controllers: {ControllerCount}", 
+                    totalDuration,
+                    codebaseStructure.Models?.Count ?? 0,
+                    codebaseStructure.Services?.Count ?? 0,
+                    codebaseStructure.Controllers?.Count ?? 0);
+                return new CodebaseStructureAIResponse
+                {
+                    Success = true,
+                    CodebaseStructure = codebaseStructure
+                };
+            }
+            catch (JsonException jsonEx)
+            {
+                _logger.LogError(jsonEx, "Failed to parse AI response as JSON: {Content}. Error: {Error}", 
+                    aiContent.Length > 1000 ? aiContent.Substring(0, 1000) + "..." : aiContent, jsonEx.Message);
+                return new CodebaseStructureAIResponse
+                {
+                    Success = false,
+                    ErrorMessage = $"Failed to parse AI response: {jsonEx.Message}"
+                };
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error generating codebase structure via AI");
+            return new CodebaseStructureAIResponse
+            {
+                Success = false,
+                ErrorMessage = $"Error generating codebase structure: {ex.Message}"
+            };
+        }
+    }
+
+    /// <summary>
+    /// Transform new structure (devcontainer + files) to existing CodebaseStructure format
+    /// </summary>
+    private CodebaseStructure TransformNewStructureToCodebaseStructure(NewCodebaseStructure newStructure)
+    {
+        var result = new CodebaseStructure();
+        
+        // Transform devcontainer object to CodeFile and preserve as NewCodebaseStructure
+        if (newStructure.Devcontainer != null)
+        {
+            var devContainerJson = JsonSerializer.Serialize(newStructure.Devcontainer, new JsonSerializerOptions
+            {
+                WriteIndented = true,
+                PropertyNamingPolicy = JsonNamingPolicy.CamelCase
+            });
+            
+            // Set legacy DevContainer property (CodeFile) - will be ignored during serialization
+            result.DevContainer = new CodeFile
+            {
+                Name = "devcontainer.json",
+                Path = ".devcontainer/devcontainer.json",
+                Content = devContainerJson
+            };
+            
+            // Set new Devcontainer property (NewCodebaseStructure) - will be serialized
+            result.Devcontainer = new NewCodebaseStructure
+            {
+                Devcontainer = newStructure.Devcontainer,
+                Files = new List<CodeFile>() // Will be populated below
+            };
+        }
+        
+        // Transform files array - categorize by path patterns and extract name from path
+        foreach (var file in newStructure.Files)
+        {
+            // Ensure file has a name (extract from path if missing)
+            if (string.IsNullOrEmpty(file.Name) && !string.IsNullOrEmpty(file.Path))
+            {
+                file.Name = System.IO.Path.GetFileName(file.Path);
+            }
+            
+            var path = file.Path.ToLower();
+            
+            if (path.Contains("/models/") || path.Contains("model."))
+            {
+                result.Models.Add(file);
+            }
+            else if (path.Contains("/services/") || path.Contains("service."))
+            {
+                result.Services.Add(file);
+            }
+            else if (path.Contains("/controllers/") || path.Contains("controller."))
+            {
+                result.Controllers.Add(file);
+            }
+            else if (path.Contains("/views/") || path.Contains("/pages/"))
+            {
+                result.Views.Add(file);
+            }
+            else if (path.Contains("applicationdbcontext") || path.Contains("dbcontext"))
+            {
+                result.ApplicationDbContext = file;
+            }
+            else if (path.Contains("appsettings") || path.Contains("app.config"))
+            {
+                result.AppSettings = file;
+            }
+            else if (path.Contains(".sql") && (path.Contains("/database/") || path.Contains("schema") || path.Contains("seed")))
+            {
+                result.SqlScripts.Add(file);
+            }
+            else if (path.Contains("devcontainer.json"))
+            {
+                result.DevContainer = file;
+            }
+            else
+            {
+                // Add to Files list for new structure (includes frontend, config, docs, etc.)
+                result.Files.Add(file);
+            }
+        }
+        
+        return result;
+    }
 }
 
 // Helper class for parsing modules response
@@ -1089,4 +1459,66 @@ public class Choice
 public class OpenAIMessage
 {
     public string Content { get; set; } = string.Empty;
+}
+
+public class CodebaseStructureAIResponse
+{
+    public bool Success { get; set; }
+    public string? ErrorMessage { get; set; }
+    public CodebaseStructure? CodebaseStructure { get; set; }
+}
+
+public class CodebaseStructure
+{
+    public List<CodeFile> Models { get; set; } = new();
+    public List<CodeFile> Services { get; set; } = new();
+    public List<CodeFile> Controllers { get; set; } = new();
+    public List<CodeFile> Views { get; set; } = new();
+    public CodeFile? ApplicationDbContext { get; set; }
+    public CodeFile? AppSettings { get; set; }
+    public List<CodeFile> PublishProfiles { get; set; } = new();
+    public List<CodeFile> SqlScripts { get; set; } = new();
+    
+    [JsonIgnore] // Ignore during serialization to avoid conflict with Devcontainer
+    public CodeFile? DevContainer { get; set; } // Required for GitHub Codespaces (legacy)
+    
+    // New structure fields for full-stack development
+    public NewCodebaseStructure? Devcontainer { get; set; }
+    public List<CodeFile> Files { get; set; } = new();
+}
+
+// New structure returned by AI (devcontainer + files array)
+public class NewCodebaseStructure
+{
+    public NewDevContainer? Devcontainer { get; set; }
+    public List<CodeFile> Files { get; set; } = new();
+}
+
+public class NewDevContainer
+{
+    public string Name { get; set; } = string.Empty;
+    public string Image { get; set; } = string.Empty;
+    public Dictionary<string, object>? Features { get; set; }
+    public Dictionary<string, object>? Customizations { get; set; }
+    public int[]? ForwardPorts { get; set; }
+    public string? PostCreateCommand { get; set; }
+    public string? RemoteUser { get; set; }
+}
+
+public class CodeFile
+{
+    public string Name { get; set; } = string.Empty;
+    public string Path { get; set; } = string.Empty;
+    public string Content { get; set; } = string.Empty;
+}
+
+public class ClaudeResponse
+{
+    public List<ClaudeContent> Content { get; set; } = new();
+}
+
+public class ClaudeContent
+{
+    public string Type { get; set; } = string.Empty;
+    public string Text { get; set; } = string.Empty;
 }
