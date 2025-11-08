@@ -746,7 +746,13 @@ public class BoardsController : ControllerBase
     {
         try
         {
+            // Check if GetChat logs should be disabled (default: true = disabled)
+            var disableLogs = _configuration.GetValue<bool>("Logging:DisableGetChatLogs", true);
+
+            if (!disableLogs)
+            {
             _logger.LogInformation("Getting chat information for BoardId {BoardId}", boardId);
+            }
 
             var board = await _context.ProjectBoards
                 .Include(pb => pb.Project)
@@ -755,7 +761,10 @@ public class BoardsController : ControllerBase
 
             if (board == null)
             {
+                if (!disableLogs)
+            {
                 _logger.LogWarning("Board with ID {BoardId} not found", boardId);
+                }
                 return NotFound(new
                 {
                     success = false,
@@ -774,6 +783,7 @@ public class BoardsController : ControllerBase
         }
         catch (Exception ex)
         {
+            // Always log errors, even if other logs are disabled
             _logger.LogError(ex, "Error getting chat information for board {BoardId}", boardId);
             return StatusCode(500, "An error occurred while retrieving chat information");
         }

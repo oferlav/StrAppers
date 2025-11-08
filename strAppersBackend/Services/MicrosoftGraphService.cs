@@ -41,6 +41,10 @@ public class MicrosoftGraphService : IMicrosoftGraphService
         _serviceAccountEmail = _configuration["MicrosoftGraph:ServiceAccountEmail"] ?? "";
         _serviceAccountUserId = _configuration["MicrosoftGraph:ServiceAccountUserId"] ?? "";
         
+        // Only log configuration if GetChat logs are not disabled (to reduce log noise)
+        var disableGetChatLogs = _configuration.GetValue<bool>("Logging:DisableGetChatLogs", true);
+        if (!disableGetChatLogs)
+        {
         _logger.LogInformation("MicrosoftGraph Configuration loaded:");
         _logger.LogInformation("- TenantId: '{TenantId}' (Length: {TenantIdLength})", _tenantId, _tenantId?.Length ?? 0);
         _logger.LogInformation("- ClientId: '{ClientId}' (Length: {ClientIdLength})", _clientId, _clientId?.Length ?? 0);
@@ -53,6 +57,7 @@ public class MicrosoftGraphService : IMicrosoftGraphService
         foreach (var item in microsoftGraphSection.GetChildren())
         {
             _logger.LogInformation("- {Key}: '{Value}'", item.Key, item.Value);
+            }
         }
     }
 

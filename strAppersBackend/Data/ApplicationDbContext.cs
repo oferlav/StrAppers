@@ -24,6 +24,7 @@ public class ApplicationDbContext : DbContext
         public DbSet<ProjectModule> ProjectModules { get; set; }
         public DbSet<Figma> Figma { get; set; }
         public DbSet<ProgrammingLanguage> ProgrammingLanguages { get; set; }
+        public DbSet<ProjectsIDE> ProjectsIDE { get; set; }
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -79,6 +80,9 @@ public class ApplicationDbContext : DbContext
             entity.Property(e => e.Address).HasMaxLength(200);
             entity.Property(e => e.Type).HasMaxLength(50);
             entity.Property(e => e.Logo).HasColumnName("Logo").HasColumnType("text");
+            entity.Property(e => e.TermsUse).HasColumnType("text");
+            entity.Property(e => e.TermsAccepted).HasDefaultValue(false);
+            entity.Property(e => e.TermsAcceptedAt).HasColumnType("timestamp with time zone");
             entity.Property(e => e.CreatedAt).HasDefaultValueSql("CURRENT_TIMESTAMP");
 
             // Seed test data
@@ -456,6 +460,31 @@ public class ApplicationDbContext : DbContext
             
             entity.HasIndex(e => e.Name).IsUnique();
             entity.HasIndex(e => e.IsActive);
+        });
+
+        // Configure ProjectsIDE entity
+        modelBuilder.Entity<ProjectsIDE>(entity =>
+        {
+            entity.ToTable("ProjectsIDE");
+            entity.HasKey(e => e.Id);
+            entity.Property(e => e.ChunkId).IsRequired().HasMaxLength(100);
+            entity.Property(e => e.ChunkType).IsRequired().HasMaxLength(50);
+            entity.Property(e => e.Status).HasMaxLength(50).HasDefaultValue("pending");
+            entity.Property(e => e.FilesJson).HasColumnType("jsonb");
+            entity.Property(e => e.FilesCount).HasDefaultValue(0);
+            entity.Property(e => e.Dependencies).HasColumnType("text[]");
+            entity.Property(e => e.ErrorMessage).HasColumnType("text");
+            entity.Property(e => e.CreatedAt).HasDefaultValueSql("CURRENT_TIMESTAMP");
+            
+            entity.HasOne(e => e.Project)
+                  .WithMany(p => p.IDEChunks)
+                  .HasForeignKey(e => e.ProjectId)
+                  .OnDelete(DeleteBehavior.Cascade);
+            
+            entity.HasIndex(e => e.ProjectId);
+            entity.HasIndex(e => e.Status);
+            entity.HasIndex(e => e.GenerationOrder);
+            entity.HasIndex(e => new { e.ProjectId, e.ChunkId }).IsUnique();
         });
     }
 }

@@ -8,6 +8,7 @@ using System.Drawing;
 using System.Drawing.Imaging;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using System.Text.RegularExpressions;
 
 namespace strAppersBackend.Controllers;
@@ -591,17 +592,95 @@ public class SystemDesignController : ControllerBase
     }
 
     /// <summary>
-    /// Update a module using AI feedback
+    /// Refine a module description using AI without persisting changes
     /// </summary>
-    [HttpPost("use/update-module")]
-    public async Task<ActionResult<UpdateModuleResponse>> UpdateModule([FromBody] UpdateModuleRequest request)
+    [HttpGet("use/refine-module")]
+    public async Task<ActionResult<UpdateModuleResponse>> RefineModule([FromQuery] int projectId, [FromQuery] int sequence, [FromQuery] string? userInput)
     {
         try
         {
-            _logger.LogInformation("Updating module with sequence {Sequence} for Project {ProjectId}", request.Sequence, request.ProjectId);
-            _logger.LogInformation("User Input: {UserInput}", request.UserInput);
+            _logger.LogInformation("Refining module with sequence {Sequence} for Project {ProjectId}", sequence, projectId);
 
-            // Validate project exists
+            if (string.IsNullOrWhiteSpace(userInput))
+            {
+                return BadRequest(new UpdateModuleResponse
+                {
+                    Success = false,
+                    Message = "User input is required."
+                });
+            }
+
+            var project = await _context.Projects.FindAsync(projectId);
+            if (project == null)
+            {
+                return NotFound(new UpdateModuleResponse
+                {
+                    Success = false,
+                    Message = $"Project with ID {projectId} not found"
+                });
+            }
+
+            var module = await _context.ProjectModules
+                .FirstOrDefaultAsync(pm => pm.Sequence == sequence && pm.ProjectId == projectId);
+
+            if (module == null)
+            {
+                return NotFound(new UpdateModuleResponse
+                {
+                    Success = false,
+                    Message = $"Module with sequence {sequence} not found for project {projectId}"
+                });
+            }
+
+            var currentDescription = module.Description ?? string.Empty;
+            _logger.LogInformation("Current module description length: {Length}", currentDescription.Length);
+
+            var cleanedUserInput = userInput.Replace("\r\n", "\n").Replace("\r", "\n");
+            _logger.LogInformation("Cleaned user input length: {Length}", cleanedUserInput.Length);
+
+            var aiResponse = await _aiService.UpdateModuleAsync(module.Id, currentDescription, cleanedUserInput);
+            if (!aiResponse.Success)
+            {
+                return BadRequest(aiResponse);
+            }
+
+            return Ok(new UpdateModuleResponse
+            {
+                Success = true,
+                UpdatedDescription = aiResponse.UpdatedDescription,
+                Title = module.Title ?? string.Empty
+            });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error refining module with sequence {Sequence} for Project {ProjectId}", sequence, projectId);
+            return StatusCode(500, new UpdateModuleResponse
+            {
+                Success = false,
+                Message = $"An error occurred while refining module: {ex.Message}"
+            });
+        }
+    }
+
+    /// <summary>
+    /// Update a module description directly
+    /// </summary>
+    [HttpPost("use/update-module")]
+    public async Task<ActionResult<UpdateModuleResponse>> UpdateModule([FromBody] UpdateModuleApplyRequest request)
+    {
+        try
+        {
+            _logger.LogInformation("Updating module description directly for Project {ProjectId}, Sequence {Sequence}", request.ProjectId, request.Sequence);
+
+            if (string.IsNullOrWhiteSpace(request.Description))
+            {
+                return BadRequest(new UpdateModuleResponse
+                {
+                    Success = false,
+                    Message = "Description is required."
+                });
+            }
+
             var project = await _context.Projects.FindAsync(request.ProjectId);
             if (project == null)
             {
@@ -612,7 +691,6 @@ public class SystemDesignController : ControllerBase
                 });
             }
 
-            // Get the module by sequence and project
             var module = await _context.ProjectModules
                 .FirstOrDefaultAsync(pm => pm.Sequence == request.Sequence && pm.ProjectId == request.ProjectId);
 
@@ -625,38 +703,21 @@ public class SystemDesignController : ControllerBase
                 });
             }
 
-            // Get the current description from the database
-            var currentDescription = module.Description ?? "";
-            _logger.LogInformation("Current module description: {Description}", currentDescription);
-
-            // Clean user input to handle newlines properly
-            var cleanedUserInput = request.UserInput?.Replace("\r\n", "\n").Replace("\r", "\n") ?? "";
-            _logger.LogInformation("Cleaned user input: {UserInput}", cleanedUserInput);
-
-            // Call AI service to update module description
-            var aiResponse = await _aiService.UpdateModuleAsync(module.Id, currentDescription, cleanedUserInput);
-            if (!aiResponse.Success)
-            {
-                return BadRequest(aiResponse);
-            }
-
-            // Update module description
-            module.Description = aiResponse.UpdatedDescription ?? module.Description;
+            module.Description = request.Description;
             await _context.SaveChangesAsync();
 
-            _logger.LogInformation("Successfully updated module with sequence {Sequence} (ID: {ModuleId}) for Project {ProjectId}", 
-                request.Sequence, module.Id, request.ProjectId);
+            _logger.LogInformation("Successfully updated module description for Project {ProjectId}, Sequence {Sequence}", request.ProjectId, request.Sequence);
 
             return Ok(new UpdateModuleResponse
             {
                 Success = true,
-                UpdatedDescription = aiResponse.UpdatedDescription
+                UpdatedDescription = module.Description,
+                Title = module.Title ?? string.Empty
             });
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Error updating module with sequence {Sequence} for Project {ProjectId}", 
-                request.Sequence, request.ProjectId);
+            _logger.LogError(ex, "Error updating module description directly for Project {ProjectId}, Sequence {Sequence}", request.ProjectId, request.Sequence);
             return StatusCode(500, new UpdateModuleResponse
             {
                 Success = false,
@@ -703,13 +764,59 @@ public class SystemDesignController : ControllerBase
 
             _logger.LogInformation("Found {Count} modules for Project {ProjectId}", modules.Count, request.ProjectId);
 
+            var projectTitle = project.Title ?? "Untitled Project";
+            var projectDescription = project.Description ?? "No description available";
+            var projectExtendedDescription = project.ExtendedDescription ?? "No extended description available";
+
+            if (request.ToTranslate)
+            {
+                if (!string.IsNullOrWhiteSpace(projectTitle))
+                {
+                    var titleTranslation = await _aiService.TranslateTextToEnglishAsync(projectTitle);
+                    if (titleTranslation.Success && !string.IsNullOrWhiteSpace(titleTranslation.Text))
+                    {
+                        projectTitle = titleTranslation.Text;
+                    }
+                    else
+                    {
+                        _logger.LogWarning("Failed to translate project title for Project {ProjectId}: {Message}", request.ProjectId, titleTranslation.Message);
+                    }
+                }
+
+                if (!string.IsNullOrWhiteSpace(projectDescription))
+                {
+                    var descriptionTranslation = await _aiService.TranslateTextToEnglishAsync(projectDescription);
+                    if (descriptionTranslation.Success && !string.IsNullOrWhiteSpace(descriptionTranslation.Text))
+                    {
+                        projectDescription = descriptionTranslation.Text;
+                    }
+                    else
+                    {
+                        _logger.LogWarning("Failed to translate project description for Project {ProjectId}: {Message}", request.ProjectId, descriptionTranslation.Message);
+                    }
+                }
+
+                if (!string.IsNullOrWhiteSpace(projectExtendedDescription))
+                {
+                    var extendedTranslation = await _aiService.TranslateTextToEnglishAsync(projectExtendedDescription);
+                    if (extendedTranslation.Success && !string.IsNullOrWhiteSpace(extendedTranslation.Text))
+                    {
+                        projectExtendedDescription = extendedTranslation.Text;
+                    }
+                    else
+                    {
+                        _logger.LogWarning("Failed to translate project extended description for Project {ProjectId}: {Message}", request.ProjectId, extendedTranslation.Message);
+                    }
+                }
+            }
+
             // Build the bound content
             var boundContent = new StringBuilder();
-            boundContent.AppendLine($"# System Design for {project.Title}");
+            boundContent.AppendLine($"# System Design for {projectTitle}");
             boundContent.AppendLine();
-            boundContent.AppendLine($"**Project Description:** {project.Description ?? "No description available"}");
+            boundContent.AppendLine($"**Project Description:** {projectDescription}");
             boundContent.AppendLine();
-            boundContent.AppendLine($"**Extended Description:** {project.ExtendedDescription ?? "No extended description available"}");
+            boundContent.AppendLine($"**Extended Description:** {projectExtendedDescription}");
             boundContent.AppendLine();
             boundContent.AppendLine("---");
             boundContent.AppendLine();
@@ -727,16 +834,34 @@ public class SystemDesignController : ControllerBase
                 for (int i = 0; i < screenModules.Count; i++)
                 {
                     var module = screenModules[i];
-                    boundContent.AppendLine($"### Module {i + 1}: {module.Title}");
+
+                    var moduleTitle = module.Title ?? "Untitled Module";
+                    var moduleDescription = module.Description ?? "No description available";
+
+                    if (request.ToTranslate)
+                    {
+                        var translationResponse = await _aiService.TranslateModuleToEnglishAsync(moduleTitle, moduleDescription);
+                        if (translationResponse.Success)
+                        {
+                            moduleTitle = translationResponse.Title ?? moduleTitle;
+                            moduleDescription = translationResponse.Description ?? moduleDescription;
+                        }
+                        else
+                        {
+                            _logger.LogWarning("Failed to translate module {ModuleSequence} for Project {ProjectId}: {Message}", module.Sequence, request.ProjectId, translationResponse.Message);
+                        }
+                    }
+
+                    boundContent.AppendLine($"### Module {i + 1}: {moduleTitle}");
                     boundContent.AppendLine();
-                    boundContent.AppendLine(module.Description ?? "No description available");
+                    boundContent.AppendLine(moduleDescription);
                     boundContent.AppendLine();
                     
                     // Add inputs and outputs if they exist in the description
-                    if (!string.IsNullOrEmpty(module.Description) && module.Description.Contains("Inputs:") && module.Description.Contains("Outputs:"))
+                    if (!string.IsNullOrEmpty(moduleDescription) && moduleDescription.Contains("Inputs:") && moduleDescription.Contains("Outputs:"))
                     {
                         // Extract inputs and outputs from the description
-                        var descriptionParts = module.Description.Split(new[] { "\n\nInputs:", "\n\nOutputs:" }, StringSplitOptions.None);
+                        var descriptionParts = moduleDescription.Split(new[] { "\n\nInputs:", "\n\nOutputs:" }, StringSplitOptions.None);
                         if (descriptionParts.Length >= 3)
                         {
                             boundContent.AppendLine($"**Inputs:** {descriptionParts[1].Trim()}");
@@ -781,7 +906,8 @@ public class SystemDesignController : ControllerBase
                 Success = true,
                 Message = $"Successfully bound {modules.Count} modules into system design",
                 BoundContent = boundContent.ToString(),
-                ModuleCount = modules.Count
+                ModuleCount = modules.Count,
+                Title = projectTitle
             });
         }
         catch (Exception ex)
@@ -1730,12 +1856,14 @@ public class InitiateModulesRequest
     public int ProjectId { get; set; }
 }
 
-// Request model for UpdateModule
-public class UpdateModuleRequest
+// Request model for direct module update
+public class UpdateModuleApplyRequest
 {
     public int ProjectId { get; set; }
     public int Sequence { get; set; }
-    public string UserInput { get; set; } = string.Empty;
+
+    [JsonPropertyName("descriptiont")]
+    public string Description { get; set; } = string.Empty;
 }
 
 // Response model for UpdateModule
@@ -1744,12 +1872,14 @@ public class UpdateModuleResponse
     public bool Success { get; set; }
     public string? Message { get; set; }
     public string? UpdatedDescription { get; set; }
+    public string Title { get; set; } = string.Empty;
 }
 
 // Request model for BindModules
 public class BindModulesRequest
 {
     public int ProjectId { get; set; }
+    public bool ToTranslate { get; set; } = false;
 }
 
 // Response model for BindModules
@@ -1759,6 +1889,7 @@ public class BindModulesResponse
     public string? Message { get; set; }
     public string? BoundContent { get; set; }
     public int ModuleCount { get; set; }
+    public string Title { get; set; } = string.Empty;
 }
 
 // Request model for CreateDataModel

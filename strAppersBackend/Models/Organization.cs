@@ -37,6 +37,10 @@ public class Organization
     
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
     public DateTime? UpdatedAt { get; set; }
+
+    public string? TermsUse { get; set; }
+    public bool TermsAccepted { get; set; } = false;
+    public DateTimeOffset? TermsAcceptedAt { get; set; }
     
     // Navigation properties
     public ICollection<Project> Projects { get; set; } = new List<Project>();
@@ -69,6 +73,10 @@ public class CreateOrganizationRequest
     public bool IsActive { get; set; } = true;
     
     public string? Logo { get; set; }  // Base64 encoded image or URL
+
+    public string? TermsUse { get; set; }
+    public bool? TermsAccepted { get; set; }
+    public DateTimeOffset? TermsAcceptedAt { get; set; }
 }
 
 public class UpdateOrganizationRequest
@@ -89,4 +97,8 @@ public class UpdateOrganizationRequest
     public string? Address { get; set; }
     
     public string? Logo { get; set; }  // Base64 encoded image or URL
+
+    public string? TermsUse { get; set; }
+    public bool? TermsAccepted { get; set; }
+    public DateTimeOffset? TermsAcceptedAt { get; set; }
 }

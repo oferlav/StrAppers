@@ -3,6 +3,9 @@ using strAppersBackend.Data;
 using strAppersBackend.Models;
 using strAppersBackend.Services;
 using System.Text.Json;
+using Microsoft.Extensions.Logging;
+using Microsoft.AspNetCore.Http;
+using Microsoft.Extensions.DependencyInjection;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -77,6 +80,9 @@ builder.Services.AddSession(options =>
     options.Cookie.IsEssential = true;
 });
 
+// Add HttpContextAccessor for logging filters
+builder.Services.AddHttpContextAccessor();
+
 // Configure Trello settings
 builder.Services.Configure<TrelloConfig>(builder.Configuration.GetSection("Trello"));
 
@@ -111,6 +117,20 @@ builder.Services.AddHttpClient<AIService>(client =>
     client.Timeout = TimeSpan.FromMinutes(10); // Increase timeout to 10 minutes for AI calls
 });
 
+// Configure GetChat log suppression
+var disableGetChatLogs = builder.Configuration.GetValue<bool>("Logging:DisableGetChatLogs", true);
+
+if (disableGetChatLogs)
+{
+    // Suppress Info/Warning logs for framework categories when GetChat logs are disabled
+    // This is done via appsettings.json, but we also set it here programmatically
+    builder.Logging.AddFilter("Microsoft.AspNetCore.Hosting.Diagnostics", LogLevel.Warning);
+    builder.Logging.AddFilter("Microsoft.AspNetCore.Routing", LogLevel.Warning);
+    builder.Logging.AddFilter("Microsoft.AspNetCore.Mvc", LogLevel.Warning);
+    builder.Logging.AddFilter("Microsoft.EntityFrameworkCore.Database.Command", LogLevel.Warning);
+    builder.Logging.AddFilter("Microsoft.AspNetCore.DataProtection", LogLevel.Warning);
+}
+
 var app = builder.Build();
 
 // Configure the HTTP request pipeline.
@@ -131,6 +151,9 @@ else
 
 // Apply CORS middleware
 app.UseCors("AllowFrontend");
+
+// Note: GetChat log suppression is now handled via log level configuration in appsettings.json
+// The middleware approach didn't work reliably because log filters don't have access to HttpContext at runtime
 
 app.UseAuthorization();
 app.UseSession();

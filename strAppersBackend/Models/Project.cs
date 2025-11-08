@@ -45,8 +45,26 @@ public class Project
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
     public DateTime? UpdatedAt { get; set; }
     
+    // IDE Generation fields
+    [Column("deployment_manifest", TypeName = "TEXT")]
+    public string? DeploymentManifest { get; set; }
+
+    [MaxLength(50)]
+    [Column("ide_generation_status")]
+    public string IdeGenerationStatus { get; set; } = "not_started";
+
+    [Column("total_chunks")]
+    public int TotalChunks { get; set; } = 0;
+
+    [Column("completed_chunks")]
+    public int CompletedChunks { get; set; } = 0;
+
+    [Column("mock_records_count")]
+    public int MockRecordsCount { get; set; } = 10;
+    
     // Navigation properties
     public ICollection<DesignVersion> DesignVersions { get; set; } = new List<DesignVersion>();
+    public ICollection<ProjectsIDE> IDEChunks { get; set; } = new List<ProjectsIDE>();
 }
 
 public class CreateProjectRequest

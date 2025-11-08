@@ -1,5 +1,6 @@
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Configuration;
 using strAppersBackend.Data;
 using strAppersBackend.Models;
 
@@ -11,11 +12,59 @@ namespace strAppersBackend.Controllers
     {
         private readonly ApplicationDbContext _context;
         private readonly ILogger<OrganizationsController> _logger;
+        private readonly IConfiguration _configuration;
 
-        public OrganizationsController(ApplicationDbContext context, ILogger<OrganizationsController> logger)
+        public OrganizationsController(ApplicationDbContext context, ILogger<OrganizationsController> logger, IConfiguration configuration)
         {
             _context = context;
             _logger = logger;
+            _configuration = configuration;
+        }
+
+        /// <summary>
+        /// Retrieve localized terms of use text
+        /// </summary>
+        [HttpGet("use/get-terms/{language}")]
+        public ActionResult<TermsOfUseResponse> GetTerms(string language)
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace(language))
+                {
+                    language = "en";
+                }
+
+                var normalizedLanguage = language.Trim().ToLowerInvariant();
+                if (normalizedLanguage != "en" && normalizedLanguage != "he")
+                {
+                    normalizedLanguage = "en";
+                }
+
+                var termsSection = _configuration.GetSection("TermsOfUse");
+                if (!termsSection.Exists())
+                {
+                    _logger.LogWarning("TermsOfUse configuration section is missing");
+                    return StatusCode(500, new { Message = "Terms configuration not found" });
+                }
+
+                var termsText = termsSection[normalizedLanguage];
+                if (string.IsNullOrWhiteSpace(termsText))
+                {
+                    _logger.LogWarning("Terms text for language {Language} not found", normalizedLanguage);
+                    return StatusCode(500, new { Message = "Terms text not configured" });
+                }
+
+                return Ok(new TermsOfUseResponse
+                {
+                    Language = normalizedLanguage,
+                    Terms = termsText
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error retrieving terms of use for language {Language}", language);
+                return StatusCode(500, new { Message = "An error occurred while retrieving terms" });
+            }
         }
 
         /// <summary>
@@ -143,6 +192,17 @@ namespace strAppersBackend.Controllers
                     return Conflict($"An organization with name '{request.Name}' already exists");
                 }
 
+                var termsAccepted = request.TermsAccepted ?? false;
+                var termsAcceptedAt = termsAccepted
+                    ? (request.TermsAcceptedAt ?? DateTimeOffset.UtcNow)
+                    : (DateTimeOffset?)null;
+
+                var termsSection = _configuration.GetSection("TermsOfUse");
+                var defaultTerms = termsSection.Exists() ? termsSection["en"] : null;
+                var termsUse = !string.IsNullOrWhiteSpace(request.TermsUse)
+                    ? request.TermsUse
+                    : (defaultTerms ?? string.Empty);
+
                 // Create new organization
                 var organization = new Organization
                 {
@@ -155,7 +215,10 @@ namespace strAppersBackend.Controllers
                     Type = request.Type,
                     IsActive = request.IsActive,
                     Logo = request.Logo, // Base64 encoded image or URL
-                    CreatedAt = DateTime.UtcNow
+                    CreatedAt = DateTime.UtcNow,
+                    TermsUse = termsUse,
+                    TermsAccepted = termsAccepted,
+                    TermsAcceptedAt = termsAcceptedAt
                 };
 
                 _context.Organizations.Add(organization);
@@ -300,6 +363,11 @@ namespace strAppersBackend.Controllers
                     }
                 }
 
+                var termsAccepted = request.TermsAccepted ?? organization.TermsAccepted;
+                var termsAcceptedAt = termsAccepted
+                    ? (request.TermsAcceptedAt ?? organization.TermsAcceptedAt ?? DateTimeOffset.UtcNow)
+                    : (DateTimeOffset?)null;
+
                 // Update organization properties
                 organization.Name = request.Name;
                 organization.Description = request.Description;
@@ -311,6 +379,12 @@ namespace strAppersBackend.Controllers
                 organization.IsActive = request.IsActive;
                 organization.Logo = request.Logo; // Base64 encoded image or URL
                 organization.UpdatedAt = DateTime.UtcNow;
+                if (!string.IsNullOrWhiteSpace(request.TermsUse))
+                {
+                    organization.TermsUse = request.TermsUse;
+                }
+                organization.TermsAccepted = termsAccepted;
+                organization.TermsAcceptedAt = termsAcceptedAt;
 
                 await _context.SaveChangesAsync();
 
@@ -531,5 +605,11 @@ namespace strAppersBackend.Controllers
             }
         }
     }
+}
+
+public class TermsOfUseResponse
+{
+    public string Language { get; set; } = "en";
+    public string Terms { get; set; } = string.Empty;
 }
 

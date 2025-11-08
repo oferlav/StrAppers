@@ -17,6 +17,8 @@ public interface IAIService
     Task<UpdateModuleResponse> UpdateModuleAsync(int moduleId, string currentDescription, string userInput);
     Task<UpdateDataModelResponse> UpdateDataModelAsync(int projectId, string currentSqlScript, string userInput);
     Task<CodebaseStructureAIResponse> GenerateCodebaseStructureAsync(string systemPrompt, string userPrompt);
+    Task<TranslateModuleResponse> TranslateModuleToEnglishAsync(string title, string description);
+    Task<TranslateTextResponse> TranslateTextToEnglishAsync(string text);
 }
 
 public class AIService : IAIService
@@ -964,11 +966,63 @@ Return ONLY valid JSON with exactly {totalSprints} sprints (NO EPICS):
 
             var updatedDescription = openAIResponse.Choices.First().Message.Content;
             
-            // Remove the "Is this what you meant?" section
-            var questionIndex = updatedDescription.IndexOf("Is this what you meant?", StringComparison.OrdinalIgnoreCase);
-            if (questionIndex > 0)
+            // Remove any dialog questions or conversational text at the end
+            // Common patterns in multiple languages
+            var dialogPatterns = new[]
             {
-                updatedDescription = updatedDescription.Substring(0, questionIndex).Trim();
+                "Is this what you meant?",
+                "האם זה מה שהתכוונת?",
+                "Please let me know if you need any adjustments",
+                "אנא ידעי אותי אם יש צורך בהתאמות",
+                "אנא ידע אותי אם יש צורך בהתאמות",
+                "Let me know if you need",
+                "ידע אותי אם",
+                "Is this what you",
+                "האם זה מה ש"
+            };
+            
+            foreach (var pattern in dialogPatterns)
+            {
+                var index = updatedDescription.IndexOf(pattern, StringComparison.OrdinalIgnoreCase);
+                if (index > 0)
+                {
+                    // Find the start of the sentence/question (look for newline or period before it)
+                    var startIndex = index;
+                    // Look backwards for sentence boundary
+                    for (int i = index - 1; i >= 0; i--)
+            {
+                        if (updatedDescription[i] == '\n' || updatedDescription[i] == '.' || updatedDescription[i] == '!' || updatedDescription[i] == '?')
+                        {
+                            startIndex = i + 1;
+                            break;
+                        }
+                        if (i == 0)
+                        {
+                            startIndex = 0;
+                        }
+                    }
+                    updatedDescription = updatedDescription.Substring(0, startIndex).Trim();
+                    break; // Remove only the first occurrence
+                }
+            }
+            
+            // Additional cleanup: Remove any trailing questions that might have question marks
+            // Look for patterns like "? ..." at the end
+            updatedDescription = updatedDescription.Trim();
+            var lastQuestionMark = updatedDescription.LastIndexOf('?');
+            if (lastQuestionMark > updatedDescription.Length * 0.8) // If question mark is in last 20% of text
+            {
+                // Check if there's a newline before it, suggesting it's a separate question
+                var beforeQuestion = updatedDescription.Substring(0, lastQuestionMark);
+                var afterQuestion = updatedDescription.Substring(lastQuestionMark + 1);
+                
+                // If the part after question mark is short and looks like dialog, remove it
+                if (afterQuestion.Trim().Length < 100 && 
+                    (afterQuestion.Contains("אנא") || afterQuestion.Contains("Please") || 
+                     afterQuestion.Contains("ידע") || afterQuestion.Contains("Let me")))
+                {
+                    updatedDescription = beforeQuestion.Trim();
+                }
             }
 
             _logger.LogInformation("AI response received for module update");
@@ -1438,6 +1492,216 @@ Return ONLY valid JSON with exactly {totalSprints} sprints (NO EPICS):
         
         return result;
     }
+
+    public async Task<TranslateModuleResponse> TranslateModuleToEnglishAsync(string title, string description)
+    {
+        try
+        {
+            var systemPrompt = "You are a professional technical translator. Translate product and UI module content to English while preserving meaning, formatting, and any markup. Respond ONLY with valid JSON.";
+            var userPrompt = $"Translate the following module title and description to English. Preserve Markdown formatting and bullet structures.\n\nTitle:\n{title}\n\nDescription:\n{description}\n\nReturn JSON in the form {{\"title\": \"...\", \"description\": \"...\"}}.";
+
+            var requestBody = new
+            {
+                model = _aiConfig.Model,
+                messages = new[]
+                {
+                    new { role = "system", content = systemPrompt },
+                    new { role = "user", content = userPrompt }
+                },
+                max_tokens = _aiConfig.MaxTokens,
+                temperature = _aiConfig.Temperature
+            };
+
+            var json = JsonSerializer.Serialize(requestBody);
+            var content = new StringContent(json, Encoding.UTF8, "application/json");
+
+            _logger.LogInformation("Calling OpenAI API for module translation");
+            var response = await _httpClient.PostAsync("https://api.openai.com/v1/chat/completions", content);
+            var responseContent = await response.Content.ReadAsStringAsync();
+
+            if (!response.IsSuccessStatusCode)
+            {
+                _logger.LogError("OpenAI API error during translation: {StatusCode} - {Content}", response.StatusCode, responseContent);
+                return new TranslateModuleResponse
+                {
+                    Success = false,
+                    Message = $"OpenAI API error: {response.StatusCode}",
+                    Title = title,
+                    Description = description
+                };
+            }
+
+            var openAIResponse = JsonSerializer.Deserialize<OpenAIResponse>(responseContent, new JsonSerializerOptions
+            {
+                PropertyNameCaseInsensitive = true
+            });
+
+            var aiContent = openAIResponse?.Choices?.FirstOrDefault()?.Message?.Content;
+            if (string.IsNullOrWhiteSpace(aiContent))
+            {
+                return new TranslateModuleResponse
+                {
+                    Success = false,
+                    Message = "Failed to get translation from AI service",
+                    Title = title,
+                    Description = description
+                };
+            }
+
+            var cleanedContent = CleanJsonFromMarkdown(aiContent);
+
+            ModuleTranslationResult? translationResult = null;
+            try
+            {
+                translationResult = JsonSerializer.Deserialize<ModuleTranslationResult>(cleanedContent, new JsonSerializerOptions
+                {
+                    PropertyNameCaseInsensitive = true
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Failed to deserialize translation response: {Content}", cleanedContent);
+                return new TranslateModuleResponse
+                {
+                    Success = false,
+                    Message = "Failed to parse translation response",
+                    Title = title,
+                    Description = description
+                };
+            }
+
+            if (translationResult == null || string.IsNullOrWhiteSpace(translationResult.Title) || string.IsNullOrWhiteSpace(translationResult.Description))
+            {
+                return new TranslateModuleResponse
+                {
+                    Success = false,
+                    Message = "Translation response missing required fields",
+                    Title = title,
+                    Description = description
+                };
+            }
+
+            return new TranslateModuleResponse
+            {
+                Success = true,
+                Title = translationResult.Title,
+                Description = translationResult.Description
+            };
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error translating module content to English");
+            return new TranslateModuleResponse
+            {
+                Success = false,
+                Message = $"Error translating module: {ex.Message}",
+                Title = title,
+                Description = description
+            };
+        }
+    }
+
+    public async Task<TranslateTextResponse> TranslateTextToEnglishAsync(string text)
+    {
+        try
+        {
+            var systemPrompt = "You are a professional technical translator. Translate any provided text to English while preserving formatting and meaning. Respond ONLY with valid JSON.";
+            var userPrompt = $"Translate the following text to English. Preserve line breaks and Markdown formatting.\n\nText:\n{text}\n\nReturn JSON in the form {{\"text\": \"...\"}}.";
+
+            var requestBody = new
+            {
+                model = _aiConfig.Model,
+                messages = new[]
+                {
+                    new { role = "system", content = systemPrompt },
+                    new { role = "user", content = userPrompt }
+                },
+                max_tokens = _aiConfig.MaxTokens,
+                temperature = _aiConfig.Temperature
+            };
+
+            var json = JsonSerializer.Serialize(requestBody);
+            var content = new StringContent(json, Encoding.UTF8, "application/json");
+
+            _logger.LogInformation("Calling OpenAI API for text translation");
+            var response = await _httpClient.PostAsync("https://api.openai.com/v1/chat/completions", content);
+            var responseContent = await response.Content.ReadAsStringAsync();
+
+            if (!response.IsSuccessStatusCode)
+            {
+                _logger.LogError("OpenAI API error during text translation: {StatusCode} - {Content}", response.StatusCode, responseContent);
+                return new TranslateTextResponse
+                {
+                    Success = false,
+                    Message = $"OpenAI API error: {response.StatusCode}",
+                    Text = text
+                };
+            }
+
+            var openAIResponse = JsonSerializer.Deserialize<OpenAIResponse>(responseContent, new JsonSerializerOptions
+            {
+                PropertyNameCaseInsensitive = true
+            });
+
+            var aiContent = openAIResponse?.Choices?.FirstOrDefault()?.Message?.Content;
+            if (string.IsNullOrWhiteSpace(aiContent))
+            {
+                return new TranslateTextResponse
+                {
+                    Success = false,
+                    Message = "Failed to get translation from AI service",
+                    Text = text
+                };
+            }
+
+            var cleanedContent = CleanJsonFromMarkdown(aiContent);
+
+            TextTranslationResult? translationResult = null;
+            try
+            {
+                translationResult = JsonSerializer.Deserialize<TextTranslationResult>(cleanedContent, new JsonSerializerOptions
+                {
+                    PropertyNameCaseInsensitive = true
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Failed to deserialize text translation response: {Content}", cleanedContent);
+                return new TranslateTextResponse
+                {
+                    Success = false,
+                    Message = "Failed to parse translation response",
+                    Text = text
+                };
+            }
+
+            if (translationResult == null || string.IsNullOrWhiteSpace(translationResult.Text))
+            {
+                return new TranslateTextResponse
+                {
+                    Success = false,
+                    Message = "Translation response missing required fields",
+                    Text = text
+                };
+            }
+
+            return new TranslateTextResponse
+            {
+                Success = true,
+                Text = translationResult.Text
+            };
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error translating text to English");
+            return new TranslateTextResponse
+            {
+                Success = false,
+                Message = $"Error translating text: {ex.Message}",
+                Text = text
+            };
+        }
+    }
 }
 
 // Helper class for parsing modules response
@@ -1515,10 +1779,47 @@ public class CodeFile
 public class ClaudeResponse
 {
     public List<ClaudeContent> Content { get; set; } = new();
+    public ClaudeUsage? Usage { get; set; }
+}
+
+public class ClaudeUsage
+{
+    public int InputTokens { get; set; }
+    public int OutputTokens { get; set; }
 }
 
 public class ClaudeContent
 {
     public string Type { get; set; } = string.Empty;
     public string Text { get; set; } = string.Empty;
+}
+
+public class TranslateModuleResponse
+{
+    public bool Success { get; set; }
+    public string? Message { get; set; }
+    public string? Title { get; set; }
+    public string? Description { get; set; }
+}
+
+public class TranslateTextResponse
+{
+    public bool Success { get; set; }
+    public string? Message { get; set; }
+    public string? Text { get; set; }
+}
+
+file sealed class ModuleTranslationResult
+{
+    [JsonPropertyName("title")]
+    public string? Title { get; set; }
+
+    [JsonPropertyName("description")]
+    public string? Description { get; set; }
+}
+
+file sealed class TextTranslationResult
+{
+    [JsonPropertyName("text")]
+    public string? Text { get; set; }
 }

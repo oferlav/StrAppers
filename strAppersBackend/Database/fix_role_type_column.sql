@@ -38,3 +38,4 @@ SELECT "Id", "Name", "Type", "IsActive" FROM "Roles" ORDER BY "Id";
 
 
 
+
