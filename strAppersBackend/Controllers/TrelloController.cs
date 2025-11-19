@@ -317,5 +317,76 @@ public class TrelloController : ControllerBase
                 });
             }
         }
+
+        /// <summary>
+        /// Get all cards and lists for a specific board filtered by label name
+        /// </summary>
+        /// <param name="boardId">Trello board ID</param>
+        /// <param name="labelName">Label name to filter cards by</param>
+        /// <returns>Lists and cards filtered by the specified label</returns>
+        [HttpGet("use/board/{boardId}/label/{labelName}")]
+        public async Task<ActionResult<object>> GetCardsAndListsByLabel(string boardId, string labelName)
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace(boardId))
+                {
+                    return BadRequest(new
+                    {
+                        Success = false,
+                        Message = "Board ID is required"
+                    });
+                }
+
+                if (string.IsNullOrWhiteSpace(labelName))
+                {
+                    return BadRequest(new
+                    {
+                        Success = false,
+                        Message = "Label name is required"
+                    });
+                }
+
+                // URL decode the label name in case it contains encoded characters like %2F for /
+                labelName = System.Net.WebUtility.UrlDecode(labelName);
+                _logger.LogInformation("Getting cards and lists for board {BoardId} filtered by label '{LabelName}' (decoded)", boardId, labelName);
+
+                var result = await _trelloService.GetCardsAndListsByLabelAsync(boardId, labelName);
+
+                // Check if the result indicates success
+                var resultType = result.GetType();
+                var successProperty = resultType.GetProperty("Success");
+                if (successProperty != null)
+                {
+                    var success = (bool)successProperty.GetValue(result)!;
+                    if (!success)
+                    {
+                        var messageProperty = resultType.GetProperty("Message");
+                        var message = messageProperty?.GetValue(result)?.ToString() ?? "Unknown error";
+                        
+                        var labelFoundProperty = resultType.GetProperty("LabelFound");
+                        var labelFound = labelFoundProperty != null && (bool)labelFoundProperty.GetValue(result)!;
+                        
+                        if (!labelFound)
+                        {
+                            return NotFound(result);
+                        }
+                        
+                        return BadRequest(result);
+                    }
+                }
+
+                return Ok(result);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error getting cards and lists by label '{LabelName}' for board {BoardId}", labelName, boardId);
+                return StatusCode(500, new
+                {
+                    Success = false,
+                    Message = $"Error getting cards and lists by label: {ex.Message}"
+                });
+            }
+        }
     }
 }

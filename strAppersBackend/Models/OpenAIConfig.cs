@@ -112,6 +112,7 @@ public class ProjectTask
     public int EstimatedHours { get; set; }
     public int Priority { get; set; }
     public List<string> Dependencies { get; set; } = new List<string>();
+    public List<string> ChecklistItems { get; set; } = new List<string>();
 }
 
 public class Sprint

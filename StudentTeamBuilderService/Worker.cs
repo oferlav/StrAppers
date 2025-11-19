@@ -75,6 +75,19 @@ public class Worker : BackgroundService
 
         var all = (await conn.QueryAsync<StudentCandidate>(new CommandDefinition(sql, cancellationToken: ct))).ToList();
         _logger.LogInformation("[CANDIDATES] Total rows (by project priority expansion): {Count}", all.Count);
+        
+        // DEBUG: Log detailed candidate information from SQL query
+        if (all.Any())
+        {
+            _logger.LogInformation("[CANDIDATES] Detailed candidate breakdown:");
+            foreach (var candidate in all)
+            {
+                _logger.LogInformation("[CANDIDATES]   StudentId={StudentId}, ProjectId={ProjectId}, RoleId={RoleId}, RoleType={RoleType}, RoleName={RoleName}, IsAdmin={IsAdmin}, PriorityRank={PriorityRank}",
+                    candidate.Id, candidate.ProjectId?.ToString() ?? "NULL", candidate.RoleId?.ToString() ?? "NULL", 
+                    candidate.RoleType?.ToString() ?? "NULL", candidate.RoleName ?? "NULL", candidate.IsAdmin, candidate.PriorityRank);
+            }
+        }
+        
         if (!all.Any()) return 0;
 
         // Group by projectId, prefer groups where candidates have lower PriorityRank and older StartPendingAt
@@ -101,9 +114,12 @@ public class Worker : BackgroundService
             using var tx = conn.BeginTransaction();
             try
             {
+                // Update Status and ProjectId for all selected students
                 await conn.ExecuteAsync(new CommandDefinition(
-                    "UPDATE \"Students\" SET \"Status\"=2, \"UpdatedAt\"=NOW() WHERE \"Id\" = ANY(@Ids)",
-                    new { Ids = ids }, transaction: tx, cancellationToken: ct));
+                    "UPDATE \"Students\" SET \"Status\"=2, \"ProjectId\"=@ProjectId, \"UpdatedAt\"=NOW() WHERE \"Id\" = ANY(@Ids)",
+                    new { Ids = ids, ProjectId = projectId }, transaction: tx, cancellationToken: ct));
+
+                _logger.LogInformation("[UPDATE] Updated {Count} students with ProjectId={ProjectId} and Status=2", ids.Length, projectId);
 
                 await tx.CommitAsync(ct);
             }
@@ -136,8 +152,9 @@ public class Worker : BackgroundService
                     var errorText = await resp.Content.ReadAsStringAsync(ct);
                     _logger.LogWarning("[CREATE_BOARD] Failed for project {ProjectId}. Status={Status}. Body={Body}", projectId, resp.StatusCode, errorText);
                     await conn.ExecuteAsync(new CommandDefinition(
-                        "UPDATE \"Students\" SET \"Status\"=1, \"UpdatedAt\"=NOW() WHERE \"Id\" = ANY(@Ids)",
+                        "UPDATE \"Students\" SET \"Status\"=1, \"ProjectId\"=NULL, \"UpdatedAt\"=NOW() WHERE \"Id\" = ANY(@Ids)",
                         new { Ids = ids }, cancellationToken: ct));
+                    _logger.LogInformation("[ROLLBACK] Reset {Count} students: Status=1, ProjectId=NULL", ids.Length);
                     continue;
                 }
                 var okText = await resp.Content.ReadAsStringAsync(ct);
@@ -148,8 +165,9 @@ public class Worker : BackgroundService
             {
                 _logger.LogError(ex, "[CREATE_BOARD] Exception for project {ProjectId}: {Message}", projectId, ex.Message);
                 await conn.ExecuteAsync(new CommandDefinition(
-                    "UPDATE \"Students\" SET \"Status\"=1, \"UpdatedAt\"=NOW() WHERE \"Id\" = ANY(@Ids)",
+                    "UPDATE \"Students\" SET \"Status\"=1, \"ProjectId\"=NULL, \"UpdatedAt\"=NOW() WHERE \"Id\" = ANY(@Ids)",
                     new { Ids = ids }, cancellationToken: ct));
+                _logger.LogInformation("[ROLLBACK] Reset {Count} students: Status=1, ProjectId=NULL", ids.Length);
             }
         }
 
@@ -191,19 +209,48 @@ public class Worker : BackgroundService
         var byRole = new Dictionary<int, StudentCandidate>();
         StudentCandidate? admin = null;
         logger.LogInformation("[SELECT] Evaluating {Count} candidates", candidates.Count);
+        
+        // DEBUG: Log all candidates with full details
+        logger.LogInformation("[SELECT] All candidates details:");
+        for (int i = 0; i < candidates.Count; i++)
+        {
+            var c = candidates[i];
+            logger.LogInformation("[SELECT]   Candidate {Index}: StudentId={StudentId}, RoleId={RoleId}, RoleType={RoleType}, RoleName={RoleName}, IsAdmin={IsAdmin}, PriorityRank={PriorityRank}, StartPendingAt={StartPendingAt}",
+                i + 1, c.Id, c.RoleId?.ToString() ?? "NULL", c.RoleType?.ToString() ?? "NULL", c.RoleName ?? "NULL", c.IsAdmin, c.PriorityRank, c.StartPendingAt?.ToString() ?? "NULL");
+        }
+        
         var adminIds = candidates.Where(x => x.IsAdmin && x.RoleId != null).Select(x => x.Id).ToList();
         if (adminIds.Any())
         {
             logger.LogInformation("[SELECT] Admin-flagged candidates: [{Ids}]", string.Join(',', adminIds));
         }
+        
+        // DEBUG: Check for UI/UX in all candidates
+        var uiuxCandidates = candidates.Where(x => x.RoleType == 3).ToList();
+        if (uiuxCandidates.Any())
+        {
+            logger.LogInformation("[SELECT] UI/UX candidates found in ALL candidates: [{Details}]", 
+                string.Join(", ", uiuxCandidates.Select(c => $"StudentId={c.Id}, RoleId={c.RoleId}, RoleName={c.RoleName}")));
+        }
+        else
+        {
+            logger.LogInformation("[SELECT] WARNING: No UI/UX candidates (RoleType=3) found in ALL candidates");
+        }
+        
         foreach (var c in candidates)
         {
-            if (c.RoleId == null) continue;
+            if (c.RoleId == null)
+            {
+                logger.LogInformation("[SELECT] Skipping candidate StudentId={StudentId}: RoleId is NULL", c.Id);
+                continue;
+            }
             var roleKey = c.RoleId.Value;
             if (!byRole.ContainsKey(roleKey))
             {
                 // First time we see this role, take candidate
                 byRole[roleKey] = c;
+                logger.LogInformation("[SELECT] Added to byRole: StudentId={StudentId}, RoleId={RoleId}, RoleType={RoleType}, RoleName={RoleName}, IsAdmin={IsAdmin}",
+                    c.Id, roleKey, c.RoleType?.ToString() ?? "NULL", c.RoleName ?? "NULL", c.IsAdmin);
             }
             else
             {
@@ -211,22 +258,78 @@ public class Worker : BackgroundService
                 var existing = byRole[roleKey];
                 if (c.IsAdmin && !existing.IsAdmin)
                 {
+                    logger.LogInformation("[SELECT] Replacing in byRole (preferring admin): Old StudentId={OldId}, New StudentId={NewId}, RoleId={RoleId}",
+                        existing.Id, c.Id, roleKey);
                     byRole[roleKey] = c;
+                }
+                else
+                {
+                    logger.LogInformation("[SELECT] Skipping candidate StudentId={StudentId}: RoleId={RoleId} already taken by StudentId={ExistingId}",
+                        c.Id, roleKey, existing.Id);
                 }
             }
             if (c.IsAdmin)
             {
                 if (admin == null) admin = c; // track one admin reference; exact count computed below
             }
-            if (byRole.Count >= cfg.MinimumStudents) break;
+            
+            // Check if we can stop early, but only if all required roles are satisfied
+            var hasMinimumStudents = byRole.Count >= cfg.MinimumStudents;
+            var hasRequiredUIUX = !cfg.RequireUIUXDesigner || byRole.Values.Any(x => x.RoleType == 3);
+            
+            if (hasMinimumStudents && hasRequiredUIUX)
+            {
+                logger.LogInformation("[SELECT] Stopping early: byRole.Count={Count} >= MinimumStudents={Min} AND required roles satisfied", byRole.Count, cfg.MinimumStudents);
+                break;
+            }
+            else if (hasMinimumStudents && !hasRequiredUIUX)
+            {
+                logger.LogInformation("[SELECT] Continuing: byRole.Count={Count} >= MinimumStudents={Min} but UI/UX not yet found, continuing search...", byRole.Count, cfg.MinimumStudents);
+            }
         }
 
         var group = byRole.Values.ToList();
+
+        // DEBUG: Log the selected group before validation
+        logger.LogInformation("[SELECT] Selected group before validation: Count={Count}", group.Count);
+        foreach (var g in group)
+        {
+            logger.LogInformation("[SELECT]   Group member: StudentId={StudentId}, RoleId={RoleId}, RoleType={RoleType}, RoleName={RoleName}, IsAdmin={IsAdmin}",
+                g.Id, g.RoleId?.ToString() ?? "NULL", g.RoleType?.ToString() ?? "NULL", g.RoleName ?? "NULL", g.IsAdmin);
+        }
 
         if (group.Count < cfg.MinimumStudents)
         {
             logger.LogInformation("[SELECT] Rejected: not enough unique-role students (have {Have}, need {Need})", group.Count, cfg.MinimumStudents);
             return null;
+        }
+        
+        // FIX: If UI/UX is required but not in group, try to add it even if it means replacing a non-required role
+        if (cfg.RequireUIUXDesigner && !group.Any(x => x.RoleType == 3))
+        {
+            logger.LogInformation("[SELECT] UI/UX required but not in group. Attempting to add UI/UX candidate...");
+            var uiuxCandidate = candidates.FirstOrDefault(x => x.RoleType == 3 && x.RoleId != null);
+            if (uiuxCandidate != null)
+            {
+                var uiuxRoleId = uiuxCandidate.RoleId!.Value;
+                if (byRole.ContainsKey(uiuxRoleId))
+                {
+                    // UI/UX role already in group but with wrong RoleType? This shouldn't happen, but log it
+                    logger.LogWarning("[SELECT] WARNING: UI/UX RoleId={RoleId} already in group but RoleType mismatch!", uiuxRoleId);
+                }
+                else
+                {
+                    // Add UI/UX candidate to group
+                    byRole[uiuxRoleId] = uiuxCandidate;
+                    group = byRole.Values.ToList();
+                    logger.LogInformation("[SELECT] Added UI/UX candidate: StudentId={StudentId}, RoleId={RoleId}, RoleName={RoleName}",
+                        uiuxCandidate.Id, uiuxRoleId, uiuxCandidate.RoleName);
+                }
+            }
+            else
+            {
+                logger.LogInformation("[SELECT] No UI/UX candidate found in candidates list to add");
+            }
         }
         var adminCount = group.Count(x => x.IsAdmin);
         if (cfg.RequireAdmin && adminCount != 1)
@@ -258,10 +361,26 @@ public class Worker : BackgroundService
         }
 
         // Enforce required roles
-        if (cfg.RequireUIUXDesigner && !group.Any(x => x.RoleType == 3))
+        if (cfg.RequireUIUXDesigner)
         {
-            logger.LogInformation("[SELECT] Rejected: missing UI/UX role (RoleType=3)");
-            return null;
+            var hasUIUX = group.Any(x => x.RoleType == 3);
+            var uiuxInGroup = group.Where(x => x.RoleType == 3).ToList();
+            logger.LogInformation("[SELECT] UI/UX check: RequireUIUXDesigner={Require}, HasUIUXInGroup={Has}, UIUXMembers=[{Members}]",
+                cfg.RequireUIUXDesigner, hasUIUX, string.Join(", ", uiuxInGroup.Select(g => $"StudentId={g.Id}, RoleId={g.RoleId}, RoleName={g.RoleName}")));
+            
+            if (!hasUIUX)
+            {
+                logger.LogInformation("[SELECT] Rejected: missing UI/UX role (RoleType=3) in selected group");
+                logger.LogInformation("[SELECT] DEBUG: Checking if UI/UX exists in all candidates but wasn't selected...");
+                var uiuxInAllCandidates = candidates.Where(x => x.RoleType == 3).ToList();
+                if (uiuxInAllCandidates.Any())
+                {
+                    logger.LogInformation("[SELECT] DEBUG: Found {Count} UI/UX candidate(s) in ALL candidates that were NOT selected: [{Details}]",
+                        uiuxInAllCandidates.Count,
+                        string.Join(", ", uiuxInAllCandidates.Select(c => $"StudentId={c.Id}, RoleId={c.RoleId}, RoleName={c.RoleName}, PriorityRank={c.PriorityRank}")));
+                }
+                return null;
+            }
         }
         if (cfg.RequireDeveloperRule)
         {

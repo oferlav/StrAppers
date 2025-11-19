@@ -286,7 +286,7 @@ public class BoardsController : ControllerBase
                 _logger.LogWarning("AI service returned null SprintPlan: {ErrorMessage}. Proceeding with basic sprint plan.", sprintPlanResponse.Message);
                 
                 // Create a basic fallback sprint plan
-                var fallbackSprintPlan = CreateFallbackSprintPlan(project, students, roleGroups);
+                var fallbackSprintPlan = CreateFallbackSprintPlan(project, students, roleGroups, projectLengthWeeks, sprintLengthWeeks);
                 sprintPlanResponse = new SprintPlanningResponse
                 {
                     Success = true,
@@ -331,7 +331,8 @@ public class BoardsController : ControllerBase
                     ListName = s.Name,
                     RoleName = t.RoleName,
                     DueDate = s.EndDate,
-                    Priority = t.Priority
+                    Priority = t.Priority,
+                    ChecklistItems = t.ChecklistItems ?? new List<string>()
                 }) ?? new List<TrelloCard>()).ToList() ?? new List<TrelloCard>(),
                 TotalSprints = sprintPlanResponse.SprintPlan.TotalSprints,
                 TotalTasks = sprintPlanResponse.SprintPlan.TotalTasks,
@@ -432,6 +433,35 @@ public class BoardsController : ControllerBase
             else
             {
                 _logger.LogWarning("No GitHub usernames found for students, skipping repository creation");
+            }
+
+            // Send welcome emails to all team members (before any meeting-related emails)
+            _logger.LogInformation("Sending welcome emails to {Count} team members", students.Count);
+            var welcomeRecipients = students
+                .Where(s => !string.IsNullOrWhiteSpace(s.Email) && !string.IsNullOrWhiteSpace(s.FirstName))
+                .Select(s => (s.Email, s.FirstName))
+                .ToList();
+            
+            if (welcomeRecipients.Any())
+            {
+                var welcomeEmailsSent = await _smtpEmailService.SendBulkWelcomeEmailsAsync(
+                    welcomeRecipients,
+                    project.Title,
+                    projectLengthWeeks
+                );
+
+                if (welcomeEmailsSent)
+                {
+                    _logger.LogInformation("All welcome emails sent successfully to {Count} team members", welcomeRecipients.Count);
+                }
+                else
+                {
+                    _logger.LogWarning("Some welcome emails failed to send to team members");
+                }
+            }
+            else
+            {
+                _logger.LogWarning("No valid student emails/names found for welcome emails");
             }
 
             // Create Teams meeting if meeting details are provided
@@ -1188,15 +1218,15 @@ The actual prompt generation would require access to project details and student
         }
     }
 
-    private SprintPlan CreateFallbackSprintPlan(Project project, List<Student> students, List<RoleInfo> teamRoles)
+    private SprintPlan CreateFallbackSprintPlan(Project project, List<Student> students, List<RoleInfo> teamRoles, int projectLengthWeeks, int sprintLengthWeeks)
     {
         var sprints = new List<Sprint>();
-        var totalSprints = 12; // Default 12 weeks
+        var totalSprints = projectLengthWeeks / sprintLengthWeeks; // Calculate from configuration
         
         for (int i = 1; i <= totalSprints; i++)
         {
-            var sprintStartDate = DateTime.UtcNow.AddDays((i - 1) * 7);
-            var sprintEndDate = sprintStartDate.AddDays(6);
+            var sprintStartDate = DateTime.UtcNow.AddDays((i - 1) * sprintLengthWeeks * 7);
+            var sprintEndDate = sprintStartDate.AddDays(sprintLengthWeeks * 7 - 1);
             
             var tasks = new List<ProjectTask>();
             var taskId = 1;

@@ -42,6 +42,10 @@ public class Organization
     public bool TermsAccepted { get; set; } = false;
     public DateTimeOffset? TermsAcceptedAt { get; set; }
     
+    // Password hash field
+    [MaxLength(256)]
+    public string? PasswordHash { get; set; }
+    
     // Navigation properties
     public ICollection<Project> Projects { get; set; } = new List<Project>();
 }
@@ -77,6 +81,9 @@ public class CreateOrganizationRequest
     public string? TermsUse { get; set; }
     public bool? TermsAccepted { get; set; }
     public DateTimeOffset? TermsAcceptedAt { get; set; }
+    
+    [MaxLength(100)]
+    public string? Password { get; set; }  // Plain password (will be hashed before storing)
 }
 
 public class UpdateOrganizationRequest

@@ -16,13 +16,15 @@ public class StudentsController : ControllerBase
     private readonly ILogger<StudentsController> _logger;
     private readonly IGitHubService _githubService;
     private readonly IKickoffService _kickoffService;
+    private readonly IPasswordHasherService _passwordHasher;
 
-    public StudentsController(ApplicationDbContext context, ILogger<StudentsController> logger, IGitHubService githubService, IKickoffService kickoffService)
+    public StudentsController(ApplicationDbContext context, ILogger<StudentsController> logger, IGitHubService githubService, IKickoffService kickoffService, IPasswordHasherService passwordHasher)
     {
         _context = context;
         _logger = logger;
         _githubService = githubService;
         _kickoffService = kickoffService;
+        _passwordHasher = passwordHasher;
     }
 
     /// <summary>
@@ -224,19 +226,34 @@ public class StudentsController : ControllerBase
 
             _logger.LogInformation("GitHub user {GithubUser} validated successfully", request.GithubUser);
 
-            // Validate programming language if provided
-            if (request.ProgrammingLanguageId.HasValue)
+            // Handle programming language (allow 0 to be treated as null)
+            int? programmingLanguageId = request.ProgrammingLanguageId;
+            if (programmingLanguageId.HasValue && programmingLanguageId.Value == 0)
             {
-                _logger.LogInformation("Validating programming language with ID {ProgrammingLanguageId}", request.ProgrammingLanguageId.Value);
+                programmingLanguageId = null;
+            }
+
+            // Validate programming language if provided
+            if (programmingLanguageId.HasValue)
+            {
+                _logger.LogInformation("Validating programming language with ID {ProgrammingLanguageId}", programmingLanguageId.Value);
                 var programmingLanguage = await _context.ProgrammingLanguages
-                    .FirstOrDefaultAsync(pl => pl.Id == request.ProgrammingLanguageId.Value && pl.IsActive);
+                    .FirstOrDefaultAsync(pl => pl.Id == programmingLanguageId.Value && pl.IsActive);
 
                 if (programmingLanguage == null)
                 {
-                    _logger.LogWarning("Programming language with ID {ProgrammingLanguageId} not found or not active", request.ProgrammingLanguageId.Value);
-                    return BadRequest($"Programming language with ID {request.ProgrammingLanguageId.Value} not found or not active");
+                    _logger.LogWarning("Programming language with ID {ProgrammingLanguageId} not found or not active", programmingLanguageId.Value);
+                    return BadRequest($"Programming language with ID {programmingLanguageId.Value} not found or not active");
                 }
                 _logger.LogInformation("Programming language {LanguageName} validated successfully", programmingLanguage.Name);
+            }
+
+            // Hash password if provided
+            string? passwordHash = null;
+            if (!string.IsNullOrWhiteSpace(request.Password))
+            {
+                _logger.LogInformation("Hashing password for student with email {Email}", request.Email);
+                passwordHash = _passwordHasher.HashPassword(request.Password);
             }
 
             // Create new student
@@ -252,12 +269,13 @@ public class StudentsController : ControllerBase
                 LinkedInUrl = request.LinkedInUrl,
                 GithubUser = request.GithubUser, // GitHub username
                 Photo = request.Photo, // Base64 encoded image or URL
-                ProgrammingLanguageId = request.ProgrammingLanguageId, // Programming language preference
+                ProgrammingLanguageId = programmingLanguageId, // Programming language preference (null allowed)
                 ProjectId = null, // Default to null
                 IsAdmin = false, // Default to false
                 BoardId = null, // Default to null
                 CreatedAt = DateTime.UtcNow,
-                Status = 0
+                Status = 0,
+                PasswordHash = passwordHash
             };
 
             _logger.LogInformation("Adding student to context");
@@ -668,20 +686,25 @@ public class StudentsController : ControllerBase
             // Handle programming language update if provided
             if (request.ProgrammingLanguageId.HasValue)
             {
-                _logger.LogInformation("Validating programming language with ID {ProgrammingLanguageId}", request.ProgrammingLanguageId.Value);
-                
-                // Validate programming language exists and is active
-                var programmingLanguage = await _context.ProgrammingLanguages
-                    .FirstOrDefaultAsync(pl => pl.Id == request.ProgrammingLanguageId.Value && pl.IsActive);
+                var programmingLanguageId = request.ProgrammingLanguageId.Value;
 
-                if (programmingLanguage == null)
+                if (programmingLanguageId == 0)
                 {
-                    _logger.LogWarning("Programming language with ID {ProgrammingLanguageId} not found or not active", request.ProgrammingLanguageId.Value);
-                    return BadRequest($"Programming language with ID {request.ProgrammingLanguageId.Value} not found or not active");
+                    student.ProgrammingLanguageId = null;
                 }
+                else
+                {
+                    _logger.LogInformation("Validating programming language with ID {ProgrammingLanguageId}", programmingLanguageId);
+                    var programmingLanguage = await _context.ProgrammingLanguages
+                        .FirstOrDefaultAsync(pl => pl.Id == programmingLanguageId && pl.IsActive);
 
-                student.ProgrammingLanguageId = request.ProgrammingLanguageId.Value;
-                _logger.LogInformation("Programming language {LanguageName} updated successfully for student {StudentId}", programmingLanguage.Name, id);
+                    if (programmingLanguage == null)
+                    {
+                        _logger.LogWarning("Programming language with ID {ProgrammingLanguageId} not found or not active", programmingLanguageId);
+                        return BadRequest($"Programming language with ID {programmingLanguageId} not found or not active");
+                    }
+                    student.ProgrammingLanguageId = programmingLanguageId;
+                }
             }
 
             // StudentId, OrganizationId, ProjectId, IsAdmin, IsAvailable, BoardId are not updatable
@@ -1069,9 +1092,139 @@ public class StudentsController : ControllerBase
             });
         }
     }
+
+    /// <summary>
+    /// Login endpoint for students - verifies email and password
+    /// </summary>
+    [HttpPost("use/login")]
+    public async Task<ActionResult<object>> LoginStudent(LoginRequest request)
+    {
+        try
+        {
+            _logger.LogInformation("Login attempt for student with email {Email}", request.Email);
+
+            if (string.IsNullOrWhiteSpace(request.Email) || string.IsNullOrWhiteSpace(request.Password))
+            {
+                _logger.LogWarning("Login attempt with missing email or password");
+                return BadRequest(new { Success = false, Message = "Email and password are required" });
+            }
+
+            var student = await _context.Students
+                .FirstOrDefaultAsync(s => s.Email == request.Email);
+
+            if (student == null)
+            {
+                _logger.LogWarning("Login attempt failed: Student with email {Email} not found", request.Email);
+                return Unauthorized(new { Success = false, Message = "Invalid email or password" });
+            }
+
+            if (string.IsNullOrWhiteSpace(student.PasswordHash))
+            {
+                _logger.LogWarning("Login attempt failed: Student with email {Email} has no password set", request.Email);
+                return Unauthorized(new { Success = false, Message = "Password not set for this account" });
+            }
+
+            bool isValidPassword = _passwordHasher.VerifyPassword(student.PasswordHash, request.Password);
+
+            if (!isValidPassword)
+            {
+                _logger.LogWarning("Login attempt failed: Invalid password for student with email {Email}", request.Email);
+                return Unauthorized(new { Success = false, Message = "Invalid email or password" });
+            }
+
+            _logger.LogInformation("Login successful for student with email {Email}", request.Email);
+
+            return Ok(new
+            {
+                Success = true,
+                Message = "Login successful",
+                Student = new
+                {
+                    Id = student.Id,
+                    FirstName = student.FirstName,
+                    LastName = student.LastName,
+                    Email = student.Email
+                }
+            });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error during student login for email {Email}", request.Email);
+            return StatusCode(500, new { Success = false, Message = "An error occurred during login" });
+        }
+    }
+
+    /// <summary>
+    /// Change password endpoint for students
+    /// </summary>
+    [HttpPost("use/change-password")]
+    public async Task<ActionResult<object>> ChangeStudentPassword(ChangePasswordRequest request)
+    {
+        try
+        {
+            _logger.LogInformation("Password change request for student with email {Email}", request.Email);
+
+            if (string.IsNullOrWhiteSpace(request.Email) || string.IsNullOrWhiteSpace(request.NewPassword))
+            {
+                _logger.LogWarning("Password change attempt with missing email or new password");
+                return BadRequest(new { Success = false, Message = "Email and new password are required" });
+            }
+
+            var student = await _context.Students
+                .FirstOrDefaultAsync(s => s.Email == request.Email);
+
+            if (student == null)
+            {
+                _logger.LogWarning("Password change failed: Student with email {Email} not found", request.Email);
+                return NotFound(new { Success = false, Message = "Student not found" });
+            }
+
+            // Hash the new password
+            string passwordHash = _passwordHasher.HashPassword(request.NewPassword);
+            student.PasswordHash = passwordHash;
+            student.UpdatedAt = DateTime.UtcNow;
+
+            await _context.SaveChangesAsync();
+
+            _logger.LogInformation("Password changed successfully for student with email {Email}", request.Email);
+
+            return Ok(new
+            {
+                Success = true,
+                Message = "Password changed successfully"
+            });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error changing password for student with email {Email}", request.Email);
+            return StatusCode(500, new { Success = false, Message = "An error occurred while changing password" });
+        }
+    }
 }
 
 // Request DTOs for StudentsController
+public class LoginRequest
+{
+    [Required]
+    [EmailAddress]
+    public string Email { get; set; } = string.Empty;
+
+    [Required]
+    [MaxLength(100)]
+    public string Password { get; set; } = string.Empty;
+}
+
+public class ChangePasswordRequest
+{
+    [Required]
+    [EmailAddress]
+    public string Email { get; set; } = string.Empty;
+
+    [Required]
+    [MaxLength(100)]
+    public string NewPassword { get; set; } = string.Empty;
+}
+
 public class AllocateStudentRequest
 {
     /// <summary>

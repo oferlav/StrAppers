@@ -78,6 +78,10 @@ public class Student
     public int? ProgrammingLanguageId { get; set; }
     public ProgrammingLanguage? ProgrammingLanguage { get; set; }
     
+    // Password hash field
+    [MaxLength(256)]
+    public string? PasswordHash { get; set; }
+    
     // Navigation properties
     public ICollection<StudentRole> StudentRoles { get; set; } = new List<StudentRole>();
 }
@@ -118,6 +122,9 @@ public class CreateStudentRequest
     public string? Photo { get; set; }  // Base64 encoded image or URL
     
     public int? ProgrammingLanguageId { get; set; }  // Optional programming language preference
+    
+    [MaxLength(100)]
+    public string? Password { get; set; }  // Plain password (will be hashed before storing)
 }
 
 public class UpdateStudentRequest

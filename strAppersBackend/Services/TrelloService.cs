@@ -13,6 +13,7 @@ namespace strAppersBackend.Services
         Task<object> GetProjectStatsAsync(string trelloBoardId);
         Task<object> ListAllBoardsAsync();
         Task<object> GetBoardMembersWithEmailResolutionAsync(string trelloBoardId);
+        Task<object> GetCardsAndListsByLabelAsync(string trelloBoardId, string labelName);
     }
 
     public class TrelloService : ITrelloService
@@ -416,6 +417,74 @@ namespace strAppersBackend.Services
                             var cardId = cardData.GetProperty("id").GetString();
                             var cardUrl = cardData.GetProperty("url").GetString();
 
+                            // Create checklist with items if checklist items are provided
+                            if (card.ChecklistItems != null && card.ChecklistItems.Count > 0)
+                            {
+                                try
+                                {
+                                    _logger.LogInformation("Creating checklist for card {CardName} with {ItemCount} items", card.Name, card.ChecklistItems.Count);
+                                    
+                                    // Step 1: Create the checklist
+                                    var createChecklistUrl = $"https://api.trello.com/1/checklists?name=Checklist&idCard={cardId}&key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
+                                    var createChecklistResponse = await _httpClient.PostAsync(createChecklistUrl, null);
+                                    
+                                    if (createChecklistResponse.IsSuccessStatusCode)
+                                    {
+                                        var checklistJson = await createChecklistResponse.Content.ReadAsStringAsync();
+                                        var checklistData = JsonSerializer.Deserialize<JsonElement>(checklistJson);
+                                        var checklistId = checklistData.GetProperty("id").GetString();
+                                        
+                                        _logger.LogInformation("Checklist created with ID {ChecklistId} for card {CardName}", checklistId, card.Name);
+                                        
+                                        // Step 2: Add items to the checklist
+                                        int position = 1;
+                                        foreach (var item in card.ChecklistItems)
+                                        {
+                                            try
+                                            {
+                                                var addItemUrl = $"https://api.trello.com/1/checklists/{checklistId}/checkItems?name={Uri.EscapeDataString(item)}&pos={position}&key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
+                                                var addItemResponse = await _httpClient.PostAsync(addItemUrl, null);
+                                                
+                                                if (addItemResponse.IsSuccessStatusCode)
+                                                {
+                                                    _logger.LogInformation("Added checklist item {Item} to card {CardName}", item, card.Name);
+                                                }
+                                                else
+                                                {
+                                                    var errorContent = await addItemResponse.Content.ReadAsStringAsync();
+                                                    _logger.LogWarning("Failed to add checklist item {Item} to card {CardName}: {Error}", item, card.Name, errorContent);
+                                                    errors.Add($"Failed to add checklist item '{item}' to card '{card.Name}'");
+                                                }
+                                                
+                                                position++;
+                                            }
+                                            catch (Exception ex)
+                                            {
+                                                _logger.LogError(ex, "Error adding checklist item {Item} to card {CardName}", item, card.Name);
+                                                errors.Add($"Error adding checklist item '{item}' to card '{card.Name}': {ex.Message}");
+                                            }
+                                        }
+                                        
+                                        _logger.LogInformation("Successfully created checklist with {ItemCount} items for card {CardName}", card.ChecklistItems.Count, card.Name);
+                                    }
+                                    else
+                                    {
+                                        var errorContent = await createChecklistResponse.Content.ReadAsStringAsync();
+                                        _logger.LogWarning("Failed to create checklist for card {CardName}: {Error}", card.Name, errorContent);
+                                        errors.Add($"Failed to create checklist for card '{card.Name}': {errorContent}");
+                                    }
+                                }
+                                catch (Exception ex)
+                                {
+                                    _logger.LogError(ex, "Error creating checklist for card {CardName}", card.Name);
+                                    errors.Add($"Error creating checklist for card '{card.Name}': {ex.Message}");
+                                }
+                            }
+                            else
+                            {
+                                _logger.LogInformation("No checklist items provided for card {CardName}, skipping checklist creation", card.Name);
+                            }
+
                             response.CreatedCards.Add(new TrelloCreatedCard
                             {
                                 CardId = cardId,
@@ -427,7 +496,9 @@ namespace strAppersBackend.Services
                         }
                         else
                         {
-                            errors.Add($"Failed to create card: {card.Name}");
+                            var errorContent = await createCardResponse.Content.ReadAsStringAsync();
+                            _logger.LogError("Failed to create card {CardName}: {Error}", card.Name, errorContent);
+                            errors.Add($"Failed to create card: {card.Name} - {errorContent}");
                         }
                     }
                     catch (Exception ex)
@@ -932,6 +1003,216 @@ namespace strAppersBackend.Services
             
             _logger.LogInformation("No organization found, creating board in personal account");
             return null;
+        }
+
+        public async Task<object> GetCardsAndListsByLabelAsync(string trelloBoardId, string labelName)
+        {
+            try
+            {
+                _logger.LogInformation("Getting cards and lists filtered by label '{LabelName}' for board {BoardId}", labelName, trelloBoardId);
+
+                // Step 1: Get all labels for the board to find the label ID by name
+                var labelsUrl = $"https://api.trello.com/1/boards/{trelloBoardId}/labels?key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
+                var labelsResponse = await _httpClient.GetAsync(labelsUrl);
+
+                if (!labelsResponse.IsSuccessStatusCode)
+                {
+                    var errorContent = await labelsResponse.Content.ReadAsStringAsync();
+                    _logger.LogError("Failed to get labels for board {BoardId}: {Error}", trelloBoardId, errorContent);
+                    return new
+                    {
+                        Success = false,
+                        Message = $"Failed to get labels for board: {labelsResponse.StatusCode}",
+                        LabelFound = false
+                    };
+                }
+
+                var labelsContent = await labelsResponse.Content.ReadAsStringAsync();
+                var labelsData = JsonSerializer.Deserialize<JsonElement[]>(labelsContent);
+
+                // Find the label by name (case-insensitive)
+                var label = labelsData.FirstOrDefault(l =>
+                {
+                    var name = l.TryGetProperty("name", out var nameProp) ? nameProp.GetString() : "";
+                    return string.Equals(name, labelName, StringComparison.OrdinalIgnoreCase);
+                });
+
+                if (label.ValueKind == JsonValueKind.Undefined)
+                {
+                    _logger.LogWarning("Label '{LabelName}' not found on board {BoardId}", labelName, trelloBoardId);
+                    return new
+                    {
+                        Success = false,
+                        Message = $"Label '{labelName}' not found on board",
+                        LabelFound = false,
+                        AvailableLabels = labelsData.Select(l => l.TryGetProperty("name", out var n) ? n.GetString() : "").Where(n => !string.IsNullOrEmpty(n)).ToList()
+                    };
+                }
+
+                var labelId = label.GetProperty("id").GetString();
+                var labelColor = label.TryGetProperty("color", out var colorProp) ? colorProp.GetString() : "";
+                _logger.LogInformation("Found label '{LabelName}' with ID {LabelId}", labelName, labelId);
+
+                // Step 2: Get all lists for the board
+                var listsUrl = $"https://api.trello.com/1/boards/{trelloBoardId}/lists?key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
+                var listsResponse = await _httpClient.GetAsync(listsUrl);
+                var lists = new List<object>();
+
+                if (listsResponse.IsSuccessStatusCode)
+                {
+                    var listsContent = await listsResponse.Content.ReadAsStringAsync();
+                    var listsData = JsonSerializer.Deserialize<JsonElement[]>(listsContent);
+
+                    lists = listsData.Select(l => new
+                    {
+                        Id = l.TryGetProperty("id", out var idProp) ? idProp.GetString() : "",
+                        Name = l.TryGetProperty("name", out var nameProp) ? nameProp.GetString() : "",
+                        Closed = l.TryGetProperty("closed", out var closedProp) ? closedProp.GetBoolean() : false,
+                        Position = l.TryGetProperty("pos", out var posProp) ? posProp.GetDouble() : 0.0
+                    }).Cast<object>().ToList();
+                }
+
+                // Step 3: Get all cards for the board and filter by label name (include checklists)
+                var cardsUrl = $"https://api.trello.com/1/boards/{trelloBoardId}/cards?checklists=all&key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
+                var cardsResponse = await _httpClient.GetAsync(cardsUrl);
+                var cards = new List<object>();
+
+                if (cardsResponse.IsSuccessStatusCode)
+                {
+                    var cardsContent = await cardsResponse.Content.ReadAsStringAsync();
+                    var cardsData = JsonSerializer.Deserialize<JsonElement[]>(cardsContent);
+
+                    // Filter cards that have the specified label name
+                    var filteredCards = cardsData.Where(c =>
+                    {
+                        if (!c.TryGetProperty("labels", out var labelsProp))
+                            return false;
+
+                        return labelsProp.EnumerateArray().Any(l =>
+                        {
+                            var cardLabelName = l.TryGetProperty("name", out var nameProp) ? nameProp.GetString() : "";
+                            return string.Equals(cardLabelName, labelName, StringComparison.OrdinalIgnoreCase);
+                        });
+                    }).ToList();
+
+                    // Process each filtered card and fetch checklists if not included
+                    foreach (var cardElement in filteredCards)
+                    {
+                        var cardId = cardElement.TryGetProperty("id", out var idProp) ? idProp.GetString() : "";
+                        var checklists = new List<object>();
+
+                        // Check if checklists are already included in the card data
+                        if (cardElement.TryGetProperty("checklists", out var checklistsProp))
+                        {
+                            // Checklists are included in the response
+                            checklists = checklistsProp.EnumerateArray().Select(cl => new
+                            {
+                                Id = cl.TryGetProperty("id", out var clIdProp) ? clIdProp.GetString() : "",
+                                Name = cl.TryGetProperty("name", out var clNameProp) ? clNameProp.GetString() : "",
+                                Position = cl.TryGetProperty("pos", out var clPosProp) ? clPosProp.GetDouble() : 0.0,
+                                CheckItems = cl.TryGetProperty("checkItems", out var checkItemsProp) ?
+                                    checkItemsProp.EnumerateArray().Select(ci => new
+                                    {
+                                        Id = ci.TryGetProperty("id", out var ciIdProp) ? ciIdProp.GetString() : "",
+                                        Name = ci.TryGetProperty("name", out var ciNameProp) ? ciNameProp.GetString() : "",
+                                        State = ci.TryGetProperty("state", out var ciStateProp) ? ciStateProp.GetString() : "incomplete",
+                                        Position = ci.TryGetProperty("pos", out var ciPosProp) ? ciPosProp.GetDouble() : 0.0
+                                    }).ToArray() : new object[0]
+                            }).Cast<object>().ToList();
+                        }
+                        else if (!string.IsNullOrEmpty(cardId))
+                        {
+                            // Fetch checklists separately if not included
+                            try
+                            {
+                                var checklistsUrl = $"https://api.trello.com/1/cards/{cardId}/checklists?key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
+                                var checklistsResponse = await _httpClient.GetAsync(checklistsUrl);
+                                
+                                if (checklistsResponse.IsSuccessStatusCode)
+                                {
+                                    var checklistsContent = await checklistsResponse.Content.ReadAsStringAsync();
+                                    var checklistsData = JsonSerializer.Deserialize<JsonElement[]>(checklistsContent);
+                                    
+                                    checklists = checklistsData.Select(cl => new
+                                    {
+                                        Id = cl.TryGetProperty("id", out var clIdProp) ? clIdProp.GetString() : "",
+                                        Name = cl.TryGetProperty("name", out var clNameProp) ? clNameProp.GetString() : "",
+                                        Position = cl.TryGetProperty("pos", out var clPosProp) ? clPosProp.GetDouble() : 0.0,
+                                        CheckItems = cl.TryGetProperty("checkItems", out var checkItemsProp) ?
+                                            checkItemsProp.EnumerateArray().Select(ci => new
+                                            {
+                                                Id = ci.TryGetProperty("id", out var ciIdProp) ? ciIdProp.GetString() : "",
+                                                Name = ci.TryGetProperty("name", out var ciNameProp) ? ciNameProp.GetString() : "",
+                                                State = ci.TryGetProperty("state", out var ciStateProp) ? ciStateProp.GetString() : "incomplete",
+                                                Position = ci.TryGetProperty("pos", out var ciPosProp) ? ciPosProp.GetDouble() : 0.0
+                                            }).ToArray() : new object[0]
+                                    }).Cast<object>().ToList();
+                                }
+                            }
+                            catch (Exception ex)
+                            {
+                                _logger.LogWarning("Failed to fetch checklists for card {CardId}: {Error}", cardId, ex.Message);
+                            }
+                        }
+
+                        cards.Add(new
+                        {
+                            Id = cardId,
+                            Name = cardElement.TryGetProperty("name", out var nameProp) ? nameProp.GetString() : "",
+                            Description = cardElement.TryGetProperty("desc", out var descProp) ? descProp.GetString() : "",
+                            ListId = cardElement.TryGetProperty("idList", out var listProp) ? listProp.GetString() : "",
+                            Closed = cardElement.TryGetProperty("closed", out var closedProp) ? closedProp.GetBoolean() : false,
+                            DueDate = cardElement.TryGetProperty("due", out var dueProp) ? dueProp.GetString() : null,
+                            DueComplete = cardElement.TryGetProperty("dueComplete", out var dueCompleteProp) ? dueCompleteProp.GetBoolean() : false,
+                            Url = cardElement.TryGetProperty("url", out var urlProp) ? urlProp.GetString() : "",
+                            Labels = cardElement.TryGetProperty("labels", out var labelsProp) ?
+                                labelsProp.EnumerateArray().Select(l => new
+                                {
+                                    Id = l.TryGetProperty("id", out var labelIdProp) ? labelIdProp.GetString() : "",
+                                    Name = l.TryGetProperty("name", out var labelNameProp) ? labelNameProp.GetString() : "",
+                                    Color = l.TryGetProperty("color", out var labelColorProp) ? labelColorProp.GetString() : ""
+                                }).ToArray() : new object[0],
+                            Checklists = checklists,
+                            DateLastActivity = cardElement.TryGetProperty("dateLastActivity", out var activityProp) ? activityProp.GetString() : null
+                        });
+                    }
+
+                    _logger.LogInformation("Filtered {FilteredCount} cards from {TotalCount} total cards by label '{LabelName}'", cards.Count, cardsData.Length, labelName);
+                }
+                else
+                {
+                    var errorContent = await cardsResponse.Content.ReadAsStringAsync();
+                    _logger.LogError("Failed to get cards for board {BoardId}: {Error}", trelloBoardId, errorContent);
+                }
+
+                _logger.LogInformation("Retrieved {CardCount} cards and {ListCount} lists for label '{LabelName}' on board {BoardId}", cards.Count, lists.Count, labelName, trelloBoardId);
+
+                return new
+                {
+                    Success = true,
+                    LabelFound = true,
+                    Label = new
+                    {
+                        Id = labelId,
+                        Name = labelName,
+                        Color = labelColor
+                    },
+                    Lists = lists,
+                    Cards = cards,
+                    CardCount = cards.Count,
+                    ListCount = lists.Count
+                };
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error getting cards and lists by label '{LabelName}' for board {BoardId}", labelName, trelloBoardId);
+                return new
+                {
+                    Success = false,
+                    Message = $"Error getting cards and lists by label: {ex.Message}",
+                    LabelFound = false
+                };
+            }
         }
     }
 }

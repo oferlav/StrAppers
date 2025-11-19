@@ -271,7 +271,7 @@ Keep it concise, professional, and easy to understand. DO NOT use JSON format - 
     private string BuildSprintPlanningPrompt(SprintPlanningRequest request)
     {
         var teamRolesText = string.Join(", ", request.TeamRoles.Select(r => $"{r.RoleName} ({r.StudentCount} students)"));
-        var totalSprints = _systemDesignConfig.DefaultSprintCount; // Use configured sprint count instead of calculated
+        var totalSprints = request.ProjectLengthWeeks / request.SprintLengthWeeks; // Calculate from project length and sprint length
         
         // Filter out Data Model section to save tokens and focus on system modules
         var filteredSystemDesign = FilterOutDataModelSection(request.SystemDesign);
@@ -285,42 +285,70 @@ TEAM: {teamRolesText}
 START DATE: {request.StartDate:yyyy-MM-dd}
 TOTAL SPRINTS: {totalSprints} (CONFIGURED - must fill ALL sprints even if fewer modules)
 
-SYSTEM DESIGN:
+SYSTEM DESIGN (READ CAREFULLY - ALL TASKS MUST REFERENCE THIS):
 {filteredSystemDesign ?? "No system design available"}
 
-CRITICAL REQUIREMENTS:
+⚠️ CRITICAL BUSINESS LOGIC REQUIREMENTS ⚠️
 - You MUST create exactly {totalSprints} sprints (configured number, not based on modules)
-- Each sprint must have tasks for ALL roles: {string.Join(", ", request.TeamRoles.Select(r => r.RoleName))}
-- Map system modules to sprints (distribute modules across sprints as needed)
-- Create MULTIPLE specific tasks per role per sprint based on module inputs/outputs
-- Tasks must be detailed and specific to the module's functionality
-- ONE sprint must include database layer tasks for Backend/Full Stack developers
-- Tasks must have: id, title, description, roleId, roleName, estimatedHours, priority, dependencies
+- Each sprint MUST have AT LEAST ONE task for EACH role: {string.Join(", ", request.TeamRoles.Select(r => r.RoleName))}
+- EVERY task title and description MUST directly reference specific modules, inputs, outputs, or business logic from the System Design above
+- NO GENERIC TASKS ALLOWED - Every task must be tied to specific business functionality described in the System Design
+- Tasks must implement the actual business logic described in the modules (inputs, outputs, functionality)
+- ONE sprint must include database layer tasks for Backend/Full Stack developers based on the Data Model section
 
-ROLE-SPECIFIC TASK GENERATION:
+MANDATORY TASK REQUIREMENTS:
+- Task titles MUST include the module name or specific business function from System Design
+- Task descriptions MUST explain how it implements specific inputs/outputs from the System Design
+- Example GOOD title: ""Implement User Registration Module - Email validation and password hashing""
+- Example BAD title: ""Create registration feature"" (too generic, doesn't reference System Design)
+- Example GOOD description: ""Build the User Registration module that accepts email, password, and full name (as specified in Module 1 inputs) and returns a confirmation token (as specified in Module 1 outputs)""
+- Example BAD description: ""Implement user registration"" (too generic, no reference to System Design)
+
+ROLE-SPECIFIC TASK GENERATION (MUST REFERENCE SYSTEM DESIGN):
 {roleInstructions}
 
-TASK GENERATION RULES:
-- For each module, analyze the Inputs and Outputs described
-- Create specific tasks that implement those inputs/outputs
-- Each task should be specific and actionable (not generic)
-- Multiple tasks per role per sprint are expected and encouraged
-- If you run out of modules, create additional tasks like: testing, documentation, integration, optimization, deployment
+TASK GENERATION STRATEGY:
+1. Read the System Design carefully and identify ALL modules with their inputs and outputs
+2. For EACH module, create tasks that directly implement the described functionality
+3. Task titles must reference the module name or number from System Design
+4. Task descriptions must explain which inputs/outputs from System Design are being implemented
+5. Distribute modules across sprints, ensuring each sprint has at least one task per role
+6. If you have fewer modules than sprints, create additional tasks that extend the business logic (e.g., ""Add email notification to User Registration module"", ""Implement error handling for Login Module"")
+7. NEVER create generic tasks like ""Write tests"" or ""Update documentation"" without specifying which module they relate to
 
 SPRINT DISTRIBUTION STRATEGY:
 - Distribute the {GetModuleCount(filteredSystemDesign)} system modules across {totalSprints} sprints
-- One sprint should focus on database layer implementation
-- Remaining sprints should cover all modules plus additional tasks
-- Ensure every sprint has meaningful work for all roles
-- If you have fewer modules than sprints, create additional tasks like: testing, documentation, integration, optimization, deployment
+- Each sprint must have at least one task per role that directly implements System Design modules
+- One sprint should focus on database layer implementation based on the Data Model section
+- Ensure every sprint has meaningful, business-logic-specific work for all roles
+- If you have fewer modules than sprints, create tasks that extend or enhance the existing modules from System Design
+
+⚠️ CHECKLIST REQUIREMENTS - BUSINESS LOGIC SPECIFIC ⚠️
+- Each task MUST include a ""checklistItems"" array with AT LEAST 4 sub-tasks
+- EVERY checklist item MUST directly reference specific business logic, inputs, outputs, or functionality from the System Design
+- Checklist items must break down the task into specific implementation steps for the business logic described
+- Checklist items MUST NOT be generic (NEVER use: ""Implement feature"", ""Test code"", ""Write documentation"", ""Code review"", ""Deploy"" without specifics)
+- Each checklist item must specify WHAT part of the System Design module is being implemented
+- Example GOOD checklist items for ""Implement User Registration Module"":
+  * ""Create API endpoint POST /api/users/register that accepts email, password, fullName (Module 1 inputs)""
+  * ""Implement email format validation using regex pattern for email input from Module 1""
+  * ""Hash password using bcrypt before storing in database (Module 1 security requirement)""
+  * ""Return JSON response with userId and confirmationToken (Module 1 outputs)""
+- Example BAD checklist items (TOO GENERIC - DO NOT USE):
+  * ""Implement registration""
+  * ""Write tests""
+  * ""Code review""
+  * ""Deploy to production""
 
 Return ONLY valid JSON with exactly {totalSprints} sprints (NO EPICS):
 {{
-  ""sprints"": [{{""sprintNumber"": 1, ""name"": ""Sprint 1"", ""startDate"": ""{request.StartDate:yyyy-MM-dd}"", ""endDate"": ""{request.StartDate.AddDays(request.SprintLengthWeeks * 7 - 1):yyyy-MM-dd}"", ""tasks"": [{{""id"": ""task1"", ""title"": ""Specific Task Title"", ""description"": ""Detailed task description based on module inputs/outputs"", ""roleId"": 1, ""roleName"": ""Role"", ""estimatedHours"": 8, ""priority"": 1, ""dependencies"": []}}], ""totalStoryPoints"": 10, ""roleWorkload"": {{""1"": 8}}}}],
+  ""sprints"": [{{""sprintNumber"": 1, ""name"": ""Sprint 1"", ""startDate"": ""{request.StartDate:yyyy-MM-dd}"", ""endDate"": ""{request.StartDate.AddDays(request.SprintLengthWeeks * 7 - 1):yyyy-MM-dd}"", ""tasks"": [{{""id"": ""task1"", ""title"": ""Implement [Module Name from System Design] - [Specific Business Function]"", ""description"": ""Build [Module Name] that processes [specific inputs from System Design] and returns [specific outputs from System Design]. This implements the business logic described in Module X."", ""roleId"": 1, ""roleName"": ""Role"", ""estimatedHours"": 8, ""priority"": 1, ""dependencies"": [], ""checklistItems"": [""Create [specific component] that handles [specific input from Module X]"", ""Implement [specific business rule] for [specific output from Module X]"", ""Add validation for [specific input field] as described in Module X inputs"", ""Return [specific output format] matching Module X outputs specification""]}}], ""totalStoryPoints"": 10, ""roleWorkload"": {{""1"": 8}}}}],
   ""totalSprints"": {totalSprints},
   ""totalTasks"": 0,
   ""estimatedWeeks"": {request.ProjectLengthWeeks}
-}}";
+}}
+
+REMEMBER: Every task title, description, and checklist item MUST directly reference the System Design modules, inputs, outputs, or business logic. NO GENERIC TASKS ALLOWED.";
     }
 
     /// <summary>
@@ -332,36 +360,34 @@ Return ONLY valid JSON with exactly {totalSprints} sprints (NO EPICS):
         
         foreach (var role in teamRoles)
         {
-            switch (role.RoleName.ToLower())
+            var roleNameLower = role.RoleName.ToLower();
+            
+            // Only include Developer roles, Marketing, Product Management, and UI/UX Design
+            if (roleNameLower.Contains("frontend developer") || roleNameLower.Contains("front-end developer") || roleNameLower == "frontend" || roleNameLower == "front-end")
             {
-                case "frontend developer":
-                    instructions.Add($"- Frontend Developer: Focus on React/Vue/Angular components, user interfaces, client-side logic, responsive design, user experience, form validation, state management, API integration from frontend");
-                    break;
-                case "backend developer":
-                    instructions.Add($"- Backend Developer: Focus on API development, server-side logic, database design, authentication, authorization, data processing, business logic, microservices, database optimization");
-                    break;
-                case "full stack developer":
-                    instructions.Add($"- Full Stack Developer: Focus on both frontend and backend tasks, API integration, database design, full application features, end-to-end functionality, system integration");
-                    break;
-                case "ui/ux designer":
-                    instructions.Add($"- UI/UX Designer: Focus on user interface design, user experience research, wireframes, prototypes, visual design, accessibility, user testing, design systems, mockups");
-                    break;
-                case "quality assurance":
-                    instructions.Add($"- Quality Assurance: Focus on testing strategies, test case creation, automated testing, bug tracking, quality metrics, user acceptance testing, performance testing, security testing");
-                    break;
-                case "project manager":
-                    instructions.Add($"- Project Manager: Focus on project coordination, task management, stakeholder communication, progress tracking, risk management, resource planning, documentation, team coordination");
-                    break;
-                case "marketing":
-                    instructions.Add($"- Marketing: Focus on user acquisition strategies, content creation, social media integration, analytics, user engagement features, promotional materials, market research, and ALWAYS include a task for creating a video demo of the application");
-                    break;
-                case "documentation specialist":
-                    instructions.Add($"- Documentation Specialist: Focus on technical documentation, user guides, API documentation, code documentation, training materials, knowledge base, help systems");
-                    break;
-                default:
-                    instructions.Add($"- {role.RoleName}: Create appropriate tasks based on the role's typical responsibilities and the module requirements");
-                    break;
+                instructions.Add("- Frontend Developer: Create tasks that implement the UI components for specific modules from System Design. Each task must reference which module's inputs/outputs are being displayed. Example: \"Build User Registration Form UI for Module 1 - Display email, password, fullName inputs and show confirmationToken output\". Focus on React/Vue/Angular components that directly implement the module interfaces described in System Design.");
             }
+            else if (roleNameLower.Contains("backend developer") || roleNameLower == "backend")
+            {
+                instructions.Add("- Backend Developer: Create tasks that implement the API endpoints and business logic for specific modules from System Design. Each task must reference which module's inputs/outputs are being processed. Example: \"Implement User Registration API for Module 1 - Process email, password, fullName inputs and return confirmationToken output\". Focus on server-side logic that directly implements the business rules described in System Design modules.");
+            }
+            else if (roleNameLower.Contains("full stack developer") || roleNameLower.Contains("fullstack developer") || roleNameLower == "full stack" || roleNameLower == "fullstack")
+            {
+                instructions.Add("- Full Stack Developer: Create tasks that implement complete features for specific modules from System Design, covering both frontend and backend. Each task must reference which module is being implemented end-to-end. Example: \"Implement complete User Registration Module 1 - Build form UI, API endpoint, and database integration for email/password/fullName inputs and confirmationToken output\". Focus on full implementation of System Design modules.");
+            }
+            else if (roleNameLower.Contains("ui/ux designer") || roleNameLower.Contains("ui ux designer") || roleNameLower.Contains("ux designer") || roleNameLower == "ui/ux" || roleNameLower == "ux")
+            {
+                instructions.Add("- UI/UX Designer: Create tasks that design the user interface for specific modules from System Design. Each task must reference which module's inputs/outputs need UI design. Example: \"Design User Registration Module 1 interface - Wireframe for email/password/fullName input fields and confirmationToken display\". Focus on designing interfaces that match the business logic and data flow described in System Design.");
+            }
+            else if (roleNameLower.Contains("marketing"))
+            {
+                instructions.Add("- Marketing: Create tasks that promote specific features from System Design modules. Each task must reference which module's functionality is being marketed. Example: \"Create marketing content for User Registration Module 1 - Highlight email validation and secure password features\". ALWAYS include a task for creating a video demo showcasing the modules from System Design.");
+            }
+            else if (roleNameLower.Contains("product manager") || roleNameLower.Contains("product management") || roleNameLower == "product manager")
+            {
+                instructions.Add("- Product Manager: Create tasks that define and coordinate product features for specific modules from System Design. Each task must reference which modules are being managed and which business requirements are being addressed. Example: \"Define product requirements for User Registration Module 1 - Specify email validation rules and password security requirements from System Design\". Focus on product strategy and requirements based on System Design modules.");
+            }
+            // All other roles are ignored - no instructions added
         }
         
         return string.Join("\n", instructions);
@@ -423,7 +449,7 @@ Return ONLY valid JSON with exactly {totalSprints} sprints (NO EPICS):
     private (bool IsValid, List<string> Errors) ValidateSprintPlan(SprintPlan sprintPlan, SprintPlanningRequest request)
     {
         var errors = new List<string>();
-        var expectedSprints = _systemDesignConfig.DefaultSprintCount; // Use configured sprint count
+        var expectedSprints = request.ProjectLengthWeeks / request.SprintLengthWeeks; // Calculate from project length and sprint length
         
         // Check sprint count
         if (sprintPlan.Sprints?.Count != expectedSprints)
@@ -760,8 +786,21 @@ Return ONLY valid JSON with exactly {totalSprints} sprints (NO EPICS):
             var cleanedContent = CleanJsonFromMarkdown(aiContent);
             _logger.LogInformation("Cleaned AI content: {Content}", cleanedContent);
 
+            // Sanitize known problematic characters before JSON parsing
+            var sanitizedContent = cleanedContent
+                .Replace('\u00D7', 'x')
+                .Replace('÷', '/')
+                .Replace('\u2022', '-')
+                .Replace('\u2212', '-')
+                .Replace('\u00A0', ' ');
+
+            if (!ReferenceEquals(cleanedContent, sanitizedContent))
+            {
+                _logger.LogInformation("Sanitized AI content length: {Length}", sanitizedContent.Length);
+            }
+ 
             // Parse the JSON response
-            var modulesResponse = JsonSerializer.Deserialize<ModulesResponse>(cleanedContent, new JsonSerializerOptions
+            var modulesResponse = JsonSerializer.Deserialize<ModulesResponse>(sanitizedContent, new JsonSerializerOptions
             {
                 PropertyNameCaseInsensitive = true
             });

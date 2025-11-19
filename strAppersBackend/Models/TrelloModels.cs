@@ -112,6 +112,7 @@ namespace strAppersBackend.Models
         public int Priority { get; set; }
         public int EstimatedHours { get; set; }
         public string RoleName { get; set; } = string.Empty;
+        public List<string> ChecklistItems { get; set; } = new List<string>();
     }
 
     public class TrelloProjectCreationResponse

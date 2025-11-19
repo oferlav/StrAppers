@@ -3,6 +3,8 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using strAppersBackend.Data;
 using strAppersBackend.Models;
+using strAppersBackend.Services;
+using System.ComponentModel.DataAnnotations;
 
 namespace strAppersBackend.Controllers
 {
@@ -13,12 +15,14 @@ namespace strAppersBackend.Controllers
         private readonly ApplicationDbContext _context;
         private readonly ILogger<OrganizationsController> _logger;
         private readonly IConfiguration _configuration;
+        private readonly IPasswordHasherService _passwordHasher;
 
-        public OrganizationsController(ApplicationDbContext context, ILogger<OrganizationsController> logger, IConfiguration configuration)
+        public OrganizationsController(ApplicationDbContext context, ILogger<OrganizationsController> logger, IConfiguration configuration, IPasswordHasherService passwordHasher)
         {
             _context = context;
             _logger = logger;
             _configuration = configuration;
+            _passwordHasher = passwordHasher;
         }
 
         /// <summary>
@@ -203,6 +207,14 @@ namespace strAppersBackend.Controllers
                     ? request.TermsUse
                     : (defaultTerms ?? string.Empty);
 
+                // Hash password if provided
+                string? passwordHash = null;
+                if (!string.IsNullOrWhiteSpace(request.Password))
+                {
+                    _logger.LogInformation("Hashing password for organization with name {Name}", request.Name);
+                    passwordHash = _passwordHasher.HashPassword(request.Password);
+                }
+
                 // Create new organization
                 var organization = new Organization
                 {
@@ -218,7 +230,8 @@ namespace strAppersBackend.Controllers
                     CreatedAt = DateTime.UtcNow,
                     TermsUse = termsUse,
                     TermsAccepted = termsAccepted,
-                    TermsAcceptedAt = termsAcceptedAt
+                    TermsAcceptedAt = termsAcceptedAt,
+                    PasswordHash = passwordHash
                 };
 
                 _context.Organizations.Add(organization);
@@ -474,9 +487,74 @@ namespace strAppersBackend.Controllers
         }
 
         /// <summary>
+        /// Get a specific organization by ContactEmail (for frontend use)
+        /// </summary>
+        [HttpGet("use/{email}")]
+        public async Task<ActionResult<object>> GetOrganizationByEmail(string email)
+        {
+            try
+            {
+                _logger.LogInformation("Getting organization by email {Email}", email);
+
+                var organization = await _context.Organizations
+                    .Include(o => o.Projects)
+                    .FirstOrDefaultAsync(o => o.ContactEmail == email);
+
+                if (organization == null)
+                {
+                    _logger.LogWarning("Organization with email {Email} not found", email);
+                    return NotFound(new
+                    {
+                        Success = false,
+                        Message = $"Organization with email '{email}' not found"
+                    });
+                }
+
+                _logger.LogInformation("Found organization {OrganizationId}: {Name} with email {Email}", organization.Id, organization.Name, email);
+
+                // Return a simplified response to avoid serialization issues
+                return Ok(new
+                {
+                    Success = true,
+                    Id = organization.Id,
+                    Name = organization.Name,
+                    Description = organization.Description,
+                    Website = organization.Website,
+                    ContactEmail = organization.ContactEmail,
+                    Phone = organization.Phone,
+                    Address = organization.Address,
+                    Type = organization.Type,
+                    IsActive = organization.IsActive,
+                    Logo = organization.Logo,
+                    CreatedAt = organization.CreatedAt,
+                    UpdatedAt = organization.UpdatedAt,
+                    ProjectCount = organization.Projects?.Count ?? 0
+                });
+            }
+            catch (DbUpdateException ex)
+            {
+                _logger.LogError(ex, "Database error while retrieving organization with email {Email}: {Message}", email, ex.Message);
+                return StatusCode(500, new
+                {
+                    Success = false,
+                    Message = "Database error occurred while retrieving the organization"
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error retrieving organization with email {Email}: {Message}", email, ex.Message);
+                return StatusCode(500, new
+                {
+                    Success = false,
+                    Message = "An error occurred while retrieving the organization"
+                });
+            }
+        }
+
+        /// <summary>
         /// Get a specific organization by ID (for frontend use)
         /// </summary>
-        [HttpGet("use/{id}")]
+        [HttpGet("use/by-id/{id}")]
         public async Task<ActionResult<object>> GetOrganizationById(int id)
         {
             try
@@ -604,7 +682,137 @@ namespace strAppersBackend.Controllers
                 });
             }
         }
+
+        /// <summary>
+        /// Login endpoint for organizations - verifies contact email and password
+        /// </summary>
+        [HttpPost("use/login")]
+        public async Task<ActionResult<object>> LoginOrganization(OrganizationLoginRequest request)
+        {
+            try
+            {
+                _logger.LogInformation("Login attempt for organization with email {Email}", request.Email);
+
+                if (string.IsNullOrWhiteSpace(request.Email) || string.IsNullOrWhiteSpace(request.Password))
+                {
+                    _logger.LogWarning("Login attempt with missing email or password");
+                    return BadRequest(new { Success = false, Message = "Email and password are required" });
+                }
+
+                var organization = await _context.Organizations
+                    .FirstOrDefaultAsync(o => o.ContactEmail == request.Email);
+
+                if (organization == null)
+                {
+                    _logger.LogWarning("Login attempt failed: Organization with email {Email} not found", request.Email);
+                    return Unauthorized(new { Success = false, Message = "Invalid email or password" });
+                }
+
+                if (string.IsNullOrWhiteSpace(organization.PasswordHash))
+                {
+                    _logger.LogWarning("Login attempt failed: Organization with email {Email} has no password set", request.Email);
+                    return Unauthorized(new { Success = false, Message = "Password not set for this account" });
+                }
+
+                bool isValidPassword = _passwordHasher.VerifyPassword(organization.PasswordHash, request.Password);
+
+                if (!isValidPassword)
+                {
+                    _logger.LogWarning("Login attempt failed: Invalid password for organization with email {Email}", request.Email);
+                    return Unauthorized(new { Success = false, Message = "Invalid email or password" });
+                }
+
+                _logger.LogInformation("Login successful for organization with email {Email}", request.Email);
+
+                return Ok(new
+                {
+                    Success = true,
+                    Message = "Login successful",
+                    Organization = new
+                    {
+                        Id = organization.Id,
+                        Name = organization.Name,
+                        ContactEmail = organization.ContactEmail
+                    }
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error during organization login for email {Email}", request.Email);
+                return StatusCode(500, new { Success = false, Message = "An error occurred during login" });
+            }
+        }
+
+        /// <summary>
+        /// Change password endpoint for organizations
+        /// </summary>
+        [HttpPost("use/change-password")]
+        public async Task<ActionResult<object>> ChangeOrganizationPassword(OrganizationChangePasswordRequest request)
+        {
+            try
+            {
+                _logger.LogInformation("Password change request for organization with email {Email}", request.Email);
+
+                if (string.IsNullOrWhiteSpace(request.Email) || string.IsNullOrWhiteSpace(request.NewPassword))
+                {
+                    _logger.LogWarning("Password change attempt with missing email or new password");
+                    return BadRequest(new { Success = false, Message = "Email and new password are required" });
+                }
+
+                var organization = await _context.Organizations
+                    .FirstOrDefaultAsync(o => o.ContactEmail == request.Email);
+
+                if (organization == null)
+                {
+                    _logger.LogWarning("Password change failed: Organization with email {Email} not found", request.Email);
+                    return NotFound(new { Success = false, Message = "Organization not found" });
+                }
+
+                // Hash the new password
+                string passwordHash = _passwordHasher.HashPassword(request.NewPassword);
+                organization.PasswordHash = passwordHash;
+                organization.UpdatedAt = DateTime.UtcNow;
+
+                await _context.SaveChangesAsync();
+
+                _logger.LogInformation("Password changed successfully for organization with email {Email}", request.Email);
+
+                return Ok(new
+                {
+                    Success = true,
+                    Message = "Password changed successfully"
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error changing password for organization with email {Email}", request.Email);
+                return StatusCode(500, new { Success = false, Message = "An error occurred while changing password" });
+            }
+        }
     }
+}
+
+// Request DTOs for OrganizationsController
+public class OrganizationLoginRequest
+{
+    [Required]
+    [EmailAddress]
+    public string Email { get; set; } = string.Empty;
+
+    [Required]
+    [MaxLength(100)]
+    public string Password { get; set; } = string.Empty;
+}
+
+public class OrganizationChangePasswordRequest
+{
+    [Required]
+    [EmailAddress]
+    public string Email { get; set; } = string.Empty;
+
+    [Required]
+    [MaxLength(100)]
+    public string NewPassword { get; set; } = string.Empty;
 }
 
 public class TermsOfUseResponse

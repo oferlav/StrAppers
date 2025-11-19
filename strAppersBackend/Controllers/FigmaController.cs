@@ -5,6 +5,7 @@ using strAppersBackend.Models;
 using System.Text.Json;
 using System.Text;
 using System.Text.Json.Serialization;
+using System.Net.Http.Headers;
 
 namespace strAppersBackend.Controllers
 {
@@ -595,30 +596,55 @@ namespace strAppersBackend.Controllers
             try
             {
                 _logger.LogInformation("Extracting file key from URL: {Url}", url);
-                
-                // Parse the URL to get the path
-                var uri = new Uri(url);
+
+                if (string.IsNullOrWhiteSpace(url))
+                {
+                    return string.Empty;
+                }
+
+                if (!Uri.TryCreate(url, UriKind.Absolute, out var uri))
+                {
+                    var withScheme = url.StartsWith("http", StringComparison.OrdinalIgnoreCase)
+                        ? url
+                        : $"https://{url.TrimStart('/')}";
+
+                    if (!Uri.TryCreate(withScheme, UriKind.Absolute, out uri))
+                    {
+                        _logger.LogWarning("Unable to parse URL even after adding scheme: {Url}", url);
+                        return string.Empty;
+                    }
+                }
+
                 var path = uri.AbsolutePath;
-                
                 _logger.LogInformation("URL path: {Path}", path);
-                
-                // Split the path by /
+
                 var segments = path.Split('/', StringSplitOptions.RemoveEmptyEntries);
-                
                 _logger.LogInformation("Path segments: {Segments}", string.Join(", ", segments));
-                
-                // Scan segments from left to right for Figma file_key pattern
+
+                // Handle community URL structure: /community/file/{key}/{title}
+                for (int i = 0; i < segments.Length - 1; i++)
+                {
+                    if (segments[i].Equals("file", StringComparison.OrdinalIgnoreCase))
+                    {
+                        var candidate = segments[i + 1];
+                        if (!string.IsNullOrEmpty(candidate))
+                        {
+                            _logger.LogInformation("Found file key (community path): {FileKey}", candidate);
+                            return candidate;
+                        }
+                    }
+                }
+
+                // Fallback: scan for alphanumeric segments resembling file keys (20-40 chars typical)
                 foreach (var segment in segments)
                 {
-                    // Figma file_key is usually 20-40 alphanumeric characters
-                    if (segment.Length >= 20 && segment.Length <= 40 && 
-                        segment.All(c => char.IsLetterOrDigit(c)))
+                    if (segment.Length >= 16 && segment.Length <= 40 && segment.All(c => char.IsLetterOrDigit(c)))
                     {
-                        _logger.LogInformation("Found file key: {FileKey}", segment);
+                        _logger.LogInformation("Found file key (fallback scan): {FileKey}", segment);
                         return segment;
                     }
                 }
-                
+
                 _logger.LogWarning("No valid file key found in URL: {Url}", url);
                 return string.Empty;
             }
@@ -768,6 +794,185 @@ namespace strAppersBackend.Controllers
             {
                 _logger.LogError(ex, "Error downloading metadata for board {BoardId}", request.BoardId);
                 return StatusCode(500, "An error occurred while downloading metadata");
+            }
+        }
+
+        /// <summary>
+        /// Retrieve the raw JSON representation of a public Figma file using its shared URL
+        /// </summary>
+        [HttpPost("use/fetch-public-file")]
+        public async Task<ActionResult> FetchPublicFile([FromBody] FetchPublicFileRequest request)
+        {
+            try
+            {
+                if (request == null || string.IsNullOrWhiteSpace(request.FileUrl))
+                {
+                    return BadRequest("FileUrl is required.");
+                }
+
+                var fileKey = ExtractFileKeyFromUrl(request.FileUrl);
+                if (string.IsNullOrEmpty(fileKey))
+                {
+                    return BadRequest("Unable to extract a file key from the provided URL.");
+                }
+
+                _logger.LogInformation("Fetching public Figma JSON for file key {FileKey}", fileKey);
+
+                var candidateEndpoints = new[]
+                {
+                    $"https://www.figma.com/api/design/{fileKey}.json?format=figma",
+                    $"https://www.figma.com/api/design/{fileKey}.json",
+                    $"https://www.figma.com/file/{fileKey}.json",
+                    $"https://www.figma.com/file/{fileKey}.json?raw=1"
+                };
+
+                foreach (var endpoint in candidateEndpoints)
+                {
+                    try
+                    {
+                        _httpClient.DefaultRequestHeaders.Clear();
+                        _httpClient.DefaultRequestHeaders.UserAgent.Add(new ProductInfoHeaderValue("SkillIn", "1.0"));
+                        _httpClient.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+
+                        _logger.LogInformation("Attempting to fetch public Figma JSON from {Endpoint}", endpoint);
+
+                        using var response = await _httpClient.GetAsync(endpoint);
+                        var content = await response.Content.ReadAsStringAsync();
+
+                        if (!response.IsSuccessStatusCode)
+                        {
+                            _logger.LogWarning("Public Figma fetch failed from {Endpoint}: {StatusCode}", endpoint, response.StatusCode);
+                            continue;
+                        }
+
+                        try
+                        {
+                            using var _ = JsonDocument.Parse(content);
+                            _logger.LogInformation("Successfully retrieved public JSON from {Endpoint}", endpoint);
+                            return Content(content, "application/json");
+                        }
+                        catch (JsonException jsonEx)
+                        {
+                            _logger.LogWarning(jsonEx, "Response from {Endpoint} was not valid JSON", endpoint);
+                        }
+                    }
+                    catch (Exception innerEx)
+                    {
+                        _logger.LogWarning(innerEx, "Error attempting to fetch public Figma JSON from {Endpoint}", endpoint);
+                    }
+                }
+
+                return StatusCode(502, new
+                {
+                    success = false,
+                    message = "Unable to retrieve public JSON for the supplied Figma URL. Ensure the file is shared publicly or via the Figma Community."
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error fetching public Figma JSON for URL {Url}", request?.FileUrl);
+                return StatusCode(500, "An error occurred while fetching the public Figma file JSON.");
+            }
+        }
+
+        /// <summary>
+        /// Exchange an authorization code for tokens and immediately fetch Figma file metadata without persisting anything
+        /// </summary>
+        [HttpPost("use/exchange-code-and-fetch")]
+        public async Task<ActionResult> ExchangeCodeAndFetch([FromBody] ExchangeCodeFetchRequest request)
+        {
+            try
+            {
+                if (request == null || string.IsNullOrWhiteSpace(request.AuthCode) || string.IsNullOrWhiteSpace(request.FileUrl))
+                {
+                    return BadRequest("AuthCode and FileUrl are required.");
+                }
+
+                var clientId = _configuration["Figma:ClientId"];
+                var clientSecret = _configuration["Figma:ClientSecret"];
+                var redirectUrls = _configuration.GetSection("Figma:RedirectUrls").Get<string[]>() ?? Array.Empty<string>();
+
+                if (string.IsNullOrEmpty(clientId) || string.IsNullOrEmpty(clientSecret))
+                {
+                    return BadRequest("Figma OAuth configuration is missing.");
+                }
+
+                var redirectUri = request.RedirectUri;
+                if (string.IsNullOrWhiteSpace(redirectUri))
+                {
+                    redirectUri = redirectUrls.FirstOrDefault();
+                }
+
+                if (string.IsNullOrWhiteSpace(redirectUri))
+                {
+                    return BadRequest("RedirectUri is required (either in request or configuration).");
+                }
+
+                var tokenForm = new List<KeyValuePair<string, string>>
+                {
+                    new("client_id", clientId!),
+                    new("client_secret", clientSecret!),
+                    new("redirect_uri", redirectUri),
+                    new("code", request.AuthCode),
+                    new("grant_type", "authorization_code")
+                };
+
+                var tokenResponse = await _httpClient.PostAsync("https://api.figma.com/v1/oauth/token", new FormUrlEncodedContent(tokenForm));
+                var tokenContent = await tokenResponse.Content.ReadAsStringAsync();
+
+                _logger.LogInformation("Figma OAuth exchange response: {StatusCode} - {Content}", tokenResponse.StatusCode, tokenContent);
+
+                if (!tokenResponse.IsSuccessStatusCode)
+                {
+                    return BadRequest(new
+                    {
+                        success = false,
+                        message = "Failed to exchange authorization code",
+                        details = tokenContent
+                    });
+                }
+
+                var tokenPayload = JsonSerializer.Deserialize<FigmaTokenResponse>(tokenContent, new JsonSerializerOptions
+                {
+                    PropertyNameCaseInsensitive = true
+                });
+
+                if (tokenPayload?.AccessToken == null)
+                {
+                    return BadRequest(new
+                    {
+                        success = false,
+                        message = "Invalid token response from Figma",
+                        details = tokenContent
+                    });
+                }
+
+                var fileKey = ExtractFileKeyFromUrl(request.FileUrl);
+                if (string.IsNullOrEmpty(fileKey))
+                {
+                    return BadRequest("Unable to extract file key from the provided URL.");
+                }
+
+                var metadata = await GetFigmaFileMetadata(tokenPayload.AccessToken, fileKey);
+                if (metadata == null)
+                {
+                    return BadRequest(new
+                    {
+                        success = false,
+                        message = "Failed to fetch file metadata from Figma. Ensure the authenticated user has access to the file."
+                    });
+                }
+
+                return Ok(new
+                {
+                    success = true,
+                    metadata
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error exchanging code and fetching Figma metadata for URL {Url}", request?.FileUrl);
+                return StatusCode(500, "An error occurred while exchanging code and fetching metadata.");
             }
         }
 
@@ -1150,6 +1355,18 @@ namespace strAppersBackend.Controllers
     public class DownloadMetadataRequest
     {
         public string BoardId { get; set; } = string.Empty;
+    }
+
+    public class FetchPublicFileRequest
+    {
+        public string FileUrl { get; set; } = string.Empty;
+    }
+
+    public class ExchangeCodeFetchRequest
+    {
+        public string AuthCode { get; set; } = string.Empty;
+        public string FileUrl { get; set; } = string.Empty;
+        public string? RedirectUri { get; set; }
     }
 
     public class FigmaTokenResponse

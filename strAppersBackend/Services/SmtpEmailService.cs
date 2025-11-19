@@ -9,6 +9,8 @@ public interface ISmtpEmailService
 {
     Task<bool> SendMeetingEmailAsync(string recipientEmail, string meetingTitle, DateTime startTime, DateTime endTime, string meetingLink, string meetingDescription = "");
     Task<bool> SendBulkMeetingEmailsAsync(List<string> recipientEmails, string meetingTitle, DateTime startTime, DateTime endTime, string meetingLink, string meetingDescription = "");
+    Task<bool> SendWelcomeEmailAsync(string recipientEmail, string firstName, string projectName, int projectLengthWeeks);
+    Task<bool> SendBulkWelcomeEmailsAsync(List<(string Email, string FirstName)> recipients, string projectName, int projectLengthWeeks);
 }
 
 public class SmtpEmailService : ISmtpEmailService
@@ -253,6 +255,88 @@ END:VCALENDAR";
 </body>
 </html>";
     }
+
+    public async Task<bool> SendWelcomeEmailAsync(string recipientEmail, string firstName, string projectName, int projectLengthWeeks)
+    {
+        try
+        {
+            if (_config.WelcomeEmailTemplate == null || string.IsNullOrEmpty(_config.WelcomeEmailTemplate.Subject) || string.IsNullOrEmpty(_config.WelcomeEmailTemplate.Body))
+            {
+                _logger.LogWarning("Welcome email template not configured, skipping welcome email to {Email}", recipientEmail);
+                return false;
+            }
+
+            _logger.LogInformation("Sending welcome email to {Email} for project {ProjectName}", recipientEmail, projectName);
+
+            // Replace placeholders in subject and body
+            var subject = _config.WelcomeEmailTemplate.Subject
+                .Replace("{{first_name}}", firstName)
+                .Replace("{{PROJECT_NAME}}", projectName)
+                .Replace("{{X}}", projectLengthWeeks.ToString());
+
+            var body = _config.WelcomeEmailTemplate.Body
+                .Replace("{{first_name}}", firstName)
+                .Replace("{{PROJECT_NAME}}", projectName)
+                .Replace("{{X}}", projectLengthWeeks.ToString());
+
+            // Convert newlines to HTML breaks for email body
+            var htmlBody = body.Replace("\n", "<br>");
+
+            using var client = CreateSmtpClient();
+            using var message = new MailMessage
+            {
+                From = new MailAddress(_config.FromEmail, _config.FromName, System.Text.Encoding.UTF8),
+                Subject = subject,
+                IsBodyHtml = true,
+                Body = $@"
+<html>
+<body style='font-family: Arial, sans-serif; line-height: 1.6; color: #333;'>
+    <div style='max-width: 600px; margin: 0 auto; padding: 20px;'>
+        <div style='white-space: pre-line;'>{htmlBody}</div>
+    </div>
+</body>
+</html>"
+            };
+
+            message.To.Add(recipientEmail);
+            message.Headers.Add("X-Sender-Name", _config.FromName);
+
+            await client.SendMailAsync(message);
+
+            _logger.LogInformation("Welcome email sent successfully to {Email}", recipientEmail);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error sending welcome email to {Email}: {Message}", recipientEmail, ex.Message);
+            return false;
+        }
+    }
+
+    public async Task<bool> SendBulkWelcomeEmailsAsync(List<(string Email, string FirstName)> recipients, string projectName, int projectLengthWeeks)
+    {
+        try
+        {
+            _logger.LogInformation("Sending bulk welcome emails to {Count} recipients for project {ProjectName}", 
+                recipients.Count, projectName);
+
+            var tasks = recipients.Select(r => 
+                SendWelcomeEmailAsync(r.Email, r.FirstName, projectName, projectLengthWeeks));
+
+            var results = await Task.WhenAll(tasks);
+            var successCount = results.Count(r => r);
+
+            _logger.LogInformation("Bulk welcome email sending completed: {SuccessCount}/{TotalCount} successful", 
+                successCount, recipients.Count);
+
+            return successCount == recipients.Count;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error sending bulk welcome emails: {Message}", ex.Message);
+            return false;
+        }
+    }
 }
 
 public class SmtpConfig
@@ -265,4 +349,11 @@ public class SmtpConfig
     public string Pass { get; set; } = string.Empty;
     public string FromEmail { get; set; } = string.Empty;
     public string FromName { get; set; } = "StrAppers Admin";
+    public WelcomeEmailTemplateConfig? WelcomeEmailTemplate { get; set; }
+}
+
+public class WelcomeEmailTemplateConfig
+{
+    public string Subject { get; set; } = string.Empty;
+    public string Body { get; set; } = string.Empty;
 }

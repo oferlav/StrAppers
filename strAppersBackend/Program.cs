@@ -71,6 +71,9 @@ builder.Services.AddScoped<IGitHubService, GitHubService>();
 // Add Kickoff service
 builder.Services.AddScoped<IKickoffService, KickoffService>();
 
+// Add Password Hasher service
+builder.Services.AddScoped<IPasswordHasherService, PasswordHasherService>();
+
 // Add session support for GitHub OAuth
 builder.Services.AddDistributedMemoryCache();
 builder.Services.AddSession(options =>
