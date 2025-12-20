@@ -82,8 +82,31 @@ public class Student
     [MaxLength(256)]
     public string? PasswordHash { get; set; }
     
+    // CV field (base64 encoded PDF/document)
+    [Column(TypeName = "text")]
+    public string? CV { get; set; }
+    
+    // Work preferences
+    public int? MinutesToWork { get; set; }
+    public bool HybridWork { get; set; } = false;
+    public bool HomeWork { get; set; } = false;
+    public bool FullTimeWork { get; set; } = false;
+    public bool PartTimeWork { get; set; } = false;
+    public bool FreelanceWork { get; set; } = false;
+    public bool TravelWork { get; set; } = false;
+    public bool NightShiftWork { get; set; } = false;
+    public bool RelocationWork { get; set; } = false;
+    public bool StudentWork { get; set; } = false;
+    public bool MultilingualWork { get; set; } = false;
+    
+    // Subscription type
+    public int? SubscriptionTypeId { get; set; }
+    
     // Navigation properties
     public ICollection<StudentRole> StudentRoles { get; set; } = new List<StudentRole>();
+    
+    [ForeignKey("SubscriptionTypeId")]
+    public Subscription? SubscriptionType { get; set; }
 }
 
 public class CreateStudentRequest
@@ -112,9 +135,8 @@ public class CreateStudentRequest
     [Url]
     public string LinkedInUrl { get; set; } = string.Empty;
     
-    [Required]
     [MaxLength(255)]
-    public string GithubUser { get; set; } = string.Empty; // GitHub username (required)
+    public string? GithubUser { get; set; } // GitHub username (optional - not required for non-developer roles)
     
     [Required]
     public int RoleId { get; set; }
@@ -125,6 +147,22 @@ public class CreateStudentRequest
     
     [MaxLength(100)]
     public string? Password { get; set; }  // Plain password (will be hashed before storing)
+    
+    // Work preferences
+    public int? MinutesToWork { get; set; }
+    public bool? HybridWork { get; set; }
+    public bool? HomeWork { get; set; }
+    public bool? FullTimeWork { get; set; }
+    public bool? PartTimeWork { get; set; }
+    public bool? FreelanceWork { get; set; }
+    public bool? TravelWork { get; set; }
+    public bool? NightShiftWork { get; set; }
+    public bool? RelocationWork { get; set; }
+    public bool? StudentWork { get; set; }
+    public bool? MultilingualWork { get; set; }
+    
+    // CV field (base64 encoded PDF/document)
+    public string? CV { get; set; }
 }
 
 public class UpdateStudentRequest
@@ -155,4 +193,20 @@ public class UpdateStudentRequest
     public string? Photo { get; set; }  // Base64 encoded image or URL
     
     public int? ProgrammingLanguageId { get; set; }  // Optional programming language preference
+    
+    // Work preferences
+    public int? MinutesToWork { get; set; }
+    public bool? HybridWork { get; set; }
+    public bool? HomeWork { get; set; }
+    public bool? FullTimeWork { get; set; }
+    public bool? PartTimeWork { get; set; }
+    public bool? FreelanceWork { get; set; }
+    public bool? TravelWork { get; set; }
+    public bool? NightShiftWork { get; set; }
+    public bool? RelocationWork { get; set; }
+    public bool? StudentWork { get; set; }
+    public bool? MultilingualWork { get; set; }
+    
+    // CV field (base64 encoded PDF/document)
+    public string? CV { get; set; }
 }

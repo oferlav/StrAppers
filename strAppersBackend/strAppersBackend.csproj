@@ -4,6 +4,7 @@
     <TargetFramework>net8.0</TargetFramework>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
+	<IsTransformWebConfigDisabled>true</IsTransformWebConfigDisabled>
   </PropertyGroup>
 
   <ItemGroup>
@@ -19,4 +20,12 @@
     <PackageReference Include="System.Drawing.Common" Version="9.0.10" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- Exclude Development config from publish (only use appsettings.json and appsettings.Production.json) -->
+    <Content Remove="appsettings.Development.json" />
+    <None Include="appsettings.Development.json">
+      <CopyToPublishDirectory>Never</CopyToPublishDirectory>
+    </None>
+  </ItemGroup>
+	
 </Project>

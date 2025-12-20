@@ -15,6 +15,8 @@ public interface IGitHubService
     Task<bool> CreateInitialCommitAsync(string owner, string repositoryName, string projectTitle, string accessToken);
     Task<bool> EnableGitHubPagesAsync(string owner, string repositoryName, string accessToken);
     string GetGitHubPagesUrl(string repositoryName);
+    Task<DateTime?> GetLastCommitDateByUserAsync(string owner, string repo, string username, string? accessToken = null);
+    Task<GitHubCommitInfo?> GetLastCommitInfoByUserAsync(string owner, string repo, string username, string? accessToken = null);
 }
 
 public class GitHubService : IGitHubService
@@ -644,6 +646,171 @@ public class GitHubService : IGitHubService
         return $"https://skill-in-projects.github.io/{repositoryName}/";
     }
 
+    /// <summary>
+    /// Gets the date and time of the last commit by a specific user in a repository
+    /// </summary>
+    public async Task<DateTime?> GetLastCommitDateByUserAsync(string owner, string repo, string username, string? accessToken = null)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(owner) || string.IsNullOrWhiteSpace(repo) || string.IsNullOrWhiteSpace(username))
+            {
+                _logger.LogWarning("GetLastCommitDateByUserAsync: Invalid parameters - owner: {Owner}, repo: {Repo}, username: {Username}", 
+                    owner ?? "null", repo ?? "null", username ?? "null");
+                return null;
+            }
+
+            var url = $"{GitHubApiBaseUrl}/repos/{owner}/{repo}/commits?author={username}&per_page=1";
+            var request = new HttpRequestMessage(HttpMethod.Get, url);
+            
+            if (!string.IsNullOrEmpty(accessToken))
+            {
+                request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", accessToken);
+            }
+
+            _logger.LogInformation("Fetching last commit for user {Username} in repo {Owner}/{Repo}", username, owner, repo);
+            var response = await _httpClient.SendAsync(request);
+            
+            if (!response.IsSuccessStatusCode)
+            {
+                _logger.LogWarning("Failed to get commits for user {Username} in repo {Owner}/{Repo}. Status: {StatusCode}", 
+                    username, owner, repo, response.StatusCode);
+                return null;
+            }
+
+            var content = await response.Content.ReadAsStringAsync();
+            var commits = JsonSerializer.Deserialize<List<JsonElement>>(content, new JsonSerializerOptions 
+            { 
+                PropertyNameCaseInsensitive = true 
+            });
+            
+            if (commits == null || !commits.Any())
+            {
+                _logger.LogInformation("No commits found for user {Username} in repo {Owner}/{Repo}", username, owner, repo);
+                return null;
+            }
+
+            var firstCommit = commits[0];
+            if (firstCommit.TryGetProperty("commit", out var commitProp))
+            {
+                if (commitProp.TryGetProperty("author", out var authorProp))
+                {
+                    if (authorProp.TryGetProperty("date", out var dateProp))
+                    {
+                        var commitDateStr = dateProp.GetString();
+                        if (DateTime.TryParse(commitDateStr, out var commitDate))
+                        {
+                            _logger.LogInformation("Found last commit for user {Username} in repo {Owner}/{Repo}: {CommitDate}", 
+                                username, owner, repo, commitDate);
+                            return commitDate;
+                        }
+                    }
+                }
+            }
+            
+            _logger.LogWarning("Could not parse commit date from response for user {Username} in repo {Owner}/{Repo}", username, owner, repo);
+            return null;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error getting last commit date for user {Username} in repo {Owner}/{Repo}: {Message}", 
+                username, owner, repo, ex.Message);
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Gets the date, time, and message of the last commit by a specific user in a repository
+    /// </summary>
+    public async Task<GitHubCommitInfo?> GetLastCommitInfoByUserAsync(string owner, string repo, string username, string? accessToken = null)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(owner) || string.IsNullOrWhiteSpace(repo) || string.IsNullOrWhiteSpace(username))
+            {
+                _logger.LogWarning("GetLastCommitInfoByUserAsync: Invalid parameters - owner: {Owner}, repo: {Repo}, username: {Username}", 
+                    owner ?? "null", repo ?? "null", username ?? "null");
+                return null;
+            }
+
+            var url = $"{GitHubApiBaseUrl}/repos/{owner}/{repo}/commits?author={username}&per_page=1";
+            var request = new HttpRequestMessage(HttpMethod.Get, url);
+            
+            if (!string.IsNullOrEmpty(accessToken))
+            {
+                request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", accessToken);
+            }
+
+            _logger.LogInformation("Fetching last commit info for user {Username} in repo {Owner}/{Repo}", username, owner, repo);
+            var response = await _httpClient.SendAsync(request);
+            
+            if (!response.IsSuccessStatusCode)
+            {
+                _logger.LogWarning("Failed to get commits for user {Username} in repo {Owner}/{Repo}. Status: {StatusCode}", 
+                    username, owner, repo, response.StatusCode);
+                return null;
+            }
+
+            var content = await response.Content.ReadAsStringAsync();
+            var commits = JsonSerializer.Deserialize<List<JsonElement>>(content, new JsonSerializerOptions 
+            { 
+                PropertyNameCaseInsensitive = true 
+            });
+            
+            if (commits == null || !commits.Any())
+            {
+                _logger.LogInformation("No commits found for user {Username} in repo {Owner}/{Repo}", username, owner, repo);
+                return null;
+            }
+
+            var firstCommit = commits[0];
+            DateTime? commitDate = null;
+            string commitMessage = string.Empty;
+
+            if (firstCommit.TryGetProperty("commit", out var commitProp))
+            {
+                // Get commit message
+                if (commitProp.TryGetProperty("message", out var messageProp))
+                {
+                    commitMessage = messageProp.GetString() ?? string.Empty;
+                }
+
+                // Get commit date
+                if (commitProp.TryGetProperty("author", out var authorProp))
+                {
+                    if (authorProp.TryGetProperty("date", out var dateProp))
+                    {
+                        var commitDateStr = dateProp.GetString();
+                        if (DateTime.TryParse(commitDateStr, out var parsedDate))
+                        {
+                            commitDate = parsedDate;
+                        }
+                    }
+                }
+            }
+
+            if (commitDate.HasValue)
+            {
+                _logger.LogInformation("Found last commit for user {Username} in repo {Owner}/{Repo}: Date={CommitDate}, Message={CommitMessage}", 
+                    username, owner, repo, commitDate.Value, commitMessage);
+                return new GitHubCommitInfo
+                {
+                    CommitDate = commitDate.Value,
+                    CommitMessage = commitMessage
+                };
+            }
+            
+            _logger.LogWarning("Could not parse commit info from response for user {Username} in repo {Owner}/{Repo}", username, owner, repo);
+            return null;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error getting last commit info for user {Username} in repo {Owner}/{Repo}: {Message}", 
+                username, owner, repo, ex.Message);
+            return null;
+        }
+    }
+
     // Helper methods for Git operations
 
     private async Task<DefaultBranchInfo?> GetDefaultBranchAsync(string owner, string repositoryName, string accessToken)
@@ -1096,6 +1263,15 @@ public class GitHubUserInfo
     public int Following { get; set; }
     public DateTime CreatedAt { get; set; }
     public DateTime UpdatedAt { get; set; }
+}
+
+/// <summary>
+/// GitHub commit information
+/// </summary>
+public class GitHubCommitInfo
+{
+    public DateTime CommitDate { get; set; }
+    public string CommitMessage { get; set; } = string.Empty;
 }
 
 /// <summary>

@@ -146,7 +146,11 @@ public class ModuleInfo
 {
     public string Title { get; set; } = string.Empty;
     public string Description { get; set; } = string.Empty;
+    
+    [JsonConverter(typeof(FlexibleStringConverter))]
     public string Inputs { get; set; } = string.Empty;
+    
+    [JsonConverter(typeof(FlexibleStringConverter))]
     public string Outputs { get; set; } = string.Empty;
 }
 

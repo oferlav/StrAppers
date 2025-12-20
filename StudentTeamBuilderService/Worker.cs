@@ -15,13 +15,16 @@ public class Worker : BackgroundService
     private readonly IHttpClientFactory _httpClientFactory;
     private readonly IConfiguration _configuration;
     private readonly KickoffConfig _kickoffConfig;
+    private readonly ProjectCriteriaConfig _criteriaConfig;
+    private readonly Random _random = new();
 
-    public Worker(ILogger<Worker> logger, IHttpClientFactory httpClientFactory, IConfiguration configuration, IOptions<KickoffConfig> kickoffConfig)
+    public Worker(ILogger<Worker> logger, IHttpClientFactory httpClientFactory, IConfiguration configuration, IOptions<KickoffConfig> kickoffConfig, IOptions<ProjectCriteriaConfig> criteriaConfig)
     {
         _logger = logger;
         _httpClientFactory = httpClientFactory;
         _configuration = configuration;
         _kickoffConfig = kickoffConfig.Value;
+        _criteriaConfig = criteriaConfig.Value;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -38,6 +41,7 @@ public class Worker : BackgroundService
             {
                 _logger.LogInformation("[ITERATION] Starting iteration at {Time}", DateTime.UtcNow);
                 await ExpireOldPendingAsync(connectionString, stoppingToken);
+                await UpdateProjectCriteriaAsync(connectionString, stoppingToken);
 
                 var created = await TryCreateBoardsAsync(connectionString, baseUrl, stoppingToken);
                 _logger.LogInformation("[ITERATION] Completed at {Time}. Boards created: {Created}", DateTime.UtcNow, created);
@@ -180,6 +184,206 @@ public class Worker : BackgroundService
         return next;
     }
 
+    private async Task UpdateProjectCriteriaAsync(string connectionString, CancellationToken ct)
+    {
+        using var conn = new NpgsqlConnection(connectionString);
+        await conn.OpenAsync(ct);
+
+        // Get all projects with their creation dates
+        var projects = (await conn.QueryAsync<ProjectInfo>(new CommandDefinition(
+            @"SELECT ""Id"", ""CreatedAt"" FROM ""Projects"" ORDER BY ""Id""",
+            cancellationToken: ct))).ToList();
+
+        if (!projects.Any())
+        {
+            _logger.LogInformation("[CRITERIA] No projects found to update");
+            return;
+        }
+
+        _logger.LogInformation("[CRITERIA] Processing {Count} projects for criteria generation", projects.Count);
+
+        // Get all "* Needed" criteria IDs (2-6)
+        var neededCriteriaIds = new[] { 2, 3, 4, 5, 6 }; // UI/UX Designer Needed, Backend Developer Needed, Frontend Developer Needed, Product manager Needed, Marketing Needed
+
+        // Get mapping of criteria ID to name for logging
+        var criteriaNames = (await conn.QueryAsync<(int Id, string Name)>(new CommandDefinition(
+            @"SELECT ""Id"", ""Name"" FROM ""ProjectCriterias"" WHERE ""Id"" IN (2, 3, 4, 5, 6)",
+            cancellationToken: ct))).ToDictionary(x => x.Id, x => x.Name);
+
+        // Determine which projects should be "Popular Projects" (20% random)
+        var popularProjectsCount = (int)Math.Round(projects.Count * _criteriaConfig.PopularProjectsRate);
+        var popularProjectIds = projects
+            .OrderBy(_ => _random.Next())
+            .Take(popularProjectsCount)
+            .Select(p => p.Id)
+            .ToHashSet();
+
+        _logger.LogInformation("[CRITERIA] Selected {Count} projects as Popular Projects (rate: {Rate})", popularProjectIds.Count, _criteriaConfig.PopularProjectsRate);
+
+        var updatedCount = 0;
+        var cutoffDate = DateTime.UtcNow.AddDays(-_criteriaConfig.NewProjectsMaxDays);
+
+        foreach (var project in projects)
+        {
+            var criteriaIds = new HashSet<int>();
+
+            // Rule 1: Popular Projects (id=1) - randomly set for 20% of projects
+            if (popularProjectIds.Contains(project.Id))
+            {
+                criteriaIds.Add(1);
+            }
+
+            // Rule 2: New Projects (id=7) - set for projects newer than configured days
+            if (project.CreatedAt >= cutoffDate)
+            {
+                criteriaIds.Add(7);
+            }
+
+            // Rule 3: "* Needed" criteria (ids 2-6)
+            // For each criteria, check if there's a student allocated to the project (Status=1 or Status=2) 
+            // with a role that matches that criteria. If NOT found -> add the criteria
+            
+            // First, check if there's a Fullstack developer (Role.Type = 1) allocated to this project
+            var hasFullstackDeveloper = await conn.ExecuteScalarAsync<bool>(new CommandDefinition(
+                @"SELECT EXISTS(
+                    SELECT 1 FROM ""Students"" s
+                    INNER JOIN ""StudentRoles"" sr ON sr.""StudentId"" = s.""Id"" AND sr.""IsActive"" = TRUE
+                    INNER JOIN ""Roles"" r ON r.""Id"" = sr.""RoleId""
+                    WHERE s.""ProjectId"" = @ProjectId 
+                    AND s.""Status"" IN (1, 2)
+                    AND r.""Type"" = 1
+                    LIMIT 1)",
+                new { ProjectId = project.Id },
+                cancellationToken: ct));
+
+            if (hasFullstackDeveloper)
+            {
+                _logger.LogDebug("[CRITERIA] Project {ProjectId}: Has Fullstack developer - will exclude Backend (3) and Frontend (4) criteria",
+                    project.Id);
+            }
+
+            foreach (var criteriaId in neededCriteriaIds)
+            {
+                // Special case: If Fullstack developer exists, skip Backend (3) and Frontend (4) criteria
+                if (hasFullstackDeveloper && (criteriaId == 3 || criteriaId == 4))
+                {
+                    _logger.LogDebug("[CRITERIA] Project {ProjectId}: Skipping criteria {CriteriaId} - Fullstack developer covers this",
+                        project.Id, criteriaId);
+                    continue;
+                }
+
+                // Map criteria ID to role matching logic
+                bool hasMatchingStudent = false;
+                
+                if (criteriaId == 2) // UI/UX Designer Needed
+                {
+                    // Check for UI/UX Designer role (Role.Id = 4 or Role.Name contains "UI/UX Designer")
+                    hasMatchingStudent = await conn.ExecuteScalarAsync<bool>(new CommandDefinition(
+                        @"SELECT EXISTS(
+                            SELECT 1 FROM ""Students"" s
+                            INNER JOIN ""StudentRoles"" sr ON sr.""StudentId"" = s.""Id"" AND sr.""IsActive"" = TRUE
+                            INNER JOIN ""Roles"" r ON r.""Id"" = sr.""RoleId""
+                            WHERE s.""ProjectId"" = @ProjectId 
+                            AND s.""Status"" IN (1, 2)
+                            AND (r.""Id"" = 4 OR r.""Name"" ILIKE '%UI/UX Designer%' OR r.""Name"" ILIKE '%UI UX Designer%')
+                            LIMIT 1)",
+                        new { ProjectId = project.Id },
+                        cancellationToken: ct));
+                }
+                else if (criteriaId == 3) // Backend Developer Needed
+                {
+                    // Check for Backend Developer role (Role.Id = 3 or Role.Name contains "Backend Developer")
+                    hasMatchingStudent = await conn.ExecuteScalarAsync<bool>(new CommandDefinition(
+                        @"SELECT EXISTS(
+                            SELECT 1 FROM ""Students"" s
+                            INNER JOIN ""StudentRoles"" sr ON sr.""StudentId"" = s.""Id"" AND sr.""IsActive"" = TRUE
+                            INNER JOIN ""Roles"" r ON r.""Id"" = sr.""RoleId""
+                            WHERE s.""ProjectId"" = @ProjectId 
+                            AND s.""Status"" IN (1, 2)
+                            AND (r.""Id"" = 3 OR r.""Name"" ILIKE '%Backend Developer%')
+                            LIMIT 1)",
+                        new { ProjectId = project.Id },
+                        cancellationToken: ct));
+                }
+                else if (criteriaId == 4) // Frontend Developer Needed
+                {
+                    // Check for Frontend Developer role (Role.Id = 2 or Role.Name contains "Frontend Developer")
+                    hasMatchingStudent = await conn.ExecuteScalarAsync<bool>(new CommandDefinition(
+                        @"SELECT EXISTS(
+                            SELECT 1 FROM ""Students"" s
+                            INNER JOIN ""StudentRoles"" sr ON sr.""StudentId"" = s.""Id"" AND sr.""IsActive"" = TRUE
+                            INNER JOIN ""Roles"" r ON r.""Id"" = sr.""RoleId""
+                            WHERE s.""ProjectId"" = @ProjectId 
+                            AND s.""Status"" IN (1, 2)
+                            AND (r.""Id"" = 2 OR r.""Name"" ILIKE '%Frontend Developer%')
+                            LIMIT 1)",
+                        new { ProjectId = project.Id },
+                        cancellationToken: ct));
+                }
+                else if (criteriaId == 5) // Product manager Needed
+                {
+                    // Check for Project Manager role (Role.Id = 1 or Role.Name contains "Project Manager" or "Product Manager")
+                    hasMatchingStudent = await conn.ExecuteScalarAsync<bool>(new CommandDefinition(
+                        @"SELECT EXISTS(
+                            SELECT 1 FROM ""Students"" s
+                            INNER JOIN ""StudentRoles"" sr ON sr.""StudentId"" = s.""Id"" AND sr.""IsActive"" = TRUE
+                            INNER JOIN ""Roles"" r ON r.""Id"" = sr.""RoleId""
+                            WHERE s.""ProjectId"" = @ProjectId 
+                            AND s.""Status"" IN (1, 2)
+                            AND (r.""Id"" = 1 OR r.""Name"" ILIKE '%Project Manager%' OR r.""Name"" ILIKE '%Product Manager%')
+                            LIMIT 1)",
+                        new { ProjectId = project.Id },
+                        cancellationToken: ct));
+                }
+                else if (criteriaId == 6) // Marketing Needed
+                {
+                    // Check for Marketing role (Role.Name contains "Marketing")
+                    hasMatchingStudent = await conn.ExecuteScalarAsync<bool>(new CommandDefinition(
+                        @"SELECT EXISTS(
+                            SELECT 1 FROM ""Students"" s
+                            INNER JOIN ""StudentRoles"" sr ON sr.""StudentId"" = s.""Id"" AND sr.""IsActive"" = TRUE
+                            INNER JOIN ""Roles"" r ON r.""Id"" = sr.""RoleId""
+                            WHERE s.""ProjectId"" = @ProjectId 
+                            AND s.""Status"" IN (1, 2)
+                            AND r.""Name"" ILIKE '%Marketing%'
+                            LIMIT 1)",
+                        new { ProjectId = project.Id },
+                        cancellationToken: ct));
+                }
+
+                if (!hasMatchingStudent)
+                {
+                    criteriaIds.Add(criteriaId);
+                    var criteriaName = criteriaNames.GetValueOrDefault(criteriaId, $"Criteria {criteriaId}");
+                    _logger.LogDebug("[CRITERIA] Project {ProjectId}: Adding '{CriteriaName}' (id={CriteriaId}) - no matching student role found",
+                        project.Id, criteriaName, criteriaId);
+                }
+                else
+                {
+                    var criteriaName = criteriaNames.GetValueOrDefault(criteriaId, $"Criteria {criteriaId}");
+                    _logger.LogDebug("[CRITERIA] Project {ProjectId}: Skipping '{CriteriaName}' (id={CriteriaId}) - matching student role found",
+                        project.Id, criteriaName, criteriaId);
+                }
+            }
+
+            // Convert to comma-separated string (sorted for consistency)
+            var criteriaIdsString = criteriaIds.Count > 0
+                ? string.Join(",", criteriaIds.OrderBy(id => id))
+                : null;
+
+            // Update the project
+            await conn.ExecuteAsync(new CommandDefinition(
+                @"UPDATE ""Projects"" SET ""CriteriaIds"" = @CriteriaIds, ""UpdatedAt"" = NOW() WHERE ""Id"" = @ProjectId",
+                new { CriteriaIds = criteriaIdsString, ProjectId = project.Id },
+                cancellationToken: ct));
+
+            updatedCount++;
+            _logger.LogDebug("[CRITERIA] Project {ProjectId}: Updated CriteriaIds = '{CriteriaIds}'", project.Id, criteriaIdsString ?? "NULL");
+        }
+
+        _logger.LogInformation("[CRITERIA] Updated criteria for {Count} projects", updatedCount);
+    }
+
     private async Task ExpireOldPendingAsync(string connectionString, CancellationToken ct)
     {
         using var conn = new NpgsqlConnection(connectionString);
@@ -275,16 +479,18 @@ public class Worker : BackgroundService
             
             // Check if we can stop early, but only if all required roles are satisfied
             var hasMinimumStudents = byRole.Count >= cfg.MinimumStudents;
-            var hasRequiredUIUX = !cfg.RequireUIUXDesigner || byRole.Values.Any(x => x.RoleType == 3);
+            var hasRequiredUIUX = !cfg.RequireUIUXDesigner || byRole.Values.Count(x => x.RoleType == 3) == 1;
+            var hasRequiredProductManager = !cfg.RequireProductManager || byRole.Values.Count(x => x.RoleType == 4) == 1;
             
-            if (hasMinimumStudents && hasRequiredUIUX)
+            if (hasMinimumStudents && hasRequiredUIUX && hasRequiredProductManager)
             {
                 logger.LogInformation("[SELECT] Stopping early: byRole.Count={Count} >= MinimumStudents={Min} AND required roles satisfied", byRole.Count, cfg.MinimumStudents);
                 break;
             }
-            else if (hasMinimumStudents && !hasRequiredUIUX)
+            else if (hasMinimumStudents && (!hasRequiredUIUX || !hasRequiredProductManager))
             {
-                logger.LogInformation("[SELECT] Continuing: byRole.Count={Count} >= MinimumStudents={Min} but UI/UX not yet found, continuing search...", byRole.Count, cfg.MinimumStudents);
+                logger.LogInformation("[SELECT] Continuing: byRole.Count={Count} >= MinimumStudents={Min} but required roles not yet satisfied (UI/UX={UIUX}, PM={PM}), continuing search...", 
+                    byRole.Count, cfg.MinimumStudents, hasRequiredUIUX, hasRequiredProductManager);
             }
         }
 
@@ -304,31 +510,97 @@ public class Worker : BackgroundService
             return null;
         }
         
-        // FIX: If UI/UX is required but not in group, try to add it even if it means replacing a non-required role
-        if (cfg.RequireUIUXDesigner && !group.Any(x => x.RoleType == 3))
+        // FIX: If UI/UX is required but not exactly 1 in group, try to fix it
+        if (cfg.RequireUIUXDesigner)
         {
-            logger.LogInformation("[SELECT] UI/UX required but not in group. Attempting to add UI/UX candidate...");
-            var uiuxCandidate = candidates.FirstOrDefault(x => x.RoleType == 3 && x.RoleId != null);
-            if (uiuxCandidate != null)
+            var uiuxCount = group.Count(x => x.RoleType == 3);
+            if (uiuxCount == 0)
             {
-                var uiuxRoleId = uiuxCandidate.RoleId!.Value;
-                if (byRole.ContainsKey(uiuxRoleId))
+                logger.LogInformation("[SELECT] UI/UX required but not in group. Attempting to add UI/UX candidate...");
+                var uiuxCandidate = candidates.FirstOrDefault(x => x.RoleType == 3 && x.RoleId != null);
+                if (uiuxCandidate != null)
                 {
-                    // UI/UX role already in group but with wrong RoleType? This shouldn't happen, but log it
-                    logger.LogWarning("[SELECT] WARNING: UI/UX RoleId={RoleId} already in group but RoleType mismatch!", uiuxRoleId);
+                    var uiuxRoleId = uiuxCandidate.RoleId!.Value;
+                    if (byRole.ContainsKey(uiuxRoleId))
+                    {
+                        // UI/UX role already in group but with wrong RoleType? This shouldn't happen, but log it
+                        logger.LogWarning("[SELECT] WARNING: UI/UX RoleId={RoleId} already in group but RoleType mismatch!", uiuxRoleId);
+                    }
+                    else
+                    {
+                        // Add UI/UX candidate to group
+                        byRole[uiuxRoleId] = uiuxCandidate;
+                        group = byRole.Values.ToList();
+                        logger.LogInformation("[SELECT] Added UI/UX candidate: StudentId={StudentId}, RoleId={RoleId}, RoleName={RoleName}",
+                            uiuxCandidate.Id, uiuxRoleId, uiuxCandidate.RoleName);
+                    }
                 }
                 else
                 {
-                    // Add UI/UX candidate to group
-                    byRole[uiuxRoleId] = uiuxCandidate;
-                    group = byRole.Values.ToList();
-                    logger.LogInformation("[SELECT] Added UI/UX candidate: StudentId={StudentId}, RoleId={RoleId}, RoleName={RoleName}",
-                        uiuxCandidate.Id, uiuxRoleId, uiuxCandidate.RoleName);
+                    logger.LogInformation("[SELECT] No UI/UX candidate found in candidates list to add");
                 }
             }
-            else
+            else if (uiuxCount > 1)
             {
-                logger.LogInformation("[SELECT] No UI/UX candidate found in candidates list to add");
+                // Remove extra UI/UX designers, keep only the first one
+                var uiuxMembers = group.Where(x => x.RoleType == 3).ToList();
+                for (int i = 1; i < uiuxMembers.Count; i++)
+                {
+                    var toRemove = uiuxMembers[i];
+                    var roleId = toRemove.RoleId!.Value;
+                    if (byRole.ContainsKey(roleId))
+                    {
+                        byRole.Remove(roleId);
+                        logger.LogInformation("[SELECT] Removed extra UI/UX designer: StudentId={StudentId}, RoleId={RoleId}", toRemove.Id, roleId);
+                    }
+                }
+                group = byRole.Values.ToList();
+            }
+        }
+
+        // FIX: If Product Manager is required but not exactly 1 in group, try to fix it
+        if (cfg.RequireProductManager)
+        {
+            var pmCount = group.Count(x => x.RoleType == 4);
+            if (pmCount == 0)
+            {
+                logger.LogInformation("[SELECT] Product Manager required but not in group. Attempting to add Product Manager candidate...");
+                var pmCandidate = candidates.FirstOrDefault(x => x.RoleType == 4 && x.RoleId != null);
+                if (pmCandidate != null)
+                {
+                    var pmRoleId = pmCandidate.RoleId!.Value;
+                    if (byRole.ContainsKey(pmRoleId))
+                    {
+                        logger.LogWarning("[SELECT] WARNING: Product Manager RoleId={RoleId} already in group but RoleType mismatch!", pmRoleId);
+                    }
+                    else
+                    {
+                        byRole[pmRoleId] = pmCandidate;
+                        group = byRole.Values.ToList();
+                        logger.LogInformation("[SELECT] Added Product Manager candidate: StudentId={StudentId}, RoleId={RoleId}, RoleName={RoleName}",
+                            pmCandidate.Id, pmRoleId, pmCandidate.RoleName);
+                    }
+                }
+                else
+                {
+                    logger.LogInformation("[SELECT] No Product Manager candidate found in candidates list to add");
+                }
+            }
+            else if (pmCount > 1)
+            {
+                // Remove extra Product Managers, keep only the first one
+                var pmMembers = group.Where(x => x.RoleType == 4).ToList();
+                for (int i = 1; i < pmMembers.Count; i++)
+                {
+                    var toRemove = pmMembers[i];
+                    var roleId = toRemove.RoleId!.Value;
+                    if (byRole.ContainsKey(roleId))
+                    {
+                        byRole.Remove(roleId);
+                        logger.LogInformation("[SELECT] Removed extra Product Manager: StudentId={StudentId}, RoleId={RoleId}", toRemove.Id, roleId);
+                    }
+                }
+                group = byRole.Values.ToList();
             }
         }
         var adminCount = group.Count(x => x.IsAdmin);
@@ -360,17 +632,17 @@ public class Worker : BackgroundService
             }
         }
 
-        // Enforce required roles
+        // Enforce required roles - exactly 1 for UI/UX and Product Manager
         if (cfg.RequireUIUXDesigner)
         {
-            var hasUIUX = group.Any(x => x.RoleType == 3);
+            var uiuxCount = group.Count(x => x.RoleType == 3);
             var uiuxInGroup = group.Where(x => x.RoleType == 3).ToList();
-            logger.LogInformation("[SELECT] UI/UX check: RequireUIUXDesigner={Require}, HasUIUXInGroup={Has}, UIUXMembers=[{Members}]",
-                cfg.RequireUIUXDesigner, hasUIUX, string.Join(", ", uiuxInGroup.Select(g => $"StudentId={g.Id}, RoleId={g.RoleId}, RoleName={g.RoleName}")));
+            logger.LogInformation("[SELECT] UI/UX check: RequireUIUXDesigner={Require}, UIUXCount={Count}, UIUXMembers=[{Members}]",
+                cfg.RequireUIUXDesigner, uiuxCount, string.Join(", ", uiuxInGroup.Select(g => $"StudentId={g.Id}, RoleId={g.RoleId}, RoleName={g.RoleName}")));
             
-            if (!hasUIUX)
+            if (uiuxCount != 1)
             {
-                logger.LogInformation("[SELECT] Rejected: missing UI/UX role (RoleType=3) in selected group");
+                logger.LogInformation("[SELECT] Rejected: UI/UX count is {Count} (exactly 1 required, RoleType=3)", uiuxCount);
                 logger.LogInformation("[SELECT] DEBUG: Checking if UI/UX exists in all candidates but wasn't selected...");
                 var uiuxInAllCandidates = candidates.Where(x => x.RoleType == 3).ToList();
                 if (uiuxInAllCandidates.Any())
@@ -382,15 +654,105 @@ public class Worker : BackgroundService
                 return null;
             }
         }
+
+        if (cfg.RequireProductManager)
+        {
+            var pmCount = group.Count(x => x.RoleType == 4);
+            var pmInGroup = group.Where(x => x.RoleType == 4).ToList();
+            logger.LogInformation("[SELECT] Product Manager check: RequireProductManager={Require}, PMCount={Count}, PMMembers=[{Members}]",
+                cfg.RequireProductManager, pmCount, string.Join(", ", pmInGroup.Select(g => $"StudentId={g.Id}, RoleId={g.RoleId}, RoleName={g.RoleName}")));
+            
+            if (pmCount != 1)
+            {
+                logger.LogInformation("[SELECT] Rejected: Product Manager count is {Count} (exactly 1 required, RoleType=4)", pmCount);
+                logger.LogInformation("[SELECT] DEBUG: Checking if Product Manager exists in all candidates but wasn't selected...");
+                var pmInAllCandidates = candidates.Where(x => x.RoleType == 4).ToList();
+                if (pmInAllCandidates.Any())
+                {
+                    logger.LogInformation("[SELECT] DEBUG: Found {Count} Product Manager candidate(s) in ALL candidates that were NOT selected: [{Details}]",
+                        pmInAllCandidates.Count,
+                        string.Join(", ", pmInAllCandidates.Select(c => $"StudentId={c.Id}, RoleId={c.RoleId}, RoleName={c.RoleName}, PriorityRank={c.PriorityRank}")));
+                }
+                return null;
+            }
+        }
         if (cfg.RequireDeveloperRule)
         {
-            // Rule: either exactly one Fullstack (RoleType=1)
-            // OR one Frontend (RoleType=2, name contains "Frontend") AND one Backend (RoleType=2, name contains "Backend").
+            // Rule: 
+            // - If exactly one Fullstack (RoleType=1) exists, there must be NO Frontend and NO Backend developers
+            // - If NO Fullstack exists, there must be BOTH Frontend (RoleType=2, name contains "Frontend") 
+            //   AND Backend (RoleType=2, name contains "Backend")
             var fullstackCount = group.Count(x => x.RoleType == 1);
             var hasFrontend = group.Any(x => x.RoleType == 2 && (x.RoleName ?? string.Empty).Contains("Frontend", StringComparison.OrdinalIgnoreCase));
             var hasBackend = group.Any(x => x.RoleType == 2 && (x.RoleName ?? string.Empty).Contains("Backend", StringComparison.OrdinalIgnoreCase));
 
-            var satisfies = (fullstackCount == 1) || (hasFrontend && hasBackend);
+            // If Fullstack exists, automatically remove Frontend and Backend developers
+            if (fullstackCount == 1 && (hasFrontend || hasBackend))
+            {
+                logger.LogInformation("[SELECT] Fullstack developer found - removing Frontend and Backend developers from group");
+                
+                // Remove Frontend and Backend developers from byRole dictionary
+                var frontendBackendRoleIds = byRole.Values
+                    .Where(x => x.RoleType == 2 && 
+                        ((x.RoleName ?? string.Empty).Contains("Frontend", StringComparison.OrdinalIgnoreCase) ||
+                         (x.RoleName ?? string.Empty).Contains("Backend", StringComparison.OrdinalIgnoreCase)))
+                    .Select(x => x.RoleId!.Value)
+                    .ToList();
+                
+                foreach (var roleId in frontendBackendRoleIds)
+                {
+                    var removed = byRole[roleId];
+                    byRole.Remove(roleId);
+                    logger.LogInformation("[SELECT] Removed from group: StudentId={StudentId}, RoleId={RoleId}, RoleName={RoleName} (redundant with Fullstack)",
+                        removed.Id, roleId, removed.RoleName);
+                }
+                
+                // Update group after removal
+                group = byRole.Values.ToList();
+                
+                // Re-check counts after removal
+                fullstackCount = group.Count(x => x.RoleType == 1);
+                hasFrontend = group.Any(x => x.RoleType == 2 && (x.RoleName ?? string.Empty).Contains("Frontend", StringComparison.OrdinalIgnoreCase));
+                hasBackend = group.Any(x => x.RoleType == 2 && (x.RoleName ?? string.Empty).Contains("Backend", StringComparison.OrdinalIgnoreCase));
+                
+                logger.LogInformation("[SELECT] After removal: fullstackCount={Fullstack}, hasFrontend={FE}, hasBackend={BE}, groupCount={Count}",
+                    fullstackCount, hasFrontend, hasBackend, group.Count);
+                
+                // Re-check minimum students after removal
+                if (group.Count < cfg.MinimumStudents)
+                {
+                    logger.LogInformation("[SELECT] Rejected: not enough unique-role students after developer rule cleanup (have {Have}, need {Need})", group.Count, cfg.MinimumStudents);
+                    return null;
+                }
+            }
+            
+            // Now validate the developer rule
+            bool satisfies;
+            if (fullstackCount == 1)
+            {
+                // If we have exactly one Fullstack, we should NOT have Frontend or Backend
+                satisfies = !hasFrontend && !hasBackend;
+                if (!satisfies)
+                {
+                    logger.LogInformation("[SELECT] Rejected: developer rule violated - Fullstack exists but also has Frontend={FE} or Backend={BE} (Fullstack should be alone)", hasFrontend, hasBackend);
+                }
+            }
+            else if (fullstackCount == 0)
+            {
+                // If we have NO Fullstack, we must have BOTH Frontend AND Backend
+                satisfies = hasFrontend && hasBackend;
+                if (!satisfies)
+                {
+                    logger.LogInformation("[SELECT] Rejected: developer rule not satisfied - No Fullstack but missing Frontend={FE} or Backend={BE} (need both)", hasFrontend, hasBackend);
+                }
+            }
+            else
+            {
+                // More than one Fullstack is invalid
+                satisfies = false;
+                logger.LogInformation("[SELECT] Rejected: developer rule violated - Multiple Fullstack developers ({Count})", fullstackCount);
+            }
+
             if (!satisfies)
             {
                 logger.LogInformation("[SELECT] Rejected: developer rule not satisfied (fullstackCount={Fullstack}, hasFrontend={FE}, hasBackend={BE})", fullstackCount, hasFrontend, hasBackend);
@@ -448,6 +810,12 @@ public class CreateBoardRequest
     public string? Title { get; set; }
     public string? DateTime { get; set; }
     public int? DurationMinutes { get; set; }
+}
+
+public record ProjectInfo
+{
+    public int Id { get; init; }
+    public DateTime CreatedAt { get; init; }
 }
 
 

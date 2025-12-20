@@ -1,6 +1,7 @@
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
+using Microsoft.Extensions.Configuration;
 using strAppersBackend.Data;
 using strAppersBackend.Models;
 using strAppersBackend.Services;
@@ -17,8 +18,10 @@ public class ProjectsController : ControllerBase
     private readonly BusinessLogicConfig _businessLogicConfig;
     private readonly KickoffConfig _kickoffConfig;
     private readonly EngagementRulesConfig _engagementRulesConfig;
+    private readonly IConfiguration _configuration;
+    private readonly IKickoffService _kickoffService;
 
-    public ProjectsController(ApplicationDbContext context, ILogger<ProjectsController> logger, IDesignDocumentService designDocumentService, IOptions<BusinessLogicConfig> businessLogicConfig, IOptions<KickoffConfig> kickoffConfig, IOptions<EngagementRulesConfig> engagementRulesConfig)
+    public ProjectsController(ApplicationDbContext context, ILogger<ProjectsController> logger, IDesignDocumentService designDocumentService, IOptions<BusinessLogicConfig> businessLogicConfig, IOptions<KickoffConfig> kickoffConfig, IOptions<EngagementRulesConfig> engagementRulesConfig, IConfiguration configuration, IKickoffService kickoffService)
     {
         _context = context;
         _logger = logger;
@@ -26,6 +29,8 @@ public class ProjectsController : ControllerBase
         _businessLogicConfig = businessLogicConfig.Value;
         _kickoffConfig = kickoffConfig.Value;
         _engagementRulesConfig = engagementRulesConfig.Value;
+        _configuration = configuration;
+        _kickoffService = kickoffService;
     }
 
     /// <summary>
@@ -149,6 +154,19 @@ public class ProjectsController : ControllerBase
                 return BadRequest(ModelState);
             }
 
+            // Validate ExtendedDescription minimum word count
+            var minimumWords = _configuration.GetValue<int>("ProjectsOrg:ExtendedDescriptionMinimumWords", 50);
+            if (!string.IsNullOrWhiteSpace(request.ExtendedDescription))
+            {
+                var wordCount = request.ExtendedDescription.Split(new[] { ' ', '\t', '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries).Length;
+                if (wordCount < minimumWords)
+                {
+                    var errorMessage = $"ExtendedDescription must contain at least {minimumWords} words (currently {wordCount} words). A rich and detailed project description is essential for creating a comprehensive system design that guides the development team effectively. Please provide more details about the project's goals, requirements, features, and technical considerations.";
+                    _logger.LogWarning("ExtendedDescription validation failed: {WordCount} words (minimum: {MinimumWords})", wordCount, minimumWords);
+                    return BadRequest(new { Success = false, Message = errorMessage, WordCount = wordCount, MinimumWords = minimumWords });
+                }
+            }
+
             // Validate organization exists
             var organization = await _context.Organizations
                 .FirstOrDefaultAsync(o => o.Id == organizationId);
@@ -173,6 +191,7 @@ public class ProjectsController : ControllerBase
                 Priority = request.Priority,
                 OrganizationId = organizationId,
                 IsAvailable = request.IsAvailable,
+                CriteriaIds = request.CriteriaIds,
                 CreatedAt = DateTime.UtcNow
             };
 
@@ -266,6 +285,19 @@ public class ProjectsController : ControllerBase
                 return BadRequest(ModelState);
             }
 
+            // Validate ExtendedDescription minimum word count
+            var minimumWords = _configuration.GetValue<int>("ProjectsOrg:ExtendedDescriptionMinimumWords", 50);
+            if (!string.IsNullOrWhiteSpace(request.ExtendedDescription))
+            {
+                var wordCount = request.ExtendedDescription.Split(new[] { ' ', '\t', '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries).Length;
+                if (wordCount < minimumWords)
+                {
+                    var errorMessage = $"ExtendedDescription must contain at least {minimumWords} words (currently {wordCount} words). A rich and detailed project description is essential for creating a comprehensive system design that guides the development team effectively. Please provide more details about the project's goals, requirements, features, and technical considerations.";
+                    _logger.LogWarning("ExtendedDescription validation failed: {WordCount} words (minimum: {MinimumWords})", wordCount, minimumWords);
+                    return BadRequest(new { Success = false, Message = errorMessage, WordCount = wordCount, MinimumWords = minimumWords });
+                }
+            }
+
             // Validate organization exists
             var organization = await _context.Organizations
                 .FirstOrDefaultAsync(o => o.Id == request.OrganizationId);
@@ -289,6 +321,7 @@ public class ProjectsController : ControllerBase
                 Priority = "high", // Default priority
                 OrganizationId = request.OrganizationId,
                 IsAvailable = true, // Default isAvailable
+                CriteriaIds = request.CriteriaIds,
                 CreatedAt = DateTime.UtcNow
             };
 
@@ -384,8 +417,17 @@ public class ProjectsController : ControllerBase
                     OrganizationId = p.OrganizationId,
                     IsAvailable = p.IsAvailable,
                     Kickoff = p.Kickoff,
+                    CriteriaIds = p.CriteriaIds,
                     CreatedAt = p.CreatedAt,
-                    UpdatedAt = p.UpdatedAt
+                    UpdatedAt = p.UpdatedAt,
+                    ApplicantsCount = _context.Students
+                        .Count(s => s.Status == 1 && (
+                            s.ProjectId == p.Id ||
+                            s.ProjectPriority1 == p.Id ||
+                            s.ProjectPriority2 == p.Id ||
+                            s.ProjectPriority3 == p.Id ||
+                            s.ProjectPriority4 == p.Id
+                        ))
                     // Exclude SystemDesign, SystemDesignDoc, and Organization to avoid serialization issues
                 })
                 .ToListAsync();
@@ -396,6 +438,99 @@ public class ProjectsController : ControllerBase
         {
             _logger.LogError(ex, "Error retrieving available projects");
             return StatusCode(500, "An error occurred while retrieving available projects");
+        }
+    }
+
+    /// <summary>
+    /// Get all project criteria
+    /// </summary>
+    [HttpGet("use/ProjectCriteria")]
+    public async Task<ActionResult<IEnumerable<ProjectCriteria>>> GetProjectCriteria()
+    {
+        try
+        {
+            var criteria = await _context.ProjectCriterias
+                .OrderBy(c => c.Id)
+                .ToListAsync();
+
+            return Ok(criteria);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error retrieving project criteria");
+            return StatusCode(500, "An error occurred while retrieving project criteria");
+        }
+    }
+
+    /// <summary>
+    /// Get all students who have this project in their priority fields (ProjectPriority1-4) and Status < 2
+    /// </summary>
+    /// <param name="id">The project ID</param>
+    [HttpGet("use/get-students/{id}")]
+    public async Task<ActionResult<IEnumerable<object>>> GetStudentsForProject(int id)
+    {
+        try
+        {
+            _logger.LogInformation("Getting students for project {ProjectId} with Status < 2", id);
+
+            // Validate project exists
+            var projectExists = await _context.Projects.AnyAsync(p => p.Id == id);
+            if (!projectExists)
+            {
+                _logger.LogWarning("Project {ProjectId} not found", id);
+                return NotFound($"Project with ID {id} not found.");
+            }
+
+            // Get students where any ProjectPriority field equals projectId AND Status < 2
+            var students = await _context.Students
+                .Include(s => s.Major)
+                .Include(s => s.Year)
+                .Include(s => s.StudentRoles)
+                    .ThenInclude(sr => sr.Role)
+                .Where(s => s.Status.HasValue && s.Status < 2 && (
+                    s.ProjectPriority1 == id ||
+                    s.ProjectPriority2 == id ||
+                    s.ProjectPriority3 == id ||
+                    s.ProjectPriority4 == id
+                ))
+                .Select(s => new
+                {
+                    Id = s.Id,
+                    FirstName = s.FirstName,
+                    LastName = s.LastName,
+                    Email = s.Email,
+                    StudentId = s.StudentId,
+                    MajorId = s.MajorId,
+                    MajorName = s.Major != null ? s.Major.Name : null,
+                    YearId = s.YearId,
+                    YearName = s.Year != null ? s.Year.Name : null,
+                    LinkedInUrl = s.LinkedInUrl,
+                    GithubUser = s.GithubUser,
+                    Photo = s.Photo,
+                    ProjectId = s.ProjectId,
+                    ProjectPriority1 = s.ProjectPriority1,
+                    ProjectPriority2 = s.ProjectPriority2,
+                    ProjectPriority3 = s.ProjectPriority3,
+                    ProjectPriority4 = s.ProjectPriority4,
+                    IsAdmin = s.IsAdmin,
+                    BoardId = s.BoardId,
+                    IsAvailable = s.IsAvailable,
+                    Status = s.Status,
+                    StartPendingAt = s.StartPendingAt,
+                    RoleId = s.StudentRoles.FirstOrDefault(sr => sr.IsActive) != null ? s.StudentRoles.FirstOrDefault(sr => sr.IsActive).RoleId : (int?)null,
+                    RoleName = s.StudentRoles.FirstOrDefault(sr => sr.IsActive) != null ? s.StudentRoles.FirstOrDefault(sr => sr.IsActive).Role.Name : null,
+                    CreatedAt = s.CreatedAt,
+                    UpdatedAt = s.UpdatedAt
+                })
+                .ToListAsync();
+
+            _logger.LogInformation("Found {Count} students for project {ProjectId} with Status < 2", students.Count, id);
+            return Ok(students);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error retrieving students for project {ProjectId}: {Message}", id, ex.Message);
+            return StatusCode(500, $"An error occurred while retrieving students for the project: {ex.Message}");
         }
     }
 
@@ -487,8 +622,9 @@ public class ProjectsController : ControllerBase
                 var kickoffRules = new List<string>(kickoffRequirements.Rules);
                 kickoffRules.Insert(0, $"Minimum Juniors: {_kickoffConfig.MinimumStudents} juniors must be allocated");
                 kickoffRules.Insert(1, _kickoffConfig.RequireAdmin ? "Admin Required: At least one junior must be an admin" : "Admin Required: Not required");
-                kickoffRules.Insert(2, _kickoffConfig.RequireUIUXDesigner ? "UI/UX Designer Required: At least one junior must have UI/UX Designer role" : "UI/UX Designer Required: Not required");
-                kickoffRules.Insert(3, _kickoffConfig.RequireDeveloperRule ? "Developer Rule: At least 1 Full-stack Developer OR at least one Backend and one Frontend developers" : "Developer Rule: Not required");
+                kickoffRules.Insert(2, _kickoffConfig.RequireUIUXDesigner ? "UI/UX Designer Required: Exactly one junior must have UI/UX Designer role (Type=3)" : "UI/UX Designer Required: Not required");
+                kickoffRules.Insert(3, _kickoffConfig.RequireProductManager ? "Product Manager Required: Exactly one junior must have Product Manager role (Type=4)" : "Product Manager Required: Not required");
+                kickoffRules.Insert(4, _kickoffConfig.RequireDeveloperRule ? "Developer Rule: At least 1 Full-stack Developer OR at least one Backend and one Frontend developers" : "Developer Rule: Not required");
 
                 sections.Add(new
                 {
@@ -524,13 +660,15 @@ public class ProjectsController : ControllerBase
                     businessLogic = new
                     {
                         projectLengthInWeeks = _businessLogicConfig.ProjectLengthInWeeks,
-                        sprintLengthInWeeks = _businessLogicConfig.SprintLengthInWeeks
+                        sprintLengthInWeeks = _businessLogicConfig.SprintLengthInWeeks,
+                        maxProjectsSelection = _businessLogicConfig.MaxProjectsSelection
                     },
                     kickoff = new
                     {
                         minimumStudents = _kickoffConfig.MinimumStudents,
                         requireAdmin = _kickoffConfig.RequireAdmin,
                         requireUIUXDesigner = _kickoffConfig.RequireUIUXDesigner,
+                        requireProductManager = _kickoffConfig.RequireProductManager,
                         requireDeveloperRule = _kickoffConfig.RequireDeveloperRule
                     }
                 },
@@ -683,6 +821,9 @@ public class ProjectsController : ControllerBase
             if (request.IsAvailable.HasValue)
                 project.IsAvailable = request.IsAvailable.Value;
 
+            if (request.CriteriaIds != null)
+                project.CriteriaIds = request.CriteriaIds;
+
             project.UpdatedAt = DateTime.UtcNow;
 
             await _context.SaveChangesAsync();
@@ -793,6 +934,179 @@ public class ProjectsController : ControllerBase
         {
             _logger.LogError(ex, "Error retrieving system design document for project {ProjectId}", id);
             return StatusCode(500, "An error occurred while retrieving the system design document");
+        }
+    }
+
+    /// <summary>
+    /// Get "Hot Projects" for a student - projects that would cause immediate kickoff if the student selects them
+    /// Returns a comma-separated string of project IDs
+    /// </summary>
+    /// <param name="studentId">The student ID to check hot projects for</param>
+    /// <returns>Comma-separated string of project IDs that would cause kickoff if selected</returns>
+    [HttpGet("use/hot-projects/{studentId}")]
+    public async Task<ActionResult<string>> GetHotProjects(int studentId)
+    {
+        try
+        {
+            _logger.LogInformation("Getting hot projects for student {StudentId}", studentId);
+
+            // Get the student
+            var student = await _context.Students
+                .Include(s => s.StudentRoles)
+                    .ThenInclude(sr => sr.Role)
+                .FirstOrDefaultAsync(s => s.Id == studentId);
+
+            if (student == null)
+            {
+                _logger.LogWarning("Student {StudentId} not found", studentId);
+                return NotFound($"Student with ID {studentId} not found");
+            }
+
+            // Get all available projects (or projects that don't already have kickoff)
+            var availableProjects = await _context.Projects
+                .Where(p => p.IsAvailable && (p.Kickoff == null || p.Kickoff == false)) // Only projects that are available and not already kicked off
+                .Select(p => p.Id)
+                .ToListAsync();
+
+            _logger.LogInformation("Found {Count} available projects to check for student {StudentId}", availableProjects.Count, studentId);
+
+            var hotProjectIds = new List<int>();
+
+            foreach (var projectId in availableProjects)
+            {
+                // Get all students with Status < 2 who have this project in ProjectPriorityX (excluding our student)
+                var studentsWithProjectPriority = await _context.Students
+                    .Include(s => s.StudentRoles)
+                        .ThenInclude(sr => sr.Role)
+                    .Where(s => s.Id != studentId &&
+                               s.Status.HasValue &&
+                               s.Status < 2 &&
+                               (s.ProjectPriority1 == projectId ||
+                                s.ProjectPriority2 == projectId ||
+                                s.ProjectPriority3 == projectId ||
+                                s.ProjectPriority4 == projectId))
+                    .Select(s => s.Id)
+                    .ToListAsync();
+
+                // Simulate adding the student to this project
+                var simulatedStudentIds = studentsWithProjectPriority.ToList();
+                if (!simulatedStudentIds.Contains(studentId))
+                {
+                    simulatedStudentIds.Add(studentId);
+                }
+
+                // Check if kickoff would be met with this student added
+                // Note: We simulate that these students would be allocated (ProjectId would be set)
+                // by using KickoffService which checks students with ProjectId == projectId
+                // So we need to simulate the scenario where these students have ProjectId set
+                // But KickoffService expects students already allocated with ProjectId
+                
+                // Actually, we need to check: if these students (with ProjectPriorityX) were to be allocated,
+                // would kickoff be met? The KickoffService checks students with ProjectId set.
+                // So we simulate by temporarily checking if kickoff rules would be met.
+                
+                // For simulation, we'll check the kickoff rules manually similar to KickoffService
+                // but adapted for the ProjectPriorityX scenario
+                
+                var allSimulatedStudents = await _context.Students
+                    .Include(s => s.StudentRoles)
+                        .ThenInclude(sr => sr.Role)
+                    .Where(s => simulatedStudentIds.Contains(s.Id))
+                    .ToListAsync();
+
+                // Check kickoff rules (similar to KickoffService logic)
+                bool wouldKickoff = true;
+
+                // Rule 1: Minimum number of students
+                if (allSimulatedStudents.Count < _kickoffConfig.MinimumStudents)
+                {
+                    wouldKickoff = false;
+                    _logger.LogDebug("Project {ProjectId}: Would NOT kickoff - only {Count} students (need {Min})", 
+                        projectId, allSimulatedStudents.Count, _kickoffConfig.MinimumStudents);
+                    continue;
+                }
+
+                // Rule 2: Admin requirement
+                if (_kickoffConfig.RequireAdmin)
+                {
+                    bool hasAdmin = allSimulatedStudents.Any(s => s.IsAdmin);
+                    if (!hasAdmin)
+                    {
+                        wouldKickoff = false;
+                        _logger.LogDebug("Project {ProjectId}: Would NOT kickoff - no admin", projectId);
+                        continue;
+                    }
+                }
+
+                // Rule 3: UI/UX Designer requirement (exactly 1)
+                if (_kickoffConfig.RequireUIUXDesigner)
+                {
+                    var uiuxCount = allSimulatedStudents.Count(s =>
+                        s.StudentRoles.Any(sr => sr.IsActive && sr.Role?.Type == 3));
+                    
+                    if (uiuxCount != 1)
+                    {
+                        wouldKickoff = false;
+                        _logger.LogDebug("Project {ProjectId}: Would NOT kickoff - UI/UX count is {Count} (need exactly 1)", 
+                            projectId, uiuxCount);
+                        continue;
+                    }
+                }
+
+                // Rule 4: Product Manager requirement (exactly 1)
+                if (_kickoffConfig.RequireProductManager)
+                {
+                    var pmCount = allSimulatedStudents.Count(s =>
+                        s.StudentRoles.Any(sr => sr.IsActive && sr.Role?.Type == 4));
+                    
+                    if (pmCount != 1)
+                    {
+                        wouldKickoff = false;
+                        _logger.LogDebug("Project {ProjectId}: Would NOT kickoff - Product Manager count is {Count} (need exactly 1)", 
+                            projectId, pmCount);
+                        continue;
+                    }
+                }
+
+                // Rule 5: Developer rule
+                if (_kickoffConfig.RequireDeveloperRule)
+                {
+                    var developers = allSimulatedStudents.Count(s =>
+                        s.StudentRoles.Any(sr => sr.IsActive && sr.Role?.Type == 1));
+                    var juniorDevelopers = allSimulatedStudents.Count(s =>
+                        s.StudentRoles.Any(sr => sr.IsActive && sr.Role?.Type == 2));
+
+                    bool developerRuleMet = developers >= 1 || juniorDevelopers >= 2;
+
+                    if (!developerRuleMet)
+                    {
+                        wouldKickoff = false;
+                        _logger.LogDebug("Project {ProjectId}: Would NOT kickoff - Developer rule not met (Devs: {Devs}, JuniorDevs: {JuniorDevs})", 
+                            projectId, developers, juniorDevelopers);
+                        continue;
+                    }
+                }
+
+                if (wouldKickoff)
+                {
+                    hotProjectIds.Add(projectId);
+                    _logger.LogInformation("Project {ProjectId} is HOT for student {StudentId} - would cause kickoff", projectId, studentId);
+                }
+            }
+
+            var result = hotProjectIds.Count > 0 
+                ? string.Join(",", hotProjectIds.OrderBy(id => id))
+                : "";
+
+            _logger.LogInformation("Found {Count} hot projects for student {StudentId}: [{Projects}]", 
+                hotProjectIds.Count, studentId, result);
+
+            return Ok(result);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error retrieving hot projects for student {StudentId}", studentId);
+            return StatusCode(500, "An error occurred while retrieving hot projects");
         }
     }
 

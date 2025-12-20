@@ -14,6 +14,11 @@ namespace strAppersBackend.Models
         /// Default sprint length in weeks
         /// </summary>
         public int SprintLengthInWeeks { get; set; } = 1;
+
+        /// <summary>
+        /// Maximum number of projects a student can select in their priority fields
+        /// </summary>
+        public int MaxProjectsSelection { get; set; } = 4;
     }
 }
 

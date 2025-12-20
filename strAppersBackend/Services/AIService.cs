@@ -1,4 +1,5 @@
 using System.Text;
+using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Microsoft.Extensions.Configuration;
@@ -12,7 +13,7 @@ public interface IAIService
 {
     Task<SystemDesignResponse> GenerateSystemDesignAsync(SystemDesignRequest request);
     Task<SprintPlanningResponse> GenerateSprintPlanAsync(SprintPlanningRequest request);
-    Task<InitiateModulesResponse> InitiateModulesAsync(int projectId, string extendedDescription, int maxModules, int minWordsPerModule);
+    Task<InitiateModulesResponse> InitiateModulesAsync(int projectId, string extendedDescription, int maxModules, int minWordsPerModule, string? contentForLanguageDetection = null);
     Task<CreateDataModelResponse> CreateDataModelAsync(int projectId, string modulesData);
     Task<UpdateModuleResponse> UpdateModuleAsync(int moduleId, string currentDescription, string userInput);
     Task<UpdateDataModelResponse> UpdateDataModelAsync(int projectId, string currentSqlScript, string userInput);
@@ -194,78 +195,26 @@ public class AIService : IAIService
 
     private string BuildSystemDesignPrompt(SystemDesignRequest request)
     {
-        var teamRolesText = string.Join(", ", request.TeamRoles.Select(r => $"{r.RoleName} ({r.StudentCount} students)"));
+        var promptConfig = _configuration.GetSection("PromptConfig:ProjectModules:SystemDesign");
+        var systemPrompt = promptConfig["SystemPrompt"] ?? "You are a senior software architect. Generate a comprehensive system design document based on the following project requirements.";
+        var userPromptTemplate = promptConfig["UserPromptTemplate"] ?? "PROJECT DESCRIPTION:\n{0}\n\nTEAM COMPOSITION:\n{1}\n\nPlease generate a structured system design document in JSON format.";
         
-        return $@"You are a senior software architect. Generate a comprehensive system design document based on the following project requirements:
-
-PROJECT DESCRIPTION:
-{request.ExtendedDescription}
-
-TEAM COMPOSITION:
-{teamRolesText}
-
-Please generate a structured system design document in JSON format with the following sections:
-
-1. **Architecture Overview**
-   - System type (web app, mobile app, desktop, etc.)
-   - High-level architecture pattern (MVC, microservices, monolithic, etc.)
-   - Technology stack recommendations
-
-2. **Core Components**
-   - List of main system components
-   - Component responsibilities
-   - Component interactions
-
-3. **Database Design**
-   - Database type recommendation (PostgreSQL, MongoDB, etc.)
-   - Key entities and relationships
-   - Data flow patterns
-
-4. **API Design**
-   - RESTful API structure
-   - Key endpoints
-   - Authentication/authorization approach
-
-5. **Infrastructure**
-   - Deployment strategy
-   - Hosting recommendations
-   - Scalability considerations
-
-6. **Security**
-   - Security measures
-   - Data protection strategies
-
-7. **Development Guidelines**
-   - Coding standards
-   - Testing strategy
-   - CI/CD recommendations
-
-Return the response as a well-structured JSON object that can be easily parsed and stored in a database.";
+        var teamRolesText = string.Join(", ", request.TeamRoles.Select(r => $"{r.RoleName} ({r.StudentCount} students)"));
+        var userPrompt = string.Format(userPromptTemplate, request.ExtendedDescription, teamRolesText);
+        
+        return $"{systemPrompt}\n\n{userPrompt}";
     }
 
     private string BuildFormattedSystemDesignPrompt(SystemDesignRequest request)
     {
-        var teamRolesText = string.Join(", ", request.TeamRoles.Select(r => $"{r.RoleName} ({r.StudentCount} students)"));
+        var promptConfig = _configuration.GetSection("PromptConfig:ProjectModules:SystemDesignFormatted");
+        var systemPrompt = promptConfig["SystemPrompt"] ?? "You are a senior software architect. Generate a concise, human-readable system design summary for the following project.";
+        var userPromptTemplate = promptConfig["UserPromptTemplate"] ?? "PROJECT DESCRIPTION:\n{0}\n\nTEAM COMPOSITION:\n{1}\n\nPlease generate a brief, professional summary (maximum 2000 characters).";
         
-        return $@"You are a senior software architect. Generate a concise, human-readable system design summary for the following project:
-
-PROJECT DESCRIPTION:
-{request.ExtendedDescription}
-
-TEAM COMPOSITION:
-{teamRolesText}
-
-Please generate a brief, professional summary (maximum 2000 characters) that covers:
-
-1. System Type & Architecture Pattern
-2. Key Technologies Recommended
-3. Main Components & Their Purpose
-4. Database & Data Strategy
-5. Deployment & Infrastructure
-
-Format the response as clear, readable text with bullet points and short paragraphs. This will be displayed to stakeholders and team members who need a quick overview of the system design.
-
-Keep it concise, professional, and easy to understand. DO NOT use JSON format - use plain text with formatting.";
+        var teamRolesText = string.Join(", ", request.TeamRoles.Select(r => $"{r.RoleName} ({r.StudentCount} students)"));
+        var userPrompt = string.Format(userPromptTemplate, request.ExtendedDescription, teamRolesText);
+        
+        return $"{systemPrompt}\n\n{userPrompt}";
     }
 
     private string BuildSprintPlanningPrompt(SprintPlanningRequest request)
@@ -650,6 +599,178 @@ REMEMBER: Every task title, description, and checklist item MUST directly refere
     }
 
     /// <summary>
+    /// Detects if text contains Hebrew characters
+    /// </summary>
+    private bool ContainsHebrewCharacters(string text)
+    {
+        if (string.IsNullOrEmpty(text))
+            return false;
+        
+        // Hebrew Unicode range: U+0590 to U+05FF
+        foreach (char c in text)
+        {
+            if (c >= '\u0590' && c <= '\u05FF')
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// Fixes common JSON issues when Hebrew characters are present
+    /// Repairs malformed JSON by escaping newlines, quotes, and other problematic characters
+    /// </summary>
+    private string FixJsonForHebrewContent(string json)
+    {
+        if (string.IsNullOrEmpty(json))
+            return json;
+
+        try
+        {
+            // Try to parse first - if it works, return as-is
+            using (var doc = JsonDocument.Parse(json, new JsonDocumentOptions { AllowTrailingCommas = true }))
+            {
+                return json;
+            }
+        }
+        catch
+        {
+            // If parsing fails, try to fix common issues
+            // Main issues: unescaped newlines, unescaped quotes, unescaped backslashes inside string values
+            var jsonToFix = json;
+            var result = new StringBuilder();
+            var inString = false;
+            var escapeNext = false;
+            
+            for (int i = 0; i < jsonToFix.Length; i++)
+            {
+                var c = jsonToFix[i];
+                
+                if (escapeNext)
+                {
+                    result.Append(c);
+                    escapeNext = false;
+                    continue;
+                }
+                
+                if (c == '\\')
+                {
+                    result.Append(c);
+                    escapeNext = true;
+                    continue;
+                }
+                
+                if (c == '"')
+                {
+                    if (!inString)
+                    {
+                        // Opening quote
+                        inString = true;
+                        result.Append(c);
+                    }
+                    else
+                    {
+                        // We're inside a string - check if this is a closing quote
+                        var isClosingQuote = false;
+                        // Look ahead past whitespace to see what comes next
+                        for (int j = i + 1; j < jsonToFix.Length && j < i + 20; j++)
+                        {
+                            var nextChar = jsonToFix[j];
+                            if (nextChar == ',' || nextChar == '}' || nextChar == ']')
+                            {
+                                isClosingQuote = true;
+                                break;
+                            }
+                            if (nextChar == ':')
+                            {
+                                // This is actually the start of next property - close current string
+                                isClosingQuote = true;
+                                break;
+                            }
+                            if (!char.IsWhiteSpace(nextChar))
+                            {
+                                break;
+                            }
+                        }
+                        
+                        if (isClosingQuote)
+                        {
+                            // Closing quote
+                            inString = false;
+                            result.Append(c);
+                        }
+                        else
+                        {
+                            // Quote inside string value - escape it
+                            result.Append("\\\"");
+                        }
+                    }
+                    continue;
+                }
+                
+                if (inString)
+                {
+                    // We're inside a string value - escape problematic characters
+                    if (c == '\n')
+                    {
+                        result.Append("\\n");
+                    }
+                    else if (c == '\r')
+                    {
+                        // Skip \r, we'll handle \n
+                        if (i + 1 >= jsonToFix.Length || jsonToFix[i + 1] != '\n')
+                        {
+                            result.Append("\\n");
+                        }
+                        // else skip it, \n will be handled
+                    }
+                    else if (c == '\t')
+                    {
+                        result.Append("\\t");
+                    }
+                    else if (c == '\b')
+                    {
+                        result.Append("\\b");
+                    }
+                    else if (c == '\f')
+                    {
+                        result.Append("\\f");
+                    }
+                    else
+                    {
+                        result.Append(c);
+                    }
+                }
+                else
+                {
+                    // Outside string - copy as-is
+                    result.Append(c);
+                }
+            }
+            
+            var repairedJson = result.ToString();
+            _logger.LogInformation("Attempted to repair JSON. Original length: {OriginalLength}, Repaired length: {RepairedLength}", 
+                json.Length, repairedJson.Length);
+            
+            // Try to parse the repaired JSON
+            try
+            {
+                using (var doc = JsonDocument.Parse(repairedJson, new JsonDocumentOptions { AllowTrailingCommas = true }))
+                {
+                    _logger.LogInformation("Successfully repaired JSON");
+                    return repairedJson;
+                }
+            }
+            catch (Exception repairEx)
+            {
+                _logger.LogWarning(repairEx, "JSON repair attempt failed, returning original");
+                return json;
+            }
+        }
+    }
+
+    /// <summary>
     /// Cleans AI response to extract SQL from markdown code blocks
     /// </summary>
     private string CleanSqlFromMarkdown(string content)
@@ -681,7 +802,7 @@ REMEMBER: Every task title, description, and checklist item MUST directly refere
         return content;
     }
 
-    public async Task<InitiateModulesResponse> InitiateModulesAsync(int projectId, string extendedDescription, int maxModules, int minWordsPerModule)
+    public async Task<InitiateModulesResponse> InitiateModulesAsync(int projectId, string extendedDescription, int maxModules, int minWordsPerModule, string? contentForLanguageDetection = null)
     {
         try
         {
@@ -690,7 +811,16 @@ REMEMBER: Every task title, description, and checklist item MUST directly refere
             var promptConfig = _configuration.GetSection("PromptConfig:ProjectModules:InitiateModules");
             var baseSystemPrompt = promptConfig["SystemPrompt"] ?? "You are an expert software architect.";
             
-            // Enhance system prompt to emphasize word count requirements
+            // Determine language from SystemDesign if available, otherwise from ExtendedDescription
+            var languageSource = !string.IsNullOrEmpty(contentForLanguageDetection) ? contentForLanguageDetection : extendedDescription;
+            var isHebrew = ContainsHebrewCharacters(languageSource);
+            
+            // Build language instruction
+            var languageInstruction = isHebrew 
+                ? "🌍 CRITICAL LANGUAGE REQUIREMENT - HEBREW: 🌍\n- The project description/SystemDesign is in HEBREW.\n- You MUST generate ALL modules (titles, descriptions, inputs, outputs) COMPLETELY in HEBREW.\n- Do NOT translate to English - respond entirely in Hebrew.\n- Every word, sentence, and explanation must be in Hebrew."
+                : "🌍 LANGUAGE CONSISTENCY REQUIREMENT: 🌍\n- Always respond in the SAME language as the project description provided by the user.\n- Match the language exactly - if it's English, respond in English; if it's Hebrew, respond in Hebrew.";
+            
+            // Enhance system prompt to emphasize word count requirements and language
             var systemPrompt = $"{baseSystemPrompt}\n\n" +
                              $"🚨 CRITICAL WORD COUNT REQUIREMENT 🚨\n" +
                              $"Each module description MUST be EXACTLY {minWordsPerModule} words or MORE.\n" +
@@ -701,9 +831,14 @@ REMEMBER: Every task title, description, and checklist item MUST directly refere
                              $"- Architecture and integration points\n" +
                              $"- User interactions and data flows\n" +
                              $"- Examples and detailed explanations\n" +
-                             $"Be verbose, thorough, and comprehensive - aim for {minWordsPerModule}+ words per description.\n" +
-                             $"🌍 LANGUAGE CONSISTENCY: Always respond in the SAME language as the project description provided by the user.";
+                             $"Be verbose, thorough, and comprehensive - aim for {minWordsPerModule}+ words per description.\n\n" +
+                             $"{languageInstruction}";
             var userPromptTemplate = promptConfig["UserPromptTemplate"] ?? "Project Description: {0}";
+            
+            // Build JSON format instruction (especially important for Hebrew)
+            var jsonFormatInstruction = isHebrew 
+                ? "\n\n⚠️ CRITICAL JSON FORMAT REQUIREMENT - MANDATORY ⚠️\n- You MUST return valid JSON that can be parsed by a standard JSON parser.\n- ALL Hebrew text MUST be inside properly quoted string values (between double quotes).\n- CRITICAL: Replace ALL actual newline characters (line breaks) in your text with the escape sequence \\n (backslash followed by n).\n- CRITICAL: Replace ALL actual tab characters with \\t.\n- Ensure ALL quotes inside Hebrew text are escaped with backslash (\\\").\n- DO NOT include actual line breaks or newlines in the JSON - use \\n instead.\n- The JSON must be on a single line or properly formatted with escaped newlines.\n- Example CORRECT format: {\"title\": \"מודול\", \"description\": \"תיאור ארוך עם\\nשורות מרובות\"}\n- Example WRONG format: {\"title\": \"מודול\", \"description\": \"תיאור ארוך עם\nשורות מרובות\"} (actual newline breaks JSON)\n- DO NOT put Hebrew characters outside of quoted strings.\n- Test your JSON: it must parse without errors."
+                : "\n\n⚠️ CRITICAL JSON FORMAT REQUIREMENT - MANDATORY ⚠️\n- You MUST return valid JSON that can be parsed by a standard JSON parser.\n- ALL text MUST be inside properly quoted string values (between double quotes).\n- CRITICAL: Replace ALL actual newline characters (line breaks) in your text with the escape sequence \\n (backslash followed by n).\n- CRITICAL: Replace ALL actual tab characters with \\t.\n- Ensure ALL quotes inside text are escaped with backslash (\\\").\n- DO NOT include actual line breaks or newlines in the JSON - use \\n instead.\n- The JSON must be on a single line or properly formatted with escaped newlines.\n- Test your JSON: it must parse without errors.";
             
             // Enhance the user prompt with MaxModules and MinWordsPerModule constraints
             var enhancedUserPrompt = $"{string.Format(userPromptTemplate, extendedDescription)}\n\n" +
@@ -718,8 +853,9 @@ REMEMBER: Every task title, description, and checklist item MUST directly refere
                                    $"- Add examples, scenarios, and detailed explanations\n" +
                                    $"- Be verbose and thorough - aim for {minWordsPerModule}+ words per description\n" +
                                    $"- Ensure each module has detailed inputs and outputs\n" +
-                                   $"- DO NOT write brief or concise descriptions - be comprehensive and detailed\n" +
-                                   $"- 🌍 LANGUAGE CONSISTENCY: Respond in the SAME language as the project description provided above";
+                                   $"- DO NOT write brief or concise descriptions - be comprehensive and detailed\n\n" +
+                                   $"{languageInstruction}" +
+                                   $"{jsonFormatInstruction}";
             
             var userPrompt = enhancedUserPrompt;
             
@@ -786,9 +922,8 @@ REMEMBER: Every task title, description, and checklist item MUST directly refere
             var cleanedContent = CleanJsonFromMarkdown(aiContent);
             _logger.LogInformation("Cleaned AI content: {Content}", cleanedContent);
 
-            // Sanitize known problematic characters before JSON parsing
+            // Sanitize known problematic characters before JSON parsing (but preserve Hebrew)
             var sanitizedContent = cleanedContent
-                .Replace('\u00D7', 'x')
                 .Replace('÷', '/')
                 .Replace('\u2022', '-')
                 .Replace('\u2212', '-')
@@ -798,12 +933,132 @@ REMEMBER: Every task title, description, and checklist item MUST directly refere
             {
                 _logger.LogInformation("Sanitized AI content length: {Length}", sanitizedContent.Length);
             }
+
+            // Try to fix common JSON issues with Hebrew characters
+            sanitizedContent = FixJsonForHebrewContent(sanitizedContent);
  
-            // Parse the JSON response
-            var modulesResponse = JsonSerializer.Deserialize<ModulesResponse>(sanitizedContent, new JsonSerializerOptions
+            // Parse the JSON response with custom converter for flexible Inputs/Outputs handling
+            var jsonOptions = new JsonSerializerOptions
             {
-                PropertyNameCaseInsensitive = true
-            });
+                PropertyNameCaseInsensitive = true,
+                Converters = { new Models.FlexibleStringConverter() },
+                Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping // Allow Hebrew characters
+            };
+            
+            ModulesResponse? modulesResponse = null;
+            try
+            {
+                // First try to validate JSON structure
+                using (var doc = JsonDocument.Parse(sanitizedContent, new JsonDocumentOptions { AllowTrailingCommas = true }))
+                {
+                    _logger.LogInformation("JSON structure validated successfully");
+                }
+                
+                modulesResponse = JsonSerializer.Deserialize<ModulesResponse>(sanitizedContent, jsonOptions);
+            }
+            catch (JsonException ex)
+            {
+                _logger.LogError(ex, "JSON deserialization failed. Error: {Error}. Path: {Path}. Line: {Line}. Position: {Position}", 
+                    ex.Message, ex.Path, ex.LineNumber, ex.BytePositionInLine);
+                
+                // Log the problematic content around the error location
+                var errorPosition = ex.BytePositionInLine > 0 ? (int)ex.BytePositionInLine : 0;
+                var errorLine = ex.LineNumber > 0 ? (int)ex.LineNumber : 0;
+                
+                _logger.LogError("Error occurred at Line {Line}, Position {Position}", errorLine, errorPosition);
+                
+                // Try to extract context around the error
+                if (errorPosition > 0 && sanitizedContent.Length > errorPosition)
+                {
+                    var startPos = Math.Max(0, errorPosition - 100);
+                    var length = Math.Min(200, sanitizedContent.Length - startPos);
+                    var context = sanitizedContent.Substring(startPos, length);
+                    _logger.LogError("Content around error position: {Context}", context);
+                }
+                
+                // Log full content (truncated if too long)
+                if (sanitizedContent.Length > 5000)
+                {
+                    _logger.LogError("Full JSON content (first 2500 chars): {Content}", sanitizedContent.Substring(0, 2500));
+                    _logger.LogError("Full JSON content (last 2500 chars): {Content}", sanitizedContent.Substring(sanitizedContent.Length - 2500));
+                }
+                else
+                {
+                    _logger.LogError("Full JSON content: {Content}", sanitizedContent);
+                }
+                
+                // Try to manually extract modules if JSON structure is partially valid
+                try
+                {
+                    // Look for the modules array pattern manually
+                    var modulesStart = sanitizedContent.IndexOf("\"modules\"", StringComparison.OrdinalIgnoreCase);
+                    if (modulesStart >= 0)
+                    {
+                        var arrayStart = sanitizedContent.IndexOf('[', modulesStart);
+                        if (arrayStart >= 0)
+                        {
+                            _logger.LogInformation("Found modules array starting at position {Position}", arrayStart);
+                            // Try to count modules by counting opening braces
+                            var moduleCount = 0;
+                            var braceCount = 0;
+                            var inString = false;
+                            var escapeNext = false;
+                            
+                            for (int i = arrayStart + 1; i < sanitizedContent.Length && i < arrayStart + 10000; i++)
+                            {
+                                var c = sanitizedContent[i];
+                                
+                                if (escapeNext)
+                                {
+                                    escapeNext = false;
+                                    continue;
+                                }
+                                
+                                if (c == '\\')
+                                {
+                                    escapeNext = true;
+                                    continue;
+                                }
+                                
+                                if (c == '"' && !escapeNext)
+                                {
+                                    inString = !inString;
+                                    continue;
+                                }
+                                
+                                if (!inString)
+                                {
+                                    if (c == '{')
+                                    {
+                                        braceCount++;
+                                        if (braceCount == 1) moduleCount++;
+                                    }
+                                    else if (c == '}')
+                                    {
+                                        braceCount--;
+                                    }
+                                    else if (c == ']' && braceCount == 0)
+                                    {
+                                        break;
+                                    }
+                                }
+                            }
+                            
+                            _logger.LogInformation("Manually counted approximately {Count} modules in array", moduleCount);
+                        }
+                    }
+                }
+                catch (Exception manualEx)
+                {
+                    _logger.LogWarning(manualEx, "Failed to manually analyze JSON structure");
+                }
+                
+                return new InitiateModulesResponse
+                {
+                    Success = false,
+                    Message = $"JSON parsing error: {ex.Message}. Path: {ex.Path ?? "unknown"}. Line: {errorLine}, Position: {errorPosition}. The AI response contains invalid JSON structure - likely Hebrew characters are not properly escaped or quoted. Please try again. The prompt has been updated to ensure valid JSON format."
+                };
+            }
 
             if (modulesResponse?.Modules == null)
             {
@@ -1862,3 +2117,4 @@ file sealed class TextTranslationResult
     [JsonPropertyName("text")]
     public string? Text { get; set; }
 }
+

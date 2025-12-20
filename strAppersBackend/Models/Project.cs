@@ -62,6 +62,15 @@ public class Project
     [Column("mock_records_count")]
     public int MockRecordsCount { get; set; } = 10;
     
+    // Project Criteria - comma-separated string of Criteria Ids
+    [MaxLength(500)]
+    [Column("CriteriaIds")]
+    public string? CriteriaIds { get; set; }
+    
+    // Calculated field: Count of applicants (students with Status=1 who have this project in ProjectId or any ProjectPriority field)
+    [NotMapped]
+    public int ApplicantsCount { get; set; }
+    
     // Navigation properties
     public ICollection<DesignVersion> DesignVersions { get; set; } = new List<DesignVersion>();
     public ICollection<ProjectsIDE> IDEChunks { get; set; } = new List<ProjectsIDE>();
@@ -83,6 +92,9 @@ public class CreateProjectRequest
     public string Priority { get; set; } = "Medium";
     
     public bool IsAvailable { get; set; } = true;
+    
+    [MaxLength(500)]
+    public string? CriteriaIds { get; set; }
 }
 
 public class CreateProjectSimpleRequest
@@ -99,6 +111,9 @@ public class CreateProjectSimpleRequest
     
     [Column(TypeName = "TEXT")]
     public string? ExtendedDescription { get; set; }
+    
+    [MaxLength(500)]
+    public string? CriteriaIds { get; set; }
 }
 
 public class UpdateProjectRequest
@@ -116,4 +131,7 @@ public class UpdateProjectRequest
     public string? Priority { get; set; }
     
     public bool? IsAvailable { get; set; }
+    
+    [MaxLength(500)]
+    public string? CriteriaIds { get; set; }
 }

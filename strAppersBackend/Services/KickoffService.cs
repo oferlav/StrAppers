@@ -28,8 +28,9 @@ public class KickoffService : IKickoffService
     /// Rules (configurable):
     /// 1. Minimum number of students (default: 2)
     /// 2. At least one admin required (default: true)
-    /// 3. UI/UX Designer required (default: true, Type=3)
-    /// 4. Developer rule required (default: true) - at least 1 student with Type=1 OR at least 2 students with Type=2
+    /// 3. UI/UX Designer required (default: true, Type=3) - exactly 1 required
+    /// 4. Product Manager required (default: false, Type=4) - exactly 1 required
+    /// 5. Developer rule required (default: true) - at least 1 student with Type=1 OR at least 2 students with Type=2
     /// </summary>
     /// <param name="projectId">The project ID to check</param>
     /// <param name="studentIds">Collection of student IDs to evaluate</param>
@@ -42,8 +43,8 @@ public class KickoffService : IKickoffService
             _logger.LogInformation("ProjectId: {ProjectId}", projectId);
             _logger.LogInformation("Student IDs provided: [{StudentIds}]", string.Join(", ", studentIds));
             _logger.LogInformation("Total student IDs provided: {Count}", studentIds.Count());
-            _logger.LogInformation("Configuration: MinStudents={MinStudents}, RequireAdmin={RequireAdmin}, RequireUIUX={RequireUIUX}, RequireDeveloper={RequireDeveloper}", 
-                _kickoffConfig.MinimumStudents, _kickoffConfig.RequireAdmin, _kickoffConfig.RequireUIUXDesigner, _kickoffConfig.RequireDeveloperRule);
+            _logger.LogInformation("Configuration: MinStudents={MinStudents}, RequireAdmin={RequireAdmin}, RequireUIUX={RequireUIUX}, RequireProductManager={RequireProductManager}, RequireDeveloper={RequireDeveloper}", 
+                _kickoffConfig.MinimumStudents, _kickoffConfig.RequireAdmin, _kickoffConfig.RequireUIUXDesigner, _kickoffConfig.RequireProductManager, _kickoffConfig.RequireDeveloperRule);
 
             if (!studentIds.Any())
             {
@@ -100,26 +101,45 @@ public class KickoffService : IKickoffService
                 _logger.LogInformation("✅ RULE 2 SKIPPED: Admin requirement disabled");
             }
 
-            // Rule 3: UI/UX Designer requirement (if enabled)
+            // Rule 3: UI/UX Designer requirement (if enabled) - exactly 1 required
             if (_kickoffConfig.RequireUIUXDesigner)
             {
-                bool hasUIUXDesigner = studentsWithoutBoard.Any(s => 
+                var uiuxDesignerCount = studentsWithoutBoard.Count(s => 
                     s.StudentRoles.Any(sr => sr.IsActive && sr.Role?.Type == 3));
                 
-                if (!hasUIUXDesigner)
+                if (uiuxDesignerCount != 1)
                 {
-                    _logger.LogInformation("❌ RULE 3 FAILED: No students with UI/UX Designer role (Type=3)");
+                    _logger.LogInformation("❌ RULE 3 FAILED: UI/UX Designer count is {Count} (exactly 1 required, Type=3)", uiuxDesignerCount);
                     _logger.LogInformation("========== KICKOFF CHECK END: FALSE ==========");
                     return false;
                 }
-                _logger.LogInformation("✅ RULE 3 PASSED: Found at least one UI/UX Designer");
+                _logger.LogInformation("✅ RULE 3 PASSED: Found exactly one UI/UX Designer");
             }
             else
             {
                 _logger.LogInformation("✅ RULE 3 SKIPPED: UI/UX Designer requirement disabled");
             }
 
-            // Rule 4: Developer rule (if enabled)
+            // Rule 4: Product Manager requirement (if enabled) - exactly 1 required
+            if (_kickoffConfig.RequireProductManager)
+            {
+                var productManagerCount = studentsWithoutBoard.Count(s => 
+                    s.StudentRoles.Any(sr => sr.IsActive && sr.Role?.Type == 4));
+                
+                if (productManagerCount != 1)
+                {
+                    _logger.LogInformation("❌ RULE 4 FAILED: Product Manager count is {Count} (exactly 1 required, Type=4)", productManagerCount);
+                    _logger.LogInformation("========== KICKOFF CHECK END: FALSE ==========");
+                    return false;
+                }
+                _logger.LogInformation("✅ RULE 4 PASSED: Found exactly one Product Manager");
+            }
+            else
+            {
+                _logger.LogInformation("✅ RULE 4 SKIPPED: Product Manager requirement disabled");
+            }
+
+            // Rule 5: Developer rule (if enabled)
             if (_kickoffConfig.RequireDeveloperRule)
             {
                 // Check for at least 1 student with Type=1 (Developer) OR at least 2 students with Type=2 (Junior Developer)
@@ -132,17 +152,17 @@ public class KickoffService : IKickoffService
 
                 if (!developerRuleMet)
                 {
-                    _logger.LogInformation("❌ RULE 4 FAILED: Developer rule not met - Developers: {Developers}, Junior Developers: {JuniorDevelopers} (need 1+ Developer OR 2+ Junior Developer)", 
+                    _logger.LogInformation("❌ RULE 5 FAILED: Developer rule not met - Developers: {Developers}, Junior Developers: {JuniorDevelopers} (need 1+ Developer OR 2+ Junior Developer)", 
                         developers, juniorDevelopers);
                     _logger.LogInformation("========== KICKOFF CHECK END: FALSE ==========");
                     return false;
                 }
-                _logger.LogInformation("✅ RULE 4 PASSED: Developer rule met - Developers: {Developers}, Junior Developers: {JuniorDevelopers}", 
+                _logger.LogInformation("✅ RULE 5 PASSED: Developer rule met - Developers: {Developers}, Junior Developers: {JuniorDevelopers}", 
                     developers, juniorDevelopers);
             }
             else
             {
-                _logger.LogInformation("✅ RULE 4 SKIPPED: Developer rule requirement disabled");
+                _logger.LogInformation("✅ RULE 5 SKIPPED: Developer rule requirement disabled");
             }
 
             _logger.LogInformation("✅ ALL RULES PASSED: Kickoff should be TRUE for Project {ProjectId}", projectId);

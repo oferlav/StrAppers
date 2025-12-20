@@ -421,12 +421,16 @@ public class SystemDesignController : ControllerBase
                 });
             }
 
+            // Get SystemDesign for language detection - prefer SystemDesign if available
+            var systemDesign = project.SystemDesign ?? "";
+            var contentForLanguageDetection = !string.IsNullOrEmpty(systemDesign) ? systemDesign : extendedDescription;
+
             // Get configuration values
             var maxModules = _configuration.GetValue<int>("SystemDesignAIAgent:MaxModules", 10);
             var minWordsPerModule = _configuration.GetValue<int>("SystemDesignAIAgent:MinWordsPerModule", 100);
 
             // Call AI service to generate modules with constraints
-            var aiResponse = await _aiService.InitiateModulesAsync(request.ProjectId, extendedDescription, maxModules, minWordsPerModule);
+            var aiResponse = await _aiService.InitiateModulesAsync(request.ProjectId, extendedDescription, maxModules, minWordsPerModule, contentForLanguageDetection);
             if (!aiResponse.Success)
             {
                 return BadRequest(aiResponse);
@@ -770,7 +774,7 @@ public class SystemDesignController : ControllerBase
 
             if (request.ToTranslate)
             {
-                if (!string.IsNullOrWhiteSpace(projectTitle))
+                if (!string.IsNullOrWhiteSpace(projectTitle) && ContainsHebrewCharacters(projectTitle))
                 {
                     var titleTranslation = await _aiService.TranslateTextToEnglishAsync(projectTitle);
                     if (titleTranslation.Success && !string.IsNullOrWhiteSpace(titleTranslation.Text))
@@ -783,7 +787,7 @@ public class SystemDesignController : ControllerBase
                     }
                 }
 
-                if (!string.IsNullOrWhiteSpace(projectDescription))
+                if (!string.IsNullOrWhiteSpace(projectDescription) && ContainsHebrewCharacters(projectDescription))
                 {
                     var descriptionTranslation = await _aiService.TranslateTextToEnglishAsync(projectDescription);
                     if (descriptionTranslation.Success && !string.IsNullOrWhiteSpace(descriptionTranslation.Text))
@@ -796,7 +800,7 @@ public class SystemDesignController : ControllerBase
                     }
                 }
 
-                if (!string.IsNullOrWhiteSpace(projectExtendedDescription))
+                if (!string.IsNullOrWhiteSpace(projectExtendedDescription) && ContainsHebrewCharacters(projectExtendedDescription))
                 {
                     var extendedTranslation = await _aiService.TranslateTextToEnglishAsync(projectExtendedDescription);
                     if (extendedTranslation.Success && !string.IsNullOrWhiteSpace(extendedTranslation.Text))
@@ -838,7 +842,7 @@ public class SystemDesignController : ControllerBase
                     var moduleTitle = module.Title ?? "Untitled Module";
                     var moduleDescription = module.Description ?? "No description available";
 
-                    if (request.ToTranslate)
+                    if (request.ToTranslate && (ContainsHebrewCharacters(moduleTitle) || ContainsHebrewCharacters(moduleDescription)))
                     {
                         var translationResponse = await _aiService.TranslateModuleToEnglishAsync(moduleTitle, moduleDescription);
                         if (translationResponse.Success)
@@ -885,9 +889,27 @@ public class SystemDesignController : ControllerBase
                 for (int i = 0; i < dataModelModules.Count; i++)
                 {
                     var module = dataModelModules[i];
-                    boundContent.AppendLine($"### Data Model {i + 1}: {module.Title}");
+                    
+                    var dataModelTitle = module.Title ?? "Untitled Data Model";
+                    var dataModelDescription = module.Description ?? "No description available";
+
+                    if (request.ToTranslate && (ContainsHebrewCharacters(dataModelTitle) || ContainsHebrewCharacters(dataModelDescription)))
+                    {
+                        var translationResponse = await _aiService.TranslateModuleToEnglishAsync(dataModelTitle, dataModelDescription);
+                        if (translationResponse.Success)
+                        {
+                            dataModelTitle = translationResponse.Title ?? dataModelTitle;
+                            dataModelDescription = translationResponse.Description ?? dataModelDescription;
+                        }
+                        else
+                        {
+                            _logger.LogWarning("Failed to translate data model module {ModuleSequence} for Project {ProjectId}: {Message}", module.Sequence, request.ProjectId, translationResponse.Message);
+                        }
+                    }
+
+                    boundContent.AppendLine($"### Data Model {i + 1}: {dataModelTitle}");
                     boundContent.AppendLine();
-                    boundContent.AppendLine(module.Description ?? "No description available");
+                    boundContent.AppendLine(dataModelDescription);
                     boundContent.AppendLine();
                     boundContent.AppendLine("---");
                     boundContent.AppendLine();
@@ -1834,6 +1856,25 @@ public class SystemDesignController : ControllerBase
         public List<RelationshipInfo> Relationships { get; set; } = new();
     }
 
+    /// <summary>
+    /// Checks if text contains Hebrew characters
+    /// </summary>
+    private bool ContainsHebrewCharacters(string text)
+    {
+        if (string.IsNullOrEmpty(text))
+            return false;
+        
+        // Hebrew Unicode range: U+0590 to U+05FF
+        foreach (char c in text)
+        {
+            if (c >= '\u0590' && c <= '\u05FF')
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
     private class ColumnInfo
     {
         public string Name { get; set; } = string.Empty;
@@ -1879,7 +1920,7 @@ public class UpdateModuleResponse
 public class BindModulesRequest
 {
     public int ProjectId { get; set; }
-    public bool ToTranslate { get; set; } = false;
+    public bool ToTranslate { get; set; } = true;
 }
 
 // Response model for BindModules

@@ -13,6 +13,7 @@ public class ApplicationDbContext : DbContext
     public DbSet<Organization> Organizations { get; set; }
     public DbSet<Project> Projects { get; set; }
     public DbSet<ProjectStatus> ProjectStatuses { get; set; }
+    public DbSet<ProjectCriteria> ProjectCriterias { get; set; }
     public DbSet<Role> Roles { get; set; }
     public DbSet<StudentRole> StudentRoles { get; set; }
     public DbSet<Major> Majors { get; set; }
@@ -20,11 +21,17 @@ public class ApplicationDbContext : DbContext
     public DbSet<JoinRequest> JoinRequests { get; set; }
     public DbSet<DesignVersion> DesignVersions { get; set; }
     public DbSet<ProjectBoard> ProjectBoards { get; set; }
+    public DbSet<BoardMeeting> BoardMeetings { get; set; }
         public DbSet<ModuleType> ModuleTypes { get; set; }
         public DbSet<ProjectModule> ProjectModules { get; set; }
         public DbSet<Figma> Figma { get; set; }
         public DbSet<ProgrammingLanguage> ProgrammingLanguages { get; set; }
         public DbSet<ProjectsIDE> ProjectsIDE { get; set; }
+        public DbSet<Subscription> Subscriptions { get; set; }
+        public DbSet<Employer> Employers { get; set; }
+        public DbSet<EmployerBoard> EmployerBoards { get; set; }
+        public DbSet<EmployerAdd> EmployerAdds { get; set; }
+        public DbSet<EmployerCandidate> EmployerCandidates { get; set; }
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -110,6 +117,24 @@ public class ApplicationDbContext : DbContext
                 new ProjectStatus { Id = 4, Name = "On Hold", Description = "Project temporarily paused", Color = "#EF4444", SortOrder = 4, IsActive = true, CreatedAt = DateTime.UtcNow.AddDays(-40) },
                 new ProjectStatus { Id = 5, Name = "Completed", Description = "Project successfully completed", Color = "#059669", SortOrder = 5, IsActive = true, CreatedAt = DateTime.UtcNow.AddDays(-40) },
                 new ProjectStatus { Id = 6, Name = "Cancelled", Description = "Project cancelled or abandoned", Color = "#6B7280", SortOrder = 6, IsActive = true, CreatedAt = DateTime.UtcNow.AddDays(-40) }
+            );
+        });
+
+        // Configure ProjectCriteria entity
+        modelBuilder.Entity<ProjectCriteria>(entity =>
+        {
+            entity.HasKey(e => e.Id);
+            entity.Property(e => e.Name).IsRequired().HasMaxLength(100);
+
+            // Seed initial data
+            entity.HasData(
+                new ProjectCriteria { Id = 1, Name = "Popular Projects" },
+                new ProjectCriteria { Id = 2, Name = "UI/UX Designer Needed" },
+                new ProjectCriteria { Id = 3, Name = "Backend Developer Needed" },
+                new ProjectCriteria { Id = 4, Name = "Frontend Developer Needed" },
+                new ProjectCriteria { Id = 5, Name = "Product manager Needed" },
+                new ProjectCriteria { Id = 6, Name = "Marketing Needed" },
+                new ProjectCriteria { Id = 7, Name = "New Projects" }
             );
         });
 
@@ -206,6 +231,7 @@ public class ApplicationDbContext : DbContext
             entity.Property(e => e.CreatedAt).HasDefaultValueSql("CURRENT_TIMESTAMP");
             entity.Property(e => e.IsAvailable).HasDefaultValue(true);
             entity.Property(e => e.Kickoff).HasColumnName("Kickoff").HasDefaultValue(false);
+            entity.Property(e => e.CriteriaIds).HasColumnName("CriteriaIds").HasMaxLength(500);
 
             // Foreign key relationships
             entity.HasOne(e => e.Organization)
@@ -238,17 +264,17 @@ public class ApplicationDbContext : DbContext
             entity.Property(e => e.Type).IsRequired().HasDefaultValue(0);
             entity.Property(e => e.CreatedAt).HasDefaultValueSql("CURRENT_TIMESTAMP");
 
-            // Seed test data
-            entity.HasData(
-                new Role { Id = 1, Name = "Project Manager", Description = "Leads project planning and execution", Category = "Leadership", Type = 4, IsActive = true, CreatedAt = DateTime.UtcNow.AddDays(-40) },
-                new Role { Id = 2, Name = "Frontend Developer", Description = "Develops user interface and user experience", Category = "Technical", Type = 1, IsActive = true, CreatedAt = DateTime.UtcNow.AddDays(-40) },
-                new Role { Id = 3, Name = "Backend Developer", Description = "Develops server-side logic and database integration", Category = "Technical", Type = 1, IsActive = true, CreatedAt = DateTime.UtcNow.AddDays(-40) },
-                new Role { Id = 4, Name = "UI/UX Designer", Description = "Designs user interface and user experience", Category = "Technical", Type = 3, IsActive = true, CreatedAt = DateTime.UtcNow.AddDays(-40) },
-                new Role { Id = 5, Name = "Quality Assurance", Description = "Tests software and ensures quality standards", Category = "Technical", Type = 2, IsActive = true, CreatedAt = DateTime.UtcNow.AddDays(-40) },
-                new Role { Id = 6, Name = "Team Lead", Description = "Provides guidance and mentorship to team members", Category = "Leadership", Type = 4, IsActive = true, CreatedAt = DateTime.UtcNow.AddDays(-40) },
-                new Role { Id = 7, Name = "Research Assistant", Description = "Conducts research and data analysis", Category = "Academic", Type = 2, IsActive = true, CreatedAt = DateTime.UtcNow.AddDays(-40) },
-                new Role { Id = 8, Name = "Documentation Specialist", Description = "Creates and maintains project documentation", Category = "Administrative", Type = 2, IsActive = true, CreatedAt = DateTime.UtcNow.AddDays(-40) }
-            );
+            // Note: Seed data removed from HasData() to prevent overwriting production data
+            // Roles are seeded via migration (20250127000000_EnsureRolesDataWithoutOverwrite) 
+            // that syncs prod with dev data:
+            // 1. Product Manager (Leadership, Type 0)
+            // 2. Frontend Developer (Technical, Type 2)
+            // 3. Backend Developer (Technical, Type 2)
+            // 4. UI/UX Designer (Technical, Type 3)
+            // 5. Quality Assurance (Technical, Type 0, IsActive: false)
+            // 6. Full Stack Developer (Leadership, Type 1)
+            // 7. Marketing (Academic, Type 0)
+            // 8. Documentation Specialist (Administrative, Type 0, IsActive: false)
         });
 
         // Configure StudentRole entity (many-to-many relationship)
@@ -354,6 +380,7 @@ public class ApplicationDbContext : DbContext
             entity.Property(e => e.NextMeetingUrl).HasColumnName("NextMeetingUrl").HasMaxLength(1000);
             entity.Property(e => e.GithubUrl).HasColumnName("GithubUrl").HasMaxLength(1000);
             entity.Property(e => e.GroupChat).HasColumnName("GroupChat").HasColumnType("text");
+            entity.Property(e => e.Observed).HasColumnName("Observed").HasDefaultValue(0);
             
             // Foreign key relationships
             entity.HasOne(e => e.Project)
@@ -378,6 +405,31 @@ public class ApplicationDbContext : DbContext
             entity.HasIndex(e => e.ProjectId);
             entity.HasIndex(e => e.CreatedAt);
             entity.HasIndex(e => e.StatusId);
+        });
+
+        // Configure BoardMeeting entity
+        modelBuilder.Entity<BoardMeeting>(entity =>
+        {
+            entity.HasKey(e => e.Id);
+            entity.Property(e => e.BoardId).HasMaxLength(50).IsRequired();
+            entity.Property(e => e.MeetingTime).IsRequired().HasColumnType("timestamp with time zone");
+            entity.Property(e => e.StudentEmail).HasMaxLength(255);
+            entity.Property(e => e.CustomMeetingUrl).HasColumnType("TEXT");
+            entity.Property(e => e.ActualMeetingUrl).HasColumnType("TEXT");
+            entity.Property(e => e.Attended).HasDefaultValue(false);
+            entity.Property(e => e.JoinTime).HasColumnType("timestamp with time zone");
+            
+            // Foreign key relationship to ProjectBoard
+            entity.HasOne(e => e.ProjectBoard)
+                  .WithMany()
+                  .HasForeignKey(e => e.BoardId)
+                  .OnDelete(DeleteBehavior.Cascade);
+            
+            // Indexes for better performance
+            entity.HasIndex(e => e.BoardId);
+            entity.HasIndex(e => e.MeetingTime);
+            entity.HasIndex(e => e.StudentEmail);
+            entity.HasIndex(e => e.Attended);
         });
 
         // Configure ModuleType entity
@@ -485,6 +537,150 @@ public class ApplicationDbContext : DbContext
             entity.HasIndex(e => e.Status);
             entity.HasIndex(e => e.GenerationOrder);
             entity.HasIndex(e => new { e.ProjectId, e.ChunkId }).IsUnique();
+        });
+
+        // Configure Subscription entity
+        modelBuilder.Entity<Subscription>(entity =>
+        {
+            entity.HasKey(e => e.Id);
+            entity.Property(e => e.Description).IsRequired().HasMaxLength(100);
+            entity.Property(e => e.Price).IsRequired().HasColumnType("decimal(18,2)");
+            entity.Property(e => e.CreatedAt).HasDefaultValueSql("CURRENT_TIMESTAMP");
+            
+            // Seed data
+            entity.HasData(
+                new Subscription { Id = 1, Description = "Junior", Price = 0, CreatedAt = DateTime.UtcNow },
+                new Subscription { Id = 2, Description = "Product", Price = 0, CreatedAt = DateTime.UtcNow },
+                new Subscription { Id = 3, Description = "Enterprise A", Price = 0, CreatedAt = DateTime.UtcNow },
+                new Subscription { Id = 4, Description = "Enterprise B", Price = 0, CreatedAt = DateTime.UtcNow }
+            );
+        });
+
+        // Configure Employer entity
+        modelBuilder.Entity<Employer>(entity =>
+        {
+            entity.HasKey(e => e.Id);
+            entity.Property(e => e.Name).IsRequired().HasMaxLength(200);
+            entity.Property(e => e.Logo).HasColumnType("text");
+            entity.Property(e => e.Website).HasMaxLength(500);
+            entity.Property(e => e.ContactEmail).IsRequired().HasMaxLength(255);
+            entity.Property(e => e.Phone).HasMaxLength(20);
+            entity.Property(e => e.Address).HasMaxLength(500);
+            entity.Property(e => e.Description).HasMaxLength(1000);
+            entity.Property(e => e.PasswordHash).HasMaxLength(256);
+            entity.Property(e => e.SubscriptionTypeId).IsRequired();
+            entity.Property(e => e.CreatedAt).HasDefaultValueSql("CURRENT_TIMESTAMP");
+            
+            entity.HasOne(e => e.SubscriptionType)
+                  .WithMany(s => s.Employers)
+                  .HasForeignKey(e => e.SubscriptionTypeId)
+                  .OnDelete(DeleteBehavior.Restrict);
+            
+            entity.HasIndex(e => e.ContactEmail);
+            entity.HasIndex(e => e.SubscriptionTypeId);
+        });
+
+        // Configure EmployerBoard entity
+        modelBuilder.Entity<EmployerBoard>(entity =>
+        {
+            entity.HasKey(e => e.Id);
+            entity.Property(e => e.EmployerId).IsRequired();
+            entity.Property(e => e.BoardId).IsRequired().HasMaxLength(50);
+            entity.Property(e => e.Observed).HasDefaultValue(false);
+            entity.Property(e => e.Approved).HasDefaultValue(false);
+            entity.Property(e => e.Message).HasColumnType("text");
+            entity.Property(e => e.CreatedAt).HasDefaultValueSql("CURRENT_TIMESTAMP");
+            
+            entity.HasOne(e => e.Employer)
+                  .WithMany(emp => emp.EmployerBoards)
+                  .HasForeignKey(e => e.EmployerId)
+                  .OnDelete(DeleteBehavior.Cascade);
+            
+            entity.HasOne(e => e.ProjectBoard)
+                  .WithMany()
+                  .HasForeignKey(e => e.BoardId)
+                  .HasPrincipalKey(pb => pb.Id)
+                  .OnDelete(DeleteBehavior.Cascade);
+            
+            entity.HasIndex(e => e.EmployerId);
+            entity.HasIndex(e => e.BoardId);
+            entity.HasIndex(e => new { e.EmployerId, e.BoardId }).IsUnique();
+        });
+
+        // Configure EmployerAdd entity
+        modelBuilder.Entity<EmployerAdd>(entity =>
+        {
+            entity.HasKey(e => e.Id);
+            entity.Property(e => e.EmployerId).IsRequired();
+            entity.Property(e => e.RoleId).IsRequired();
+            entity.Property(e => e.Tags).HasColumnType("text");
+            entity.Property(e => e.JobDescription).HasColumnType("text");
+            entity.Property(e => e.CreatedAt).HasDefaultValueSql("CURRENT_TIMESTAMP");
+            
+            entity.HasOne(e => e.Employer)
+                  .WithMany(emp => emp.EmployerAdds)
+                  .HasForeignKey(e => e.EmployerId)
+                  .OnDelete(DeleteBehavior.Cascade);
+            
+            entity.HasOne(e => e.Role)
+                  .WithMany()
+                  .HasForeignKey(e => e.RoleId)
+                  .OnDelete(DeleteBehavior.Restrict);
+            
+            entity.HasIndex(e => e.EmployerId);
+            entity.HasIndex(e => e.RoleId);
+        });
+
+        // Configure EmployerCandidate entity
+        modelBuilder.Entity<EmployerCandidate>(entity =>
+        {
+            entity.HasKey(e => e.Id);
+            entity.Property(e => e.EmployerId).IsRequired();
+            entity.Property(e => e.StudentId).IsRequired();
+            entity.Property(e => e.CreatedAt).HasDefaultValueSql("CURRENT_TIMESTAMP");
+            
+            // Unique constraint to prevent duplicate employer-student pairs
+            entity.HasIndex(e => new { e.EmployerId, e.StudentId }).IsUnique();
+            
+            entity.HasOne(e => e.Employer)
+                  .WithMany(emp => emp.EmployerCandidates)
+                  .HasForeignKey(e => e.EmployerId)
+                  .OnDelete(DeleteBehavior.Cascade);
+            
+            entity.HasOne(e => e.Student)
+                  .WithMany()
+                  .HasForeignKey(e => e.StudentId)
+                  .OnDelete(DeleteBehavior.Cascade);
+            
+            // Indexes for query performance
+            entity.HasIndex(e => e.EmployerId);
+            entity.HasIndex(e => e.StudentId);
+            entity.HasIndex(e => e.CreatedAt);
+        });
+
+        // Update Student entity configuration to include new fields
+        modelBuilder.Entity<Student>(entity =>
+        {
+            entity.Property(e => e.CV).HasColumnType("text");
+            entity.Property(e => e.SubscriptionTypeId);
+            entity.Property(e => e.MinutesToWork);
+            entity.Property(e => e.HybridWork).HasDefaultValue(false);
+            entity.Property(e => e.HomeWork).HasDefaultValue(false);
+            entity.Property(e => e.FullTimeWork).HasDefaultValue(false);
+            entity.Property(e => e.PartTimeWork).HasDefaultValue(false);
+            entity.Property(e => e.FreelanceWork).HasDefaultValue(false);
+            entity.Property(e => e.TravelWork).HasDefaultValue(false);
+            entity.Property(e => e.NightShiftWork).HasDefaultValue(false);
+            entity.Property(e => e.RelocationWork).HasDefaultValue(false);
+            entity.Property(e => e.StudentWork).HasDefaultValue(false);
+            entity.Property(e => e.MultilingualWork).HasDefaultValue(false);
+            
+            entity.HasOne(e => e.SubscriptionType)
+                  .WithMany(s => s.Students)
+                  .HasForeignKey(e => e.SubscriptionTypeId)
+                  .OnDelete(DeleteBehavior.SetNull);
+            
+            entity.HasIndex(e => e.SubscriptionTypeId);
         });
     }
 }

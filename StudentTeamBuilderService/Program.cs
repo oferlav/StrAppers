@@ -18,6 +18,40 @@ public class Program
             .CreateLogger();
 
         var builder = Host.CreateApplicationBuilder(args);
+        
+        // Determine which config file to use based on command-line argument
+        // Dev service should pass "Dev", Prod service should pass "Prod"
+        string configFile = "appsettings.Dev.json"; // Default to Dev
+        
+        if (args.Length > 0 && args[0].Equals("Prod", StringComparison.OrdinalIgnoreCase))
+        {
+            configFile = "appsettings.Prod.json";
+        }
+        else if (args.Length > 0 && args[0].Equals("Dev", StringComparison.OrdinalIgnoreCase))
+        {
+            configFile = "appsettings.Dev.json";
+        }
+        else
+        {
+            // If no argument, try to auto-detect from executable path or default to Dev
+            var exePath = AppContext.BaseDirectory;
+            if (exePath.Contains("publish-prod", StringComparison.OrdinalIgnoreCase))
+            {
+                configFile = "appsettings.Prod.json";
+            }
+            else
+            {
+                configFile = "appsettings.Dev.json";
+            }
+        }
+        
+        // Load only the specific config file (no environment variable dependency)
+        builder.Configuration.Sources.Clear();
+        builder.Configuration
+            .SetBasePath(builder.Environment.ContentRootPath)
+            .AddJsonFile(configFile, optional: false, reloadOnChange: true)
+            .AddCommandLine(args);
+        
         builder.Logging.ClearProviders();
         builder.Logging.AddEventLog();
         builder.Services.AddSerilog(Log.Logger, dispose: true);
@@ -25,11 +59,13 @@ public class Program
         builder.Services.AddHttpClient();
 
         builder.Services.Configure<KickoffConfig>(builder.Configuration.GetSection("KickoffConfig"));
+        builder.Services.Configure<ProjectCriteriaConfig>(builder.Configuration.GetSection("ProjectCriteriaConfig"));
 
         // Enable Windows Service
+        var serviceNameFinal = builder.Configuration.GetValue<string>("Service:Name") ?? "StrAppers Student Team Builder";
         builder.Services.AddWindowsService(options =>
         {
-            options.ServiceName = "StrAppers Student Team Builder";
+            options.ServiceName = serviceNameFinal;
         });
 
         try
@@ -49,7 +85,14 @@ public class KickoffConfig
     public int MinimumStudents { get; set; } = 2;
     public bool RequireAdmin { get; set; } = true;
     public bool RequireUIUXDesigner { get; set; } = true;
+    public bool RequireProductManager { get; set; } = false;
     public bool RequireDeveloperRule { get; set; } = true;
     public int MaxPendingTime { get; set; } = 96;
+}
+
+public class ProjectCriteriaConfig
+{
+    public double PopularProjectsRate { get; set; } = 0.2;
+    public int NewProjectsMaxDays { get; set; } = 30;
 }
 

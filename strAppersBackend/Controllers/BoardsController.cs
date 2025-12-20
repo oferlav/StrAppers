@@ -6,6 +6,9 @@ using strAppersBackend.Models;
 using strAppersBackend.Services;
 using Microsoft.Extensions.Configuration;
 using System.Text.RegularExpressions;
+using System.Text.Json;
+using System.Net.Http;
+using System.Net;
 
 namespace strAppersBackend.Controllers;
 
@@ -464,89 +467,6 @@ public class BoardsController : ControllerBase
                 _logger.LogWarning("No valid student emails/names found for welcome emails");
             }
 
-            // Create Teams meeting if meeting details are provided
-            string? meetingUrl = null;
-            if (!string.IsNullOrEmpty(request.Title) && !string.IsNullOrEmpty(request.DateTime) && request.DurationMinutes.HasValue)
-            {
-                try
-                {
-                    _logger.LogInformation("Creating Teams meeting: {Title} at {DateTime} for {DurationMinutes} minutes", 
-                        request.Title, request.DateTime, request.DurationMinutes);
-
-                    // Get student emails for attendees
-                    var attendeeEmails = students
-                        .Where(s => !string.IsNullOrWhiteSpace(s.Email))
-                        .Select(s => s.Email)
-                        .ToList();
-
-                    if (attendeeEmails.Any())
-                    {
-                        var teamsRequest = new CreateTeamsMeetingRequest
-                        {
-                            Title = request.Title,
-                            DateTime = request.DateTime,
-                            DurationMinutes = request.DurationMinutes.Value,
-                            Attendees = attendeeEmails
-                        };
-
-                        var teamsResponse = await _graphService.CreateTeamsMeetingWithoutAttendeesAsync(teamsRequest);
-                        
-                        if (teamsResponse.Success && !string.IsNullOrEmpty(teamsResponse.JoinUrl))
-                        {
-                            meetingUrl = teamsResponse.JoinUrl;
-                            _logger.LogInformation("Teams meeting created successfully: {MeetingUrl}", meetingUrl);
-                            
-                            // Send SMTP email invitations to all attendees
-                            _logger.LogInformation("Sending SMTP email invitations to {Count} attendees", attendeeEmails.Count);
-                            
-                            // Parse start and end times for email
-                            if (System.DateTime.TryParse(request.DateTime, out var startTime))
-                            {
-                                var endTime = startTime.AddMinutes(request.DurationMinutes.Value);
-                                
-                                var emailsSent = await _smtpEmailService.SendBulkMeetingEmailsAsync(
-                                    attendeeEmails, 
-                                    request.Title, 
-                                    startTime, 
-                                    endTime, 
-                                    teamsResponse.JoinUrl,
-                                    $"Join this Teams meeting to discuss: {request.Title}"
-                                );
-
-                                if (emailsSent)
-                                {
-                                    _logger.LogInformation("All SMTP email invitations sent successfully to {Count} attendees", attendeeEmails.Count);
-                                }
-                                else
-                                {
-                                    _logger.LogWarning("Some SMTP email invitations failed to send to attendees: {Attendees}", string.Join(", ", attendeeEmails));
-                                }
-                            }
-                            else
-                            {
-                                _logger.LogError("Invalid DateTime format for Teams meeting: {DateTime}", request.DateTime);
-                            }
-                        }
-                        else
-                        {
-                            _logger.LogWarning("Teams meeting creation failed: {ErrorMessage}. Board creation will continue without meeting.", teamsResponse.Message);
-                        }
-                    }
-                    else
-                    {
-                        _logger.LogWarning("No valid student emails found for Teams meeting attendees");
-                    }
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogError(ex, "Error creating Teams meeting: {ErrorMessage}. Board creation will continue without meeting.", ex.Message);
-                }
-            }
-            else
-            {
-                _logger.LogInformation("Teams meeting details not provided, skipping meeting creation");
-            }
-
             // Find admin student (first one with IsAdmin = true)
             var adminStudent = students.FirstOrDefault(s => s.IsAdmin);
             _logger.LogInformation("Admin student: {AdminId}", adminStudent?.Id);
@@ -579,6 +499,9 @@ public class BoardsController : ControllerBase
             project.Kickoff = false;
             _logger.LogInformation("Set Kickoff flag to false for project {ProjectId} when board was created", request.ProjectId);
 
+            // Initialize meetingUrl variable (will be set after ProjectBoard is created)
+            string? meetingUrl = null;
+
             // Create ProjectBoard record
             var projectBoard = new ProjectBoard
             {
@@ -591,7 +514,7 @@ public class BoardsController : ControllerBase
                 SprintPlan = System.Text.Json.JsonSerializer.Serialize(sprintPlanResponse.SprintPlan),
                 BoardUrl = trelloResponse.BoardUrl,
                 NextMeetingTime = nextMeetingTime,
-                NextMeetingUrl = meetingUrl,
+                NextMeetingUrl = meetingUrl, // Will be updated after Teams meeting is created
                 GithubUrl = repositoryUrl,
                 PublishUrl = publishUrl,
                 CreatedAt = DateTime.UtcNow,
@@ -622,15 +545,105 @@ public class BoardsController : ControllerBase
                 throw;
             }
             
+            // Commit transaction BEFORE calling Teams endpoint so TeamsController can see the ProjectBoard
             try
             {
                 await transaction.CommitAsync();
-                _logger.LogInformation("Transaction committed successfully");
+                _logger.LogInformation("Transaction committed successfully - ProjectBoard is now visible to other endpoints");
             }
             catch (Exception commitEx)
             {
                 _logger.LogError(commitEx, "Error committing transaction: {CommitException}", commitEx.Message);
                 throw;
+            }
+            
+            // Create Teams meeting AFTER ProjectBoard is committed (so TeamsController can find it)
+            // Use the create-meeting-smtp-for-board-auth endpoint which handles custom URLs and tracking
+            if (!string.IsNullOrEmpty(request.Title) && !string.IsNullOrEmpty(request.DateTime) && request.DurationMinutes.HasValue)
+            {
+                try
+                {
+                    _logger.LogInformation("Creating Teams meeting via create-meeting-smtp-for-board-auth: {Title} at {DateTime} for {DurationMinutes} minutes", 
+                        request.Title, request.DateTime, request.DurationMinutes);
+
+                    // Get student emails for attendees
+                    var attendeeEmails = students
+                        .Where(s => !string.IsNullOrWhiteSpace(s.Email))
+                        .Select(s => s.Email)
+                        .ToList();
+
+                    if (attendeeEmails.Any() && !string.IsNullOrEmpty(trelloBoardId))
+                    {
+                        // Call the create-meeting-smtp-for-board-auth endpoint
+                        // This will create custom tracking URLs and send emails with those URLs
+                        var teamsMeetingRequest = new strAppersBackend.Controllers.CreateTeamsMeetingForBoardRequest
+                        {
+                            BoardId = trelloBoardId,
+                            Title = request.Title,
+                            DateTime = request.DateTime,
+                            DurationMinutes = request.DurationMinutes.Value,
+                            Attendees = attendeeEmails
+                        };
+
+                        // Sanitize title to remove newlines that might cause JSON parsing issues
+                        var sanitizedTitle = request.Title?.Replace("\r\n", " ").Replace("\n", " ").Replace("\r", " ").Trim() ?? "";
+                        teamsMeetingRequest.Title = sanitizedTitle;
+                        
+                        // Use HttpClient to call our own API endpoint
+                        using var httpClient = new HttpClient();
+                        httpClient.BaseAddress = new Uri($"{Request.Scheme}://{Request.Host}");
+                        
+                        // Serialize with proper options - standard encoder will escape newlines properly
+                        var jsonContent = JsonSerializer.Serialize(teamsMeetingRequest, new JsonSerializerOptions 
+                        { 
+                            PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+                            WriteIndented = false
+                        });
+                        var content = new StringContent(jsonContent, System.Text.Encoding.UTF8, "application/json");
+                        
+                        _logger.LogInformation("Calling create-meeting-smtp-for-board-auth for board {BoardId} with {AttendeeCount} attendees", 
+                            trelloBoardId, attendeeEmails.Count);
+                        
+                        var response = await httpClient.PostAsync("/api/Teams/use/create-meeting-smtp-for-board-auth", content);
+                        var responseContent = await response.Content.ReadAsStringAsync();
+                        
+                        if (response.IsSuccessStatusCode)
+                        {
+                            var result = JsonSerializer.Deserialize<JsonElement>(responseContent);
+                            if (result.TryGetProperty("actualMeetingUrl", out var actualUrlElement))
+                            {
+                                meetingUrl = actualUrlElement.GetString();
+                                _logger.LogInformation("Teams meeting created successfully via create-meeting-smtp-for-board-auth: {MeetingUrl}", meetingUrl);
+                                
+                                // Update ProjectBoard with the actual meeting URL (transaction already committed)
+                                projectBoard.NextMeetingUrl = meetingUrl;
+                                await _context.SaveChangesAsync();
+                                _logger.LogInformation("Updated ProjectBoard with meeting URL: {MeetingUrl}", meetingUrl);
+                            }
+                            else
+                            {
+                                _logger.LogWarning("Teams meeting created but no actualMeetingUrl in response. Full response: {Response}", responseContent);
+                            }
+                        }
+                        else
+                        {
+                            _logger.LogWarning("Teams meeting creation failed via create-meeting-smtp-for-board-auth: {StatusCode} - {Content}. Board creation will continue without meeting.", 
+                                response.StatusCode, responseContent);
+                        }
+                    }
+                    else
+                    {
+                        _logger.LogWarning("No valid student emails or board ID found for Teams meeting attendees");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "Error creating Teams meeting via create-meeting-smtp-for-board-auth: {ErrorMessage}. Board creation will continue without meeting.", ex.Message);
+                }
+            }
+            else
+            {
+                _logger.LogInformation("Teams meeting details not provided, skipping meeting creation");
             }
 
             _logger.LogInformation("Successfully created board {BoardId} for project {ProjectId}", trelloBoardId, request.ProjectId);
@@ -869,6 +882,7 @@ public class BoardsController : ControllerBase
                 NextMeetingUrl = board.NextMeetingUrl,
                 GithubUrl = board.GithubUrl,
                 SprintPlan = board.SprintPlan,
+                Observed = board.Observed,
                 CreatedAt = board.CreatedAt,
                 UpdatedAt = board.UpdatedAt
             });
@@ -921,6 +935,7 @@ public class BoardsController : ControllerBase
                 ProjectId = projectBoard.ProjectId,
                 ProjectName = projectBoard.Project.Title,
                 BoardUrl = projectBoard.BoardUrl,
+                Observed = projectBoard.Observed,
                 Stats = stats
             });
         }
@@ -1148,6 +1163,1020 @@ The actual prompt generation would require access to project details and student
         {
             _logger.LogError(ex, "Error generating debug prompt");
             return StatusCode(500, new { success = false, message = "Error generating debug prompt", error = ex.Message });
+        }
+    }
+
+    /// <summary>
+    /// Get comprehensive board information for a specific student
+    /// Returns: boardId, project name, organization name, team members, startDate, dueDate, weeksLeft (rounded int), next meeting, recent activities, and stats
+    /// Route: /api/Boards/use/student/{studentId}
+    /// </summary>
+    [HttpGet("student/{studentId}")]
+    public async Task<ActionResult<object>> GetBoardForStudent(int studentId)
+    {
+        try
+        {
+            _logger.LogInformation("Getting board information for StudentId {StudentId}", studentId);
+
+            // Get student with board and project information
+            var student = await _context.Students
+                .Include(s => s.ProjectBoard)
+                    .ThenInclude(pb => pb.Project)
+                        .ThenInclude(p => p.Organization)
+                .Include(s => s.StudentRoles)
+                    .ThenInclude(sr => sr.Role)
+                .FirstOrDefaultAsync(s => s.Id == studentId);
+
+            if (student == null)
+            {
+                _logger.LogWarning("Student with ID {StudentId} not found", studentId);
+                return NotFound(new
+                {
+                    Success = false,
+                    Message = $"Student with ID {studentId} not found"
+                });
+            }
+
+            if (string.IsNullOrEmpty(student.BoardId))
+            {
+                _logger.LogWarning("Student {StudentId} does not have a board assigned", studentId);
+                return NotFound(new
+                {
+                    Success = false,
+                    Message = $"Student with ID {studentId} does not have a board assigned"
+                });
+            }
+
+            var board = student.ProjectBoard;
+            if (board == null)
+            {
+                _logger.LogWarning("Board {BoardId} not found for student {StudentId}", student.BoardId, studentId);
+                return NotFound(new
+                {
+                    Success = false,
+                    Message = $"Board {student.BoardId} not found"
+                });
+            }
+
+            var project = board.Project;
+            if (project == null)
+            {
+                _logger.LogWarning("Project not found for board {BoardId}", board.Id);
+                return NotFound(new
+                {
+                    Success = false,
+                    Message = $"Project not found for board {board.Id}"
+                });
+            }
+
+            // Get project dates
+            var startDate = board.StartDate ?? board.CreatedAt;
+            var dueDate = board.DueDate;
+            
+            // Calculate weeks left using DueDate if available, otherwise calculate from config
+            int weeksLeft = 0;
+            if (dueDate.HasValue)
+            {
+            var today = DateTime.UtcNow.Date;
+                var dueDateValue = dueDate.Value.Date;
+                var daysLeft = (dueDateValue - today).TotalDays;
+                weeksLeft = Math.Max(0, (int)Math.Round(daysLeft / 7.0));
+            }
+            else
+            {
+                // Fallback to config-based calculation if DueDate is not set
+                var projectLengthWeeks = _configuration.GetValue<int>("BusinessLogicConfig:ProjectLengthInWeeks", 12);
+                var today = DateTime.UtcNow.Date;
+                var startDateValue = startDate.Date;
+                var endDate = startDateValue.AddDays(projectLengthWeeks * 7);
+                var daysLeft = (endDate - today).TotalDays;
+                weeksLeft = Math.Max(0, (int)Math.Round(daysLeft / 7.0));
+            }
+
+            // Get team members (students with same BoardId)
+            var teamMembers = await _context.Students
+                .Include(s => s.StudentRoles)
+                    .ThenInclude(sr => sr.Role)
+                .Where(s => s.BoardId == board.Id && s.IsAvailable)
+                .Select(s => new
+                {
+                    Id = s.Id,
+                    FirstName = s.FirstName,
+                    LastName = s.LastName,
+                    Email = s.Email,
+                    LinkedInUrl = s.LinkedInUrl,
+                    Photo = s.Photo,
+                    Roles = s.StudentRoles
+                        .Where(sr => sr.IsActive)
+                        .Select(sr => new
+                        {
+                            RoleId = sr.RoleId,
+                            RoleName = sr.Role != null ? sr.Role.Name : null
+                        })
+                        .ToList()
+                })
+                .ToListAsync();
+
+            // Get student's roles for filtering cards by role labels
+            // Cards are linked to students via role tags (labels) in Trello
+            var studentRoles = student.StudentRoles
+                .Where(sr => sr.IsActive && sr.Role != null)
+                .Select(sr => sr.Role!.Name)
+                .Distinct()
+                .ToList();
+            
+            _logger.LogInformation("Student {StudentId} has {RoleCount} active role(s): {Roles}", 
+                studentId, studentRoles.Count, string.Join(", ", studentRoles));
+
+            var recentActivities = new List<object>();
+            var studentStats = new
+            {
+                TotalCards = 0,
+                CompletedCards = 0,
+                OverdueCards = 0,
+                InProgressCards = 0,
+                AssignedCards = 0
+            };
+
+            // Get student's Trello member ID for filtering activities
+            string? studentTrelloMemberId = null;
+
+            try
+            {
+                // Get board members from Trello to find student's Trello member ID (for activities only)
+                var membersResult = await _trelloService.GetBoardMembersWithEmailResolutionAsync(board.Id);
+                
+                // Convert to JSON to extract member information
+                var membersJson = JsonSerializer.Serialize(membersResult);
+                var membersElement = JsonSerializer.Deserialize<JsonElement>(membersJson);
+                
+                if (membersElement.TryGetProperty("Members", out var membersProp) && membersProp.ValueKind == JsonValueKind.Array)
+                {
+                    foreach (var member in membersProp.EnumerateArray())
+                    {
+                        var email = member.TryGetProperty("Email", out var emailProp) ? emailProp.GetString() : "";
+                        if (string.Equals(email, student.Email, StringComparison.OrdinalIgnoreCase))
+                        {
+                            studentTrelloMemberId = member.TryGetProperty("Id", out var idProp) ? idProp.GetString() : null;
+                            break;
+                        }
+                    }
+                }
+
+                // Get cards filtered by student's role labels
+                // Cards are linked to students via role tags (labels) in Trello
+                var allStudentCards = new List<JsonElement>();
+                var cardsByRole = new Dictionary<string, List<JsonElement>>(); // Track cards per role for detailed logging
+                var allListMappings = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase); // Map ListId to ListName for completion checking
+                
+                foreach (var roleName in studentRoles)
+                {
+                    try
+                    {
+                        var cardsByLabel = await _trelloService.GetCardsAndListsByLabelAsync(board.Id, roleName);
+                        var cardsJson = JsonSerializer.Serialize(cardsByLabel);
+                        var cardsElement = JsonSerializer.Deserialize<JsonElement>(cardsJson);
+                        
+                        // Check if the request was successful and label was found
+                        var success = cardsElement.TryGetProperty("Success", out var successProp) && successProp.GetBoolean();
+                        var labelFound = cardsElement.TryGetProperty("LabelFound", out var labelFoundProp) && labelFoundProp.GetBoolean();
+                        
+                        if (success && labelFound && cardsElement.TryGetProperty("Cards", out var cardsProp) && cardsProp.ValueKind == JsonValueKind.Array)
+                        {
+                            // Get lists to map ListId to ListName for completion checking (store globally for reuse)
+                            if (cardsElement.TryGetProperty("Lists", out var listsProp) && listsProp.ValueKind == JsonValueKind.Array)
+                            {
+                                foreach (var list in listsProp.EnumerateArray())
+                                {
+                                    var listId = list.TryGetProperty("Id", out var idProp) ? idProp.GetString() : 
+                                                (list.TryGetProperty("id", out var idProp2) ? idProp2.GetString() : "");
+                                    var listName = list.TryGetProperty("Name", out var nameProp) ? nameProp.GetString() : 
+                                                  (list.TryGetProperty("name", out var nameProp2) ? nameProp2.GetString() : "");
+                                    if (!string.IsNullOrEmpty(listId) && !string.IsNullOrEmpty(listName))
+                                    {
+                                        allListMappings[listId] = listName;
+                                    }
+                                }
+                            }
+                            
+                            foreach (var card in cardsProp.EnumerateArray())
+                            {
+                                // GetCardsAndListsByLabelAsync already filters cards by label, so cards returned should have the label
+                                // Verify the card has the role label (check both PascalCase and camelCase property names)
+                                var hasRoleLabel = false;
+                                JsonElement cardLabelsProp;
+                                
+                                // Try PascalCase first (original format from TrelloService)
+                                if (card.TryGetProperty("Labels", out cardLabelsProp) && cardLabelsProp.ValueKind == JsonValueKind.Array)
+                                {
+                                    hasRoleLabel = cardLabelsProp.EnumerateArray().Any(l =>
+                                    {
+                                        var labelName = l.TryGetProperty("Name", out var nameProp) ? nameProp.GetString() : 
+                                                      (l.TryGetProperty("name", out var nameProp2) ? nameProp2.GetString() : "");
+                                        return !string.IsNullOrEmpty(labelName) && string.Equals(labelName, roleName, StringComparison.OrdinalIgnoreCase);
+                                    });
+                                }
+                                // Try camelCase (if serialization changed it)
+                                else if (card.TryGetProperty("labels", out cardLabelsProp) && cardLabelsProp.ValueKind == JsonValueKind.Array)
+                                {
+                                    hasRoleLabel = cardLabelsProp.EnumerateArray().Any(l =>
+                                    {
+                                        var labelName = l.TryGetProperty("Name", out var nameProp) ? nameProp.GetString() : 
+                                                      (l.TryGetProperty("name", out var nameProp2) ? nameProp2.GetString() : "");
+                                        return !string.IsNullOrEmpty(labelName) && string.Equals(labelName, roleName, StringComparison.OrdinalIgnoreCase);
+                                    });
+                                }
+                                
+                                // Since GetCardsAndListsByLabelAsync already filtered by label, if we can't find Labels property,
+                                // it might be a serialization issue - log warning but trust the service filtering
+                                if (!hasRoleLabel && !card.TryGetProperty("Labels", out _) && !card.TryGetProperty("labels", out _))
+                                {
+                                    _logger.LogWarning("Card does not have Labels property - trusting service filtering for role '{RoleName}'", roleName);
+                                    hasRoleLabel = true; // Trust the service since it already filtered
+                                }
+                                
+                                // Only add card if it has the role label
+                                if (hasRoleLabel)
+                                {
+                                    var cardId = card.TryGetProperty("Id", out var idProp) ? idProp.GetString() : 
+                                                (card.TryGetProperty("id", out var idProp2) ? idProp2.GetString() : "");
+                                    var cardName = card.TryGetProperty("Name", out var nameProp) ? nameProp.GetString() : 
+                                                  (card.TryGetProperty("name", out var nameProp2) ? nameProp2.GetString() : "");
+                                    
+                                    if (!string.IsNullOrEmpty(cardId) && !allStudentCards.Any(c => 
+                                    {
+                                        var existingId = c.TryGetProperty("Id", out var existingIdProp) ? existingIdProp.GetString() : 
+                                                        (c.TryGetProperty("id", out var existingIdProp2) ? existingIdProp2.GetString() : "");
+                                        return existingId == cardId;
+                                    }))
+                                {
+                                    allStudentCards.Add(card);
+                                        
+                                        // Track card per role for detailed logging
+                                        if (!cardsByRole.ContainsKey(roleName))
+                                        {
+                                            cardsByRole[roleName] = new List<JsonElement>();
+                                        }
+                                        cardsByRole[roleName].Add(card);
+                                        
+                                        _logger.LogDebug("Added card '{CardName}' (ID: {CardId}) with role label '{RoleName}' for student {StudentId}", 
+                                            cardName, cardId, roleName, studentId);
+                                    }
+                                }
+                                else
+                                {
+                                    var cardId = card.TryGetProperty("Id", out var idProp) ? idProp.GetString() : 
+                                                (card.TryGetProperty("id", out var idProp2) ? idProp2.GetString() : "");
+                                    var cardName = card.TryGetProperty("Name", out var nameProp) ? nameProp.GetString() : 
+                                                  (card.TryGetProperty("name", out var nameProp2) ? nameProp2.GetString() : "");
+                                    _logger.LogWarning("Card '{CardName}' (ID: {CardId}) from label filter does not have role label '{RoleName}' - skipping", 
+                                        cardName, cardId, roleName);
+                                }
+                            }
+                            
+                            _logger.LogInformation("Found {CardCount} cards with role label '{RoleName}' for student {StudentId}", 
+                                cardsProp.GetArrayLength(), roleName, studentId);
+                        }
+                        else
+                        {
+                            if (!success)
+                            {
+                                var message = cardsElement.TryGetProperty("Message", out var msgProp) ? msgProp.GetString() : "Unknown error";
+                                _logger.LogWarning("Request failed for label '{RoleName}' for student {StudentId}. Message: {Message}", 
+                                    roleName, studentId, message);
+                            }
+                            else if (!labelFound)
+                            {
+                                _logger.LogWarning("Label '{RoleName}' not found on board for student {StudentId}. No cards will be included for this role.", 
+                                    roleName, studentId);
+                            }
+                            else
+                            {
+                                _logger.LogWarning("Cards property not found in response for label '{RoleName}' for student {StudentId}", 
+                                    roleName, studentId);
+                            }
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning(ex, "Failed to fetch cards for role '{RoleName}' for student {StudentId}", roleName, studentId);
+                    }
+                }
+
+                _logger.LogInformation("Total student-level cards found: {CardCount} for student {StudentId} with roles: {Roles}", 
+                    allStudentCards.Count, studentId, string.Join(", ", studentRoles));
+
+                // Calculate student-level stats from cards filtered by role labels
+                // Cards are linked to students via role tags (labels) in Trello
+                // Calculate stats per role for detailed logging
+                    var now = DateTime.UtcNow;
+                    var totalCards = allStudentCards.Count;
+                    var completedCards = 0;
+                    var overdueCards = 0;
+                    var inProgressCards = 0;
+
+                if (allStudentCards.Any())
+                {
+                    _logger.LogInformation("Calculating stats for {CardCount} total student-level cards (across all roles) for student {StudentId}", 
+                        allStudentCards.Count, studentId);
+                    
+                    _logger.LogInformation("List mappings found: {ListCount} lists", allListMappings.Count);
+                    foreach (var listMapping in allListMappings)
+                    {
+                        _logger.LogDebug("List ID {ListId} -> Name: {ListName}", listMapping.Key, listMapping.Value);
+                    }
+                    
+                    // Calculate stats per role for detailed logging
+                    foreach (var roleEntry in cardsByRole)
+                    {
+                        var roleName = roleEntry.Key;
+                        var roleCards = roleEntry.Value;
+                        var roleCompleted = 0;
+                        var roleOverdue = 0;
+                        var roleInProgress = 0;
+
+                        foreach (var card in roleCards)
+                        {
+                            var cardId = card.TryGetProperty("Id", out var idProp) ? idProp.GetString() : 
+                                        (card.TryGetProperty("id", out var idProp2) ? idProp2.GetString() : "");
+                            var cardName = card.TryGetProperty("Name", out var nameProp) ? nameProp.GetString() : 
+                                          (card.TryGetProperty("name", out var nameProp2) ? nameProp2.GetString() : "");
+                            
+                            // Check both PascalCase and camelCase property names (serialization may change casing)
+                            var isClosed = false;
+                            if (card.TryGetProperty("Closed", out var closedProp))
+                            {
+                                isClosed = closedProp.GetBoolean();
+                            }
+                            else if (card.TryGetProperty("closed", out var closedProp2))
+                            {
+                                isClosed = closedProp2.GetBoolean();
+                            }
+                            
+                            var dueComplete = false;
+                            if (card.TryGetProperty("DueComplete", out var dueCompleteProp))
+                            {
+                                dueComplete = dueCompleteProp.GetBoolean();
+                            }
+                            else if (card.TryGetProperty("dueComplete", out var dueCompleteProp2))
+                            {
+                                dueComplete = dueCompleteProp2.GetBoolean();
+                            }
+                            
+                            // Check if card is in a "Done" or "Completed" list
+                            var listId = card.TryGetProperty("ListId", out var listIdProp) ? listIdProp.GetString() : 
+                                       (card.TryGetProperty("listId", out var listIdProp2) ? listIdProp2.GetString() : "");
+                            var isInDoneList = false;
+                            var listName = "";
+                            if (!string.IsNullOrEmpty(listId) && allListMappings.TryGetValue(listId, out listName))
+                            {
+                                isInDoneList = listName.Contains("Done", StringComparison.OrdinalIgnoreCase) || 
+                                             listName.Contains("Completed", StringComparison.OrdinalIgnoreCase) ||
+                                             listName.Contains("Complete", StringComparison.OrdinalIgnoreCase);
+                            }
+                            
+                            // Card is completed if: closed=true OR in Done/Completed list OR dueComplete=true
+                            var isCompleted = isClosed || isInDoneList || dueComplete;
+                            
+                            var dueDateStr = card.TryGetProperty("DueDate", out var dueProp) ? dueProp.GetString() : 
+                                           (card.TryGetProperty("dueDate", out var dueProp2) ? dueProp2.GetString() : null);
+                            var isOverdue = false;
+                            
+                            if (!string.IsNullOrEmpty(dueDateStr) && DateTime.TryParse(dueDateStr, out var cardDueDate))
+                            {
+                                isOverdue = cardDueDate < now && !isCompleted;
+                            }
+
+                            _logger.LogDebug("Card '{CardName}' (ID: {CardId}) - Role: {RoleName}, List: {ListName}, Closed: {Closed}, DueComplete: {DueComplete}, InDoneList: {InDoneList}, IsCompleted: {IsCompleted}, IsOverdue: {IsOverdue}", 
+                                cardName, cardId, roleName, listName ?? "Unknown", isClosed, dueComplete, isInDoneList, isCompleted, isOverdue);
+
+                            if (isCompleted)
+                                roleCompleted++;
+                            else if (isOverdue)
+                                roleOverdue++;
+                            else
+                                roleInProgress++;
+                        }
+
+                        _logger.LogInformation("Stats for role '{RoleName}' - student {StudentId}: Total={Total}, Completed={Completed}, Overdue={Overdue}, InProgress={InProgress}", 
+                            roleName, studentId, roleCards.Count, roleCompleted, roleOverdue, roleInProgress);
+                    }
+
+                    // Calculate aggregate stats
+                    foreach (var card in allStudentCards)
+                    {
+                        var cardId = card.TryGetProperty("Id", out var idProp) ? idProp.GetString() : 
+                                    (card.TryGetProperty("id", out var idProp2) ? idProp2.GetString() : "");
+                        var cardName = card.TryGetProperty("Name", out var nameProp) ? nameProp.GetString() : 
+                                      (card.TryGetProperty("name", out var nameProp2) ? nameProp2.GetString() : "");
+                        
+                        // Check both PascalCase and camelCase property names (serialization may change casing)
+                        var isClosed = false;
+                        if (card.TryGetProperty("Closed", out var closedProp))
+                        {
+                            isClosed = closedProp.GetBoolean();
+                        }
+                        else if (card.TryGetProperty("closed", out var closedProp2))
+                        {
+                            isClosed = closedProp2.GetBoolean();
+                        }
+                        
+                        var dueComplete = false;
+                        if (card.TryGetProperty("DueComplete", out var dueCompleteProp))
+                        {
+                            dueComplete = dueCompleteProp.GetBoolean();
+                        }
+                        else if (card.TryGetProperty("dueComplete", out var dueCompleteProp2))
+                        {
+                            dueComplete = dueCompleteProp2.GetBoolean();
+                        }
+                        
+                        // Check if card is in a "Done" or "Completed" list
+                        var listId = card.TryGetProperty("ListId", out var listIdProp) ? listIdProp.GetString() : 
+                                   (card.TryGetProperty("listId", out var listIdProp2) ? listIdProp2.GetString() : "");
+                        var isInDoneList = false;
+                        var listName = "";
+                        if (!string.IsNullOrEmpty(listId) && allListMappings.TryGetValue(listId, out listName))
+                        {
+                            isInDoneList = listName.Contains("Done", StringComparison.OrdinalIgnoreCase) || 
+                                         listName.Contains("Completed", StringComparison.OrdinalIgnoreCase) ||
+                                         listName.Contains("Complete", StringComparison.OrdinalIgnoreCase);
+                        }
+                        
+                        // Card is completed if: closed=true OR in Done/Completed list OR dueComplete=true
+                        var isCompleted = isClosed || isInDoneList || dueComplete;
+                        
+                        var dueDateStr = card.TryGetProperty("DueDate", out var dueProp) ? dueProp.GetString() : 
+                                       (card.TryGetProperty("dueDate", out var dueProp2) ? dueProp2.GetString() : null);
+                        var isOverdue = false;
+                        
+                        if (!string.IsNullOrEmpty(dueDateStr) && DateTime.TryParse(dueDateStr, out var cardDueDate))
+                        {
+                            isOverdue = cardDueDate < now && !isCompleted;
+                        }
+
+                        if (isCompleted)
+                            completedCards++;
+                        else if (isOverdue)
+                            overdueCards++;
+                        else
+                            inProgressCards++;
+                    }
+
+                    studentStats = new
+                    {
+                        TotalCards = totalCards,
+                        CompletedCards = completedCards,
+                        OverdueCards = overdueCards,
+                        InProgressCards = inProgressCards,
+                        AssignedCards = totalCards
+                    };
+                    
+                    _logger.LogInformation("Aggregate student-level stats for student {StudentId}: Total={Total}, Completed={Completed}, Overdue={Overdue}, InProgress={InProgress}", 
+                        studentId, totalCards, completedCards, overdueCards, inProgressCards);
+                }
+                else
+                {
+                    _logger.LogInformation("No student-level cards found for student {StudentId} with roles: {Roles}. Stats will be zero.", 
+                        studentId, string.Join(", ", studentRoles));
+                    // studentStats already initialized to zeros above
+                }
+
+                // Get recent activities for the student (filtered by role labels)
+                // Only include activities for cards that have the student's role labels
+                // Note: We filter by role labels, not by member ID, since Trello may not have user ID info
+                try
+                {
+                    using var httpClient = new HttpClient();
+                    // Include comprehensive action types for card changes:
+                    // - updateCard: covers due date, description, name, closed status, and any card property changes
+                    // - commentCard: comments on cards
+                    // - createCard: card creation
+                    // - updateCheckItemStateOnCard: marking checklist items as complete/incomplete
+                    // - addChecklistToCard: adding checklists to cards
+                    // - removeChecklistFromCard: removing checklists from cards
+                    // - updateChecklist: updating checklist properties
+                    // - addAttachmentToCard: adding attachments
+                    // - addMemberToCard: adding members to cards
+                    // - removeMemberFromCard: removing members from cards
+                    // Note: We don't filter by member ID since Trello may not have user info - we filter by role labels instead
+                    var actionsUrl = $"https://api.trello.com/1/boards/{board.Id}/actions?filter=updateCard,commentCard,createCard,updateCheckItemStateOnCard,addChecklistToCard,removeChecklistFromCard,updateChecklist,addAttachmentToCard,addMemberToCard,removeMemberFromCard&limit=100&key={_configuration["TrelloConfig:ApiKey"]}&token={_configuration["TrelloConfig:ApiToken"]}";
+                    var actionsResponse = await httpClient.GetAsync(actionsUrl);
+                        
+                        if (actionsResponse.IsSuccessStatusCode)
+                        {
+                            var actionsContent = await actionsResponse.Content.ReadAsStringAsync();
+                            var actionsData = JsonSerializer.Deserialize<JsonElement[]>(actionsContent);
+                            
+                            // Get set of card IDs that belong to student (have student's role labels)
+                            var studentCardIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                            foreach (var card in allStudentCards)
+                            {
+                                var cardId = card.TryGetProperty("Id", out var idProp) ? idProp.GetString() : 
+                                            (card.TryGetProperty("id", out var idProp2) ? idProp2.GetString() : "");
+                                if (!string.IsNullOrEmpty(cardId))
+                                {
+                                    studentCardIds.Add(cardId);
+                                }
+                            }
+                            
+                            _logger.LogInformation("Filtering recent activities by role labels for student {StudentId}: Found {CardCount} student cards (with role labels: {Roles}), {ActionCount} total board actions", 
+                                studentId, studentCardIds.Count, string.Join(", ", studentRoles), actionsData?.Length ?? 0);
+                            
+                            var filteredActions = new List<object>();
+                            var activitiesByRole = new Dictionary<string, int>();
+                            
+                            foreach (var a in actionsData ?? Array.Empty<JsonElement>())
+                            {
+                                var actionType = a.TryGetProperty("type", out var typeProp) ? typeProp.GetString() : "";
+                                var cardId = "";
+                                
+                                // Extract card ID from different action types
+                                if (a.TryGetProperty("data", out var dataProp))
+                                {
+                                    // Most actions have card.id
+                                    if (dataProp.TryGetProperty("card", out var cardProp))
+                                    {
+                                        cardId = cardProp.TryGetProperty("id", out var cardIdProp) ? cardIdProp.GetString() : "";
+                                    }
+                                    // Some actions might have cardId directly
+                                    if (string.IsNullOrEmpty(cardId))
+                                    {
+                                        cardId = dataProp.TryGetProperty("cardId", out var cardIdProp2) ? cardIdProp2.GetString() : "";
+                                    }
+                                }
+                                
+                                // Only include activities for cards that belong to the student (have student's role labels)
+                                if (!string.IsNullOrEmpty(cardId) && studentCardIds.Contains(cardId))
+                                {
+                                    // Determine which role this card belongs to for logging
+                                    var cardRole = "Unknown";
+                                    foreach (var roleEntry in cardsByRole)
+                                    {
+                                        if (roleEntry.Value.Any(c =>
+                                        {
+                                            var cId = c.TryGetProperty("Id", out var idProp) ? idProp.GetString() : 
+                                                     (c.TryGetProperty("id", out var idProp2) ? idProp2.GetString() : "");
+                                            return cId == cardId;
+                                        }))
+                                        {
+                                            cardRole = roleEntry.Key;
+                                            break;
+                                        }
+                                    }
+                                    
+                                    if (!activitiesByRole.ContainsKey(cardRole))
+                                    {
+                                        activitiesByRole[cardRole] = 0;
+                                    }
+                                    activitiesByRole[cardRole]++;
+                                    
+                                    // Extract detailed information based on action type
+                                    var actionData = a.TryGetProperty("data", out var dataProp2) ? dataProp2 : default;
+                                    var cardName = "";
+                                    var cardData = actionData.ValueKind != JsonValueKind.Undefined && actionData.TryGetProperty("card", out var cardProp2) ? cardProp2 : default;
+                                    if (cardData.ValueKind != JsonValueKind.Undefined)
+                                    {
+                                        cardName = cardData.TryGetProperty("name", out var cardNameProp) ? cardNameProp.GetString() : "";
+                                    }
+                                    
+                                    var text = actionData.ValueKind != JsonValueKind.Undefined && actionData.TryGetProperty("text", out var textProp) ? textProp.GetString() : null;
+                                    
+                                    // Extract checklist information for checklist-related actions
+                                    var checklistName = "";
+                                    var checkItemName = "";
+                                    var checkItemState = "";
+                                    if (actionData.ValueKind != JsonValueKind.Undefined)
+                                    {
+                                        if (actionData.TryGetProperty("checklist", out var checklistProp))
+                                        {
+                                            checklistName = checklistProp.TryGetProperty("name", out var checklistNameProp) ? checklistNameProp.GetString() : "";
+                                        }
+                                        if (actionData.TryGetProperty("checkItem", out var checkItemProp))
+                                        {
+                                            checkItemName = checkItemProp.TryGetProperty("name", out var checkItemNameProp) ? checkItemNameProp.GetString() : "";
+                                            checkItemState = checkItemProp.TryGetProperty("state", out var checkItemStateProp) ? checkItemStateProp.GetString() : "";
+                                        }
+                                    }
+                                    
+                                    // Extract old/new values for updateCard actions (e.g., due date changes, description changes)
+                                    var oldValue = "";
+                                    var newValue = "";
+                                    if (actionType == "updateCard" && actionData.ValueKind != JsonValueKind.Undefined)
+                                    {
+                                        if (actionData.TryGetProperty("old", out var oldProp))
+                                        {
+                                            // Check for common fields that might have changed
+                                            if (oldProp.TryGetProperty("due", out var oldDueProp))
+                                            {
+                                                oldValue = $"Due: {oldDueProp.GetString()}";
+                                            }
+                                            else if (oldProp.TryGetProperty("desc", out var oldDescProp))
+                                            {
+                                                oldValue = $"Description changed";
+                                            }
+                                            else if (oldProp.TryGetProperty("name", out var oldNameProp))
+                                            {
+                                                oldValue = $"Name: {oldNameProp.GetString()}";
+                                            }
+                                            else if (oldProp.TryGetProperty("closed", out var oldClosedProp))
+                                            {
+                                                oldValue = oldClosedProp.GetBoolean() ? "Card was open" : "Card was closed";
+                                            }
+                                        }
+                                        if (actionData.TryGetProperty("card", out var newCardProp))
+                                        {
+                                            if (newCardProp.TryGetProperty("due", out var newDueProp))
+                                            {
+                                                newValue = $"Due: {newDueProp.GetString()}";
+                                            }
+                                            else if (newCardProp.TryGetProperty("desc", out var newDescProp))
+                                            {
+                                                newValue = "Description updated";
+                                            }
+                                            else if (newCardProp.TryGetProperty("name", out var newNameProp))
+                                            {
+                                                newValue = $"Name: {newNameProp.GetString()}";
+                                            }
+                                            else if (newCardProp.TryGetProperty("closed", out var newClosedProp))
+                                            {
+                                                newValue = newClosedProp.GetBoolean() ? "Card closed" : "Card opened";
+                                            }
+                                        }
+                                    }
+                                    
+                                    filteredActions.Add(new
+                                    {
+                                        Type = actionType,
+                                Date = a.TryGetProperty("date", out var dateProp) ? dateProp.GetString() : "",
+                                        Data = new
+                                {
+                                            Card = !string.IsNullOrEmpty(cardId) ? new
+                                    {
+                                                Name = cardName,
+                                                Id = cardId
+                                    } : null,
+                                            Text = text,
+                                            ChecklistName = !string.IsNullOrEmpty(checklistName) ? checklistName : null,
+                                            CheckItemName = !string.IsNullOrEmpty(checkItemName) ? checkItemName : null,
+                                            CheckItemState = !string.IsNullOrEmpty(checkItemState) ? checkItemState : null,
+                                            OldValue = !string.IsNullOrEmpty(oldValue) ? oldValue : null,
+                                            NewValue = !string.IsNullOrEmpty(newValue) ? newValue : null
+                                        },
+                                MemberCreator = a.TryGetProperty("memberCreator", out var memberProp) ? new
+                                {
+                                    FullName = memberProp.TryGetProperty("fullName", out var nameProp) ? nameProp.GetString() : ""
+                                } : null
+                                    });
+                                }
+                            }
+                            
+                            recentActivities = filteredActions.Cast<object>().ToList();
+                            
+                            _logger.LogInformation("Recent activities filtered for student {StudentId}: {FilteredCount} activities (from {TotalCount} total) included", 
+                                studentId, filteredActions.Count, actionsData?.Length ?? 0);
+                            
+                            foreach (var roleActivity in activitiesByRole)
+                            {
+                                _logger.LogInformation("Activities for role '{RoleName}' - student {StudentId}: {ActivityCount} activities", 
+                                    roleActivity.Key, studentId, roleActivity.Value);
+                            }
+                        }
+                        else
+                        {
+                            _logger.LogWarning("Failed to fetch activities from Trello API for student {StudentId}: Status {StatusCode}", 
+                                studentId, actionsResponse.StatusCode);
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning(ex, "Failed to fetch Trello activities for student {StudentId}", studentId);
+                    }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Error fetching Trello data for student {StudentId}: {Error}", studentId, ex.Message);
+            }
+
+            // Add meeting participation activities from BoardMeetings
+            try
+            {
+                if (!string.IsNullOrWhiteSpace(student.Email) && !string.IsNullOrWhiteSpace(board.Id))
+                {
+                    var attendedMeetings = await _context.BoardMeetings
+                        .Where(bm => bm.BoardId == board.Id && bm.StudentEmail == student.Email && bm.Attended && bm.JoinTime.HasValue)
+                        .OrderByDescending(bm => bm.JoinTime)
+                        .Take(10)
+                        .ToListAsync();
+                    
+                    foreach (var meeting in attendedMeetings)
+                    {
+                        recentActivities.Add(new
+                        {
+                            Type = "meetingParticipation",
+                            Date = meeting.JoinTime!.Value.ToString("yyyy-MM-ddTHH:mm:ssZ"),
+                            Data = new
+                            {
+                                MeetingTime = meeting.MeetingTime.ToString("yyyy-MM-ddTHH:mm:ssZ"),
+                                JoinTime = meeting.JoinTime.Value.ToString("yyyy-MM-ddTHH:mm:ssZ"),
+                                Description = $"Joined team meeting"
+                            },
+                            MemberCreator = (object?)null
+                        });
+                    }
+                    
+                    _logger.LogInformation("Added {MeetingCount} meeting participation activities for student {StudentId}", 
+                        attendedMeetings.Count, studentId);
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Error adding meeting participation activities for student {StudentId}: {Message}", studentId, ex.Message);
+            }
+
+            // Add GitHub commit activities
+            try
+            {
+                if (!string.IsNullOrWhiteSpace(student.GithubUser) && !string.IsNullOrWhiteSpace(board.GithubUrl))
+                {
+                    var githubUrl = board.GithubUrl.Trim();
+                    if (githubUrl.StartsWith("https://github.com/", StringComparison.OrdinalIgnoreCase) ||
+                        githubUrl.StartsWith("http://github.com/", StringComparison.OrdinalIgnoreCase))
+                    {
+                        var path = githubUrl.Replace("https://github.com/", "", StringComparison.OrdinalIgnoreCase)
+                                           .Replace("http://github.com/", "", StringComparison.OrdinalIgnoreCase)
+                                           .TrimEnd('/');
+                        
+                        if (path.EndsWith(".git", StringComparison.OrdinalIgnoreCase))
+                        {
+                            path = path.Substring(0, path.Length - 4);
+                        }
+                        
+                        var parts = path.Split('/');
+                        if (parts.Length >= 2)
+                        {
+                            var owner = parts[0];
+                            var repo = parts[1];
+                            
+                            // Fetch recent commits (up to 10) for this user
+                            using var httpClient = new HttpClient();
+                            httpClient.DefaultRequestHeaders.Add("User-Agent", "StrAppers-Backend");
+                            
+                            var commitsUrl = $"https://api.github.com/repos/{owner}/{repo}/commits?author={student.GithubUser}&per_page=10";
+                            var commitsResponse = await httpClient.GetAsync(commitsUrl);
+                            
+                            if (commitsResponse.IsSuccessStatusCode)
+                            {
+                                var commitsContent = await commitsResponse.Content.ReadAsStringAsync();
+                                var commitsData = JsonSerializer.Deserialize<JsonElement[]>(commitsContent, new JsonSerializerOptions 
+                                { 
+                                    PropertyNameCaseInsensitive = true 
+                                });
+                                
+                                if (commitsData != null && commitsData.Length > 0)
+                                {
+                                    foreach (var commit in commitsData)
+                                    {
+                                        if (commit.TryGetProperty("commit", out var commitProp))
+                                        {
+                                            DateTime? commitDate = null;
+                                            string commitMessage = string.Empty;
+                                            
+                                            if (commitProp.TryGetProperty("author", out var authorProp) && 
+                                                authorProp.TryGetProperty("date", out var dateProp))
+                                            {
+                                                var commitDateStr = dateProp.GetString();
+                                                if (DateTime.TryParse(commitDateStr, out var parsedDate))
+                                                {
+                                                    commitDate = parsedDate;
+                                                }
+                                            }
+                                            
+                                            if (commitProp.TryGetProperty("message", out var messageProp))
+                                            {
+                                                commitMessage = messageProp.GetString() ?? string.Empty;
+                                                // Truncate long commit messages
+                                                if (commitMessage.Length > 100)
+                                                {
+                                                    commitMessage = commitMessage.Substring(0, 97) + "...";
+                                                }
+                                            }
+                                            
+                                            if (commitDate.HasValue)
+                                            {
+                                                recentActivities.Add(new
+                                                {
+                                                    Type = "githubCommit",
+                                                    Date = commitDate.Value.ToString("yyyy-MM-ddTHH:mm:ssZ"),
+                                                    Data = new
+                                                    {
+                                                        CommitMessage = commitMessage,
+                                                        CommitDate = commitDate.Value.ToString("yyyy-MM-ddTHH:mm:ssZ"),
+                                                        Description = $"Committed: {commitMessage}"
+                                                    },
+                                                    MemberCreator = (object?)null
+                                                });
+                                            }
+                                        }
+                                    }
+                                    
+                                    _logger.LogInformation("Added {CommitCount} GitHub commit activities for student {StudentId}", 
+                                        commitsData.Length, studentId);
+                                }
+                            }
+                            else
+                            {
+                                _logger.LogWarning("Failed to fetch GitHub commits for student {StudentId}: Status {StatusCode}", 
+                                    studentId, commitsResponse.StatusCode);
+                            }
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Error adding GitHub commit activities for student {StudentId}: {Message}", studentId, ex.Message);
+            }
+
+            // Sort all activities by date (most recent first) and limit to 10
+            // Convert to list of dynamic objects to sort by date
+            var activitiesWithDates = recentActivities.Select(a =>
+            {
+                // Use reflection to get Date property from anonymous type
+                var dateStr = a.GetType().GetProperty("Date")?.GetValue(a)?.ToString() ?? "";
+                DateTime date = DateTime.MinValue;
+                if (!string.IsNullOrEmpty(dateStr))
+                {
+                    DateTime.TryParse(dateStr, out date);
+                }
+                return new { Activity = a, Date = date };
+            })
+            .OrderByDescending(x => x.Date)
+            .Take(10)
+            .Select(x => x.Activity)
+            .ToList();
+            
+            recentActivities = activitiesWithDates;
+            
+            _logger.LogInformation("Combined and sorted activities for student {StudentId}: {TotalCount} activities (limited to 10 most recent)", 
+                studentId, recentActivities.Count);
+
+            // Get last GitHub commit info (date and message) for the student
+            Services.GitHubCommitInfo? lastCommitInfo = null;
+            try
+            {
+                if (!string.IsNullOrWhiteSpace(student.GithubUser) && !string.IsNullOrWhiteSpace(board.GithubUrl))
+                {
+                    // Parse GitHub URL to extract owner and repo
+                    // Format: https://github.com/owner/repo or https://github.com/owner/repo.git
+                    var githubUrl = board.GithubUrl.Trim();
+                    if (githubUrl.StartsWith("https://github.com/", StringComparison.OrdinalIgnoreCase) ||
+                        githubUrl.StartsWith("http://github.com/", StringComparison.OrdinalIgnoreCase))
+                    {
+                        var path = githubUrl.Replace("https://github.com/", "", StringComparison.OrdinalIgnoreCase)
+                                           .Replace("http://github.com/", "", StringComparison.OrdinalIgnoreCase)
+                                           .TrimEnd('/');
+                        
+                        // Remove .git suffix if present
+                        if (path.EndsWith(".git", StringComparison.OrdinalIgnoreCase))
+                        {
+                            path = path.Substring(0, path.Length - 4);
+                        }
+                        
+                        var parts = path.Split('/');
+                        if (parts.Length >= 2)
+                        {
+                            var owner = parts[0];
+                            var repo = parts[1];
+                            
+                            _logger.LogInformation("Fetching last GitHub commit for student {StudentId} (GitHubUser: {GithubUser}) in repo {Owner}/{Repo}", 
+                                studentId, student.GithubUser, owner, repo);
+                            
+                            lastCommitInfo = await _gitHubService.GetLastCommitInfoByUserAsync(owner, repo, student.GithubUser);
+                            
+                            if (lastCommitInfo != null)
+                            {
+                                _logger.LogInformation("Found last commit for student {StudentId}: Date={CommitDate}, Message={CommitMessage}", 
+                                    studentId, lastCommitInfo.CommitDate, lastCommitInfo.CommitMessage);
+                            }
+                            else
+                            {
+                                _logger.LogInformation("No commits found for student {StudentId} (GitHubUser: {GithubUser}) in repo {Owner}/{Repo}", 
+                                    studentId, student.GithubUser, owner, repo);
+                            }
+                        }
+                        else
+                        {
+                            _logger.LogWarning("Invalid GitHub URL format for board {BoardId}: {GithubUrl}", board.Id, board.GithubUrl);
+                        }
+                    }
+                    else
+                    {
+                        _logger.LogWarning("GitHub URL does not match expected format for board {BoardId}: {GithubUrl}", board.Id, board.GithubUrl);
+                    }
+                }
+                else
+                {
+                    _logger.LogDebug("Skipping GitHub commit lookup for student {StudentId}: GithubUser={GithubUser}, GithubUrl={GithubUrl}", 
+                        studentId, student.GithubUser ?? "null", board.GithubUrl ?? "null");
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Error fetching GitHub commit info for student {StudentId}: {Message}", studentId, ex.Message);
+                // Don't fail the entire request if GitHub API call fails
+            }
+
+            // Analyze BoardMeetings for attendance statistics
+            int attendedCalls = 0;
+            int notAttendingCalls = 0;
+            double participationRate = 0.0;
+            
+            try
+            {
+                if (!string.IsNullOrWhiteSpace(student.Email) && !string.IsNullOrWhiteSpace(board.Id))
+                {
+                    var currentTime = DateTime.UtcNow;
+                    
+                    // Get all meetings for this student and board
+                    var meetings = await _context.BoardMeetings
+                        .Where(bm => bm.BoardId == board.Id && bm.StudentEmail == student.Email)
+                        .ToListAsync();
+                    
+                    _logger.LogInformation("Found {MeetingCount} BoardMeetings records for student {StudentId} (Email: {Email}) on board {BoardId}", 
+                        meetings.Count, studentId, student.Email, board.Id);
+                    
+                    // Count attended calls
+                    attendedCalls = meetings.Count(m => m.Attended);
+                    
+                    // Count not attending calls (Attended = false AND MeetingTime has passed)
+                    notAttendingCalls = meetings.Count(m => !m.Attended && m.MeetingTime < currentTime);
+                    
+                    // Calculate participation rate
+                    // Participation rate = attended / (attended + not attending) * 100
+                    // Only calculate if there are meetings that have passed
+                    var totalPastMeetings = attendedCalls + notAttendingCalls;
+                    if (totalPastMeetings > 0)
+                    {
+                        participationRate = Math.Round((double)attendedCalls / totalPastMeetings * 100, 2);
+                    }
+                    
+                    _logger.LogInformation("Meeting statistics for student {StudentId}: Attended={Attended}, NotAttending={NotAttending}, ParticipationRate={Rate}%", 
+                        studentId, attendedCalls, notAttendingCalls, participationRate);
+                }
+                else
+                {
+                    _logger.LogDebug("Skipping meeting statistics for student {StudentId}: Email={Email}, BoardId={BoardId}", 
+                        studentId, student.Email ?? "null", board.Id ?? "null");
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Error analyzing BoardMeetings for student {StudentId}: {Message}", studentId, ex.Message);
+                // Don't fail the entire request if meeting analysis fails
+            }
+
+            return Ok(new
+            {
+                Success = true,
+                BoardId = board.Id,
+                ProjectName = project.Title,
+                OrganizationName = project.Organization?.Name ?? "N/A",
+                OrganizationWebsite = project.Organization?.Website,
+                OrgLogo = project.Organization?.Logo,
+                TeamMembers = teamMembers,
+                StartDate = startDate,
+                DueDate = dueDate,
+                WeeksLeft = weeksLeft,
+                NextMeetingUrl = board.NextMeetingUrl,
+                NextTeamMeeting = new
+                {
+                    Time = board.NextMeetingTime,
+                    Url = board.NextMeetingUrl
+                },
+                RecentActivities = recentActivities,
+                Stats = studentStats,
+                GitHubCommit = lastCommitInfo != null ? new
+                {
+                    LastCommitDate = lastCommitInfo.CommitDate,
+                    LastCommitMessage = lastCommitInfo.CommitMessage
+                } : null,
+                MeetingStatistics = new
+                {
+                    AttendedCalls = attendedCalls,
+                    NotAttendingCalls = notAttendingCalls,
+                    ParticipationRate = participationRate
+                }
+            });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error getting board information for StudentId {StudentId}", studentId);
+            return StatusCode(500, new
+            {
+                Success = false,
+                Message = $"An error occurred while retrieving board information: {ex.Message}"
+            });
         }
     }
 

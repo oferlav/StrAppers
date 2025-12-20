@@ -20,10 +20,27 @@ builder.Services.AddCors(options =>
                           // Allow requests from the specific frontend domain and localhost for development
                           policy.WithOrigins("https://preview--skill-in-ce9dcf39.base44.app", 
                                             "http://localhost:9001",
-                                            "https://localhost:9001")
+                                            "https://localhost:9001",
+                                            "http://localhost:5000", // Backend localhost
+                                            "https://localhost:5000", // Backend localhost HTTPS
+                                            "http://20.126.90.3:9001", // Production frontend IP
+                                            "https://20.126.90.3:9001") // Production frontend IP HTTPS
                                 .AllowAnyHeader()
-                                .AllowAnyMethod();
+                                .AllowAnyMethod()
+                                .AllowCredentials(); // Allow credentials for CORS requests
                       });
+    
+    // Add a more permissive policy for development/testing
+    if (builder.Environment.IsDevelopment())
+    {
+        options.AddPolicy(name: "AllowAll",
+                          policy =>
+                          {
+                              policy.AllowAnyOrigin()
+                                    .AllowAnyHeader()
+                                    .AllowAnyMethod();
+                          });
+    }
 });
 
 builder.Services.AddControllers()
@@ -74,6 +91,9 @@ builder.Services.AddScoped<IKickoffService, KickoffService>();
 // Add Password Hasher service
 builder.Services.AddScoped<IPasswordHasherService, PasswordHasherService>();
 
+// Add Affinda service
+builder.Services.AddScoped<IAffindaService, AffindaService>();
+
 // Add session support for GitHub OAuth
 builder.Services.AddDistributedMemoryCache();
 builder.Services.AddSession(options =>
@@ -119,6 +139,10 @@ builder.Services.AddHttpClient<AIService>(client =>
 {
     client.Timeout = TimeSpan.FromMinutes(10); // Increase timeout to 10 minutes for AI calls
 });
+builder.Services.AddHttpClient<AffindaService>(client =>
+{
+    client.Timeout = TimeSpan.FromMinutes(5); // Resume parsing can take time
+});
 
 // Configure GetChat log suppression
 var disableGetChatLogs = builder.Configuration.GetValue<bool>("Logging:DisableGetChatLogs", true);
@@ -152,8 +176,15 @@ else
 // Disable HTTPS redirection completely for IIS
 // app.UseHttpsRedirection();
 
-// Apply CORS middleware
-app.UseCors("AllowFrontend");
+// Apply CORS middleware - use more permissive policy in development
+if (app.Environment.IsDevelopment())
+{
+    app.UseCors("AllowAll");
+}
+else
+{
+    app.UseCors("AllowFrontend");
+}
 
 // Note: GetChat log suppression is now handled via log level configuration in appsettings.json
 // The middleware approach didn't work reliably because log filters don't have access to HttpContext at runtime

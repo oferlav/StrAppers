@@ -11,6 +11,7 @@ public interface ISmtpEmailService
     Task<bool> SendBulkMeetingEmailsAsync(List<string> recipientEmails, string meetingTitle, DateTime startTime, DateTime endTime, string meetingLink, string meetingDescription = "");
     Task<bool> SendWelcomeEmailAsync(string recipientEmail, string firstName, string projectName, int projectLengthWeeks);
     Task<bool> SendBulkWelcomeEmailsAsync(List<(string Email, string FirstName)> recipients, string projectName, int projectLengthWeeks);
+    Task<bool> SendMeetingEmailWithSenderAsync(string recipientEmail, string meetingTitle, DateTime startTime, DateTime endTime, string meetingLink, string senderEmail, string senderName, string? customMessage = null, string? organizationName = null);
 }
 
 public class SmtpEmailService : ISmtpEmailService
@@ -336,6 +337,216 @@ END:VCALENDAR";
             _logger.LogError(ex, "Error sending bulk welcome emails: {Message}", ex.Message);
             return false;
         }
+    }
+
+    public async Task<bool> SendMeetingEmailWithSenderAsync(string recipientEmail, string meetingTitle, DateTime startTime, DateTime endTime, string meetingLink, string senderEmail, string senderName, string? customMessage = null, string? organizationName = null)
+    {
+        try
+        {
+            _logger.LogInformation("Sending SMTP meeting email to {Email} for meeting: {Title} from sender: {SenderName} <{SenderEmail}>", 
+                recipientEmail, meetingTitle, senderName, senderEmail);
+            _logger.LogInformation("SMTP Configuration - Host: {Host}, Port: {Port}, From: {FromEmail}, Security: {Security}", 
+                _config.Host, _config.Port, _config.FromEmail, _config.Security);
+
+            using var client = CreateSmtpClient();
+            using var message = CreateEmailMessageWithSender(recipientEmail, meetingTitle, startTime, endTime, meetingLink, senderEmail, senderName, customMessage, organizationName);
+
+            _logger.LogInformation("SMTP email details - To: {To}, Subject: {Subject}, Meeting Link: {Link}, From: {SenderName} <{SenderEmail}>", 
+                recipientEmail, message.Subject, meetingLink, senderName, senderEmail);
+
+            await client.SendMailAsync(message);
+
+            _logger.LogInformation("SMTP meeting email sent successfully to {Email} from {SenderName}", recipientEmail, senderName);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error sending SMTP meeting email to {Email} from {SenderName}: {Message}", recipientEmail, senderName, ex.Message);
+            return false;
+        }
+    }
+
+    private MailMessage CreateEmailMessageWithSender(string recipientEmail, string meetingTitle, DateTime startTime, DateTime endTime, string meetingLink, string senderEmail, string senderName, string? customMessage, string? organizationName)
+    {
+        _logger.LogInformation("Creating email message with Sender: '{SenderName}' <{SenderEmail}>, Organization: {Organization}", senderName, senderEmail, organizationName ?? "N/A");
+        
+        // Use sender email/name for the "From" field, but reply-to will be set to sender
+        // Note: SMTP servers may require the From address to match authenticated user, so we'll use config FromEmail
+        // but set Reply-To to sender and use sender name in the display
+        var message = new MailMessage
+        {
+            From = new MailAddress(_config.FromEmail, senderName, System.Text.Encoding.UTF8),
+            Subject = $"Meeting Invitation: {meetingTitle}",
+            IsBodyHtml = true,
+            Body = CreateEmailBodyWithSender(meetingTitle, startTime, endTime, meetingLink, senderName, customMessage, organizationName)
+        };
+        
+        // Set Reply-To to the sender so replies go to them
+        message.ReplyToList.Add(new MailAddress(senderEmail, senderName));
+        
+        // Add custom header with sender info
+        message.Headers.Add("X-Sender-Name", senderName);
+        message.Headers.Add("X-Sender-Email", senderEmail);
+        if (!string.IsNullOrEmpty(organizationName))
+        {
+            message.Headers.Add("X-Organization", organizationName);
+        }
+
+        message.To.Add(recipientEmail);
+        
+        // Add calendar invitation as attachment
+        var icsContent = CreateIcsContentWithSender(meetingTitle, startTime, endTime, meetingLink, senderEmail, senderName, customMessage, organizationName);
+        var icsAttachment = new Attachment(new MemoryStream(System.Text.Encoding.UTF8.GetBytes(icsContent)), 
+            "meeting-invitation.ics", "text/calendar");
+        message.Attachments.Add(icsAttachment);
+        
+        _logger.LogInformation("Email message created - From: '{FromDisplayName}' <{FromAddress}>, Reply-To: {ReplyTo}, To: {To}, Subject: {Subject}, Attachments: {AttachmentCount}", 
+            message.From.DisplayName, message.From.Address, senderEmail, recipientEmail, message.Subject, message.Attachments.Count);
+
+        return message;
+    }
+
+    private string CreateEmailBodyWithSender(string meetingTitle, DateTime startTime, DateTime endTime, string meetingLink, string senderName, string? customMessage, string? organizationName)
+    {
+        var startTimeFormatted = startTime.ToString("MMMM dd, yyyy 'at' h:mm tt");
+        var endTimeFormatted = endTime.ToString("MMMM dd, yyyy 'at' h:mm tt");
+        var duration = (endTime - startTime).TotalMinutes;
+        
+        // Generate Google Calendar link
+        var googleCalendarLink = BuildGoogleCalendarLink(
+            title: meetingTitle,
+            startLocal: startTime,
+            endLocal: endTime,
+            description: customMessage ?? "",
+            location: meetingLink,
+            timeZoneId: "Asia/Jerusalem"
+        );
+
+        var encodedSenderName = System.Net.WebUtility.HtmlEncode(senderName);
+        var encodedOrganizationName = string.IsNullOrEmpty(organizationName) ? "" : System.Net.WebUtility.HtmlEncode(organizationName);
+        
+        var organizationSection = string.IsNullOrEmpty(organizationName) ? "" : $@"
+        <div style='background-color: #fff3cd; padding: 15px; border-radius: 5px; margin: 20px 0; border-left: 4px solid #ffc107;'>
+            <h3 style='color: #856404; margin-top: 0;'>🏢 Organization</h3>
+            <p style='margin: 0; font-size: 16px; font-weight: bold;'>{encodedOrganizationName}</p>
+        </div>";
+
+        var customMessageSection = string.IsNullOrEmpty(customMessage) ? "" : $@"
+        <div style='background-color: #e7f3ff; padding: 15px; border-radius: 5px; margin: 20px 0; border-left: 4px solid #2196f3;'>
+            <h3 style='color: #1976d2; margin-top: 0;'>💬 Message from {encodedSenderName}</h3>
+            <p style='margin: 0; white-space: pre-line;'>{System.Net.WebUtility.HtmlEncode(customMessage)}</p>
+        </div>";
+
+        return $@"
+<html>
+<body style='font-family: Arial, sans-serif; line-height: 1.6; color: #333;'>
+    <div style='max-width: 600px; margin: 0 auto; padding: 20px;'>
+        <h2 style='color: #2c3e50; border-bottom: 2px solid #3498db; padding-bottom: 10px;'>
+            📅 Meeting Invitation: {meetingTitle}
+        </h2>
+        
+        <div style='background-color: #f8f9fa; padding: 15px; border-radius: 5px; margin: 20px 0;'>
+            <p style='margin: 0 0 10px 0;'><strong>From:</strong> {encodedSenderName}</p>
+            {organizationSection}
+        </div>
+
+        {customMessageSection}
+        
+        <div style='background-color: #f8f9fa; padding: 15px; border-radius: 5px; margin: 20px 0;'>
+            <h3 style='color: #2c3e50; margin-top: 0;'>Meeting Details</h3>
+            <p><strong>📅 Date & Time:</strong> {startTimeFormatted}</p>
+            <p><strong>⏰ Duration:</strong> {duration} minutes</p>
+            <p><strong>🔗 Meeting Link:</strong> <a href='{meetingLink}' style='color: #3498db; font-weight: bold; font-size: 16px;'>{meetingLink}</a></p>
+        </div>
+
+        <div style='background-color: #e3f2fd; padding: 15px; border-radius: 5px; margin: 20px 0; border-left: 4px solid #2196f3;'>
+            <h3 style='color: #1976d2; margin-top: 0;'>🚀 Quick Access</h3>
+            <p style='margin: 10px 0;'><strong>Click here to join the meeting:</strong></p>
+            <p style='margin: 10px 0;'><a href='{meetingLink}' style='background-color: #5558AF; color: white; padding: 12px 24px; text-decoration: none; border-radius: 5px; font-weight: bold; display: inline-block;'>Join Meeting</a></p>
+        </div>
+
+        <div style='background-color: #f8f9fa; padding: 15px; border-radius: 5px; margin: 20px 0; border-left: 4px solid #28a745;'>
+            <h3 style='color: #28a745; margin-top: 0;'>📅 Add to Calendar</h3>
+            <p style='margin: 10px 0;'><strong>Choose your preferred calendar app:</strong></p>
+            <p style='margin: 10px 0;'>
+                <a href='{googleCalendarLink}' target='_blank' style='display:inline-block;padding:10px 16px;border-radius:6px;background:#1a73e8;color:#fff;text-decoration:none;font-weight:600;margin-right:10px;'>Add to Google Calendar</a>
+                <span style='color: #666; font-size: 14px;'>or download the .ics file attachment for Outlook, Apple Calendar, etc.</span>
+            </p>
+        </div>
+
+        <div style='background-color: #e8f5e8; padding: 15px; border-radius: 5px; margin: 20px 0;'>
+            <h3 style='color: #27ae60; margin-top: 0;'>📋 What to Expect</h3>
+            <ul>
+                <li>Click the meeting link above to join</li>
+                <li>Test your camera and microphone before the meeting</li>
+                <li>Join a few minutes early to ensure everything works</li>
+                <li>Have a stable internet connection</li>
+            </ul>
+        </div>
+
+        <div style='margin-top: 30px; padding-top: 20px; border-top: 1px solid #eee; color: #666; font-size: 14px;'>
+            <p>This meeting invitation was sent by {encodedSenderName}.</p>
+            <p>If you have any questions, please reply to this email.</p>
+        </div>
+    </div>
+</body>
+</html>";
+    }
+
+    private string CreateIcsContentWithSender(string meetingTitle, DateTime startTime, DateTime endTime, string meetingLink, string senderEmail, string senderName, string? customMessage, string? organizationName)
+    {
+        var now = DateTime.UtcNow;
+        var uid = Guid.NewGuid().ToString();
+        
+        // Format dates in UTC for iCalendar
+        var startUtc = startTime.ToUniversalTime();
+        var endUtc = endTime.ToUniversalTime();
+        var nowUtc = now.ToUniversalTime();
+        
+        var startIso = startUtc.ToString("yyyyMMddTHHmmssZ");
+        var endIso = endUtc.ToString("yyyyMMddTHHmmssZ");
+        var nowIso = nowUtc.ToString("yyyyMMddTHHmmssZ");
+        
+        var description = customMessage ?? "";
+        if (!string.IsNullOrEmpty(organizationName))
+        {
+            description = string.IsNullOrEmpty(description) 
+                ? $"Organization: {organizationName}\n\nMeeting Link: {meetingLink}"
+                : $"{description}\n\nOrganization: {organizationName}\n\nMeeting Link: {meetingLink}";
+        }
+        else
+        {
+            description = string.IsNullOrEmpty(description) 
+                ? $"Meeting Link: {meetingLink}"
+                : $"{description}\n\nMeeting Link: {meetingLink}";
+        }
+        
+        var icsContent = $@"BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//StrAppers//Meeting Invitation//EN
+METHOD:REQUEST
+BEGIN:VEVENT
+UID:{uid}
+DTSTAMP:{nowIso}
+DTSTART:{startIso}
+DTEND:{endIso}
+SUMMARY:{meetingTitle}
+DESCRIPTION:{description.Replace("\n", "\\n")}
+LOCATION:{meetingLink}
+URL:{meetingLink}
+ORGANIZER;CN={senderName}:MAILTO:{senderEmail}
+STATUS:CONFIRMED
+SEQUENCE:0
+BEGIN:VALARM
+TRIGGER:-PT15M
+ACTION:DISPLAY
+DESCRIPTION:Reminder
+END:VALARM
+END:VEVENT
+END:VCALENDAR";
+
+        _logger.LogInformation("Created iCalendar content for meeting: {Title} at {StartTime} from {SenderName}", meetingTitle, startTime, senderName);
+        return icsContent;
     }
 }
 

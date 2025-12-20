@@ -120,6 +120,12 @@ namespace strAppersBackend.Models
         [Column("GroupChat", TypeName = "text")]
         public string? GroupChat { get; set; }
 
+        /// <summary>
+        /// Number of times the project board has been observed (count)
+        /// </summary>
+        [Column("Observed")]
+        public int Observed { get; set; } = 0;
+
         // Navigation properties
         /// <summary>
         /// Navigation property to the associated project

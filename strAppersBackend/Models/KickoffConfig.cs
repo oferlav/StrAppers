@@ -16,9 +16,14 @@ namespace strAppersBackend.Models
         public bool RequireAdmin { get; set; } = true;
 
         /// <summary>
-        /// Whether UI/UX Designer (Type=3) is required
+        /// Whether UI/UX Designer (Type=3) is required (exactly 1)
         /// </summary>
         public bool RequireUIUXDesigner { get; set; } = true;
+
+        /// <summary>
+        /// Whether Product Manager (Type=4) is required (exactly 1)
+        /// </summary>
+        public bool RequireProductManager { get; set; } = false;
 
         /// <summary>
         /// Whether developer rule is required
