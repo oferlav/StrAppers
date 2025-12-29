@@ -85,6 +85,18 @@ builder.Services.AddScoped<ISmtpEmailService, SmtpEmailService>();
 // Add GitHub validation service
 builder.Services.AddScoped<IGitHubService, GitHubService>();
 
+// Add Mentor Intent Detection service
+builder.Services.AddScoped<IMentorIntentService, MentorIntentService>();
+
+// Add Code Review Agent service
+builder.Services.AddScoped<ICodeReviewAgent, CodeReviewAgent>();
+
+// Add Mentor Intent Detection service
+builder.Services.AddScoped<IMentorIntentService, MentorIntentService>();
+
+// Add Code Review Agent service
+builder.Services.AddScoped<ICodeReviewAgent, CodeReviewAgent>();
+
 // Add Kickoff service
 builder.Services.AddScoped<IKickoffService, KickoffService>();
 

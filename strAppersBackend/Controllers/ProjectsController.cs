@@ -20,8 +20,9 @@ public class ProjectsController : ControllerBase
     private readonly EngagementRulesConfig _engagementRulesConfig;
     private readonly IConfiguration _configuration;
     private readonly IKickoffService _kickoffService;
+    private readonly IAIService _aiService;
 
-    public ProjectsController(ApplicationDbContext context, ILogger<ProjectsController> logger, IDesignDocumentService designDocumentService, IOptions<BusinessLogicConfig> businessLogicConfig, IOptions<KickoffConfig> kickoffConfig, IOptions<EngagementRulesConfig> engagementRulesConfig, IConfiguration configuration, IKickoffService kickoffService)
+    public ProjectsController(ApplicationDbContext context, ILogger<ProjectsController> logger, IDesignDocumentService designDocumentService, IOptions<BusinessLogicConfig> businessLogicConfig, IOptions<KickoffConfig> kickoffConfig, IOptions<EngagementRulesConfig> engagementRulesConfig, IConfiguration configuration, IKickoffService kickoffService, IAIService aiService)
     {
         _context = context;
         _logger = logger;
@@ -31,6 +32,7 @@ public class ProjectsController : ControllerBase
         _engagementRulesConfig = engagementRulesConfig.Value;
         _configuration = configuration;
         _kickoffService = kickoffService;
+        _aiService = aiService;
     }
 
     /// <summary>
@@ -218,6 +220,83 @@ public class ProjectsController : ControllerBase
 
             _logger.LogInformation("Project created successfully with ID {ProjectId} and title {Title}", 
                 project.Id, project.Title);
+
+            // Classify project criteria using AI
+            try
+            {
+                _logger.LogInformation("Classifying project criteria for project {ProjectId}", project.Id);
+                
+                // Get available project criteria (excluding Criteria 8)
+                var availableCriteria = await _context.ProjectCriterias
+                    .OrderBy(c => c.Id)
+                    .ToListAsync();
+
+                _logger.LogInformation("Found {Count} available criteria for classification", availableCriteria.Count);
+
+                // Call AI service to classify the project
+                var criteriaClassification = await _aiService.ClassifyProjectCriteriaAsync(
+                    project.Title,
+                    project.Description ?? "",
+                    project.ExtendedDescription,
+                    availableCriteria
+                );
+
+                if (criteriaClassification != null && criteriaClassification.Success)
+                {
+                    if (!string.IsNullOrWhiteSpace(criteriaClassification.CriteriaIds))
+                    {
+                        // Merge with existing CriteriaIds if any
+                        var existingCriteriaIds = new HashSet<int>();
+                        if (!string.IsNullOrEmpty(project.CriteriaIds))
+                        {
+                            var existingIds = project.CriteriaIds.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+                            foreach (var idStr in existingIds)
+                            {
+                                if (int.TryParse(idStr, out int id))
+                                {
+                                    existingCriteriaIds.Add(id);
+                                }
+                            }
+                        }
+
+                        // Add AI-classified criteria
+                        var aiClassifiedIds = criteriaClassification.CriteriaIds.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+                        foreach (var idStr in aiClassifiedIds)
+                        {
+                            if (int.TryParse(idStr, out int id))
+                            {
+                                existingCriteriaIds.Add(id);
+                            }
+                        }
+
+                        // Convert to comma-separated string (sorted)
+                        var mergedCriteriaIds = existingCriteriaIds.Count > 0
+                            ? string.Join(",", existingCriteriaIds.OrderBy(id => id))
+                            : null;
+
+                        project.CriteriaIds = mergedCriteriaIds;
+                        await _context.SaveChangesAsync();
+                        
+                        _logger.LogInformation("✅ AI successfully classified project {ProjectId} with CriteriaIds: '{CriteriaIds}'", 
+                            project.Id, mergedCriteriaIds ?? "empty");
+                    }
+                    else
+                    {
+                        _logger.LogInformation("AI classification returned no criteria for project {ProjectId}", project.Id);
+                    }
+                }
+                else
+                {
+                    _logger.LogWarning("Failed to classify project criteria for project {ProjectId}: {Message}", 
+                        project.Id, criteriaClassification?.Message ?? "Unknown error");
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error classifying project criteria for project {ProjectId}: {Message}", 
+                    project.Id, ex.Message);
+                // Don't fail the project creation if criteria classification fails
+            }
 
             // Generate system design for the project
             try

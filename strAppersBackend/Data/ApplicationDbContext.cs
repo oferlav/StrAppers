@@ -32,6 +32,8 @@ public class ApplicationDbContext : DbContext
         public DbSet<EmployerBoard> EmployerBoards { get; set; }
         public DbSet<EmployerAdd> EmployerAdds { get; set; }
         public DbSet<EmployerCandidate> EmployerCandidates { get; set; }
+        public DbSet<AIModel> AIModels { get; set; }
+        public DbSet<MentorChatHistory> MentorChatHistory { get; set; }
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -681,6 +683,54 @@ public class ApplicationDbContext : DbContext
                   .OnDelete(DeleteBehavior.SetNull);
             
             entity.HasIndex(e => e.SubscriptionTypeId);
+        });
+
+        // Configure AIModel entity
+        modelBuilder.Entity<AIModel>(entity =>
+        {
+            entity.HasKey(e => e.Id);
+            entity.ToTable("AIModels");
+            
+            entity.Property(e => e.Name).IsRequired().HasMaxLength(100);
+            entity.Property(e => e.Provider).IsRequired().HasMaxLength(50);
+            entity.Property(e => e.BaseUrl).HasMaxLength(500);
+            entity.Property(e => e.ApiVersion).HasMaxLength(50);
+            entity.Property(e => e.Description).HasMaxLength(1000);
+            entity.Property(e => e.MaxTokens).HasColumnType("integer");
+            entity.Property(e => e.DefaultTemperature).HasColumnType("double precision");
+            entity.Property(e => e.IsActive).HasDefaultValue(true);
+            entity.Property(e => e.CreatedAt).HasDefaultValueSql("CURRENT_TIMESTAMP");
+            entity.Property(e => e.UpdatedAt).HasColumnType("timestamp with time zone");
+
+            // Seed data for existing models
+            entity.HasData(
+                new AIModel
+                {
+                    Id = 1,
+                    Name = "gpt-4o-mini",
+                    Provider = "OpenAI",
+                    BaseUrl = "https://api.openai.com/v1",
+                    ApiVersion = null,
+                    MaxTokens = 16384,
+                    DefaultTemperature = 0.2,
+                    Description = "OpenAI GPT-4o Mini model - fast and cost-effective",
+                    IsActive = true,
+                    CreatedAt = DateTime.UtcNow
+                },
+                new AIModel
+                {
+                    Id = 2,
+                    Name = "claude-sonnet-4-5-20250929",
+                    Provider = "Anthropic",
+                    BaseUrl = "https://api.anthropic.com/v1",
+                    ApiVersion = "2023-06-01",
+                    MaxTokens = 200000,
+                    DefaultTemperature = 0.3,
+                    Description = "Anthropic Claude Sonnet 4.5 model - powerful for complex tasks",
+                    IsActive = true,
+                    CreatedAt = DateTime.UtcNow
+                }
+            );
         });
     }
 }

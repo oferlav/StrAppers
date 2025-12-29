@@ -189,9 +189,9 @@ public class Worker : BackgroundService
         using var conn = new NpgsqlConnection(connectionString);
         await conn.OpenAsync(ct);
 
-        // Get all projects with their creation dates
-        var projects = (await conn.QueryAsync<ProjectInfo>(new CommandDefinition(
-            @"SELECT ""Id"", ""CreatedAt"" FROM ""Projects"" ORDER BY ""Id""",
+        // Get all projects with their creation dates and existing CriteriaIds
+        var projects = (await conn.QueryAsync<(int Id, DateTime CreatedAt, string? CriteriaIds)>(new CommandDefinition(
+            @"SELECT ""Id"", ""CreatedAt"", ""CriteriaIds"" FROM ""Projects"" ORDER BY ""Id""",
             cancellationToken: ct))).ToList();
 
         if (!projects.Any())
@@ -202,168 +202,30 @@ public class Worker : BackgroundService
 
         _logger.LogInformation("[CRITERIA] Processing {Count} projects for criteria generation", projects.Count);
 
-        // Get all "* Needed" criteria IDs (2-6)
-        var neededCriteriaIds = new[] { 2, 3, 4, 5, 6 }; // UI/UX Designer Needed, Backend Developer Needed, Frontend Developer Needed, Product manager Needed, Marketing Needed
-
-        // Get mapping of criteria ID to name for logging
-        var criteriaNames = (await conn.QueryAsync<(int Id, string Name)>(new CommandDefinition(
-            @"SELECT ""Id"", ""Name"" FROM ""ProjectCriterias"" WHERE ""Id"" IN (2, 3, 4, 5, 6)",
-            cancellationToken: ct))).ToDictionary(x => x.Id, x => x.Name);
-
-        // Determine which projects should be "Popular Projects" (20% random)
-        var popularProjectsCount = (int)Math.Round(projects.Count * _criteriaConfig.PopularProjectsRate);
-        var popularProjectIds = projects
-            .OrderBy(_ => _random.Next())
-            .Take(popularProjectsCount)
-            .Select(p => p.Id)
-            .ToHashSet();
-
-        _logger.LogInformation("[CRITERIA] Selected {Count} projects as Popular Projects (rate: {Rate})", popularProjectIds.Count, _criteriaConfig.PopularProjectsRate);
-
         var updatedCount = 0;
         var cutoffDate = DateTime.UtcNow.AddDays(-_criteriaConfig.NewProjectsMaxDays);
 
         foreach (var project in projects)
         {
+            // Parse existing CriteriaIds into a HashSet
             var criteriaIds = new HashSet<int>();
-
-            // Rule 1: Popular Projects (id=1) - randomly set for 20% of projects
-            if (popularProjectIds.Contains(project.Id))
+            if (!string.IsNullOrEmpty(project.CriteriaIds))
             {
-                criteriaIds.Add(1);
+                var existingIds = project.CriteriaIds.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+                foreach (var idStr in existingIds)
+                {
+                    if (int.TryParse(idStr, out int id))
+                    {
+                        criteriaIds.Add(id);
+                    }
+                }
             }
 
-            // Rule 2: New Projects (id=7) - set for projects newer than configured days
-            if (project.CreatedAt >= cutoffDate)
+            // New Projects (id=8) - append '8' if project is new and '8' is not already present
+            if (project.CreatedAt >= cutoffDate && !criteriaIds.Contains(8))
             {
-                criteriaIds.Add(7);
-            }
-
-            // Rule 3: "* Needed" criteria (ids 2-6)
-            // For each criteria, check if there's a student allocated to the project (Status=1 or Status=2) 
-            // with a role that matches that criteria. If NOT found -> add the criteria
-            
-            // First, check if there's a Fullstack developer (Role.Type = 1) allocated to this project
-            var hasFullstackDeveloper = await conn.ExecuteScalarAsync<bool>(new CommandDefinition(
-                @"SELECT EXISTS(
-                    SELECT 1 FROM ""Students"" s
-                    INNER JOIN ""StudentRoles"" sr ON sr.""StudentId"" = s.""Id"" AND sr.""IsActive"" = TRUE
-                    INNER JOIN ""Roles"" r ON r.""Id"" = sr.""RoleId""
-                    WHERE s.""ProjectId"" = @ProjectId 
-                    AND s.""Status"" IN (1, 2)
-                    AND r.""Type"" = 1
-                    LIMIT 1)",
-                new { ProjectId = project.Id },
-                cancellationToken: ct));
-
-            if (hasFullstackDeveloper)
-            {
-                _logger.LogDebug("[CRITERIA] Project {ProjectId}: Has Fullstack developer - will exclude Backend (3) and Frontend (4) criteria",
-                    project.Id);
-            }
-
-            foreach (var criteriaId in neededCriteriaIds)
-            {
-                // Special case: If Fullstack developer exists, skip Backend (3) and Frontend (4) criteria
-                if (hasFullstackDeveloper && (criteriaId == 3 || criteriaId == 4))
-                {
-                    _logger.LogDebug("[CRITERIA] Project {ProjectId}: Skipping criteria {CriteriaId} - Fullstack developer covers this",
-                        project.Id, criteriaId);
-                    continue;
-                }
-
-                // Map criteria ID to role matching logic
-                bool hasMatchingStudent = false;
-                
-                if (criteriaId == 2) // UI/UX Designer Needed
-                {
-                    // Check for UI/UX Designer role (Role.Id = 4 or Role.Name contains "UI/UX Designer")
-                    hasMatchingStudent = await conn.ExecuteScalarAsync<bool>(new CommandDefinition(
-                        @"SELECT EXISTS(
-                            SELECT 1 FROM ""Students"" s
-                            INNER JOIN ""StudentRoles"" sr ON sr.""StudentId"" = s.""Id"" AND sr.""IsActive"" = TRUE
-                            INNER JOIN ""Roles"" r ON r.""Id"" = sr.""RoleId""
-                            WHERE s.""ProjectId"" = @ProjectId 
-                            AND s.""Status"" IN (1, 2)
-                            AND (r.""Id"" = 4 OR r.""Name"" ILIKE '%UI/UX Designer%' OR r.""Name"" ILIKE '%UI UX Designer%')
-                            LIMIT 1)",
-                        new { ProjectId = project.Id },
-                        cancellationToken: ct));
-                }
-                else if (criteriaId == 3) // Backend Developer Needed
-                {
-                    // Check for Backend Developer role (Role.Id = 3 or Role.Name contains "Backend Developer")
-                    hasMatchingStudent = await conn.ExecuteScalarAsync<bool>(new CommandDefinition(
-                        @"SELECT EXISTS(
-                            SELECT 1 FROM ""Students"" s
-                            INNER JOIN ""StudentRoles"" sr ON sr.""StudentId"" = s.""Id"" AND sr.""IsActive"" = TRUE
-                            INNER JOIN ""Roles"" r ON r.""Id"" = sr.""RoleId""
-                            WHERE s.""ProjectId"" = @ProjectId 
-                            AND s.""Status"" IN (1, 2)
-                            AND (r.""Id"" = 3 OR r.""Name"" ILIKE '%Backend Developer%')
-                            LIMIT 1)",
-                        new { ProjectId = project.Id },
-                        cancellationToken: ct));
-                }
-                else if (criteriaId == 4) // Frontend Developer Needed
-                {
-                    // Check for Frontend Developer role (Role.Id = 2 or Role.Name contains "Frontend Developer")
-                    hasMatchingStudent = await conn.ExecuteScalarAsync<bool>(new CommandDefinition(
-                        @"SELECT EXISTS(
-                            SELECT 1 FROM ""Students"" s
-                            INNER JOIN ""StudentRoles"" sr ON sr.""StudentId"" = s.""Id"" AND sr.""IsActive"" = TRUE
-                            INNER JOIN ""Roles"" r ON r.""Id"" = sr.""RoleId""
-                            WHERE s.""ProjectId"" = @ProjectId 
-                            AND s.""Status"" IN (1, 2)
-                            AND (r.""Id"" = 2 OR r.""Name"" ILIKE '%Frontend Developer%')
-                            LIMIT 1)",
-                        new { ProjectId = project.Id },
-                        cancellationToken: ct));
-                }
-                else if (criteriaId == 5) // Product manager Needed
-                {
-                    // Check for Project Manager role (Role.Id = 1 or Role.Name contains "Project Manager" or "Product Manager")
-                    hasMatchingStudent = await conn.ExecuteScalarAsync<bool>(new CommandDefinition(
-                        @"SELECT EXISTS(
-                            SELECT 1 FROM ""Students"" s
-                            INNER JOIN ""StudentRoles"" sr ON sr.""StudentId"" = s.""Id"" AND sr.""IsActive"" = TRUE
-                            INNER JOIN ""Roles"" r ON r.""Id"" = sr.""RoleId""
-                            WHERE s.""ProjectId"" = @ProjectId 
-                            AND s.""Status"" IN (1, 2)
-                            AND (r.""Id"" = 1 OR r.""Name"" ILIKE '%Project Manager%' OR r.""Name"" ILIKE '%Product Manager%')
-                            LIMIT 1)",
-                        new { ProjectId = project.Id },
-                        cancellationToken: ct));
-                }
-                else if (criteriaId == 6) // Marketing Needed
-                {
-                    // Check for Marketing role (Role.Name contains "Marketing")
-                    hasMatchingStudent = await conn.ExecuteScalarAsync<bool>(new CommandDefinition(
-                        @"SELECT EXISTS(
-                            SELECT 1 FROM ""Students"" s
-                            INNER JOIN ""StudentRoles"" sr ON sr.""StudentId"" = s.""Id"" AND sr.""IsActive"" = TRUE
-                            INNER JOIN ""Roles"" r ON r.""Id"" = sr.""RoleId""
-                            WHERE s.""ProjectId"" = @ProjectId 
-                            AND s.""Status"" IN (1, 2)
-                            AND r.""Name"" ILIKE '%Marketing%'
-                            LIMIT 1)",
-                        new { ProjectId = project.Id },
-                        cancellationToken: ct));
-                }
-
-                if (!hasMatchingStudent)
-                {
-                    criteriaIds.Add(criteriaId);
-                    var criteriaName = criteriaNames.GetValueOrDefault(criteriaId, $"Criteria {criteriaId}");
-                    _logger.LogDebug("[CRITERIA] Project {ProjectId}: Adding '{CriteriaName}' (id={CriteriaId}) - no matching student role found",
-                        project.Id, criteriaName, criteriaId);
-                }
-                else
-                {
-                    var criteriaName = criteriaNames.GetValueOrDefault(criteriaId, $"Criteria {criteriaId}");
-                    _logger.LogDebug("[CRITERIA] Project {ProjectId}: Skipping '{CriteriaName}' (id={CriteriaId}) - matching student role found",
-                        project.Id, criteriaName, criteriaId);
-                }
+                criteriaIds.Add(8);
+                _logger.LogDebug("[CRITERIA] Project {ProjectId}: Adding CriteriaId 8 (New Project) - CreatedAt: {CreatedAt}", project.Id, project.CreatedAt);
             }
 
             // Convert to comma-separated string (sorted for consistency)

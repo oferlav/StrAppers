@@ -12,11 +12,18 @@ public interface IGitHubService
     Task<GitHubUserInfo?> GetGitHubUserInfoAsync(string accessToken);
     Task<CreateRepositoryResponse> CreateRepositoryAsync(CreateRepositoryRequest request);
     Task<bool> AddCollaboratorAsync(string repositoryName, string collaboratorUsername, string accessToken);
-    Task<bool> CreateInitialCommitAsync(string owner, string repositoryName, string projectTitle, string accessToken);
+    Task<bool> CreateInitialCommitAsync(string owner, string repositoryName, string projectTitle, string accessToken, string? databaseConnectionString = null, string? webApiUrl = null, string? swaggerUrl = null);
     Task<bool> EnableGitHubPagesAsync(string owner, string repositoryName, string accessToken);
     string GetGitHubPagesUrl(string repositoryName);
     Task<DateTime?> GetLastCommitDateByUserAsync(string owner, string repo, string username, string? accessToken = null);
     Task<GitHubCommitInfo?> GetLastCommitInfoByUserAsync(string owner, string repo, string username, string? accessToken = null);
+    
+    // Code Review Agent methods
+    Task<List<GitHubCommit>> GetRecentCommitsAsync(string owner, string repo, string username, int count = 10, string? accessToken = null);
+    Task<GitHubCommitDiff?> GetCommitDiffAsync(string owner, string repo, string commitSha, string? accessToken = null);
+    Task<List<GitHubFileChange>> GetFileChangesAsync(string owner, string repo, string commitSha, string? accessToken = null);
+    Task<bool> HasRecentCommitsAsync(string owner, string repo, string username, int hours = 24, string? accessToken = null);
+    Task<string?> GetFileContentAsync(string owner, string repo, string filePath, string? accessToken = null, string? branch = null);
 }
 
 public class GitHubService : IGitHubService
@@ -396,10 +403,10 @@ public class GitHubService : IGitHubService
             response.GitHubPagesUrl = GetGitHubPagesUrl(request.Name);
             _logger.LogInformation("GitHub Pages URL will be: {PagesUrl}", response.GitHubPagesUrl);
 
-            // Create initial commit with index.html
+            // Create initial commit with index.html and README
             _logger.LogInformation("Creating initial commit for repository");
             var projectTitle = request.ProjectTitle ?? request.Name;  // Use project title if provided, otherwise use repo name
-            response.InitialCommitCreated = await CreateInitialCommitAsync(userInfo.Login, request.Name, projectTitle, accessToken);
+            response.InitialCommitCreated = await CreateInitialCommitAsync(userInfo.Login, request.Name, projectTitle, accessToken, request.DatabaseConnectionString, request.WebApiUrl, request.SwaggerUrl);
             
             if (!response.InitialCommitCreated)
             {
@@ -519,7 +526,7 @@ public class GitHubService : IGitHubService
     /// <summary>
     /// Creates initial commit with index.html file
     /// </summary>
-    public async Task<bool> CreateInitialCommitAsync(string owner, string repositoryName, string projectTitle, string accessToken)
+    public async Task<bool> CreateInitialCommitAsync(string owner, string repositoryName, string projectTitle, string accessToken, string? databaseConnectionString = null, string? webApiUrl = null, string? swaggerUrl = null)
     {
         try
         {
@@ -539,7 +546,7 @@ public class GitHubService : IGitHubService
                 return false;
             }
 
-            // Create blob for index.html only (no CNAME file)
+            // Create blob for index.html
             var indexHtmlSha = await CreateBlobAsync(owner, repositoryName, indexHtmlContent, accessToken);
 
             if (string.IsNullOrEmpty(indexHtmlSha))
@@ -548,12 +555,24 @@ public class GitHubService : IGitHubService
                 return false;
             }
 
-            // Create a tree with only index.html
+            // Create README.md with database connection string, WebApi URL, and Swagger URL if provided
+            var readmeContent = GenerateReadmeContent(projectTitle, databaseConnectionString, webApiUrl, swaggerUrl);
+            var readmeSha = await CreateBlobAsync(owner, repositoryName, readmeContent, accessToken);
+
+            // Build tree items
+            var treeItems = new List<object>
+            {
+                new { path = "index.html", mode = "100644", type = "blob", sha = indexHtmlSha }
+            };
+
+            if (!string.IsNullOrEmpty(readmeSha))
+            {
+                treeItems.Add(new { path = "README.md", mode = "100644", type = "blob", sha = readmeSha });
+            }
+
+            // Create a tree with index.html and README.md
             var tree = await CreateTreeAsync(owner, repositoryName, branchInfo.TreeSha, 
-                new[] 
-                { 
-                    new { path = "index.html", mode = "100644", type = "blob", sha = indexHtmlSha }
-                }, 
+                treeItems.ToArray(), 
                 accessToken);
 
             if (string.IsNullOrEmpty(tree))
@@ -811,6 +830,393 @@ public class GitHubService : IGitHubService
         }
     }
 
+    /// <summary>
+    /// Gets recent commits by a specific user in a repository
+    /// </summary>
+    public async Task<List<GitHubCommit>> GetRecentCommitsAsync(string owner, string repo, string username, int count = 10, string? accessToken = null)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(owner) || string.IsNullOrWhiteSpace(repo) || string.IsNullOrWhiteSpace(username))
+            {
+                _logger.LogWarning("GetRecentCommitsAsync: Invalid parameters");
+                return new List<GitHubCommit>();
+            }
+
+            var url = $"{GitHubApiBaseUrl}/repos/{owner}/{repo}/commits?author={username}&per_page={count}";
+            var request = new HttpRequestMessage(HttpMethod.Get, url);
+            
+            if (!string.IsNullOrEmpty(accessToken))
+            {
+                request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", accessToken);
+            }
+
+            _logger.LogInformation("Fetching recent commits for user {Username} in repo {Owner}/{Repo}", username, owner, repo);
+            var response = await _httpClient.SendAsync(request);
+            
+            if (!response.IsSuccessStatusCode)
+            {
+                _logger.LogWarning("Failed to get commits for user {Username} in repo {Owner}/{Repo}. Status: {StatusCode}", 
+                    username, owner, repo, response.StatusCode);
+                return new List<GitHubCommit>();
+            }
+
+            var content = await response.Content.ReadAsStringAsync();
+            var commits = JsonSerializer.Deserialize<List<JsonElement>>(content, new JsonSerializerOptions 
+            { 
+                PropertyNameCaseInsensitive = true 
+            });
+            
+            if (commits == null || !commits.Any())
+            {
+                _logger.LogInformation("No commits found for user {Username} in repo {Owner}/{Repo}", username, owner, repo);
+                return new List<GitHubCommit>();
+            }
+
+            var result = new List<GitHubCommit>();
+            foreach (var commit in commits)
+            {
+                var sha = commit.TryGetProperty("sha", out var shaProp) ? shaProp.GetString() ?? "" : "";
+                var htmlUrl = commit.TryGetProperty("html_url", out var urlProp) ? urlProp.GetString() ?? "" : "";
+                
+                string message = "";
+                DateTime commitDate = DateTime.UtcNow;
+                string author = "";
+
+                if (commit.TryGetProperty("commit", out var commitProp))
+                {
+                    message = commitProp.TryGetProperty("message", out var msgProp) ? msgProp.GetString() ?? "" : "";
+                    
+                    if (commitProp.TryGetProperty("author", out var authorProp))
+                    {
+                        author = authorProp.TryGetProperty("name", out var nameProp) ? nameProp.GetString() ?? "" : "";
+                        if (authorProp.TryGetProperty("date", out var dateProp))
+                        {
+                            var dateStr = dateProp.GetString();
+                            if (!string.IsNullOrEmpty(dateStr) && DateTime.TryParse(dateStr, out var parsedDate))
+                            {
+                                commitDate = parsedDate;
+                            }
+                        }
+                    }
+                }
+
+                if (!string.IsNullOrEmpty(sha))
+                {
+                    result.Add(new GitHubCommit
+                    {
+                        Sha = sha,
+                        Message = message,
+                        CommitDate = commitDate,
+                        Author = author,
+                        Url = htmlUrl
+                    });
+                }
+            }
+
+            _logger.LogInformation("Found {Count} commits for user {Username} in repo {Owner}/{Repo}", result.Count, username, owner, repo);
+            return result;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error getting recent commits for user {Username} in repo {Owner}/{Repo}", username, owner, repo);
+            return new List<GitHubCommit>();
+        }
+    }
+
+    /// <summary>
+    /// Gets file changes for a specific commit
+    /// </summary>
+    public async Task<List<GitHubFileChange>> GetFileChangesAsync(string owner, string repo, string commitSha, string? accessToken = null)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(owner) || string.IsNullOrWhiteSpace(repo) || string.IsNullOrWhiteSpace(commitSha))
+            {
+                _logger.LogWarning("GetFileChangesAsync: Invalid parameters");
+                return new List<GitHubFileChange>();
+            }
+
+            var url = $"{GitHubApiBaseUrl}/repos/{owner}/{repo}/commits/{commitSha}";
+            var request = new HttpRequestMessage(HttpMethod.Get, url);
+            
+            if (!string.IsNullOrEmpty(accessToken))
+            {
+                request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", accessToken);
+            }
+
+            _logger.LogInformation("Fetching file changes for commit {CommitSha} in repo {Owner}/{Repo}", commitSha, owner, repo);
+            var response = await _httpClient.SendAsync(request);
+            
+            if (!response.IsSuccessStatusCode)
+            {
+                _logger.LogWarning("Failed to get commit {CommitSha} in repo {Owner}/{Repo}. Status: {StatusCode}", 
+                    commitSha, owner, repo, response.StatusCode);
+                return new List<GitHubFileChange>();
+            }
+
+            var content = await response.Content.ReadAsStringAsync();
+            var commitData = JsonSerializer.Deserialize<JsonElement>(content, new JsonSerializerOptions 
+            { 
+                PropertyNameCaseInsensitive = true 
+            });
+
+            // Check if commitData is null or invalid
+            if (commitData.ValueKind == JsonValueKind.Null || commitData.ValueKind == JsonValueKind.Undefined)
+            {
+                return new List<GitHubFileChange>();
+            }
+
+            var fileChanges = new List<GitHubFileChange>();
+
+            if (commitData.TryGetProperty("files", out var filesProp) && filesProp.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var file in filesProp.EnumerateArray())
+                {
+                    var filePath = file.TryGetProperty("filename", out var filenameProp) ? filenameProp.GetString() ?? "" : "";
+                    var status = file.TryGetProperty("status", out var statusProp) ? statusProp.GetString() ?? "" : "";
+                    var additions = file.TryGetProperty("additions", out var addProp) ? addProp.GetInt32() : 0;
+                    var deletions = file.TryGetProperty("deletions", out var delProp) ? delProp.GetInt32() : 0;
+                    var changes = file.TryGetProperty("changes", out var changesProp) ? changesProp.GetInt32() : (additions + deletions);
+                    
+                    // Check if patch property exists
+                    bool hasPatchProperty = file.TryGetProperty("patch", out var patchProp);
+                    var patch = hasPatchProperty ? patchProp.GetString() : null;
+                    
+                    // Log patch status for debugging
+                    if (!string.IsNullOrEmpty(filePath))
+                    {
+                        if (hasPatchProperty)
+                        {
+                            if (!string.IsNullOrEmpty(patch))
+                            {
+                                _logger.LogInformation("File {FilePath} in commit {CommitSha} has patch content ({Length} chars). Status: {Status}, Additions: {Additions}, Deletions: {Deletions}", 
+                                    filePath, commitSha, patch.Length, status, additions, deletions);
+                            }
+                            else
+                            {
+                                _logger.LogWarning("File {FilePath} in commit {CommitSha} has patch property but it's null/empty. Status: {Status}, Additions: {Additions}, Deletions: {Deletions}", 
+                                    filePath, commitSha, status, additions, deletions);
+                            }
+                        }
+                        else
+                        {
+                            _logger.LogWarning("File {FilePath} in commit {CommitSha} has NO patch property in GitHub API response. Status: {Status}, Additions: {Additions}, Deletions: {Deletions}", 
+                                filePath, commitSha, status, additions, deletions);
+                        }
+                        
+                        fileChanges.Add(new GitHubFileChange
+                        {
+                            FilePath = filePath,
+                            Status = status,
+                            Additions = additions,
+                            Deletions = deletions,
+                            Changes = changes,
+                            Patch = patch
+                        });
+                    }
+                }
+            }
+
+            _logger.LogInformation("Found {Count} file changes for commit {CommitSha}", fileChanges.Count, commitSha);
+            return fileChanges;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error getting file changes for commit {CommitSha} in repo {Owner}/{Repo}", commitSha, owner, repo);
+            return new List<GitHubFileChange>();
+        }
+    }
+
+    /// <summary>
+    /// Gets complete diff information for a commit including file changes
+    /// </summary>
+    public async Task<GitHubCommitDiff?> GetCommitDiffAsync(string owner, string repo, string commitSha, string? accessToken = null)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(owner) || string.IsNullOrWhiteSpace(repo) || string.IsNullOrWhiteSpace(commitSha))
+            {
+                _logger.LogWarning("GetCommitDiffAsync: Invalid parameters");
+                return null;
+            }
+
+            var url = $"{GitHubApiBaseUrl}/repos/{owner}/{repo}/commits/{commitSha}";
+            var request = new HttpRequestMessage(HttpMethod.Get, url);
+            
+            if (!string.IsNullOrEmpty(accessToken))
+            {
+                request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", accessToken);
+            }
+
+            _logger.LogInformation("Fetching commit diff for {CommitSha} in repo {Owner}/{Repo}", commitSha, owner, repo);
+            var response = await _httpClient.SendAsync(request);
+            
+            if (!response.IsSuccessStatusCode)
+            {
+                _logger.LogWarning("Failed to get commit diff for {CommitSha} in repo {Owner}/{Repo}. Status: {StatusCode}", 
+                    commitSha, owner, repo, response.StatusCode);
+                return null;
+            }
+
+            var content = await response.Content.ReadAsStringAsync();
+            var commitData = JsonSerializer.Deserialize<JsonElement>(content, new JsonSerializerOptions 
+            { 
+                PropertyNameCaseInsensitive = true 
+            });
+
+            // Check if commitData is null or invalid
+            if (commitData.ValueKind == JsonValueKind.Null || commitData.ValueKind == JsonValueKind.Undefined)
+            {
+                return null;
+            }
+
+            var fileChanges = await GetFileChangesAsync(owner, repo, commitSha, accessToken);
+
+            string message = "";
+            DateTime commitDate = DateTime.UtcNow;
+            string author = "";
+
+            if (commitData.TryGetProperty("commit", out var commitProp))
+            {
+                message = commitProp.TryGetProperty("message", out var msgProp) ? msgProp.GetString() ?? "" : "";
+                
+                if (commitProp.TryGetProperty("author", out var authorProp))
+                {
+                    author = authorProp.TryGetProperty("name", out var nameProp) ? nameProp.GetString() ?? "" : "";
+                    if (authorProp.TryGetProperty("date", out var dateProp))
+                    {
+                        var dateStr = dateProp.GetString();
+                        if (!string.IsNullOrEmpty(dateStr) && DateTime.TryParse(dateStr, out var parsedDate))
+                        {
+                            commitDate = parsedDate;
+                        }
+                    }
+                }
+            }
+
+            var stats = commitData.TryGetProperty("stats", out var statsProp) ? statsProp : default(JsonElement);
+            var totalAdditions = stats.ValueKind != JsonValueKind.Undefined && stats.TryGetProperty("additions", out var addProp) 
+                ? addProp.GetInt32() 
+                : fileChanges.Sum(f => f.Additions);
+            var totalDeletions = stats.ValueKind != JsonValueKind.Undefined && stats.TryGetProperty("deletions", out var delProp) 
+                ? delProp.GetInt32() 
+                : fileChanges.Sum(f => f.Deletions);
+
+            return new GitHubCommitDiff
+            {
+                CommitSha = commitSha,
+                CommitMessage = message,
+                CommitDate = commitDate,
+                Author = author,
+                FileChanges = fileChanges,
+                TotalAdditions = totalAdditions,
+                TotalDeletions = totalDeletions,
+                TotalFilesChanged = fileChanges.Count
+            };
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error getting commit diff for {CommitSha} in repo {Owner}/{Repo}", commitSha, owner, repo);
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Checks if user has recent commits within specified hours
+    /// </summary>
+    public async Task<bool> HasRecentCommitsAsync(string owner, string repo, string username, int hours = 24, string? accessToken = null)
+    {
+        try
+        {
+            var commits = await GetRecentCommitsAsync(owner, repo, username, 1, accessToken);
+            
+            if (!commits.Any())
+            {
+                return false;
+            }
+
+            var mostRecentCommit = commits.OrderByDescending(c => c.CommitDate).First();
+            var hoursSinceCommit = (DateTime.UtcNow - mostRecentCommit.CommitDate).TotalHours;
+            
+            _logger.LogInformation("Most recent commit for {Username} was {Hours} hours ago", username, hoursSinceCommit);
+            return hoursSinceCommit <= hours;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error checking recent commits for user {Username} in repo {Owner}/{Repo}", username, owner, repo);
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Gets the content of a file from a GitHub repository
+    /// </summary>
+    public async Task<string?> GetFileContentAsync(string owner, string repo, string filePath, string? accessToken = null, string? branch = null)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(owner) || string.IsNullOrWhiteSpace(repo) || string.IsNullOrWhiteSpace(filePath))
+            {
+                _logger.LogWarning("GetFileContentAsync: Invalid parameters");
+                return null;
+            }
+
+            var token = accessToken ?? _configuration["GitHub:AccessToken"];
+            var branchName = branch ?? "main";
+
+            var url = $"{GitHubApiBaseUrl}/repos/{owner}/{repo}/contents/{filePath}?ref={branchName}";
+            
+            using var request = new HttpRequestMessage(HttpMethod.Get, url);
+            if (!string.IsNullOrEmpty(token))
+            {
+                request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", token);
+            }
+
+            var response = await _httpClient.SendAsync(request);
+
+            if (!response.IsSuccessStatusCode)
+            {
+                // Try 'master' branch if 'main' fails
+                if (branchName == "main")
+                {
+                    url = $"{GitHubApiBaseUrl}/repos/{owner}/{repo}/contents/{filePath}?ref=master";
+                    request.RequestUri = new Uri(url);
+                    response = await _httpClient.SendAsync(request);
+                }
+
+                if (!response.IsSuccessStatusCode)
+                {
+                    _logger.LogWarning("Failed to get file content for {FilePath} in {Owner}/{Repo}: {StatusCode}", filePath, owner, repo, response.StatusCode);
+                    return null;
+                }
+            }
+
+            var content = await response.Content.ReadAsStringAsync();
+            var fileData = JsonSerializer.Deserialize<JsonElement>(content);
+
+            // GitHub API returns base64 encoded content
+            if (fileData.TryGetProperty("content", out var contentProp) && contentProp.ValueKind == JsonValueKind.String)
+            {
+                var base64Content = contentProp.GetString();
+                if (!string.IsNullOrEmpty(base64Content))
+                {
+                    // Remove newlines from base64 string and decode
+                    var cleanedBase64 = base64Content.Replace("\n", "").Trim();
+                    var bytes = Convert.FromBase64String(cleanedBase64);
+                    return System.Text.Encoding.UTF8.GetString(bytes);
+                }
+            }
+
+            return null;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error getting file content for {FilePath} in {Owner}/{Repo}", filePath, owner, repo);
+            return null;
+        }
+    }
+
     // Helper methods for Git operations
 
     private async Task<DefaultBranchInfo?> GetDefaultBranchAsync(string owner, string repositoryName, string accessToken)
@@ -1012,6 +1418,33 @@ public class GitHubService : IGitHubService
             _logger.LogError(ex, "Error updating reference");
             return false;
         }
+    }
+
+    private string GenerateReadmeContent(string projectTitle, string? databaseConnectionString, string? webApiUrl = null, string? swaggerUrl = null)
+    {
+        var readme = $"# {projectTitle}\n\n";
+
+        if (!string.IsNullOrWhiteSpace(databaseConnectionString))
+        {
+            readme += $"## Application Database\n\n";
+            readme += $"**Application DB Connection String:** `{databaseConnectionString}`\n\n";
+        }
+
+        if (!string.IsNullOrWhiteSpace(webApiUrl))
+        {
+            readme += $"## Web API\n\n";
+            readme += $"**WebApi URL:** {webApiUrl}\n\n";
+        }
+
+        if (!string.IsNullOrWhiteSpace(swaggerUrl))
+        {
+            readme += $"**Swagger API Tester URL:** {swaggerUrl}\n\n";
+        }
+
+        readme += "## Recommended Tools\n\n";
+        readme += "**Recommended SQL Editor tool (Free):** [pgAdmin](https://www.pgadmin.org/download/)\n";
+
+        return readme;
     }
 
     private string GenerateDefaultIndexHtml(string projectTitle, string pagesUrl)
@@ -1274,6 +1707,39 @@ public class GitHubCommitInfo
     public string CommitMessage { get; set; } = string.Empty;
 }
 
+// Models for Code Review Agent
+public class GitHubCommit
+{
+    public string Sha { get; set; } = string.Empty;
+    public string Message { get; set; } = string.Empty;
+    public DateTime CommitDate { get; set; }
+    public string Author { get; set; } = string.Empty;
+    public string Url { get; set; } = string.Empty;
+}
+
+public class GitHubFileChange
+{
+    public string FilePath { get; set; } = string.Empty;
+    public string Status { get; set; } = string.Empty; // "added", "modified", "removed", "renamed"
+    public int Additions { get; set; }
+    public int Deletions { get; set; }
+    public string? Patch { get; set; } // Unified diff format
+    public string? Content { get; set; } // Full file content (if needed)
+    public int? Changes { get; set; } // Total changes (additions + deletions)
+}
+
+public class GitHubCommitDiff
+{
+    public string CommitSha { get; set; } = string.Empty;
+    public string CommitMessage { get; set; } = string.Empty;
+    public DateTime CommitDate { get; set; }
+    public string Author { get; set; } = string.Empty;
+    public List<GitHubFileChange> FileChanges { get; set; } = new();
+    public int TotalAdditions { get; set; }
+    public int TotalDeletions { get; set; }
+    public int TotalFilesChanged { get; set; }
+}
+
 /// <summary>
 /// Request model for creating a GitHub repository
 /// </summary>
@@ -1284,6 +1750,9 @@ public class CreateRepositoryRequest
     public bool IsPrivate { get; set; } = true;
     public List<string> Collaborators { get; set; } = new List<string>();
     public string? ProjectTitle { get; set; }  // Display name for the project
+    public string? DatabaseConnectionString { get; set; }  // Database connection string for README
+    public string? WebApiUrl { get; set; }  // Railway WebApi URL for README
+    public string? SwaggerUrl { get; set; }  // Swagger API tester URL for README
 }
 
 /// <summary>

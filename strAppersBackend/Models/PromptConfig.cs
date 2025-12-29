@@ -6,6 +6,42 @@ namespace strAppersBackend.Models
     public class PromptConfig
     {
         public ProjectModulesPrompts ProjectModules { get; set; } = new();
+        public MentorPrompts Mentor { get; set; } = new();
+    }
+
+    /// <summary>
+    /// AI prompts specifically for Mentor chatbot functionality
+    /// </summary>
+    public class MentorPrompts
+    {
+        public string SystemPrompt { get; set; } = string.Empty;
+        public string UserPromptTemplate { get; set; } = string.Empty;
+        public int ChatHistoryLength { get; set; } = 5; // Number of previous messages to include in context
+        public CodeReviewPrompts CodeReview { get; set; } = new();
+        public EnhancedPromptPrompts EnhancedPrompt { get; set; } = new();
+    }
+
+    /// <summary>
+    /// Code review prompt configuration
+    /// </summary>
+    public class CodeReviewPrompts
+    {
+        public int MaxCommitsToReview { get; set; } = 5;
+        public int HoursSinceLastCommit { get; set; } = 168;
+        public string ReviewSystemPrompt { get; set; } = string.Empty;
+        public string ReviewUserPromptHeader { get; set; } = string.Empty;
+        public string ReviewInstructions { get; set; } = string.Empty;
+    }
+
+    /// <summary>
+    /// Enhanced prompt configuration for context-aware system prompts
+    /// </summary>
+    public class EnhancedPromptPrompts
+    {
+        public string DeveloperCapabilitiesInfo { get; set; } = string.Empty;
+        public string NonDeveloperCapabilitiesInfo { get; set; } = string.Empty;
+        public string ContextReminder { get; set; } = string.Empty;
+        public string GitHubContextTemplate { get; set; } = string.Empty;
     }
 
     /// <summary>

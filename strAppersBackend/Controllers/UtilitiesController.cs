@@ -1,10 +1,13 @@
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Storage;
+using Microsoft.Extensions.Configuration;
 using strAppersBackend.Data;
 using strAppersBackend.Models;
 using strAppersBackend.Services;
 using System.ComponentModel.DataAnnotations;
+using System.Net.Http.Headers;
+using System.Text.Json;
 
 namespace strAppersBackend.Controllers;
 
@@ -15,12 +18,14 @@ public class UtilitiesController : ControllerBase
     private readonly ApplicationDbContext _context;
     private readonly ILogger<UtilitiesController> _logger;
     private readonly IPasswordHasherService _passwordHasher;
+    private readonly IConfiguration _configuration;
 
-    public UtilitiesController(ApplicationDbContext context, ILogger<UtilitiesController> logger, IPasswordHasherService passwordHasher)
+    public UtilitiesController(ApplicationDbContext context, ILogger<UtilitiesController> logger, IPasswordHasherService passwordHasher, IConfiguration configuration)
     {
         _context = context;
         _logger = logger;
         _passwordHasher = passwordHasher;
+        _configuration = configuration;
     }
 
     /// <summary>
@@ -382,6 +387,97 @@ public class UtilitiesController : ControllerBase
             { 
                 Success = false, 
                 Message = $"An error occurred while changing projects: {ex.Message}",
+                Error = ex.ToString()
+            });
+        }
+    }
+
+    /// <summary>
+    /// Get OpenAI account details (email, organization, etc.) using the configured API key
+    /// </summary>
+    [HttpGet("openai-account-details")]
+    public async Task<ActionResult<object>> GetOpenAIAccountDetails()
+    {
+        try
+        {
+            var apiKey = _configuration["OpenAI:ApiKey"];
+            if (string.IsNullOrEmpty(apiKey))
+            {
+                _logger.LogWarning("OpenAI API key not configured");
+                return BadRequest(new { Success = false, Message = "OpenAI API key not configured" });
+            }
+
+            var baseUrl = _configuration["OpenAI:BaseUrl"] ?? "https://api.openai.com/v1";
+            _logger.LogInformation("Querying OpenAI account details from {BaseUrl}/me", baseUrl);
+
+            using var httpClient = new HttpClient();
+            httpClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
+            httpClient.Timeout = TimeSpan.FromSeconds(30);
+
+            var response = await httpClient.GetAsync($"{baseUrl}/me");
+
+            if (!response.IsSuccessStatusCode)
+            {
+                var errorContent = await response.Content.ReadAsStringAsync();
+                _logger.LogError("OpenAI API error: {StatusCode} - {Error}", response.StatusCode, errorContent);
+                
+                return StatusCode((int)response.StatusCode, new
+                {
+                    Success = false,
+                    Message = $"OpenAI API error: {response.StatusCode}",
+                    Error = errorContent
+                });
+            }
+
+            var responseContent = await response.Content.ReadAsStringAsync();
+            var accountInfo = JsonSerializer.Deserialize<JsonElement>(responseContent);
+
+            // Extract relevant fields
+            var result = new Dictionary<string, object?>();
+            if (accountInfo.TryGetProperty("id", out var idProp))
+                result["id"] = idProp.GetString();
+            if (accountInfo.TryGetProperty("email", out var emailProp))
+                result["email"] = emailProp.GetString();
+            if (accountInfo.TryGetProperty("name", out var nameProp))
+                result["name"] = nameProp.GetString();
+            if (accountInfo.TryGetProperty("object", out var objectProp))
+                result["object"] = objectProp.GetString();
+            if (accountInfo.TryGetProperty("picture", out var pictureProp))
+                result["picture"] = pictureProp.GetString();
+            if (accountInfo.TryGetProperty("created", out var createdProp))
+                result["created"] = createdProp.GetInt64();
+            if (accountInfo.TryGetProperty("organization_id", out var orgIdProp))
+                result["organization_id"] = orgIdProp.GetString();
+            if (accountInfo.TryGetProperty("organization", out var orgProp))
+            {
+                var orgDict = new Dictionary<string, object?>();
+                if (orgProp.TryGetProperty("id", out var orgId))
+                    orgDict["id"] = orgId.GetString();
+                if (orgProp.TryGetProperty("name", out var orgName))
+                    orgDict["name"] = orgName.GetString();
+                if (orgProp.TryGetProperty("slug", out var orgSlug))
+                    orgDict["slug"] = orgSlug.GetString();
+                if (orgDict.Any())
+                    result["organization"] = orgDict;
+            }
+
+            _logger.LogInformation("Successfully retrieved OpenAI account details for email: {Email}", result.ContainsKey("email") ? result["email"] : "unknown");
+
+            return Ok(new
+            {
+                Success = true,
+                Message = "OpenAI account details retrieved successfully",
+                AccountDetails = result,
+                RawResponse = responseContent // Include raw response for debugging
+            });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error retrieving OpenAI account details");
+            return StatusCode(500, new
+            {
+                Success = false,
+                Message = $"An error occurred while retrieving OpenAI account details: {ex.Message}",
                 Error = ex.ToString()
             });
         }

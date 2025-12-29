@@ -20,6 +20,7 @@ public interface IAIService
     Task<CodebaseStructureAIResponse> GenerateCodebaseStructureAsync(string systemPrompt, string userPrompt);
     Task<TranslateModuleResponse> TranslateModuleToEnglishAsync(string title, string description);
     Task<TranslateTextResponse> TranslateTextToEnglishAsync(string text);
+    Task<ProjectCriteriaClassificationResponse> ClassifyProjectCriteriaAsync(string projectTitle, string projectDescription, string? extendedDescription, List<ProjectCriteria> availableCriteria);
 }
 
 public class AIService : IAIService
@@ -1996,6 +1997,143 @@ REMEMBER: Every task title, description, and checklist item MUST directly refere
             };
         }
     }
+
+    public async Task<ProjectCriteriaClassificationResponse> ClassifyProjectCriteriaAsync(string projectTitle, string projectDescription, string? extendedDescription, List<ProjectCriteria> availableCriteria)
+    {
+        try
+        {
+            _logger.LogInformation("Classifying project criteria for project: {Title}", projectTitle);
+
+            // Filter out Criteria 8 (New Projects) as instructed
+            var criteriaToUse = availableCriteria.Where(c => c.Id != 8).OrderBy(c => c.Id).ToList();
+            
+            if (!criteriaToUse.Any())
+            {
+                _logger.LogWarning("No criteria available for classification (excluding Criteria 8)");
+                return new ProjectCriteriaClassificationResponse
+                {
+                    Success = false,
+                    Message = "No criteria available for classification"
+                };
+            }
+
+            // Build criteria list string
+            var criteriaList = string.Join("\n", criteriaToUse.Select(c => $"- CriteriaId {c.Id}: {c.Name}"));
+
+            var systemPrompt = @"You are a project classification expert. Your task is to classify projects based on available criteria.
+
+CRITICAL INSTRUCTIONS:
+1. You will be provided with a list of available project criteria (with their IDs and names)
+2. You MUST ignore Criteria 8 (New Projects) - do NOT include it in your classification
+3. Analyze the project title, description, and extended description
+4. Classify the project by selecting ALL applicable criteria from the provided list
+5. A project can have MULTIPLE criteria - select all that apply
+6. Return ONLY a comma-separated string of CriteriaIds (e.g., ""1,2,5"" or ""3"" or ""2,4,6"")
+7. If no criteria apply, return an empty string
+8. Do NOT include any explanation, text, or formatting - ONLY the comma-separated CriteriaIds
+
+Example responses:
+- If project matches Criteria 1 and 3: ""1,3""
+- If project matches only Criteria 2: ""2""
+- If no criteria match: """"";
+
+            var projectInfo = new StringBuilder();
+            projectInfo.AppendLine($"PROJECT TITLE: {projectTitle}");
+            projectInfo.AppendLine($"PROJECT DESCRIPTION: {projectDescription}");
+            if (!string.IsNullOrWhiteSpace(extendedDescription))
+            {
+                projectInfo.AppendLine($"EXTENDED DESCRIPTION: {extendedDescription}");
+            }
+            projectInfo.AppendLine();
+            projectInfo.AppendLine("AVAILABLE CRITERIA (DO NOT USE Criteria 8 - New Projects):");
+            projectInfo.AppendLine(criteriaList);
+            projectInfo.AppendLine();
+            projectInfo.AppendLine("Return ONLY a comma-separated string of CriteriaIds that apply to this project. Example: \"1,2,5\" or \"3\" or \"\"");
+
+            var userPrompt = projectInfo.ToString();
+
+            var requestBody = new
+            {
+                model = _aiConfig.Model,
+                messages = new[]
+                {
+                    new { role = "system", content = systemPrompt },
+                    new { role = "user", content = userPrompt }
+                },
+                max_tokens = 100, // Short response - just CriteriaIds
+                temperature = 0.2 // Lower temperature for more consistent classification
+            };
+
+            var json = JsonSerializer.Serialize(requestBody);
+            var content = new StringContent(json, Encoding.UTF8, "application/json");
+
+            _logger.LogInformation("Calling OpenAI API for project criteria classification");
+            var response = await _httpClient.PostAsync("https://api.openai.com/v1/chat/completions", content);
+            var responseContent = await response.Content.ReadAsStringAsync();
+
+            if (!response.IsSuccessStatusCode)
+            {
+                _logger.LogError("OpenAI API error during criteria classification: {StatusCode} - {Content}", response.StatusCode, responseContent);
+                return new ProjectCriteriaClassificationResponse
+                {
+                    Success = false,
+                    Message = $"OpenAI API error: {response.StatusCode}"
+                };
+            }
+
+            var openAIResponse = JsonSerializer.Deserialize<OpenAIResponse>(responseContent, new JsonSerializerOptions
+            {
+                PropertyNameCaseInsensitive = true
+            });
+
+            if (openAIResponse?.Choices == null || !openAIResponse.Choices.Any())
+            {
+                _logger.LogError("No choices in OpenAI response for criteria classification");
+                return new ProjectCriteriaClassificationResponse
+                {
+                    Success = false,
+                    Message = "No response from AI"
+                };
+            }
+
+            var aiResponseText = openAIResponse.Choices[0].Message?.Content?.Trim() ?? "";
+            
+            // Clean the response - remove quotes, whitespace, and extract just the CriteriaIds
+            aiResponseText = aiResponseText.Trim('"', '\'', ' ', '\n', '\r', '\t');
+            
+            // Validate that it's a comma-separated list of numbers (or empty)
+            var criteriaIdsString = "";
+            if (!string.IsNullOrWhiteSpace(aiResponseText))
+            {
+                // Parse and validate the CriteriaIds
+                var ids = aiResponseText.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                    .Where(id => int.TryParse(id, out int parsedId) && parsedId != 8 && criteriaToUse.Any(c => c.Id == parsedId))
+                    .Distinct()
+                    .OrderBy(id => int.Parse(id))
+                    .ToList();
+                
+                criteriaIdsString = string.Join(",", ids);
+            }
+
+            _logger.LogInformation("AI criteria classification result for project '{Title}': '{CriteriaIds}'", projectTitle, criteriaIdsString ?? "empty");
+
+            return new ProjectCriteriaClassificationResponse
+            {
+                Success = true,
+                Message = "Criteria classification completed successfully",
+                CriteriaIds = string.IsNullOrWhiteSpace(criteriaIdsString) ? null : criteriaIdsString
+            };
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error classifying project criteria for project: {Title}", projectTitle);
+            return new ProjectCriteriaClassificationResponse
+            {
+                Success = false,
+                Message = $"Error classifying project criteria: {ex.Message}"
+            };
+        }
+    }
 }
 
 // Helper class for parsing modules response
@@ -2101,6 +2239,13 @@ public class TranslateTextResponse
     public bool Success { get; set; }
     public string? Message { get; set; }
     public string? Text { get; set; }
+}
+
+public class ProjectCriteriaClassificationResponse
+{
+    public bool Success { get; set; }
+    public string? Message { get; set; }
+    public string? CriteriaIds { get; set; } // Comma-separated string of CriteriaIds
 }
 
 file sealed class ModuleTranslationResult

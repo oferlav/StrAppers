@@ -45,8 +45,9 @@ public class BoardsController : ControllerBase
     private readonly IMicrosoftGraphService _graphService;
     private readonly ISmtpEmailService _smtpEmailService;
     private readonly IConfiguration _configuration;
+    private readonly IHttpClientFactory _httpClientFactory;
 
-    public BoardsController(ApplicationDbContext context, ILogger<BoardsController> logger, ITrelloService trelloService, IAIService aiService, IGitHubService gitHubService, IMicrosoftGraphService graphService, ISmtpEmailService smtpEmailService, IConfiguration configuration)
+    public BoardsController(ApplicationDbContext context, ILogger<BoardsController> logger, ITrelloService trelloService, IAIService aiService, IGitHubService gitHubService, IMicrosoftGraphService graphService, ISmtpEmailService smtpEmailService, IConfiguration configuration, IHttpClientFactory httpClientFactory)
     {
         _context = context;
         _logger = logger;
@@ -56,6 +57,7 @@ public class BoardsController : ControllerBase
         _graphService = graphService;
         _smtpEmailService = smtpEmailService;
         _configuration = configuration;
+        _httpClientFactory = httpClientFactory;
     }
 
     /// <summary>
@@ -380,6 +382,81 @@ public class BoardsController : ControllerBase
             _logger.LogInformation("Trello board created with ID: {BoardId}, URL: {BoardUrl}", trelloResponse.BoardId, trelloResponse.BoardUrl);
             var trelloBoardId = trelloResponse.BoardId;
 
+            // Create Neon database for the project
+            string? dbConnectionString = null;
+            try
+            {
+                var dbName = $"AppDB_{trelloBoardId}";
+                _logger.LogInformation("Creating Neon database: {DbName}", dbName);
+                
+                var neonApiKey = _configuration["Neon:ApiKey"];
+                var neonBaseUrl = _configuration["Neon:BaseUrl"];
+                var neonProjectId = _configuration["Neon:ProjectId"];
+                var neonBranchId = _configuration["Neon:BranchId"];
+                var neonDefaultOwnerName = _configuration["Neon:DefaultOwnerName"] ?? "neondb_owner";
+
+                if (!string.IsNullOrWhiteSpace(neonApiKey) && neonApiKey != "your-neon-api-key-here" &&
+                    !string.IsNullOrWhiteSpace(neonBaseUrl) &&
+                    !string.IsNullOrWhiteSpace(neonProjectId) &&
+                    !string.IsNullOrWhiteSpace(neonBranchId))
+                {
+                    using var httpClient = _httpClientFactory.CreateClient();
+                    httpClient.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", neonApiKey);
+                    httpClient.DefaultRequestHeaders.Accept.Add(new System.Net.Http.Headers.MediaTypeWithQualityHeaderValue("application/json"));
+
+                    // Create database request
+                    var createDbRequest = new
+                    {
+                        database = new
+                        {
+                            name = dbName,
+                            owner_name = neonDefaultOwnerName
+                        }
+                    };
+
+                    var requestBody = JsonSerializer.Serialize(createDbRequest);
+                    var content = new StringContent(requestBody, System.Text.Encoding.UTF8, "application/json");
+
+                    var apiUrl = $"{neonBaseUrl}/projects/{neonProjectId}/branches/{neonBranchId}/databases";
+                    var response = await httpClient.PostAsync(apiUrl, content);
+
+                    if (response.IsSuccessStatusCode)
+                    {
+                        var responseContent = await response.Content.ReadAsStringAsync();
+                        var jsonDoc = JsonDocument.Parse(responseContent);
+
+                        // Get connection string
+                        var connectionUrl = $"{neonBaseUrl}/projects/{neonProjectId}/connection_uri?database_name={Uri.EscapeDataString(dbName)}&role_name={Uri.EscapeDataString(neonDefaultOwnerName)}&branch_id={Uri.EscapeDataString(neonBranchId)}&pooled=false";
+                        var connResponse = await httpClient.GetAsync(connectionUrl);
+                        
+                        if (connResponse.IsSuccessStatusCode)
+                        {
+                            var connContent = await connResponse.Content.ReadAsStringAsync();
+                            var connDoc = JsonDocument.Parse(connContent);
+                            if (connDoc.RootElement.TryGetProperty("uri", out var uriProp))
+                            {
+                                dbConnectionString = uriProp.GetString();
+                                _logger.LogInformation("Successfully created Neon database and retrieved connection string");
+                            }
+                        }
+                    }
+                    else
+                    {
+                        var errorContent = await response.Content.ReadAsStringAsync();
+                        _logger.LogWarning("Failed to create Neon database: {StatusCode} - {Error}", response.StatusCode, errorContent);
+                    }
+                }
+                else
+                {
+                    _logger.LogWarning("Neon configuration is incomplete, skipping database creation");
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Error creating Neon database, continuing without it");
+                // Don't fail the entire process if database creation fails
+            }
+
             // Create GitHub repository using the board ID
             _logger.LogInformation("Creating GitHub repository for project {ProjectTitle} with board ID {BoardId}", project.Title, trelloBoardId);
             
@@ -397,6 +474,95 @@ public class BoardsController : ControllerBase
             string? publishUrl = null;
             List<string> addedCollaborators = new List<string>();
             List<string> failedCollaborators = new List<string>();
+            string? webApiUrl = null;
+            string? swaggerUrl = null;
+            
+            // Create Railway host for Web API
+            try
+            {
+                var railwayHostName = $"WebApi_{trelloBoardId}";
+                _logger.LogInformation("Creating Railway host: {HostName}", railwayHostName);
+                
+                var railwayApiToken = _configuration["Railway:ApiToken"];
+                var railwayApiUrl = _configuration["Railway:ApiUrl"];
+                
+                if (!string.IsNullOrWhiteSpace(railwayApiToken) && 
+                    railwayApiToken != "your-railway-api-token-here" &&
+                    !string.IsNullOrWhiteSpace(railwayApiUrl))
+                {
+                    using var httpClient = _httpClientFactory.CreateClient();
+                    httpClient.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", railwayApiToken);
+                    httpClient.DefaultRequestHeaders.Accept.Add(new System.Net.Http.Headers.MediaTypeWithQualityHeaderValue("application/json"));
+                    httpClient.DefaultRequestHeaders.Add("User-Agent", "StrAppersBackend/1.0");
+
+                    // Sanitize name for Railway
+                    var sanitizedName = System.Text.RegularExpressions.Regex.Replace(railwayHostName.ToLowerInvariant(), @"[^a-z0-9-_]", "-");
+
+                    // Create Railway project
+                    var createProjectMutation = new
+                    {
+                        query = @"
+                    mutation CreateProject($name: String!) {
+                        projectCreate(input: { name: $name }) {
+                            id
+                            name
+                        }
+                    }",
+                        variables = new
+                        {
+                            name = sanitizedName
+                        }
+                    };
+
+                    var requestBody = System.Text.Json.JsonSerializer.Serialize(createProjectMutation);
+                    var content = new StringContent(requestBody, System.Text.Encoding.UTF8, "application/json");
+
+                    var response = await httpClient.PostAsync(railwayApiUrl, content);
+                    var responseContent = await response.Content.ReadAsStringAsync();
+
+                    if (response.IsSuccessStatusCode)
+                    {
+                        var jsonDoc = System.Text.Json.JsonDocument.Parse(responseContent);
+                        var root = jsonDoc.RootElement;
+
+                        string? projectId = null;
+                        if (root.TryGetProperty("data", out var dataObj))
+                        {
+                            if (dataObj.TryGetProperty("projectCreate", out var projectObj))
+                            {
+                                if (projectObj.TryGetProperty("id", out var idProp))
+                                {
+                                    projectId = idProp.GetString();
+                                }
+                            }
+                        }
+
+                        if (!string.IsNullOrEmpty(projectId))
+                        {
+                            webApiUrl = $"https://railway.app/project/{projectId}";
+                            swaggerUrl = $"{webApiUrl}/swagger"; // Swagger URL is typically at /swagger endpoint
+                            _logger.LogInformation("Railway host created successfully: {ProjectId}, URL: {WebApiUrl}", projectId, webApiUrl);
+                        }
+                        else
+                        {
+                            _logger.LogWarning("Railway project created but ProjectId not found in response");
+                        }
+                    }
+                    else
+                    {
+                        _logger.LogWarning("Failed to create Railway host: {StatusCode} - {Error}", response.StatusCode, responseContent);
+                    }
+                }
+                else
+                {
+                    _logger.LogWarning("Railway configuration is incomplete, skipping Railway host creation");
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Error creating Railway host, continuing without it");
+                // Don't fail the entire process if Railway host creation fails
+            }
             
             if (githubUsernames.Any())
             {
@@ -406,7 +572,10 @@ public class BoardsController : ControllerBase
                     Description = SanitizeRepoDescription(project.Description ?? $"Project repository for {project.Title}"),
                     IsPrivate = false,  // Public repository to enable GitHub Pages on free plan
                     Collaborators = githubUsernames,
-                    ProjectTitle = project.Title  // Pass project title for HTML page headline
+                    ProjectTitle = project.Title,  // Pass project title for HTML page headline
+                    DatabaseConnectionString = dbConnectionString,  // Pass connection string for README
+                    WebApiUrl = webApiUrl,  // Pass Railway WebApi URL for README
+                    SwaggerUrl = swaggerUrl  // Pass Swagger URL for README
                 };
                 
                 _logger.LogInformation("Creating GitHub repository: {RepoName} with {CollaboratorCount} collaborators", 
