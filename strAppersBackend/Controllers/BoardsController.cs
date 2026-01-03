@@ -9,6 +9,8 @@ using System.Text.RegularExpressions;
 using System.Text.Json;
 using System.Net.Http;
 using System.Net;
+using Npgsql;
+using System.Security.Cryptography;
 
 namespace strAppersBackend.Controllers;
 
@@ -46,8 +48,9 @@ public class BoardsController : ControllerBase
     private readonly ISmtpEmailService _smtpEmailService;
     private readonly IConfiguration _configuration;
     private readonly IHttpClientFactory _httpClientFactory;
+    private readonly ILoggerFactory _loggerFactory;
 
-    public BoardsController(ApplicationDbContext context, ILogger<BoardsController> logger, ITrelloService trelloService, IAIService aiService, IGitHubService gitHubService, IMicrosoftGraphService graphService, ISmtpEmailService smtpEmailService, IConfiguration configuration, IHttpClientFactory httpClientFactory)
+    public BoardsController(ApplicationDbContext context, ILogger<BoardsController> logger, ITrelloService trelloService, IAIService aiService, IGitHubService gitHubService, IMicrosoftGraphService graphService, ISmtpEmailService smtpEmailService, IConfiguration configuration, IHttpClientFactory httpClientFactory, ILoggerFactory loggerFactory)
     {
         _context = context;
         _logger = logger;
@@ -58,6 +61,7 @@ public class BoardsController : ControllerBase
         _smtpEmailService = smtpEmailService;
         _configuration = configuration;
         _httpClientFactory = httpClientFactory;
+        _loggerFactory = loggerFactory;
     }
 
     /// <summary>
@@ -178,6 +182,7 @@ public class BoardsController : ControllerBase
             var students = await _context.Students
                 .Include(s => s.StudentRoles)
                 .ThenInclude(sr => sr.Role)
+                .Include(s => s.ProgrammingLanguage)  // Include ProgrammingLanguage for backend code generation
                 .Where(s => request.StudentIds.Contains(s.Id) && s.IsAvailable)
                 .ToListAsync();
 
@@ -435,15 +440,44 @@ public class BoardsController : ControllerBase
                             var connDoc = JsonDocument.Parse(connContent);
                             if (connDoc.RootElement.TryGetProperty("uri", out var uriProp))
                             {
-                                dbConnectionString = uriProp.GetString();
-                                _logger.LogInformation("Successfully created Neon database and retrieved connection string");
+                                var originalConnectionString = uriProp.GetString();
+                                _logger.LogInformation("✅ [NEON] Successfully created Neon database '{DbName}' and retrieved initial connection string", dbName);
+                                _logger.LogInformation("🔐 [NEON] Creating isolated database role for database '{DbName}' to prevent cross-database access", dbName);
+                                
+                                // Create an isolated role for this database and update connection string
+                                dbConnectionString = await CreateIsolatedDatabaseRole(originalConnectionString, dbName);
+                                
+                                if (!string.IsNullOrEmpty(dbConnectionString))
+                                {
+                                    _logger.LogInformation("✅ [NEON] Successfully created isolated role and updated connection string for database '{DbName}'", dbName);
+                                }
+                                else
+                                {
+                                    _logger.LogWarning("⚠️ [NEON] Failed to create isolated role, using original connection string for database '{DbName}'", dbName);
+                                    dbConnectionString = originalConnectionString;
+                                }
+                                
+                                // Execute the initial database schema script to create TestProjects table
+                                if (!string.IsNullOrEmpty(dbConnectionString))
+                                {
+                                    await ExecuteInitialDatabaseSchema(dbConnectionString, dbName);
+                                }
                             }
+                            else
+                            {
+                                _logger.LogWarning("⚠️ [NEON] Connection string URI not found in Neon API response for database '{DbName}'", dbName);
+                            }
+                        }
+                        else
+                        {
+                            var connErrorContent = await connResponse.Content.ReadAsStringAsync();
+                            _logger.LogWarning("⚠️ [NEON] Failed to retrieve connection string for database '{DbName}': {StatusCode} - {Error}", dbName, connResponse.StatusCode, connErrorContent);
                         }
                     }
                     else
                     {
                         var errorContent = await response.Content.ReadAsStringAsync();
-                        _logger.LogWarning("Failed to create Neon database: {StatusCode} - {Error}", response.StatusCode, errorContent);
+                        _logger.LogError("❌ [NEON] Failed to create Neon database '{DbName}': {StatusCode} - {Error}", dbName, response.StatusCode, errorContent);
                     }
                 }
                 else
@@ -470,21 +504,64 @@ public class BoardsController : ControllerBase
             _logger.LogInformation("Found {GitHubUserCount} GitHub usernames: {GitHubUsers}", 
                 githubUsernames.Count, string.Join(", ", githubUsernames));
             
-            string? repositoryUrl = null;
+            string? backendRepositoryUrl = null;
+            string? frontendRepositoryUrl = null;
             string? publishUrl = null;
             List<string> addedCollaborators = new List<string>();
             List<string> failedCollaborators = new List<string>();
             string? webApiUrl = null;
             string? swaggerUrl = null;
+            string? railwayServiceId = null;
+            string? environmentId = null;
+            string? programmingLanguage = null;
+            
+            // Find the Backend/Fullstack developer and their programming language
+            var developerStudent = students.FirstOrDefault(s => 
+                s.StudentRoles?.Any(sr => sr.IsActive && (sr.Role?.Type == 1 || sr.Role?.Type == 2)) ?? false);
+            
+            if (developerStudent != null)
+            {
+                _logger.LogInformation("Found developer student: StudentId={StudentId}, ProgrammingLanguageId={ProgrammingLanguageId}, HasProgrammingLanguage={HasProgrammingLanguage}", 
+                    developerStudent.Id, 
+                    developerStudent.ProgrammingLanguageId, 
+                    developerStudent.ProgrammingLanguage != null);
+                
+                if (developerStudent.ProgrammingLanguage != null)
+                {
+                    programmingLanguage = developerStudent.ProgrammingLanguage.Name;
+                    _logger.LogInformation("✅ Using programming language '{Language}' from student {StudentId}", 
+                        programmingLanguage, developerStudent.Id);
+                }
+                else
+                {
+                    _logger.LogWarning("⚠️ Developer student {StudentId} found but ProgrammingLanguage is null (ProgrammingLanguageId={ProgrammingLanguageId}). Backend code generation will be skipped.", 
+                        developerStudent.Id, developerStudent.ProgrammingLanguageId);
+                }
+            }
+            else
+            {
+                _logger.LogWarning("⚠️ No Backend/Fullstack developer found. Checking students: {StudentCount} students", students.Count);
+                foreach (var student in students)
+                {
+                    var roles = student.StudentRoles?
+                        .Where(sr => sr.IsActive)
+                        .Select(sr => $"{sr.Role?.Name} (Type={sr.Role?.Type})")
+                        .ToList() ?? new List<string>();
+                    _logger.LogInformation("  Student {StudentId}: Roles=[{Roles}]", student.Id, string.Join(", ", roles));
+                }
+            }
             
             // Create Railway host for Web API
+            string? railwayApiToken = null;
+            string? railwayApiUrl = null;
+            string? projectId = null; // Declare at higher scope for use after Railway service creation
             try
             {
                 var railwayHostName = $"WebApi_{trelloBoardId}";
                 _logger.LogInformation("Creating Railway host: {HostName}", railwayHostName);
                 
-                var railwayApiToken = _configuration["Railway:ApiToken"];
-                var railwayApiUrl = _configuration["Railway:ApiUrl"];
+                railwayApiToken = _configuration["Railway:ApiToken"];
+                railwayApiUrl = _configuration["Railway:ApiUrl"];
                 
                 if (!string.IsNullOrWhiteSpace(railwayApiToken) && 
                     railwayApiToken != "your-railway-api-token-here" &&
@@ -525,12 +602,12 @@ public class BoardsController : ControllerBase
                         var jsonDoc = System.Text.Json.JsonDocument.Parse(responseContent);
                         var root = jsonDoc.RootElement;
 
-                        string? projectId = null;
-                        if (root.TryGetProperty("data", out var dataObj))
+                        // projectId already declared at higher scope
+                        if (root.TryGetProperty("data", out var dataObj) && dataObj.ValueKind == System.Text.Json.JsonValueKind.Object)
                         {
-                            if (dataObj.TryGetProperty("projectCreate", out var projectObj))
+                            if (dataObj.TryGetProperty("projectCreate", out var projectObj) && projectObj.ValueKind == System.Text.Json.JsonValueKind.Object)
                             {
-                                if (projectObj.TryGetProperty("id", out var idProp))
+                                if (projectObj.TryGetProperty("id", out var idProp) && idProp.ValueKind == System.Text.Json.JsonValueKind.String)
                                 {
                                     projectId = idProp.GetString();
                                 }
@@ -539,9 +616,231 @@ public class BoardsController : ControllerBase
 
                         if (!string.IsNullOrEmpty(projectId))
                         {
-                            webApiUrl = $"https://railway.app/project/{projectId}";
+                            // Create Railway service within the project
+                            var createServiceMutation = new
+                            {
+                                query = @"
+                    mutation CreateService($projectId: String!, $name: String) {
+                        serviceCreate(input: { projectId: $projectId, name: $name }) {
+                            id
+                            name
+                        }
+                    }",
+                                variables = new
+                                {
+                                    projectId = projectId,
+                                    name = sanitizedName
+                                }
+                            };
+
+                            var serviceRequestBody = System.Text.Json.JsonSerializer.Serialize(createServiceMutation);
+                            var serviceContent = new StringContent(serviceRequestBody, System.Text.Encoding.UTF8, "application/json");
+                            var serviceResponse = await httpClient.PostAsync(railwayApiUrl, serviceContent);
+                            var serviceResponseContent = await serviceResponse.Content.ReadAsStringAsync();
+
+                            if (serviceResponse.IsSuccessStatusCode)
+                            {
+                                var serviceJsonDoc = System.Text.Json.JsonDocument.Parse(serviceResponseContent);
+                                var serviceRoot = serviceJsonDoc.RootElement;
+
+                                if (serviceRoot.TryGetProperty("data", out var serviceDataObj))
+                                {
+                                    if (serviceDataObj.TryGetProperty("serviceCreate", out var serviceObj))
+                                    {
+                                        if (serviceObj.TryGetProperty("id", out var serviceIdProp))
+                                        {
+                                            railwayServiceId = serviceIdProp.GetString();
+                                            _logger.LogInformation("✅ [RAILWAY] Service created: ID={ServiceId}, Name={ServiceName}", 
+                                                railwayServiceId, sanitizedName);
+                                            _logger.LogInformation("🔍 [RAILWAY] DIAGNOSTIC: Service {ServiceId} will be configured with backend build settings", railwayServiceId);
+                                        }
+                                    }
+                                }
+                                _logger.LogInformation("✅ [RAILWAY] Service created successfully: ServiceId={ServiceId}, URL={WebApiUrl}", railwayServiceId, webApiUrl);
+                            }
+                            else
+                            {
+                                _logger.LogWarning("⚠️ [RAILWAY] Failed to create service: StatusCode={StatusCode}, Response={Response}", 
+                                    serviceResponse.StatusCode, serviceResponseContent);
+                                
+                                // Check for errors in GraphQL response
+                                try
+                                {
+                                    var errorDoc = System.Text.Json.JsonDocument.Parse(serviceResponseContent);
+                                    if (errorDoc.RootElement.TryGetProperty("errors", out var errorsProp))
+                                    {
+                                        foreach (var error in errorsProp.EnumerateArray())
+                                        {
+                                            var errorMessage = error.TryGetProperty("message", out var msgProp) ? msgProp.GetString() : "Unknown error";
+                                            _logger.LogError("❌ [RAILWAY] GraphQL error: {ErrorMessage}", errorMessage);
+                                        }
+                                    }
+                                }
+                                catch (Exception parseEx)
+                                {
+                                    _logger.LogWarning(parseEx, "⚠️ [RAILWAY] Could not parse error response");
+                                }
+                            }
+
+                            // Don't set a fallback project URL - we need the actual service URL
+                            // The webApiUrl will be set when the domain is created, or polled later
+                            if (string.IsNullOrEmpty(webApiUrl))
+                            {
+                                _logger.LogInformation("⚠️ [RAILWAY] Service URL not available yet - will be set when domain is created");
+                            }
+                            
+                            // Set environment variable DATABASE_URL on the service (if service was created)
+                            if (!string.IsNullOrEmpty(railwayServiceId) && !string.IsNullOrEmpty(dbConnectionString) && !string.IsNullOrEmpty(projectId))
+                            {
+                                try
+                                {
+                                    // First, query the project to get its environments (usually one default environment)
+                                    _logger.LogInformation("🔍 [RAILWAY] Querying project {ProjectId} to get environment ID", projectId);
+                                    var getProjectQuery = new
+                                    {
+                                        query = @"
+                    query GetProject($projectId: String!) {
+                        project(id: $projectId) {
+                            id
+                            environments {
+                                edges {
+                                    node {
+                                        id
+                                    }
+                                }
+                            }
+                        }
+                    }",
+                                        variables = new
+                                        {
+                                            projectId = projectId
+                                        }
+                                    };
+
+                                    var queryRequestBody = System.Text.Json.JsonSerializer.Serialize(getProjectQuery);
+                                    var queryContent = new StringContent(queryRequestBody, System.Text.Encoding.UTF8, "application/json");
+                                    var queryResponse = await httpClient.PostAsync(railwayApiUrl, queryContent);
+                                    var queryResponseContent = await queryResponse.Content.ReadAsStringAsync();
+
+                                    if (queryResponse.IsSuccessStatusCode)
+                                    {
+                                        var queryDoc = System.Text.Json.JsonDocument.Parse(queryResponseContent);
+                                        if (queryDoc.RootElement.TryGetProperty("data", out var queryDataObj) &&
+                                            queryDataObj.TryGetProperty("project", out var projectObj) &&
+                                            projectObj.TryGetProperty("environments", out var environmentsProp) &&
+                                            environmentsProp.TryGetProperty("edges", out var edgesProp))
+                                        {
+                                            var edges = edgesProp.EnumerateArray().ToList();
+                                            if (edges.Count > 0)
+                                            {
+                                                // Use the first environment (typically the default one)
+                                                if (edges[0].TryGetProperty("node", out var nodeProp) &&
+                                                    nodeProp.TryGetProperty("id", out var envIdProp))
+                                                {
+                                                    environmentId = envIdProp.GetString();
+                                                    _logger.LogInformation("✅ [RAILWAY] Retrieved environment ID: {EnvironmentId} from project {ProjectId}", environmentId, projectId);
+                                                }
+                                            }
+                                        }
+                                    }
+                                    else
+                                    {
+                                        _logger.LogWarning("⚠️ [RAILWAY] Failed to query project for environment ID: {StatusCode} - {Error}", 
+                                            queryResponse.StatusCode, queryResponseContent);
+                                    }
+
+                                    if (string.IsNullOrEmpty(environmentId))
+                                    {
+                                        _logger.LogWarning("⚠️ [RAILWAY] Cannot set DATABASE_URL: Environment ID not found for project {ProjectId}", projectId);
+                                    }
+                                    else
+                                    {
+                                        // Railway GraphQL mutation to set environment variable
+                                        // variableUpsert returns Boolean, so we don't select fields
+                                        // Both projectId and environmentId are required
+                                        var setEnvMutation = new
+                                        {
+                                            query = @"
+                    mutation SetVariable($projectId: String!, $environmentId: String!, $serviceId: String!, $name: String!, $value: String!) {
+                        variableUpsert(input: { 
+                            projectId: $projectId
+                            environmentId: $environmentId
+                            serviceId: $serviceId
+                            name: $name
+                            value: $value
+                        })
+                    }",
+                                            variables = new
+                                            {
+                                                projectId = projectId,
+                                                environmentId = environmentId,
+                                                serviceId = railwayServiceId,
+                                                name = "DATABASE_URL",
+                                                value = dbConnectionString
+                                            }
+                                        };
+
+                                        _logger.LogInformation("🔧 [RAILWAY] Setting DATABASE_URL environment variable on service {ServiceId} in environment {EnvironmentId}", railwayServiceId, environmentId);
+                                        var envRequestBody = System.Text.Json.JsonSerializer.Serialize(setEnvMutation);
+                                        _logger.LogDebug("🔧 [RAILWAY] Environment variable mutation: {Mutation}", envRequestBody);
+                                        var envContent = new StringContent(envRequestBody, System.Text.Encoding.UTF8, "application/json");
+                                        var envResponse = await httpClient.PostAsync(railwayApiUrl, envContent);
+                                        var envResponseContent = await envResponse.Content.ReadAsStringAsync();
+
+                                        if (envResponse.IsSuccessStatusCode)
+                                        {
+                                            _logger.LogInformation("✅ [RAILWAY] Successfully set DATABASE_URL environment variable on Railway service {ServiceId}", railwayServiceId);
+                                            // Note: Verification query removed - the 200 response from variableUpsert confirms the variable was set
+                                        }
+                                        else
+                                        {
+                                            _logger.LogWarning("⚠️ [RAILWAY] Failed to set DATABASE_URL environment variable: {StatusCode} - {Error}", 
+                                                envResponse.StatusCode, envResponseContent);
+                                            
+                                            // Check for errors in GraphQL response
+                                            try
+                                            {
+                                                var errorDoc = System.Text.Json.JsonDocument.Parse(envResponseContent);
+                                                if (errorDoc.RootElement.TryGetProperty("errors", out var errorsProp))
+                                                {
+                                                    foreach (var error in errorsProp.EnumerateArray())
+                                                    {
+                                                        var errorMsg = error.TryGetProperty("message", out var msgProp) ? msgProp.GetString() : "Unknown error";
+                                                        _logger.LogError("❌ [RAILWAY] GraphQL error setting environment variable: {ErrorMessage}", errorMsg);
+                                                    }
+                                                }
+                                            }
+                                            catch (Exception parseEx)
+                                            {
+                                                _logger.LogWarning(parseEx, "⚠️ [RAILWAY] Could not parse error response when setting environment variable");
+                                            }
+                                        }
+                                    }
+                                }
+                                catch (Exception envEx)
+                                {
+                                    _logger.LogWarning(envEx, "❌ [RAILWAY] Error setting Railway environment variable, continuing anyway");
+                                }
+                            }
+                            else
+                            {
+                                if (string.IsNullOrEmpty(railwayServiceId))
+                                {
+                                    _logger.LogWarning("⚠️ [RAILWAY] Cannot set DATABASE_URL: Railway service was not created (ServiceId is null)");
+                                }
+                                if (string.IsNullOrEmpty(dbConnectionString))
+                                {
+                                    _logger.LogWarning("⚠️ [RAILWAY] Cannot set DATABASE_URL: Database connection string is not available");
+                                }
+                                if (string.IsNullOrEmpty(projectId))
+                                {
+                                    _logger.LogWarning("⚠️ [RAILWAY] Cannot set DATABASE_URL: Railway project ID is not available");
+                                }
+                            }
+
                             swaggerUrl = $"{webApiUrl}/swagger"; // Swagger URL is typically at /swagger endpoint
-                            _logger.LogInformation("Railway host created successfully: {ProjectId}, URL: {WebApiUrl}", projectId, webApiUrl);
+                            _logger.LogInformation("Railway service created successfully: ProjectId={ProjectId}, ServiceId={ServiceId}, URL={WebApiUrl}", 
+                                projectId, railwayServiceId ?? "none", webApiUrl);
                         }
                         else
                         {
@@ -566,41 +865,303 @@ public class BoardsController : ControllerBase
             
             if (githubUsernames.Any())
             {
-                var githubRequest = new CreateRepositoryRequest
+                var githubToken = _configuration["GitHub:AccessToken"];
+                if (string.IsNullOrEmpty(githubToken))
                 {
-                    Name = trelloBoardId,
-                    Description = SanitizeRepoDescription(project.Description ?? $"Project repository for {project.Title}"),
-                    IsPrivate = false,  // Public repository to enable GitHub Pages on free plan
-                    Collaborators = githubUsernames,
-                    ProjectTitle = project.Title,  // Pass project title for HTML page headline
-                    DatabaseConnectionString = dbConnectionString,  // Pass connection string for README
-                    WebApiUrl = webApiUrl,  // Pass Railway WebApi URL for README
-                    SwaggerUrl = swaggerUrl  // Pass Swagger URL for README
-                };
-                
-                _logger.LogInformation("Creating GitHub repository: {RepoName} with {CollaboratorCount} collaborators", 
-                    githubRequest.Name, githubRequest.Collaborators.Count);
-                
-                var githubResponse = await _gitHubService.CreateRepositoryAsync(githubRequest);
-                
-                if (githubResponse.Success)
-                {
-                    repositoryUrl = githubResponse.RepositoryUrl;
-                    publishUrl = githubResponse.GitHubPagesUrl;
-                    addedCollaborators = githubResponse.AddedCollaborators;
-                    failedCollaborators = githubResponse.FailedCollaborators;
-                    
-                    _logger.LogInformation("GitHub repository created successfully: {RepositoryUrl}", repositoryUrl);
-                    _logger.LogInformation("GitHub Pages URL: {PublishUrl}", publishUrl);
-                    _logger.LogInformation("Added {AddedCount} collaborators, {FailedCount} failed", 
-                        addedCollaborators.Count, failedCollaborators.Count);
+                    _logger.LogWarning("⚠️ [GITHUB] GitHub access token not configured, skipping repository creation");
                 }
                 else
                 {
-                    _logger.LogWarning("GitHub repository creation failed: {ErrorMessage}. Board creation will continue without repository.", githubResponse.ErrorMessage);
-                    // Note: We don't fail the entire process, just log the warning
-                    // The board will still be created successfully
+                    // Step 1: Create Frontend Repository
+                    // Use boardId directly (no prefix) so GitHub Pages URL matches: https://skill-in-projects.github.io/{boardId}/
+                    var frontendRepoName = trelloBoardId;
+                    _logger.LogInformation("📦 [FRONTEND] Creating frontend repository: {RepoName}", frontendRepoName);
+                    
+                    var frontendRequest = new CreateRepositoryRequest
+                    {
+                        Name = frontendRepoName,
+                        Description = SanitizeRepoDescription($"Frontend repository for {project.Title}"),
+                        IsPrivate = false,  // Public repository to enable GitHub Pages on free plan
+                        Collaborators = githubUsernames,
+                        ProjectTitle = project.Title,
+                        WebApiUrl = webApiUrl  // Pass API URL for config.js
+                    };
+                    
+                    var frontendResponse = await _gitHubService.CreateRepositoryAsync(frontendRequest);
+                    
+                    if (frontendResponse.Success && !string.IsNullOrEmpty(frontendResponse.RepositoryUrl))
+                    {
+                        frontendRepositoryUrl = frontendResponse.RepositoryUrl;
+                        addedCollaborators.AddRange(frontendResponse.AddedCollaborators);
+                        failedCollaborators.AddRange(frontendResponse.FailedCollaborators);
+                        
+                        _logger.LogInformation("✅ [FRONTEND] Repository created: {RepositoryUrl}", frontendRepositoryUrl);
+                        
+                        // Extract owner and repo name for commit creation
+                        var frontendUri = new Uri(frontendRepositoryUrl);
+                        var frontendPathParts = frontendUri.AbsolutePath.TrimStart('/').Split('/');
+                        if (frontendPathParts.Length >= 2)
+                        {
+                            var frontendOwner = frontendPathParts[0];
+                            var frontendRepoNameFromUrl = frontendPathParts[1];
+                            
+                            // Create frontend-only commit (files at root, no workflows)
+                            var frontendCommitSuccess = await _gitHubService.CreateFrontendOnlyCommitAsync(
+                                frontendOwner, frontendRepoNameFromUrl, project.Title, githubToken, webApiUrl);
+                            
+                            if (frontendCommitSuccess)
+                            {
+                                _logger.LogInformation("✅ [FRONTEND] Frontend-only commit created successfully");
+                                
+                                // Deploy frontend using DeploymentController
+                                try
+                                {
+                                    var deploymentController = new DeploymentController(
+                                        _loggerFactory.CreateLogger<DeploymentController>(),
+                                        _gitHubService,
+                                        _httpClientFactory,
+                                        _configuration);
+                                    
+                                    var deployResponse = await deploymentController.DeployFrontendRepositoryAsync(frontendRepositoryUrl);
+                                    if (deployResponse.Success && !string.IsNullOrEmpty(deployResponse.DeploymentUrl))
+                                    {
+                                        publishUrl = deployResponse.DeploymentUrl;
+                                        _logger.LogInformation("✅ [FRONTEND] Deployment triggered: {PagesUrl}", publishUrl);
+                                        _logger.LogInformation("📊 [FRONTEND] Workflow status: {Status}, Run ID: {RunId}", 
+                                            deployResponse.Status, deployResponse.WorkflowRunId);
+                                    }
+                                    else
+                                    {
+                                        // Frontend repo name is boardId directly (no prefix)
+                                        publishUrl = _gitHubService.GetGitHubPagesUrl(frontendOwner, frontendRepoNameFromUrl);
+                                        _logger.LogWarning("⚠️ [FRONTEND] Deployment may not have triggered: {Message}", deployResponse.Message);
+                                    }
+                                }
+                                catch (Exception deployEx)
+                                {
+                                    _logger.LogWarning(deployEx, "⚠️ [FRONTEND] Error calling deployment controller, using fallback");
+                                    // Frontend repo name is boardId directly (no prefix)
+                                    publishUrl = _gitHubService.GetGitHubPagesUrl(frontendOwner, frontendRepoNameFromUrl);
+                                }
+                            }
+                            else
+                            {
+                                _logger.LogWarning("⚠️ [FRONTEND] Failed to create frontend commit");
+                            }
+                        }
+                    }
+                    else
+                    {
+                        _logger.LogWarning("⚠️ [FRONTEND] Failed to create frontend repository: {Error}", frontendResponse.ErrorMessage);
+                    }
+                    
+                    // Step 2: Create Backend Repository
+                    var backendRepoName = $"backend_{trelloBoardId}";
+                    _logger.LogInformation("📦 [BACKEND] Creating backend repository: {RepoName}", backendRepoName);
+                    
+                    var backendRequest = new CreateRepositoryRequest
+                    {
+                        Name = backendRepoName,
+                        Description = SanitizeRepoDescription($"Backend API repository for {project.Title}"),
+                        IsPrivate = false,
+                        Collaborators = githubUsernames,
+                        ProjectTitle = project.Title,
+                        DatabaseConnectionString = dbConnectionString,
+                        WebApiUrl = webApiUrl,
+                        SwaggerUrl = swaggerUrl,
+                        ProgrammingLanguage = programmingLanguage
+                    };
+                    
+                    var backendResponse = await _gitHubService.CreateRepositoryAsync(backendRequest);
+                    
+                    if (backendResponse.Success && !string.IsNullOrEmpty(backendResponse.RepositoryUrl))
+                    {
+                        backendRepositoryUrl = backendResponse.RepositoryUrl;
+                        addedCollaborators.AddRange(backendResponse.AddedCollaborators);
+                        failedCollaborators.AddRange(backendResponse.FailedCollaborators);
+                        
+                        _logger.LogInformation("✅ [BACKEND] Repository created: {RepositoryUrl}", backendRepositoryUrl);
+                        
+                        // Extract owner and repo name
+                        var backendUri = new Uri(backendRepositoryUrl);
+                        var backendPathParts = backendUri.AbsolutePath.TrimStart('/').Split('/');
+                        if (backendPathParts.Length >= 2)
+                        {
+                            var backendOwner = backendPathParts[0];
+                            var backendRepoNameFromUrl = backendPathParts[1];
+                            
+                            // Create backend-only commit (files at root, no workflows)
+                            var backendCommitSuccess = await _gitHubService.CreateBackendOnlyCommitAsync(
+                                backendOwner, backendRepoNameFromUrl, project.Title, githubToken, 
+                                programmingLanguage ?? "c#", dbConnectionString, webApiUrl, swaggerUrl);
+                            
+                            if (backendCommitSuccess)
+                            {
+                                _logger.LogInformation("✅ [BACKEND] Backend-only commit created successfully");
+                                
+                                // Add Railway secrets and connect to Railway (if Railway service was created)
+                                if (!string.IsNullOrEmpty(railwayServiceId) && !string.IsNullOrEmpty(railwayApiToken))
+                    {
+                                try
+                                {
+                                    _logger.LogInformation("[GITHUB] Adding Railway secrets to backend repository {Owner}/{Repo}", backendOwner, backendRepoNameFromUrl);
+                                    
+                                    // Add RAILWAY_TOKEN secret
+                                    var tokenSecretSuccess = await _gitHubService.CreateOrUpdateRepositorySecretAsync(
+                                        backendOwner, backendRepoNameFromUrl, "RAILWAY_TOKEN", railwayApiToken, githubToken);
+                                    
+                                    if (tokenSecretSuccess)
+                                    {
+                                        _logger.LogInformation("[GITHUB] ✅ Successfully added RAILWAY_TOKEN secret");
+                                    }
+                                    else
+                                    {
+                                        _logger.LogWarning("[GITHUB] ⚠️ Failed to add RAILWAY_TOKEN secret");
+                                    }
+                                    
+                                    // Add RAILWAY_SERVICE_ID secret
+                                    var serviceIdSecretSuccess = await _gitHubService.CreateOrUpdateRepositorySecretAsync(
+                                        backendOwner, backendRepoNameFromUrl, "RAILWAY_SERVICE_ID", railwayServiceId, githubToken);
+                                    
+                                    if (serviceIdSecretSuccess)
+                                    {
+                                        _logger.LogInformation("[GITHUB] ✅ Successfully added RAILWAY_SERVICE_ID secret");
+                                    }
+                                    else
+                                    {
+                                        _logger.LogWarning("[GITHUB] ⚠️ Failed to add RAILWAY_SERVICE_ID secret");
+                                    }
+                                    
+                                    // Connect GitHub repository to Railway service
+                                    if (!string.IsNullOrEmpty(railwayApiUrl))
+                                    {
+                                        using var railwayHttpClient = _httpClientFactory.CreateClient();
+                                        railwayHttpClient.DefaultRequestHeaders.Authorization = 
+                                            new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", railwayApiToken);
+                                        railwayHttpClient.DefaultRequestHeaders.Accept.Add(
+                                            new System.Net.Http.Headers.MediaTypeWithQualityHeaderValue("application/json"));
+                                        railwayHttpClient.DefaultRequestHeaders.Add("User-Agent", "StrAppersBackend/1.0");
+                                        
+                                        await ConnectGitHubRepositoryToRailway(railwayHttpClient, railwayApiUrl, railwayApiToken, railwayServiceId, backendRepositoryUrl);
+                                        
+                                        // Set Railway build environment variables (for root-level files, no "cd backend &&" needed)
+                                        if (!string.IsNullOrEmpty(environmentId) && !string.IsNullOrEmpty(projectId) && !string.IsNullOrEmpty(programmingLanguage))
+                                        {
+                                            await SetRailwayBuildSettings(railwayHttpClient, railwayApiUrl, railwayApiToken, 
+                                                projectId, railwayServiceId, environmentId, programmingLanguage);
+                                        }
+                                        
+                                        // Create public domain for the service
+                                        string? domainUrl = null;
+                                        int targetPort = GetDefaultPortForLanguage(programmingLanguage);
+                                        _logger.LogInformation("🌐 [RAILWAY] Creating domain for language: {Language}, target port: {Port}", 
+                                            programmingLanguage ?? "unknown", targetPort);
+                                        
+                                        if (!string.IsNullOrEmpty(environmentId))
+                                        {
+                                            domainUrl = await CreateRailwayServiceDomain(
+                                                railwayHttpClient, railwayApiUrl, railwayApiToken, 
+                                                railwayServiceId, environmentId, targetPort: targetPort);
+                                            
+                                            if (!string.IsNullOrEmpty(domainUrl))
+                                            {
+                                                _logger.LogInformation("✅ [RAILWAY] Domain created successfully: {DomainUrl}", domainUrl);
+                                                // Update webApiUrl and swaggerUrl with the actual domain
+                                                webApiUrl = domainUrl;
+                                                swaggerUrl = $"{domainUrl}/swagger";
+                                                
+                                                // Update config.js in frontend repo with the service URL
+                                                if (!string.IsNullOrEmpty(frontendRepositoryUrl))
+                                                {
+                                                    _ = Task.Run(async () =>
+                                                    {
+                                                        try
+                                                        {
+                                                            await UpdateConfigJsWithServiceUrl(
+                                                                frontendRepositoryUrl, domainUrl, githubToken);
+                                                            _logger.LogInformation("✅ [FRONTEND] Updated config.js with service URL");
+                                                        }
+                                                        catch (Exception ex)
+                                                        {
+                                                            _logger.LogWarning(ex, "⚠️ [FRONTEND] Failed to update config.js with service URL");
+                                                        }
+                                                    });
+                                                }
+                                            }
+                                            else
+                                            {
+                                                _logger.LogWarning("⚠️ [RAILWAY] Domain creation may have failed - will poll for service URL");
+                                                // Start polling for service URL in background
+                                                if (!string.IsNullOrEmpty(railwayServiceId) && !string.IsNullOrEmpty(frontendRepositoryUrl))
+                                                {
+                                                    _ = Task.Run(async () =>
+                                                    {
+                                                        try
+                                                        {
+                                                            await PollAndUpdateServiceUrl(
+                                                                railwayHttpClient, railwayApiUrl, railwayApiToken,
+                                                                railwayServiceId, frontendRepositoryUrl, githubToken);
+                                                        }
+                                                        catch (Exception ex)
+                                                        {
+                                                            _logger.LogWarning(ex, "⚠️ [RAILWAY] Error polling for service URL");
+                                                        }
+                                                    });
+                                                }
+                                            }
+                                        }
+                                        
+                                        // Deploy backend using DeploymentController
+                                        try
+                                        {
+                                            var deploymentController = new DeploymentController(
+                                                _loggerFactory.CreateLogger<DeploymentController>(),
+                                                _gitHubService,
+                                                _httpClientFactory,
+                                                _configuration);
+                                            
+                                            var deployResponse = await deploymentController.DeployBackendRepositoryAsync(backendRepositoryUrl);
+                                            if (deployResponse.Success)
+                                            {
+                                                _logger.LogInformation("✅ [BACKEND] Deployment triggered successfully");
+                                                _logger.LogInformation("📊 [BACKEND] Workflow status: {Status}, Run ID: {RunId}", 
+                                                    deployResponse.Status, deployResponse.WorkflowRunId);
+                                                if (!string.IsNullOrEmpty(deployResponse.DeploymentUrl))
+                                                {
+                                                    _logger.LogInformation("🌐 [BACKEND] Deployment URL: {Url}", deployResponse.DeploymentUrl);
+                                                }
+                                            }
+                                            else
+                                            {
+                                                _logger.LogWarning("⚠️ [BACKEND] Deployment may not have triggered: {Message}", deployResponse.Message);
+                                            }
+                                        }
+                                        catch (Exception deployEx)
+                                        {
+                                            _logger.LogWarning(deployEx, "⚠️ [BACKEND] Error calling deployment controller");
+                                        }
+                                    }
+                                }
+                                catch (Exception railwayEx)
+                                {
+                                    _logger.LogWarning(railwayEx, "[GITHUB] ⚠️ Error setting up Railway integration, continuing anyway");
+                                }
+                            }
+                            else
+                            {
+                                _logger.LogWarning("⚠️ [BACKEND] Failed to create backend commit");
+                            }
+                        }
+                    }
+                    else
+                    {
+                        _logger.LogWarning("⚠️ [BACKEND] Failed to create backend repository: {Error}", backendResponse.ErrorMessage);
+                    }
+                    
+                    _logger.LogInformation("✅ [GITHUB] Added {AddedCount} collaborators total, {FailedCount} failed", 
+                        addedCollaborators.Count, failedCollaborators.Count);
                 }
+            }
             }
             else
             {
@@ -684,7 +1245,9 @@ public class BoardsController : ControllerBase
                 BoardUrl = trelloResponse.BoardUrl,
                 NextMeetingTime = nextMeetingTime,
                 NextMeetingUrl = meetingUrl, // Will be updated after Teams meeting is created
-                GithubUrl = repositoryUrl,
+                GithubBackendUrl = backendRepositoryUrl,
+                GithubFrontendUrl = frontendRepositoryUrl,
+                WebApiUrl = swaggerUrl ?? webApiUrl, // Swagger URL from Railway deployment (fallback to base URL if swagger URL not set)
                 PublishUrl = publishUrl,
                 CreatedAt = DateTime.UtcNow,
                 UpdatedAt = DateTime.UtcNow
@@ -817,8 +1380,8 @@ public class BoardsController : ControllerBase
 
             _logger.LogInformation("Successfully created board {BoardId} for project {ProjectId}", trelloBoardId, request.ProjectId);
 
-            var message = repositoryUrl != null 
-                ? "Board and repository created successfully!" 
+            var message = (backendRepositoryUrl != null || frontendRepositoryUrl != null)
+                ? "Board and repositories created successfully!" 
                 : "Board created successfully! (GitHub repository creation was skipped or failed)";
 
             return Ok(new CreateBoardResponse
@@ -827,7 +1390,9 @@ public class BoardsController : ControllerBase
                 Message = message,
                 BoardId = trelloBoardId,
                 BoardUrl = trelloResponse.BoardUrl,
-                RepositoryUrl = repositoryUrl,
+                RepositoryUrl = backendRepositoryUrl, // Deprecated - kept for backward compatibility
+                FrontendRepositoryUrl = frontendRepositoryUrl,
+                BackendRepositoryUrl = backendRepositoryUrl,
                 PublishUrl = publishUrl,
                 MeetingUrl = meetingUrl,
                 ProjectId = request.ProjectId,
@@ -1049,7 +1614,9 @@ public class BoardsController : ControllerBase
                 MovieUrl = board.MovieUrl,
                 NextMeetingTime = board.NextMeetingTime,
                 NextMeetingUrl = board.NextMeetingUrl,
-                GithubUrl = board.GithubUrl,
+                GithubBackendUrl = board.GithubBackendUrl,
+                GithubFrontendUrl = board.GithubFrontendUrl,
+                WebApiUrl = board.WebApiUrl,
                 SprintPlan = board.SprintPlan,
                 Observed = board.Observed,
                 CreatedAt = board.CreatedAt,
@@ -1105,6 +1672,9 @@ public class BoardsController : ControllerBase
                 ProjectName = projectBoard.Project.Title,
                 BoardUrl = projectBoard.BoardUrl,
                 Observed = projectBoard.Observed,
+                GithubBackendUrl = projectBoard.GithubBackendUrl,
+                GithubFrontendUrl = projectBoard.GithubFrontendUrl,
+                WebApiUrl = projectBoard.WebApiUrl,
                 Stats = stats
             });
         }
@@ -2063,101 +2633,129 @@ The actual prompt generation would require access to project details and student
                 _logger.LogWarning(ex, "Error adding meeting participation activities for student {StudentId}: {Message}", studentId, ex.Message);
             }
 
-            // Add GitHub commit activities
+            // Add GitHub commit activities - use role-based repository selection
             try
             {
-                if (!string.IsNullOrWhiteSpace(student.GithubUser) && !string.IsNullOrWhiteSpace(board.GithubUrl))
+                if (!string.IsNullOrWhiteSpace(student.GithubUser))
                 {
-                    var githubUrl = board.GithubUrl.Trim();
-                    if (githubUrl.StartsWith("https://github.com/", StringComparison.OrdinalIgnoreCase) ||
-                        githubUrl.StartsWith("http://github.com/", StringComparison.OrdinalIgnoreCase))
+                    var (frontendRepoUrl, backendRepoUrl, isFullstack) = GetRepositoryUrlsByRole(student);
+                    var reposToCheck = new List<(string Url, string Type)>();
+                    
+                    if (!string.IsNullOrEmpty(frontendRepoUrl))
                     {
-                        var path = githubUrl.Replace("https://github.com/", "", StringComparison.OrdinalIgnoreCase)
-                                           .Replace("http://github.com/", "", StringComparison.OrdinalIgnoreCase)
-                                           .TrimEnd('/');
+                        reposToCheck.Add((frontendRepoUrl, "frontend"));
+                    }
+                    if (!string.IsNullOrEmpty(backendRepoUrl))
+                    {
+                        reposToCheck.Add((backendRepoUrl, "backend"));
+                    }
+
+                    if (reposToCheck.Any())
+                    {
+                        using var httpClient = new HttpClient();
+                        httpClient.DefaultRequestHeaders.Add("User-Agent", "StrAppers-Backend");
                         
-                        if (path.EndsWith(".git", StringComparison.OrdinalIgnoreCase))
-                        {
-                            path = path.Substring(0, path.Length - 4);
-                        }
+                        var allCommits = new List<(DateTime Date, string Message, string RepoType)>();
                         
-                        var parts = path.Split('/');
-                        if (parts.Length >= 2)
+                        foreach (var (repoUrl, repoType) in reposToCheck)
                         {
-                            var owner = parts[0];
-                            var repo = parts[1];
-                            
-                            // Fetch recent commits (up to 10) for this user
-                            using var httpClient = new HttpClient();
-                            httpClient.DefaultRequestHeaders.Add("User-Agent", "StrAppers-Backend");
-                            
-                            var commitsUrl = $"https://api.github.com/repos/{owner}/{repo}/commits?author={student.GithubUser}&per_page=10";
-                            var commitsResponse = await httpClient.GetAsync(commitsUrl);
-                            
-                            if (commitsResponse.IsSuccessStatusCode)
+                            var githubUrl = repoUrl.Trim();
+                            if (githubUrl.StartsWith("https://github.com/", StringComparison.OrdinalIgnoreCase) ||
+                                githubUrl.StartsWith("http://github.com/", StringComparison.OrdinalIgnoreCase))
                             {
-                                var commitsContent = await commitsResponse.Content.ReadAsStringAsync();
-                                var commitsData = JsonSerializer.Deserialize<JsonElement[]>(commitsContent, new JsonSerializerOptions 
-                                { 
-                                    PropertyNameCaseInsensitive = true 
-                                });
+                                var path = githubUrl.Replace("https://github.com/", "", StringComparison.OrdinalIgnoreCase)
+                                                   .Replace("http://github.com/", "", StringComparison.OrdinalIgnoreCase)
+                                                   .TrimEnd('/');
                                 
-                                if (commitsData != null && commitsData.Length > 0)
+                                if (path.EndsWith(".git", StringComparison.OrdinalIgnoreCase))
                                 {
-                                    foreach (var commit in commitsData)
+                                    path = path.Substring(0, path.Length - 4);
+                                }
+                                
+                                var parts = path.Split('/');
+                                if (parts.Length >= 2)
+                                {
+                                    var owner = parts[0];
+                                    var repo = parts[1];
+                                    
+                                    var commitsUrl = $"https://api.github.com/repos/{owner}/{repo}/commits?author={student.GithubUser}&per_page=10";
+                                    var commitsResponse = await httpClient.GetAsync(commitsUrl);
+                                    
+                                    if (commitsResponse.IsSuccessStatusCode)
                                     {
-                                        if (commit.TryGetProperty("commit", out var commitProp))
+                                        var commitsContent = await commitsResponse.Content.ReadAsStringAsync();
+                                        var commitsData = JsonSerializer.Deserialize<JsonElement[]>(commitsContent, new JsonSerializerOptions 
+                                        { 
+                                            PropertyNameCaseInsensitive = true 
+                                        });
+                                        
+                                        if (commitsData != null && commitsData.Length > 0)
                                         {
-                                            DateTime? commitDate = null;
-                                            string commitMessage = string.Empty;
-                                            
-                                            if (commitProp.TryGetProperty("author", out var authorProp) && 
-                                                authorProp.TryGetProperty("date", out var dateProp))
+                                            foreach (var commit in commitsData)
                                             {
-                                                var commitDateStr = dateProp.GetString();
-                                                if (DateTime.TryParse(commitDateStr, out var parsedDate))
+                                                if (commit.TryGetProperty("commit", out var commitProp))
                                                 {
-                                                    commitDate = parsedDate;
-                                                }
-                                            }
-                                            
-                                            if (commitProp.TryGetProperty("message", out var messageProp))
-                                            {
-                                                commitMessage = messageProp.GetString() ?? string.Empty;
-                                                // Truncate long commit messages
-                                                if (commitMessage.Length > 100)
-                                                {
-                                                    commitMessage = commitMessage.Substring(0, 97) + "...";
-                                                }
-                                            }
-                                            
-                                            if (commitDate.HasValue)
-                                            {
-                                                recentActivities.Add(new
-                                                {
-                                                    Type = "githubCommit",
-                                                    Date = commitDate.Value.ToString("yyyy-MM-ddTHH:mm:ssZ"),
-                                                    Data = new
+                                                    DateTime? commitDate = null;
+                                                    string commitMessage = string.Empty;
+                                                    
+                                                    if (commitProp.TryGetProperty("author", out var authorProp) && 
+                                                        authorProp.TryGetProperty("date", out var dateProp))
                                                     {
-                                                        CommitMessage = commitMessage,
-                                                        CommitDate = commitDate.Value.ToString("yyyy-MM-ddTHH:mm:ssZ"),
-                                                        Description = $"Committed: {commitMessage}"
-                                                    },
-                                                    MemberCreator = (object?)null
-                                                });
+                                                        var commitDateStr = dateProp.GetString();
+                                                        if (DateTime.TryParse(commitDateStr, out var parsedDate))
+                                                        {
+                                                            commitDate = parsedDate;
+                                                        }
+                                                    }
+                                                    
+                                                    if (commitProp.TryGetProperty("message", out var messageProp))
+                                                    {
+                                                        commitMessage = messageProp.GetString() ?? string.Empty;
+                                                        if (commitMessage.Length > 100)
+                                                        {
+                                                            commitMessage = commitMessage.Substring(0, 97) + "...";
+                                                        }
+                                                    }
+                                                    
+                                                    if (commitDate.HasValue)
+                                                    {
+                                                        allCommits.Add((commitDate.Value, commitMessage, repoType));
+                                                    }
+                                                }
                                             }
                                         }
                                     }
-                                    
-                                    _logger.LogInformation("Added {CommitCount} GitHub commit activities for student {StudentId}", 
-                                        commitsData.Length, studentId);
                                 }
                             }
-                            else
+                        }
+                        
+                        // Sort all commits by date (most recent first) and limit to 10
+                        var sortedCommits = allCommits.OrderByDescending(c => c.Date).Take(10);
+                        
+                        foreach (var (date, message, repoType) in sortedCommits)
+                        {
+                            var description = isFullstack 
+                                ? $"[{repoType.ToUpper()}] Committed: {message}"
+                                : $"Committed: {message}";
+                            
+                            recentActivities.Add(new
                             {
-                                _logger.LogWarning("Failed to fetch GitHub commits for student {StudentId}: Status {StatusCode}", 
-                                    studentId, commitsResponse.StatusCode);
-                            }
+                                Type = "githubCommit",
+                                Date = date.ToString("yyyy-MM-ddTHH:mm:ssZ"),
+                                Data = new
+                                {
+                                    CommitMessage = message,
+                                    CommitDate = date.ToString("yyyy-MM-ddTHH:mm:ssZ"),
+                                    Description = description
+                                },
+                                MemberCreator = (object?)null
+                            });
+                        }
+                        
+                        if (allCommits.Any())
+                        {
+                            _logger.LogInformation("Added {CommitCount} GitHub commit activities for student {StudentId} from {RepoCount} repository(s)", 
+                                sortedCommits.Count(), studentId, reposToCheck.Count);
                         }
                     }
                 }
@@ -2190,64 +2788,62 @@ The actual prompt generation would require access to project details and student
             _logger.LogInformation("Combined and sorted activities for student {StudentId}: {TotalCount} activities (limited to 10 most recent)", 
                 studentId, recentActivities.Count);
 
-            // Get last GitHub commit info (date and message) for the student
+            // Get last GitHub commit info (date and message) for the student - use role-based repository selection
             Services.GitHubCommitInfo? lastCommitInfo = null;
             try
             {
-                if (!string.IsNullOrWhiteSpace(student.GithubUser) && !string.IsNullOrWhiteSpace(board.GithubUrl))
+                if (!string.IsNullOrWhiteSpace(student.GithubUser))
                 {
-                    // Parse GitHub URL to extract owner and repo
-                    // Format: https://github.com/owner/repo or https://github.com/owner/repo.git
-                    var githubUrl = board.GithubUrl.Trim();
-                    if (githubUrl.StartsWith("https://github.com/", StringComparison.OrdinalIgnoreCase) ||
-                        githubUrl.StartsWith("http://github.com/", StringComparison.OrdinalIgnoreCase))
+                    var (frontendRepoUrl, backendRepoUrl, isFullstack) = GetRepositoryUrlsByRole(student);
+                    
+                    // For fullstack, prioritize backend repo, but check both if needed
+                    // For others, use the relevant repo
+                    var repoToCheck = !string.IsNullOrEmpty(backendRepoUrl) ? backendRepoUrl : frontendRepoUrl;
+                    
+                    if (!string.IsNullOrEmpty(repoToCheck))
                     {
-                        var path = githubUrl.Replace("https://github.com/", "", StringComparison.OrdinalIgnoreCase)
-                                           .Replace("http://github.com/", "", StringComparison.OrdinalIgnoreCase)
-                                           .TrimEnd('/');
-                        
-                        // Remove .git suffix if present
-                        if (path.EndsWith(".git", StringComparison.OrdinalIgnoreCase))
+                        // Parse GitHub URL to extract owner and repo
+                        var githubUrl = repoToCheck.Trim();
+                        if (githubUrl.StartsWith("https://github.com/", StringComparison.OrdinalIgnoreCase) ||
+                            githubUrl.StartsWith("http://github.com/", StringComparison.OrdinalIgnoreCase))
                         {
-                            path = path.Substring(0, path.Length - 4);
-                        }
-                        
-                        var parts = path.Split('/');
-                        if (parts.Length >= 2)
-                        {
-                            var owner = parts[0];
-                            var repo = parts[1];
+                            var path = githubUrl.Replace("https://github.com/", "", StringComparison.OrdinalIgnoreCase)
+                                               .Replace("http://github.com/", "", StringComparison.OrdinalIgnoreCase)
+                                               .TrimEnd('/');
                             
-                            _logger.LogInformation("Fetching last GitHub commit for student {StudentId} (GitHubUser: {GithubUser}) in repo {Owner}/{Repo}", 
-                                studentId, student.GithubUser, owner, repo);
-                            
-                            lastCommitInfo = await _gitHubService.GetLastCommitInfoByUserAsync(owner, repo, student.GithubUser);
-                            
-                            if (lastCommitInfo != null)
+                            if (path.EndsWith(".git", StringComparison.OrdinalIgnoreCase))
                             {
-                                _logger.LogInformation("Found last commit for student {StudentId}: Date={CommitDate}, Message={CommitMessage}", 
-                                    studentId, lastCommitInfo.CommitDate, lastCommitInfo.CommitMessage);
+                                path = path.Substring(0, path.Length - 4);
                             }
-                            else
+                            
+                            var parts = path.Split('/');
+                            if (parts.Length >= 2)
                             {
-                                _logger.LogInformation("No commits found for student {StudentId} (GitHubUser: {GithubUser}) in repo {Owner}/{Repo}", 
+                                var owner = parts[0];
+                                var repo = parts[1];
+                                
+                                _logger.LogInformation("Fetching last GitHub commit for student {StudentId} (GitHubUser: {GithubUser}) in repo {Owner}/{Repo}", 
                                     studentId, student.GithubUser, owner, repo);
+                                
+                                lastCommitInfo = await _gitHubService.GetLastCommitInfoByUserAsync(owner, repo, student.GithubUser);
+                                
+                                if (lastCommitInfo != null)
+                                {
+                                    _logger.LogInformation("Found last commit for student {StudentId}: Date={CommitDate}, Message={CommitMessage}", 
+                                        studentId, lastCommitInfo.CommitDate, lastCommitInfo.CommitMessage);
+                                }
+                                else
+                                {
+                                    _logger.LogInformation("No commits found for student {StudentId} (GitHubUser: {GithubUser}) in repo {Owner}/{Repo}", 
+                                        studentId, student.GithubUser, owner, repo);
+                                }
                             }
-                        }
-                        else
-                        {
-                            _logger.LogWarning("Invalid GitHub URL format for board {BoardId}: {GithubUrl}", board.Id, board.GithubUrl);
                         }
                     }
                     else
                     {
-                        _logger.LogWarning("GitHub URL does not match expected format for board {BoardId}: {GithubUrl}", board.Id, board.GithubUrl);
+                        _logger.LogDebug("No repository URL found for student {StudentId} based on role", studentId);
                     }
-                }
-                else
-                {
-                    _logger.LogDebug("Skipping GitHub commit lookup for student {StudentId}: GithubUser={GithubUser}, GithubUrl={GithubUrl}", 
-                        studentId, student.GithubUser ?? "null", board.GithubUrl ?? "null");
                 }
             }
             catch (Exception ex)
@@ -2323,6 +2919,9 @@ The actual prompt generation would require access to project details and student
                     Time = board.NextMeetingTime,
                     Url = board.NextMeetingUrl
                 },
+                GithubBackendUrl = board.GithubBackendUrl,
+                GithubFrontendUrl = board.GithubFrontendUrl,
+                WebApiUrl = board.WebApiUrl,
                 RecentActivities = recentActivities,
                 Stats = studentStats,
                 GitHubCommit = lastCommitInfo != null ? new
@@ -2416,6 +3015,50 @@ The actual prompt generation would require access to project details and student
         }
     }
 
+    /// <summary>
+    /// Gets the appropriate GitHub repository URL(s) based on the student's role
+    /// Returns: Frontend URL for Frontend Developer, Backend URL for Backend Developer, or both for Fullstack Developer
+    /// </summary>
+    private (string? FrontendRepoUrl, string? BackendRepoUrl, bool IsFullstack) GetRepositoryUrlsByRole(Student student)
+    {
+        if (student?.ProjectBoard == null)
+        {
+            return (null, null, false);
+        }
+
+        var activeRole = student.StudentRoles?.FirstOrDefault(sr => sr.IsActive);
+        var roleName = activeRole?.Role?.Name ?? "";
+
+        if (string.IsNullOrEmpty(roleName))
+        {
+            // Default to backend if no role specified (backward compatibility)
+            return (null, student.ProjectBoard.GithubBackendUrl, false);
+        }
+
+        var roleNameLower = roleName.ToLowerInvariant();
+
+        // Check for Fullstack/Full Stack Developer
+        if (roleNameLower.Contains("full") && (roleNameLower.Contains("stack") || roleNameLower.Contains("stack")))
+        {
+            return (student.ProjectBoard.GithubFrontendUrl, student.ProjectBoard.GithubBackendUrl, true);
+        }
+
+        // Check for Frontend Developer
+        if (roleNameLower.Contains("frontend"))
+        {
+            return (student.ProjectBoard.GithubFrontendUrl, null, false);
+        }
+
+        // Check for Backend Developer
+        if (roleNameLower.Contains("backend"))
+        {
+            return (null, student.ProjectBoard.GithubBackendUrl, false);
+        }
+
+        // Default: use backend repo for backward compatibility
+        return (null, student.ProjectBoard.GithubBackendUrl, false);
+    }
+
     private SprintPlan CreateFallbackSprintPlan(Project project, List<Student> students, List<RoleInfo> teamRoles, int projectLengthWeeks, int sprintLengthWeeks)
     {
         var sprints = new List<Sprint>();
@@ -2479,6 +3122,1355 @@ The actual prompt generation would require access to project details and student
         if (cleaned.Length > maxLen) cleaned = cleaned.Substring(0, maxLen);
         return cleaned;
     }
+
+    /// <summary>
+    /// Creates an isolated database role for a specific database to prevent cross-database access
+    /// </summary>
+    private async Task<string?> CreateIsolatedDatabaseRole(string connectionString, string dbName)
+    {
+        try
+        {
+            _logger.LogInformation("🔐 [NEON] Starting database role isolation for database: {DbName}", dbName);
+            
+            // Generate a unique role name based on database name (sanitized - PostgreSQL role names are case-sensitive and must be valid identifiers)
+            var sanitizedDbName = dbName.ToLowerInvariant().Replace("-", "_").Replace(".", "_");
+            // Ensure role name is valid PostgreSQL identifier (max 63 chars, no special chars except underscore)
+            var roleName = $"db_{sanitizedDbName}_user".Substring(0, Math.Min(63, $"db_{sanitizedDbName}_user".Length));
+            _logger.LogInformation("🔐 [NEON] Generated role name: {RoleName}", roleName);
+            
+            // Generate a secure random password
+            var password = GenerateSecurePassword(32);
+            _logger.LogDebug("🔐 [NEON] Generated secure password for role {RoleName}", roleName);
+            
+            // Parse the connection string URI to extract components (avoiding unknown query parameters like channel_binding)
+            Uri uri;
+            string originalHost;
+            int originalPort;
+            string originalUser;
+            string originalPassword;
+            
+            try
+            {
+                // If it's a URI format, parse it directly
+                if (connectionString.StartsWith("postgresql://", StringComparison.OrdinalIgnoreCase) || 
+                    connectionString.StartsWith("postgres://", StringComparison.OrdinalIgnoreCase))
+                {
+                    // Remove query parameters before parsing (they may contain unsupported parameters)
+                    var uriString = connectionString.Split('?')[0];
+                    uri = new Uri(uriString);
+                    
+                    originalHost = uri.Host;
+                    originalPort = uri.Port > 0 ? uri.Port : 5432;
+                    
+                    // Extract user info (username:password)
+                    var userInfo = uri.UserInfo;
+                    if (string.IsNullOrEmpty(userInfo))
+                    {
+                        throw new ArgumentException("Connection string missing user credentials");
+                    }
+                    
+                    var userParts = userInfo.Split(':');
+                    originalUser = Uri.UnescapeDataString(userParts[0]);
+                    originalPassword = userParts.Length > 1 ? Uri.UnescapeDataString(userParts[1]) : "";
+                }
+                else
+                {
+                    // Try parsing as standard connection string
+                    var builder = new NpgsqlConnectionStringBuilder(connectionString);
+                    originalHost = builder.Host;
+                    originalPort = builder.Port > 0 ? builder.Port : 5432;
+                    originalUser = builder.Username ?? "";
+                    originalPassword = builder.Password ?? "";
+                }
+            }
+            catch (Exception parseEx)
+            {
+                _logger.LogError(parseEx, "❌ [NEON] Failed to parse connection string");
+                throw new ArgumentException($"Failed to parse connection string: {parseEx.Message}", parseEx);
+            }
+            
+            // Build connection string to postgres database (default) to create the role
+            var postgresBuilder = new NpgsqlConnectionStringBuilder
+            {
+                Host = originalHost,
+                Port = originalPort,
+                Database = "postgres",
+                Username = originalUser,
+                Password = originalPassword,
+                SslMode = SslMode.Require
+            };
+            var postgresConnString = postgresBuilder.ConnectionString;
+            
+            // Connect to postgres database to create the role
+            using var postgresConn = new NpgsqlConnection(postgresConnString);
+            await postgresConn.OpenAsync();
+            _logger.LogDebug("🔐 [NEON] Connected to postgres database using owner connection");
+            
+            // Create the role (escape single quotes in password)
+            var escapedPassword = password.Replace("'", "''");
+            using var createRoleCmd = new NpgsqlCommand($@"
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '{roleName}') THEN
+                        CREATE ROLE {roleName} LOGIN PASSWORD '{escapedPassword}';
+                        RAISE NOTICE 'Role {roleName} created';
+                    ELSE
+                        -- Role exists, update password
+                        ALTER ROLE {roleName} WITH PASSWORD '{escapedPassword}';
+                        RAISE NOTICE 'Role {roleName} password updated';
+                    END IF;
+                END
+                $$;", postgresConn);
+            
+            await createRoleCmd.ExecuteNonQueryAsync();
+            _logger.LogInformation("✅ [NEON] Created/updated role: {RoleName}", roleName);
+            
+            // Revoke CONNECT from PUBLIC on this database
+            using var revokePublicCmd = new NpgsqlCommand($@"REVOKE CONNECT ON DATABASE ""{dbName}"" FROM PUBLIC;", postgresConn);
+            await revokePublicCmd.ExecuteNonQueryAsync();
+            _logger.LogInformation("🔒 [NEON] Revoked CONNECT privilege from PUBLIC on database '{DbName}'", dbName);
+            
+            // Grant CONNECT to the new role
+            using var grantConnectCmd = new NpgsqlCommand($@"GRANT CONNECT ON DATABASE ""{dbName}"" TO {roleName};", postgresConn);
+            await grantConnectCmd.ExecuteNonQueryAsync();
+            _logger.LogInformation("✅ [NEON] Granted CONNECT privilege to role {RoleName} on database '{DbName}'", roleName, dbName);
+            
+            // Connect to the specific database to grant schema and table privileges
+            var dbSpecificBuilder = new NpgsqlConnectionStringBuilder
+            {
+                Host = originalHost,
+                Port = originalPort,
+                Database = dbName,
+                Username = originalUser,
+                Password = originalPassword,
+                SslMode = SslMode.Require
+            };
+            var dbSpecificConnString = dbSpecificBuilder.ConnectionString;
+            using var dbConn = new NpgsqlConnection(dbSpecificConnString);
+            await dbConn.OpenAsync();
+            _logger.LogDebug("🔐 [NEON] Connected to database '{DbName}' to grant privileges", dbName);
+            
+            // Grant USAGE and CREATE on schema (CREATE is needed to create tables)
+            using var grantSchemaUsageCmd = new NpgsqlCommand($"GRANT USAGE ON SCHEMA public TO {roleName};", dbConn);
+            await grantSchemaUsageCmd.ExecuteNonQueryAsync();
+            
+            using var grantSchemaCreateCmd = new NpgsqlCommand($"GRANT CREATE ON SCHEMA public TO {roleName};", dbConn);
+            await grantSchemaCreateCmd.ExecuteNonQueryAsync();
+            
+            // Grant privileges on all existing tables
+            using var grantTablesCmd = new NpgsqlCommand($"GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO {roleName};", dbConn);
+            await grantTablesCmd.ExecuteNonQueryAsync();
+            
+            // Grant privileges on all existing sequences
+            using var grantSequencesCmd = new NpgsqlCommand($"GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO {roleName};", dbConn);
+            await grantSequencesCmd.ExecuteNonQueryAsync();
+            
+            // Set default privileges for future tables and sequences
+            using var defaultTablesCmd = new NpgsqlCommand($"ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO {roleName};", dbConn);
+            await defaultTablesCmd.ExecuteNonQueryAsync();
+            
+            using var defaultSequencesCmd = new NpgsqlCommand($"ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT USAGE, SELECT ON SEQUENCES TO {roleName};", dbConn);
+            await defaultSequencesCmd.ExecuteNonQueryAsync();
+            
+            _logger.LogInformation("✅ [NEON] Granted all necessary privileges to role {RoleName} on database '{DbName}'", roleName, dbName);
+            
+            // Build new connection string with the isolated role (using URI format)
+            var isolatedConnectionString = $"postgresql://{roleName}:{Uri.EscapeDataString(password)}@{originalHost}:{originalPort}/{dbName}?sslmode=require";
+            
+            _logger.LogInformation("✅ [NEON] Successfully created isolated role and connection string for database '{DbName}'", dbName);
+            return isolatedConnectionString;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "❌ [NEON] Error creating isolated database role for database '{DbName}': {Message}", dbName, ex.Message);
+            return null;
+        }
+    }
+    
+    /// <summary>
+    /// Generates a secure random password
+    /// </summary>
+    private string GenerateSecurePassword(int length)
+    {
+        const string validChars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*";
+        using var rng = RandomNumberGenerator.Create();
+        var bytes = new byte[length];
+        rng.GetBytes(bytes);
+        return new string(bytes.Select(b => validChars[b % validChars.Length]).ToArray());
+    }
+    
+    /// <summary>
+    /// Executes the initial database schema script to create TestProjects table
+    /// </summary>
+    private async Task ExecuteInitialDatabaseSchema(string connectionString, string dbName)
+    {
+        try
+        {
+            _logger.LogInformation("📊 [NEON] Executing initial database schema for database '{DbName}'", dbName);
+            
+            // Parse connection string properly (handle URI format with query parameters)
+            NpgsqlConnectionStringBuilder builder;
+            try
+            {
+                // Try parsing as URI format first
+                if (connectionString.StartsWith("postgresql://", StringComparison.OrdinalIgnoreCase) || 
+                    connectionString.StartsWith("postgres://", StringComparison.OrdinalIgnoreCase))
+                {
+                    // Remove query parameters before parsing (they may contain unsupported parameters)
+                    var uriString = connectionString.Split('?')[0];
+                    var uri = new Uri(uriString);
+                    
+                    var host = uri.Host;
+                    var port = uri.Port > 0 ? uri.Port : 5432;
+                    var database = uri.AbsolutePath.TrimStart('/').Split('?')[0];
+                    
+                    // Extract user info (username:password)
+                    var userInfo = uri.UserInfo;
+                    if (string.IsNullOrEmpty(userInfo))
+                    {
+                        throw new ArgumentException("Connection string missing user credentials");
+                    }
+                    
+                    var userParts = userInfo.Split(':');
+                    var username = Uri.UnescapeDataString(userParts[0]);
+                    var password = userParts.Length > 1 ? Uri.UnescapeDataString(userParts[1]) : "";
+                    
+                    builder = new NpgsqlConnectionStringBuilder
+                    {
+                        Host = host,
+                        Port = port,
+                        Database = database,
+                        Username = username,
+                        Password = password,
+                        SslMode = SslMode.Require
+                    };
+                }
+                else
+                {
+                    // Try parsing as standard connection string
+                    builder = new NpgsqlConnectionStringBuilder(connectionString);
+                }
+            }
+            catch (Exception parseEx)
+            {
+                _logger.LogError(parseEx, "❌ [NEON] Failed to parse connection string for database '{DbName}'", dbName);
+                throw new ArgumentException($"Failed to parse connection string: {parseEx.Message}", parseEx);
+            }
+            
+            // SQL script to create TestProjects table with mock data
+            var sqlScript = @"
+-- TestProjects table for initial project setup
+-- This table is used for testing and learning database interactions
+
+CREATE TABLE IF NOT EXISTS ""TestProjects"" (
+    ""Id"" SERIAL PRIMARY KEY,
+    ""Name"" VARCHAR(255) NOT NULL
+);
+
+-- Insert mock data (only if table is empty)
+INSERT INTO ""TestProjects"" (""Name"") 
+SELECT * FROM (VALUES
+    ('Sample Project 1'),
+    ('Sample Project 2'),
+    ('Sample Project 3'),
+    ('Learning Project'),
+    ('Test Project')
+) AS v(""Name"")
+WHERE NOT EXISTS (SELECT 1 FROM ""TestProjects"");
+";
+            
+            using var conn = new NpgsqlConnection(builder.ConnectionString);
+            await conn.OpenAsync();
+            _logger.LogDebug("📊 [NEON] Connected to database '{DbName}' to execute schema script", dbName);
+            
+            using var cmd = new NpgsqlCommand(sqlScript, conn);
+            await cmd.ExecuteNonQueryAsync();
+            
+            _logger.LogInformation("✅ [NEON] Successfully executed initial database schema for database '{DbName}'. TestProjects table created with mock data.", dbName);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "❌ [NEON] Error executing initial database schema for database '{DbName}': {Message}", dbName, ex.Message);
+            // Don't throw - this is not critical for board creation
+        }
+    }
+    
+    /// <summary>
+    /// Verifies that a Railway environment variable was set correctly
+    /// </summary>
+    private async Task VerifyRailwayEnvironmentVariable(HttpClient httpClient, string railwayApiUrl, string serviceId, string apiToken)
+    {
+        try
+        {
+            _logger.LogInformation("🔍 [RAILWAY] Verifying DATABASE_URL environment variable on service {ServiceId}", serviceId);
+            
+            // Query Railway API to get service variables
+            var queryVariables = new
+            {
+                query = @"
+                    query GetServiceVariables($serviceId: String!) {
+                        service(id: $serviceId) {
+                            variables {
+                                name
+                            }
+                        }
+                    }",
+                variables = new
+                {
+                    serviceId = serviceId
+                }
+            };
+            
+            var queryBody = System.Text.Json.JsonSerializer.Serialize(queryVariables);
+            var queryContent = new StringContent(queryBody, System.Text.Encoding.UTF8, "application/json");
+            
+            var queryResponse = await httpClient.PostAsync(railwayApiUrl, queryContent);
+            var queryResponseContent = await queryResponse.Content.ReadAsStringAsync();
+            
+            if (queryResponse.IsSuccessStatusCode)
+            {
+                var queryDoc = System.Text.Json.JsonDocument.Parse(queryResponseContent);
+                if (queryDoc.RootElement.TryGetProperty("data", out var dataObj) &&
+                    dataObj.TryGetProperty("service", out var serviceObj) &&
+                    serviceObj.TryGetProperty("variables", out var variablesProp))
+                {
+                    var variables = variablesProp.EnumerateArray().Select(v => v.GetProperty("name").GetString()).ToList();
+                    
+                    if (variables.Contains("DATABASE_URL"))
+                    {
+                        _logger.LogInformation("✅ [RAILWAY] Verified: DATABASE_URL environment variable exists on service {ServiceId}", serviceId);
+                        _logger.LogInformation("📋 [RAILWAY] Service has {Count} environment variables: {Variables}", variables.Count, string.Join(", ", variables));
+                    }
+                    else
+                    {
+                        _logger.LogWarning("⚠️ [RAILWAY] DATABASE_URL environment variable NOT FOUND on service {ServiceId}. Available variables: {Variables}", 
+                            serviceId, string.Join(", ", variables));
+                    }
+                }
+                else
+                {
+                    _logger.LogWarning("⚠️ [RAILWAY] Unexpected response structure when querying service variables: {Response}", queryResponseContent);
+                }
+            }
+            else
+            {
+                _logger.LogWarning("⚠️ [RAILWAY] Failed to query service variables: {StatusCode} - {Error}", 
+                    queryResponse.StatusCode, queryResponseContent);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "⚠️ [RAILWAY] Error verifying Railway environment variable: {Message}", ex.Message);
+        }
+    }
+    
+    /// <summary>
+    /// Connects a GitHub repository to a Railway service
+    /// </summary>
+    private async Task ConnectGitHubRepositoryToRailway(HttpClient httpClient, string railwayApiUrl, string railwayApiToken, string serviceId, string repositoryUrl)
+    {
+        try
+        {
+            _logger.LogInformation("🔗 [RAILWAY] Connecting GitHub repository to Railway service {ServiceId}", serviceId);
+            _logger.LogDebug("🔗 [RAILWAY] Repository URL: {RepositoryUrl}", repositoryUrl);
+            
+            // Parse GitHub repository URL to extract owner and repo name
+            // Format: https://github.com/owner/repo-name
+            var uri = new Uri(repositoryUrl);
+            var pathParts = uri.AbsolutePath.TrimStart('/').Split('/');
+            
+            if (pathParts.Length < 2)
+            {
+                _logger.LogWarning("⚠️ [RAILWAY] Invalid GitHub repository URL format: {RepositoryUrl}", repositoryUrl);
+                return;
+            }
+            
+            var repoOwner = pathParts[0];
+            var repoName = pathParts[1].Replace(".git", ""); // Remove .git suffix if present
+            var repoFullName = $"{repoOwner}/{repoName}";
+            
+            _logger.LogInformation("🔗 [RAILWAY] Extracted repo info - Owner: {Owner}, Name: {Name}, Full: {FullName}", 
+                repoOwner, repoName, repoFullName);
+            
+            _logger.LogInformation("🚨 [RAILWAY] CRITICAL: Passing GitHub repo '{RepoFullName}' to Railway API", repoFullName);
+            _logger.LogInformation("📝 [RAILWAY] Repository structure: Backend files are at root, frontend is in frontend/ folder");
+            _logger.LogInformation("📝 [RAILWAY] Railway will build from root and detect backend application files automatically");
+            
+            // Railway GraphQL mutation to connect GitHub repository
+            var connectRepoMutation = new
+            {
+                query = @"
+                    mutation ConnectGithubRepo($id: String!, $repo: String!, $branch: String) {
+                        serviceConnect(
+                            id: $id
+                            input: {
+                                repo: $repo
+                                branch: $branch
+                            }
+                        ) {
+                            id
+                        }
+                    }",
+                variables = new
+                {
+                    id = serviceId,
+                    repo = repoFullName,
+                    branch = "main" // Default branch
+                }
+            };
+            
+            var mutationBody = System.Text.Json.JsonSerializer.Serialize(connectRepoMutation);
+            var mutationContent = new StringContent(mutationBody, System.Text.Encoding.UTF8, "application/json");
+            var response = await httpClient.PostAsync(railwayApiUrl, mutationContent);
+            var responseContent = await response.Content.ReadAsStringAsync();
+            
+            if (response.IsSuccessStatusCode)
+            {
+                _logger.LogInformation("[RAILWAY] Repository connected successfully");
+            }
+            else
+            {
+                _logger.LogError("[RAILWAY] Failed to connect repository: {StatusCode}", response.StatusCode);
+                
+                // Log GraphQL errors for debugging
+                try
+                {
+                    var errorDoc = System.Text.Json.JsonDocument.Parse(responseContent);
+                    if (errorDoc.RootElement.TryGetProperty("errors", out var errorsProp))
+                    {
+                        foreach (var error in errorsProp.EnumerateArray())
+                        {
+                            var errorMsg = error.TryGetProperty("message", out var msgProp) ? msgProp.GetString() : "Unknown error";
+                            _logger.LogError("[RAILWAY] GraphQL error: {ErrorMessage}", errorMsg);
+                        }
+                    }
+                }
+                catch (Exception parseEx)
+                {
+                    _logger.LogWarning(parseEx, "⚠️ [RAILWAY] Could not parse error response");
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "[RAILWAY] Error connecting repository: {Message}", ex.Message);
+        }
+    }
+    
+    /// <summary>
+    /// Creates a public domain for a Railway service
+    /// </summary>
+    private async Task<string?> CreateRailwayServiceDomain(HttpClient httpClient, string railwayApiUrl, string railwayApiToken, string serviceId, string environmentId, int targetPort = 8080)
+    {
+        try
+        {
+            _logger.LogInformation("[RAILWAY] Creating public domain for service on port {Port}", targetPort);
+            
+            // Railway GraphQL mutation to create a service domain
+            var createDomainMutation = new
+            {
+                query = @"
+                    mutation CreateServiceDomain($input: ServiceDomainCreateInput!) {
+                        serviceDomainCreate(input: $input) {
+                            id
+                            domain
+                            targetPort
+                        }
+                    }",
+                variables = new
+                {
+                    input = new
+                    {
+                        environmentId = environmentId,
+                        serviceId = serviceId,
+                        targetPort = targetPort
+                    }
+                }
+            };
+            
+            var mutationBody = System.Text.Json.JsonSerializer.Serialize(createDomainMutation);
+            var mutationContent = new StringContent(mutationBody, System.Text.Encoding.UTF8, "application/json");
+            var response = await httpClient.PostAsync(railwayApiUrl, mutationContent);
+            var responseContent = await response.Content.ReadAsStringAsync();
+            
+            if (response.IsSuccessStatusCode)
+            {
+                var responseDoc = System.Text.Json.JsonDocument.Parse(responseContent);
+                
+                // Check for GraphQL errors
+                if (responseDoc.RootElement.TryGetProperty("errors", out var errorsProp))
+                {
+                    foreach (var error in errorsProp.EnumerateArray())
+                    {
+                        var errorMsg = error.TryGetProperty("message", out var msgProp) ? msgProp.GetString() : "Unknown error";
+                        _logger.LogWarning("[RAILWAY] GraphQL error creating domain: {ErrorMessage}", errorMsg);
+                    }
+                    return null;
+                }
+                
+                if (responseDoc.RootElement.TryGetProperty("data", out var dataObj) &&
+                    dataObj.TryGetProperty("serviceDomainCreate", out var domainObj))
+                {
+                    if (domainObj.TryGetProperty("domain", out var domainProp))
+                    {
+                        var domain = domainProp.GetString();
+                        if (!string.IsNullOrEmpty(domain))
+                        {
+                            // Railway domains should always use HTTPS (required for Mixed Content security)
+                            // Remove any existing protocol and always use HTTPS
+                            var cleanDomain = domain.Replace("http://", "").Replace("https://", "").TrimEnd('/');
+                            var serviceUrl = $"https://{cleanDomain}";
+                            return serviceUrl;
+                        }
+                    }
+                }
+            }
+            else
+            {
+                _logger.LogWarning("[RAILWAY] Failed to create domain: {StatusCode}", response.StatusCode);
+                
+                // Try to parse and log GraphQL errors
+                try
+                {
+                    var errorDoc = System.Text.Json.JsonDocument.Parse(responseContent);
+                    if (errorDoc.RootElement.TryGetProperty("errors", out var errorsProp))
+                    {
+                        foreach (var error in errorsProp.EnumerateArray())
+                        {
+                            var errorMsg = error.TryGetProperty("message", out var msgProp) ? msgProp.GetString() : "Unknown error";
+                            _logger.LogError("[RAILWAY] GraphQL error: {ErrorMessage}", errorMsg);
+                        }
+                    }
+                }
+                catch (Exception parseEx)
+                {
+                    _logger.LogWarning(parseEx, "⚠️ [RAILWAY] Could not parse error response");
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "[RAILWAY] Error creating domain: {Message}", ex.Message);
+        }
+        
+        return null;
+    }
+    
+    /// <summary>
+    /// Gets the default port for a programming language
+    /// </summary>
+    private int GetDefaultPortForLanguage(string? programmingLanguage)
+    {
+        if (string.IsNullOrEmpty(programmingLanguage))
+            return 8080; // Default to 8080
+        
+        switch (programmingLanguage.ToLowerInvariant())
+        {
+            case "c#":
+            case "csharp":
+                return 8080; // .NET default
+            case "python":
+                return 8080; // Match PORT environment variable (8080)
+            case "nodejs":
+            case "node.js":
+            case "node":
+                return 8080; // Match PORT environment variable (8080)
+            case "java":
+                return 8080; // Spring Boot default
+            default:
+                return 8080; // Default fallback
+        }
+    }
+    
+    /// <summary>
+    /// Sets Railway build environment variables (files are at root level, not in backend/ subdirectory)
+    /// Build commands vary by programming language
+    /// Note: nixpacks.toml should handle most build configuration, but these variables provide additional control
+    /// </summary>
+    private async Task SetRailwayBuildSettings(HttpClient httpClient, string railwayApiUrl, string railwayApiToken, string projectId, string serviceId, string environmentId, string programmingLanguage)
+    {
+        try
+        {
+            _logger.LogInformation("[RAILWAY] Setting build environment variables (language: {Language})", programmingLanguage);
+            
+            // Build commands vary by programming language
+            // NOTE: Backend files are at root level (not in backend/ subdirectory)
+            var buildVariables = programmingLanguage?.ToLowerInvariant() switch
+            {
+                "c#" or "csharp" => new[]
+                {
+                    new { name = "RAILWAY_BUILD_COMMAND", value = "dotnet restore Backend.csproj && dotnet publish Backend.csproj -c Release -o /app/publish" },
+                    new { name = "RAILWAY_START_COMMAND", value = "dotnet /app/publish/Backend.dll" },
+                    new { name = "NIXPACKS_CSHARP_SDK_VERSION", value = "8.0" },
+                    new { name = "PORT", value = "8080" }
+                },
+                "python" => new[]
+                {
+                    new { name = "RAILWAY_BUILD_COMMAND", value = "pip install -r requirements.txt" },
+                    new { name = "RAILWAY_START_COMMAND", value = "uvicorn main:app --host 0.0.0.0 --port $PORT" },
+                    new { name = "NIXPACKS_PYTHON_VERSION", value = "3.11" },
+                    new { name = "PORT", value = "8080" }
+                },
+                "nodejs" or "node.js" or "node" => new[]
+                {
+                    new { name = "RAILWAY_BUILD_COMMAND", value = "npm install" },
+                    new { name = "RAILWAY_START_COMMAND", value = "node app.js" },
+                    new { name = "NIXPACKS_NODE_VERSION", value = "18" },
+                    new { name = "PORT", value = "8080" }
+                },
+                "java" => new[]
+                {
+                    new { name = "RAILWAY_BUILD_COMMAND", value = "mvn clean package || gradle build || echo 'Build system not detected'" },
+                    new { name = "RAILWAY_START_COMMAND", value = "java -jar target/*.jar || echo 'JAR not found'" },
+                    new { name = "NIXPACKS_JDK_VERSION", value = "17" },
+                    new { name = "PORT", value = "8080" }
+                },
+                _ => new[] // Default to .NET
+                {
+                    new { name = "RAILWAY_BUILD_COMMAND", value = "dotnet restore Backend.csproj && dotnet publish Backend.csproj -c Release -o /app/publish" },
+                    new { name = "RAILWAY_START_COMMAND", value = "dotnet /app/publish/Backend.dll" },
+                    new { name = "NIXPACKS_CSHARP_SDK_VERSION", value = "8.0" },
+                    new { name = "PORT", value = "8080" }
+                }
+            };
+            
+            // Set each environment variable
+            foreach (var variable in buildVariables)
+            {
+                try
+                {
+                    var setVarMutation = new
+                    {
+                        query = @"
+                            mutation SetVariable($projectId: String!, $environmentId: String!, $serviceId: String!, $name: String!, $value: String!) {
+                                variableUpsert(input: { 
+                                    projectId: $projectId
+                                    environmentId: $environmentId
+                                    serviceId: $serviceId
+                                    name: $name
+                                    value: $value
+                                })
+                            }",
+                        variables = new
+                        {
+                            projectId = projectId,
+                            environmentId = environmentId,
+                            serviceId = serviceId,
+                            name = variable.name,
+                            value = variable.value
+                        }
+                    };
+                    
+                    var mutationBody = System.Text.Json.JsonSerializer.Serialize(setVarMutation);
+                    var mutationContent = new StringContent(mutationBody, System.Text.Encoding.UTF8, "application/json");
+                    var response = await httpClient.PostAsync(railwayApiUrl, mutationContent);
+                    var responseContent = await response.Content.ReadAsStringAsync();
+                    
+                    if (response.IsSuccessStatusCode)
+                    {
+                        _logger.LogInformation("[RAILWAY] Set build variable {Name}", variable.name);
+                    }
+                    else
+                    {
+                        _logger.LogWarning("[RAILWAY] Failed to set build variable {Name}: {StatusCode}", variable.name, response.StatusCode);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "⚠️ [RAILWAY] Error setting build variable {Name}: {Message}", variable.name, ex.Message);
+                }
+            }
+            
+            _logger.LogInformation("[RAILWAY] Finished setting build environment variables");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "❌ [RAILWAY] Error setting Railway build settings: {Message}", ex.Message);
+        }
+    }
+    
+    /// <summary>
+    /// Sets the Railway service root directory to prevent static site detection
+    /// This is CRITICAL - tells Railway where to look for the application code
+    /// </summary>
+    private async Task SetRailwayServiceRootDirectory(HttpClient httpClient, string railwayApiUrl, string railwayApiToken, string serviceId, string rootDir)
+    {
+        try
+        {
+            _logger.LogInformation("📁 [RAILWAY] Setting service {ServiceId} root directory to '{RootDir}'", serviceId, rootDir);
+            _logger.LogInformation("🚨 [RAILWAY] LANDING PAGE FIX: This prevents Railway from detecting index.html at repo root as static site");
+            
+            // Try serviceUpdate mutation to set root directory
+            // Railway API may use different field names: rootDir, sourceRoot, source.rootDir, etc.
+            // Try multiple variations to find what Railway API accepts
+            bool success = false;
+            string[] fieldNames = { "rootDir", "sourceRoot", "source.rootDir" };
+            string mutationQuery = @"
+                mutation UpdateService($id: String!, $input: ServiceUpdateInput!) {
+                    serviceUpdate(id: $id, input: $input) {
+                        id
+                        name
+                    }
+                }";
+            
+            // Try 1: rootDir
+            _logger.LogInformation("🔍 [RAILWAY] Attempt 1/3: Trying to set rootDir via serviceUpdate with field 'rootDir'");
+            var mutation1 = new
+            {
+                query = mutationQuery,
+                variables = new
+                {
+                    id = serviceId,
+                    input = new
+                    {
+                        rootDir = rootDir
+                    }
+                }
+            };
+            var mutationBody1 = System.Text.Json.JsonSerializer.Serialize(mutation1);
+            var inputJson1 = System.Text.Json.JsonSerializer.Serialize(mutation1.variables.input);
+            _logger.LogInformation("🔍 [RAILWAY] Input structure: {Input}", inputJson1);
+            _logger.LogDebug("📁 [RAILWAY] Update service mutation: {Mutation}", mutationBody1);
+            
+            var mutationContent1 = new StringContent(mutationBody1, System.Text.Encoding.UTF8, "application/json");
+            var response1 = await httpClient.PostAsync(railwayApiUrl, mutationContent1);
+            var responseContent1 = await response1.Content.ReadAsStringAsync();
+            
+            if (response1.IsSuccessStatusCode)
+            {
+                _logger.LogInformation("✅ [RAILWAY] Successfully set root directory to '{RootDir}' for service {ServiceId} using field 'rootDir'", 
+                    rootDir, serviceId);
+                _logger.LogInformation("🚨 [RAILWAY] LANDING PAGE FIX APPLIED: Railway should now build from {RootDir}/ instead of repo root", rootDir);
+                success = true;
+            }
+            else
+            {
+                _logger.LogWarning("⚠️ [RAILWAY] Attempt 1 failed with field 'rootDir': {StatusCode}", response1.StatusCode);
+                
+                // Try 2: sourceRoot
+                _logger.LogInformation("🔍 [RAILWAY] Attempt 2/3: Trying to set rootDir via serviceUpdate with field 'sourceRoot'");
+                var mutation2 = new
+                {
+                    query = mutationQuery,
+                    variables = new
+                    {
+                        id = serviceId,
+                        input = new
+                        {
+                            sourceRoot = rootDir
+                        }
+                    }
+                };
+                var mutationBody2 = System.Text.Json.JsonSerializer.Serialize(mutation2);
+                var inputJson2 = System.Text.Json.JsonSerializer.Serialize(mutation2.variables.input);
+                _logger.LogInformation("🔍 [RAILWAY] Input structure: {Input}", inputJson2);
+                
+                var mutationContent2 = new StringContent(mutationBody2, System.Text.Encoding.UTF8, "application/json");
+                var response2 = await httpClient.PostAsync(railwayApiUrl, mutationContent2);
+                var responseContent2 = await response2.Content.ReadAsStringAsync();
+                
+                if (response2.IsSuccessStatusCode)
+                {
+                    _logger.LogInformation("✅ [RAILWAY] Successfully set root directory to '{RootDir}' for service {ServiceId} using field 'sourceRoot'", 
+                        rootDir, serviceId);
+                    _logger.LogInformation("🚨 [RAILWAY] LANDING PAGE FIX APPLIED: Railway should now build from {RootDir}/ instead of repo root", rootDir);
+                    success = true;
+                }
+                else
+                {
+                    _logger.LogWarning("⚠️ [RAILWAY] Attempt 2 failed with field 'sourceRoot': {StatusCode}", response2.StatusCode);
+                    
+                    // Try 3: source { rootDir }
+                    _logger.LogInformation("🔍 [RAILWAY] Attempt 3/3: Trying to set rootDir via serviceUpdate with field 'source.rootDir'");
+                    var mutation3 = new
+                    {
+                        query = mutationQuery,
+                        variables = new
+                        {
+                            id = serviceId,
+                            input = new
+                            {
+                                source = new
+                                {
+                                    rootDir = rootDir
+                                }
+                            }
+                        }
+                    };
+                    var mutationBody3 = System.Text.Json.JsonSerializer.Serialize(mutation3);
+                    var inputJson3 = System.Text.Json.JsonSerializer.Serialize(mutation3.variables.input);
+                    _logger.LogInformation("🔍 [RAILWAY] Input structure: {Input}", inputJson3);
+                    
+                    var mutationContent3 = new StringContent(mutationBody3, System.Text.Encoding.UTF8, "application/json");
+                    var response3 = await httpClient.PostAsync(railwayApiUrl, mutationContent3);
+                    var responseContent3 = await response3.Content.ReadAsStringAsync();
+                    
+                    if (response3.IsSuccessStatusCode)
+                    {
+                        _logger.LogInformation("✅ [RAILWAY] Successfully set root directory to '{RootDir}' for service {ServiceId} using field 'source.rootDir'", 
+                            rootDir, serviceId);
+                        _logger.LogInformation("🚨 [RAILWAY] LANDING PAGE FIX APPLIED: Railway should now build from {RootDir}/ instead of repo root", rootDir);
+                        success = true;
+                    }
+                    else
+                    {
+                        _logger.LogWarning("⚠️ [RAILWAY] Attempt 3 failed with field 'source.rootDir': {StatusCode}", response3.StatusCode);
+                    }
+                }
+            }
+            
+            if (!success)
+            {
+                _logger.LogError("❌ [RAILWAY] ALL attempts to set rootDir via serviceUpdate FAILED");
+                _logger.LogWarning("⚠️ [RAILWAY] Railway will rely on .railway/source.json file in repo (may take time to read)");
+                _logger.LogWarning("🚨 [RAILWAY] LANDING PAGE ISSUE: If Railway doesn't read .railway/source.json, it will detect static site");
+                _logger.LogWarning("🚨 [RAILWAY] Railway API does NOT support setting rootDir via serviceUpdate - must use .railway/source.json file");
+                _logger.LogInformation("🔍 [RAILWAY] Check Railway dashboard manually: Service → Settings → Root Directory should be 'backend'");
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "❌ [RAILWAY] Error setting Railway service root directory: {Message}", ex.Message);
+            _logger.LogWarning("⚠️ [RAILWAY] Railway will rely on .railway/source.json file in repo");
+            _logger.LogWarning("🚨 [RAILWAY] LANDING PAGE RISK: Railway may not read .railway/source.json and will detect static site");
+        }
+    }
+    
+    /// <summary>
+    /// OBSOLETE: Railway auto-deploys when connecting a GitHub repo, so manual trigger is not needed
+    /// This method is kept for reference but should not be called
+    /// </summary>
+    [Obsolete("Railway auto-deploys when connecting GitHub repo - manual trigger not needed")]
+    private async Task TriggerRailwayDeployment(HttpClient httpClient, string railwayApiUrl, string railwayApiToken, string serviceId, string environmentId)
+    {
+        try
+        {
+            _logger.LogInformation("🚀 [RAILWAY] Triggering Railway deployment for service {ServiceId} in environment {EnvironmentId}", serviceId, environmentId);
+            
+            // Railway GraphQL mutation to trigger deployment
+            // Note: Railway may auto-deploy when connecting repo, but we'll try to trigger manually as well
+            // Using deploymentCreate as per Railway API documentation
+            var triggerDeploymentMutation = new
+            {
+                query = @"
+                    mutation TriggerDeployment($input: DeploymentCreateInput!) {
+                        deploymentCreate(input: $input) {
+                            id
+                            status
+                            createdAt
+                        }
+                    }",
+                variables = new
+                {
+                    input = new
+                    {
+                        serviceId = serviceId,
+                        environmentId = environmentId
+                    }
+                }
+            };
+            
+            var mutationBody = System.Text.Json.JsonSerializer.Serialize(triggerDeploymentMutation);
+            _logger.LogDebug("🚀 [RAILWAY] Deployment trigger mutation: {Mutation}", mutationBody);
+            
+            var mutationContent = new StringContent(mutationBody, System.Text.Encoding.UTF8, "application/json");
+            var response = await httpClient.PostAsync(railwayApiUrl, mutationContent);
+            var responseContent = await response.Content.ReadAsStringAsync();
+            
+            if (response.IsSuccessStatusCode)
+            {
+                _logger.LogInformation("✅ [RAILWAY] Successfully triggered deployment for service {ServiceId}", serviceId);
+                
+                // Parse response to get deployment ID and status
+                try
+                {
+                    var responseDoc = System.Text.Json.JsonDocument.Parse(responseContent);
+                    if (responseDoc.RootElement.TryGetProperty("data", out var dataObj) &&
+                        dataObj.TryGetProperty("deploymentCreate", out var triggerObj))
+                    {
+                        if (triggerObj.TryGetProperty("id", out var idProp))
+                        {
+                            var deploymentId = idProp.GetString();
+                            _logger.LogInformation("📦 [RAILWAY] Deployment triggered with ID: {DeploymentId}", deploymentId);
+                        }
+                        if (triggerObj.TryGetProperty("status", out var statusProp))
+                        {
+                            var status = statusProp.GetString();
+                            _logger.LogInformation("📊 [RAILWAY] Deployment status: {Status}", status);
+                        }
+                    }
+                }
+                catch (Exception parseEx)
+                {
+                    _logger.LogDebug(parseEx, "✅ [RAILWAY] Deployment triggered (parse warning only, not critical)");
+                }
+            }
+            else
+            {
+                _logger.LogWarning("⚠️ [RAILWAY] Failed to trigger deployment: {StatusCode} - {Error}", 
+                    response.StatusCode, responseContent);
+                
+                // Check for errors in GraphQL response
+                try
+                {
+                    var errorDoc = System.Text.Json.JsonDocument.Parse(responseContent);
+                    if (errorDoc.RootElement.TryGetProperty("errors", out var errorsProp))
+                    {
+                        foreach (var error in errorsProp.EnumerateArray())
+                        {
+                            var errorMsg = error.TryGetProperty("message", out var msgProp) ? msgProp.GetString() : "Unknown error";
+                            _logger.LogError("❌ [RAILWAY] GraphQL error triggering deployment: {ErrorMessage}", errorMsg);
+                        }
+                    }
+                }
+                catch (Exception parseEx)
+                {
+                    _logger.LogWarning(parseEx, "⚠️ [RAILWAY] Could not parse error response");
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "❌ [RAILWAY] Error triggering Railway deployment: {Message}", ex.Message);
+        }
+    }
+    
+    /// <summary>
+    /// Queries Railway for service domains separately (since domains field not available on Service type)
+    /// </summary>
+    private async Task<string?> QueryServiceDomains(HttpClient httpClient, string railwayApiUrl, string serviceId)
+    {
+        try
+        {
+            // Try querying domains through various possible GraphQL structures
+            var queries = new[]
+            {
+                // Try 1: Query domains by serviceId
+                new
+                {
+                    query = @"
+                        query GetServiceDomains($serviceId: String!) {
+                            domains(serviceId: $serviceId) {
+                                id
+                                name
+                            }
+                        }",
+                    variables = new { serviceId = serviceId }
+                },
+                // Try 2: Query service with domains connection pattern
+                new
+                {
+                    query = @"
+                        query GetServiceWithDomains($serviceId: String!) {
+                            service(id: $serviceId) {
+                                id
+                                domains {
+                                    edges {
+                                        node {
+                                            id
+                                            name
+                                        }
+                                    }
+                                }
+                            }
+                        }",
+                    variables = new { serviceId = serviceId }
+                }
+            };
+
+            foreach (var domainQuery in queries)
+            {
+                try
+                {
+                    var queryBody = System.Text.Json.JsonSerializer.Serialize(domainQuery);
+                    var queryContent = new StringContent(queryBody, System.Text.Encoding.UTF8, "application/json");
+                    var queryResponse = await httpClient.PostAsync(railwayApiUrl, queryContent);
+                    var queryResponseContent = await queryResponse.Content.ReadAsStringAsync();
+
+                    if (queryResponse.IsSuccessStatusCode)
+                    {
+                        var queryDoc = System.Text.Json.JsonDocument.Parse(queryResponseContent);
+                        
+                        // Check for errors first
+                        if (queryDoc.RootElement.TryGetProperty("errors", out var errorsProp))
+                        {
+                            _logger.LogDebug("🔍 [RAILWAY] Domains query returned errors (expected if query structure is wrong): {Errors}", 
+                                errorsProp.ToString());
+                            continue; // Try next query structure
+                        }
+                        
+                        // Try to extract domain from response
+                        if (queryDoc.RootElement.TryGetProperty("data", out var dataObj))
+                        {
+                            // Pattern 1: domains array at root
+                            if (dataObj.TryGetProperty("domains", out var domainsArray) && 
+                                domainsArray.ValueKind == System.Text.Json.JsonValueKind.Array)
+                            {
+                                foreach (var domain in domainsArray.EnumerateArray())
+                                {
+                                    if (domain.TryGetProperty("name", out var nameProp))
+                                    {
+                                        var domainName = nameProp.GetString();
+                                        if (!string.IsNullOrEmpty(domainName))
+                                        {
+                                            return domainName.StartsWith("http") ? domainName : $"https://{domainName}";
+                                        }
+                                    }
+                                }
+                            }
+                            
+                            // Pattern 2: service.domains.edges
+                            if (dataObj.TryGetProperty("service", out var serviceObj) &&
+                                serviceObj.TryGetProperty("domains", out var serviceDomains))
+                            {
+                                // Try edges pattern
+                                if (serviceDomains.TryGetProperty("edges", out var edgesProp) &&
+                                    edgesProp.ValueKind == System.Text.Json.JsonValueKind.Array)
+                                {
+                                    foreach (var edge in edgesProp.EnumerateArray())
+                                    {
+                                        if (edge.TryGetProperty("node", out var nodeProp) &&
+                                            nodeProp.TryGetProperty("name", out var nameProp))
+                                        {
+                                            var domainName = nameProp.GetString();
+                                            if (!string.IsNullOrEmpty(domainName))
+                                            {
+                                                return domainName.StartsWith("http") ? domainName : $"https://{domainName}";
+                                            }
+                                        }
+                                    }
+                                }
+                                // Try direct array
+                                else if (serviceDomains.ValueKind == System.Text.Json.JsonValueKind.Array)
+                                {
+                                    foreach (var domain in serviceDomains.EnumerateArray())
+                                    {
+                                        if (domain.TryGetProperty("name", out var nameProp))
+                                        {
+                                            var domainName = nameProp.GetString();
+                                            if (!string.IsNullOrEmpty(domainName))
+                                            {
+                                                return domainName.StartsWith("http") ? domainName : $"https://{domainName}";
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogDebug(ex, "🔍 [RAILWAY] Error trying domains query pattern (this is expected if query structure is wrong)");
+                    continue; // Try next query structure
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "🔍 [RAILWAY] Error querying service domains separately");
+        }
+        
+        return null;
+    }
+    
+    /// <summary>
+    /// Queries Railway for the service deployment URL
+    /// </summary>
+    private async Task<string?> GetRailwayServiceUrl(HttpClient httpClient, string railwayApiUrl, string serviceId)
+    {
+        try
+        {
+            _logger.LogInformation("🔍 [RAILWAY] Querying service {ServiceId} for deployment URL", serviceId);
+            _logger.LogDebug("🔍 [RAILWAY] Checking deployment status - looking for successful deployments with URLs");
+            
+            // Query Railway API for service info including deployments
+            // Note: domains field is not available on Service type, will query separately if needed
+            var queryDeployments = new
+            {
+                query = @"
+                    query GetServiceDeployments($serviceId: String!) {
+                        service(id: $serviceId) {
+                            id
+                            name
+                            deployments(first: 5) {
+                                edges {
+                                    node {
+                                        id
+                                        status
+                                        url
+                                        createdAt
+                                    }
+                                }
+                            }
+                        }
+                    }",
+                variables = new
+                {
+                    serviceId = serviceId
+                }
+            };
+            
+            var queryBody = System.Text.Json.JsonSerializer.Serialize(queryDeployments);
+            _logger.LogDebug("🔍 [RAILWAY] Query deployments: {Query}", queryBody);
+            
+            var queryContent = new StringContent(queryBody, System.Text.Encoding.UTF8, "application/json");
+            var queryResponse = await httpClient.PostAsync(railwayApiUrl, queryContent);
+            var queryResponseContent = await queryResponse.Content.ReadAsStringAsync();
+            
+            if (queryResponse.IsSuccessStatusCode)
+            {
+                var queryDoc = System.Text.Json.JsonDocument.Parse(queryResponseContent);
+                if (queryDoc.RootElement.TryGetProperty("data", out var dataObj) &&
+                    dataObj.TryGetProperty("service", out var serviceObj))
+                {
+                    // Log service info and get service name
+                    // Get service name and construct URL
+                    string? serviceName = null;
+                    string? constructedUrl = null;
+                    if (serviceObj.TryGetProperty("name", out var serviceNameProp))
+                    {
+                        serviceName = serviceNameProp.GetString();
+                        _logger.LogInformation("🔍 [RAILWAY] Service name: {Name}", serviceName);
+                        
+                        // Construct potential URL from service name pattern
+                        // Railway typically uses: {service-name}.up.railway.app
+                        if (!string.IsNullOrEmpty(serviceName))
+                        {
+                            // Sanitize service name for URL (lowercase, replace spaces/special chars with hyphens)
+                            var sanitizedName = System.Text.RegularExpressions.Regex.Replace(
+                                serviceName.ToLowerInvariant(), 
+                                @"[^a-z0-9]+", "-").Trim('-');
+                            constructedUrl = $"https://{sanitizedName}.up.railway.app";
+                        }
+                    }
+                    
+                    // Try querying domains separately (domains field not available on Service type)
+                    var domainsUrl = await QueryServiceDomains(httpClient, railwayApiUrl, serviceId);
+                    if (!string.IsNullOrEmpty(domainsUrl))
+                    {
+                        _logger.LogInformation("✅ [RAILWAY] Found service URL from separate domains query: {ServiceUrl}", domainsUrl);
+                        return domainsUrl;
+                    }
+                    
+                    // Legacy check for domains field (in case API changes)
+                    if (serviceObj.TryGetProperty("domains", out var domainsProp) && domainsProp.ValueKind != System.Text.Json.JsonValueKind.Null)
+                    {
+                        
+                        // Try domains as an array
+                        if (domainsProp.ValueKind == System.Text.Json.JsonValueKind.Array)
+                        {
+                            foreach (var domain in domainsProp.EnumerateArray())
+                            {
+                                if (domain.TryGetProperty("name", out var domainNameProp))
+                                {
+                                    var domainName = domainNameProp.GetString();
+                                    if (!string.IsNullOrEmpty(domainName))
+                                    {
+                                        // Railway domains might already include protocol, or might just be the domain
+                                        var serviceUrl = domainName.StartsWith("http") ? domainName : $"https://{domainName}";
+                                        _logger.LogInformation("✅ [RAILWAY] Found service URL from domain: {ServiceUrl}", serviceUrl);
+                                        return serviceUrl;
+                                    }
+                                }
+                            }
+                        }
+                        // Try domains as an object with a name field
+                        else if (domainsProp.ValueKind == System.Text.Json.JsonValueKind.Object)
+                        {
+                            if (domainsProp.TryGetProperty("name", out var domainNameProp))
+                            {
+                                var domainName = domainNameProp.GetString();
+                                if (!string.IsNullOrEmpty(domainName))
+                                {
+                                    var serviceUrl = domainName.StartsWith("http") ? domainName : $"https://{domainName}";
+                                    _logger.LogInformation("✅ [RAILWAY] Found service URL from domain object: {ServiceUrl}", serviceUrl);
+                                    return serviceUrl;
+                                }
+                            }
+                        }
+                        
+                        _logger.LogDebug("🔍 [RAILWAY] Domains field exists but no valid domain name found");
+                    }
+                    else
+                    {
+                        _logger.LogDebug("🔍 [RAILWAY] Service domains not available or null");
+                    }
+                    
+                    // Check deployments
+                    bool hasSuccessfulDeployment = false;
+                    if (serviceObj.TryGetProperty("deployments", out var deploymentsProp) &&
+                        deploymentsProp.TryGetProperty("edges", out var edgesProp))
+                    {
+                        var edges = edgesProp.EnumerateArray().ToList();
+                        _logger.LogInformation("📊 [RAILWAY] Found {Count} deployment(s) for service", edges.Count);
+                        
+                        if (edges.Count > 0)
+                        {
+                            // Try all deployments (not just first) to find one with a valid URL
+                            foreach (var edge in edges)
+                            {
+                                if (edge.TryGetProperty("node", out var nodeProp))
+                                {
+                                    var deploymentStatus = nodeProp.TryGetProperty("status", out var statusProp) 
+                                        ? statusProp.GetString() : "unknown";
+                                    var deploymentId = nodeProp.TryGetProperty("id", out var idProp) 
+                                        ? idProp.GetString() : "unknown";
+                                    var createdAt = nodeProp.TryGetProperty("createdAt", out var createdAtProp) 
+                                        ? createdAtProp.GetString() : "unknown";
+                                    
+                                    _logger.LogInformation("📦 [RAILWAY] Deployment: ID={Id}, Status={Status}, Created={Created}", 
+                                        deploymentId, deploymentStatus, createdAt);
+                                    
+                                    // Check if deployment is successful
+                                    if (deploymentStatus?.Equals("SUCCESS", StringComparison.OrdinalIgnoreCase) == true)
+                                    {
+                                        hasSuccessfulDeployment = true;
+                                    }
+                                    
+                                    // Get URL from deployment
+                                    if (nodeProp.TryGetProperty("url", out var urlProp))
+                                    {
+                                        var deploymentUrl = urlProp.GetString();
+                                        if (!string.IsNullOrEmpty(deploymentUrl) && !deploymentUrl.Contains("railway.app/project/"))
+                                        {
+                                            _logger.LogInformation("✅ [RAILWAY] Found service URL from deployment: {ServiceUrl}", deploymentUrl);
+                                            return deploymentUrl;
+                                        }
+                                        else if (!string.IsNullOrEmpty(deploymentUrl))
+                                        {
+                                            _logger.LogDebug("🔍 [RAILWAY] Deployment URL is project URL (not service URL): {Url}", deploymentUrl);
+                                        }
+                                    }
+                                    else
+                                    {
+                                        _logger.LogDebug("🔍 [RAILWAY] Deployment {Id} has no URL field (status: {Status})", deploymentId, deploymentStatus);
+                                    }
+                                }
+                            }
+                            
+                            // If we have a successful deployment but no URL from deployments, use constructed URL
+                            if (hasSuccessfulDeployment && !string.IsNullOrEmpty(constructedUrl))
+                            {
+                                _logger.LogInformation("✅ [RAILWAY] Deployment successful, using constructed service URL: {ServiceUrl}", constructedUrl);
+                                return constructedUrl;
+                            }
+                        }
+                        else
+                        {
+                            _logger.LogInformation("ℹ️ [RAILWAY] No deployments found for service {ServiceId} yet. Railway may not have triggered deployment automatically.", serviceId);
+                        }
+                    }
+                    else
+                    {
+                        _logger.LogWarning("⚠️ [RAILWAY] Could not access deployments in response");
+                    }
+                }
+                else
+                {
+                    _logger.LogWarning("⚠️ [RAILWAY] Unexpected response structure when querying service: {Response}", 
+                        queryResponseContent.Length > 500 ? queryResponseContent.Substring(0, 500) + "..." : queryResponseContent);
+                }
+            }
+            else
+            {
+                _logger.LogWarning("⚠️ [RAILWAY] Failed to query service deployments: {StatusCode} - {Error}", 
+                    queryResponse.StatusCode, queryResponseContent);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "⚠️ [RAILWAY] Error querying Railway service URL: {Message}", ex.Message);
+        }
+        
+        return null;
+    }
+    
+    /// <summary>
+    /// Updates config.js in GitHub repository with the actual Railway service URL
+    /// </summary>
+    private async Task UpdateConfigJsWithServiceUrl(string repositoryUrl, string serviceUrl, string githubAccessToken)
+    {
+        try
+        {
+            _logger.LogInformation("📝 [GITHUB] Updating config.js with service URL: {ServiceUrl}", serviceUrl);
+            
+            // Parse GitHub repository URL to extract owner and repo name
+            var uri = new Uri(repositoryUrl);
+            var pathParts = uri.AbsolutePath.TrimStart('/').Split('/');
+            
+            if (pathParts.Length < 2)
+            {
+                _logger.LogWarning("⚠️ [GITHUB] Invalid repository URL format: {RepositoryUrl}", repositoryUrl);
+                return;
+            }
+            
+            var repoOwner = pathParts[0];
+            var repoName = pathParts[1].Replace(".git", "");
+            
+            _logger.LogInformation("📝 [GITHUB] Updating config.js in {Owner}/{Repo}", repoOwner, repoName);
+            
+            // Generate new config.js content with actual service URL
+            var newConfigJs = _gitHubService.GenerateConfigJs(serviceUrl);
+            
+            // Update the file in GitHub (config.js is now at root, not in frontend/ subdirectory)
+            var success = await _gitHubService.UpdateFileAsync(
+                repoOwner, 
+                repoName, 
+                "config.js", 
+                newConfigJs, 
+                "Update config.js with Railway service URL after deployment",
+                githubAccessToken
+            );
+            
+            if (success)
+            {
+                _logger.LogInformation("[FRONTEND] Updated config.js with service URL");
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "[FRONTEND] Error updating config.js: {Message}", ex.Message);
+        }
+    }
+    
+    /// <summary>
+    /// Polls Railway for service deployment and updates config.js when ready
+    /// Note: repositoryUrl parameter should be the frontend repository URL (since config.js is in the frontend repo)
+    /// </summary>
+    private async Task PollAndUpdateServiceUrl(HttpClient httpClient, string railwayApiUrl, string railwayApiToken, 
+        string serviceId, string frontendRepositoryUrl, string githubAccessToken, int maxAttempts = 10, int delaySeconds = 30)
+    {
+        try
+        {
+            _logger.LogInformation("[RAILWAY] Polling for deployment URL (max {MaxAttempts} attempts)", maxAttempts);
+            
+            for (int attempt = 1; attempt <= maxAttempts; attempt++)
+            {
+                _logger.LogInformation("[RAILWAY] Polling attempt {Attempt}/{MaxAttempts}", attempt, maxAttempts);
+                
+                var serviceUrl = await GetRailwayServiceUrl(httpClient, railwayApiUrl, serviceId);
+                
+                if (!string.IsNullOrEmpty(serviceUrl) && !serviceUrl.Contains("railway.app/project/"))
+                {
+                    _logger.LogInformation("[RAILWAY] Service URL found: {ServiceUrl}", serviceUrl);
+                    await UpdateConfigJsWithServiceUrl(frontendRepositoryUrl, serviceUrl, githubAccessToken);
+                    return;
+                }
+                
+                if (attempt < maxAttempts)
+                {
+                    await Task.Delay(TimeSpan.FromSeconds(delaySeconds));
+                }
+            }
+            
+            _logger.LogWarning("[RAILWAY] Service URL not found after {MaxAttempts} attempts", maxAttempts);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "[RAILWAY] Error polling for service URL: {Message}", ex.Message);
+        }
+    }
 }
 
 // Request/Response DTOs
@@ -2497,7 +4489,18 @@ public class CreateBoardResponse
     public string Message { get; set; } = string.Empty;
     public string BoardId { get; set; } = string.Empty;
     public string? BoardUrl { get; set; }
+    /// <summary>
+    /// Backend repository URL (deprecated - use FrontendRepositoryUrl and BackendRepositoryUrl instead)
+    /// </summary>
     public string? RepositoryUrl { get; set; }
+    /// <summary>
+    /// Frontend repository URL
+    /// </summary>
+    public string? FrontendRepositoryUrl { get; set; }
+    /// <summary>
+    /// Backend repository URL
+    /// </summary>
+    public string? BackendRepositoryUrl { get; set; }
     public string? PublishUrl { get; set; }
     public string? MeetingUrl { get; set; }
     public int ProjectId { get; set; }

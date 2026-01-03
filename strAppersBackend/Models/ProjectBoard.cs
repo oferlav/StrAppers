@@ -108,11 +108,60 @@ namespace strAppersBackend.Models
         public string? NextMeetingUrl { get; set; }
 
         /// <summary>
-        /// GitHub repository URL for the project board
+        /// GitHub backend repository URL for the project board
         /// </summary>
         [MaxLength(1000)]
-        [Column("GithubUrl")]
-        public string? GithubUrl { get; set; }
+        [Column("GithubBackendUrl")]
+        public string? GithubBackendUrl { get; set; }
+
+        /// <summary>
+        /// GitHub frontend repository URL for the project board
+        /// </summary>
+        [MaxLength(1000)]
+        [Column("GithubFrontendUrl")]
+        public string? GithubFrontendUrl { get; set; }
+
+        /// <summary>
+        /// Web API URL (Swagger URL from Railway deployment)
+        /// </summary>
+        [MaxLength(1000)]
+        [Column("WebApiUrl")]
+        public string? WebApiUrl { get; set; }
+
+        /// <summary>
+        /// Facebook URL for the project
+        /// </summary>
+        [MaxLength(1000)]
+        [Column("FacebookUrl")]
+        public string? FacebookUrl { get; set; }
+
+        /// <summary>
+        /// Presentation URL for the project
+        /// </summary>
+        [MaxLength(1000)]
+        [Column("PresentationUrl")]
+        public string? PresentationUrl { get; set; }
+
+        /// <summary>
+        /// LinkedIn URL for the project
+        /// </summary>
+        [MaxLength(1000)]
+        [Column("LinkedInUrl")]
+        public string? LinkedInUrl { get; set; }
+
+        /// <summary>
+        /// Instagram URL for the project
+        /// </summary>
+        [MaxLength(1000)]
+        [Column("InstagramUrl")]
+        public string? InstagramUrl { get; set; }
+
+        /// <summary>
+        /// YouTube URL for the project
+        /// </summary>
+        [MaxLength(1000)]
+        [Column("YoutubeUrl")]
+        public string? YoutubeUrl { get; set; }
 
         /// <summary>
         /// Group chat information for the project board

@@ -11,10 +11,16 @@ public interface IGitHubService
     Task<string?> ExchangeCodeForTokenAsync(string code);
     Task<GitHubUserInfo?> GetGitHubUserInfoAsync(string accessToken);
     Task<CreateRepositoryResponse> CreateRepositoryAsync(CreateRepositoryRequest request);
-    Task<bool> AddCollaboratorAsync(string repositoryName, string collaboratorUsername, string accessToken);
-    Task<bool> CreateInitialCommitAsync(string owner, string repositoryName, string projectTitle, string accessToken, string? databaseConnectionString = null, string? webApiUrl = null, string? swaggerUrl = null);
+    Task<bool> AddCollaboratorAsync(string owner, string repositoryName, string collaboratorUsername, string accessToken);
+    Task<bool> CreateInitialCommitAsync(string owner, string repositoryName, string projectTitle, string accessToken, string? databaseConnectionString = null, string? webApiUrl = null, string? swaggerUrl = null, string? programmingLanguage = null);
+    Task<bool> CreateFrontendOnlyCommitAsync(string owner, string repositoryName, string projectTitle, string accessToken, string? webApiUrl = null);
+    Task<bool> CreateBackendOnlyCommitAsync(string owner, string repositoryName, string projectTitle, string accessToken, string programmingLanguage, string? databaseConnectionString = null, string? webApiUrl = null, string? swaggerUrl = null);
     Task<bool> EnableGitHubPagesAsync(string owner, string repositoryName, string accessToken);
+    Task<bool> CheckGitHubPagesStatusAsync(string owner, string repositoryName, string accessToken);
+    Task<bool> TriggerWorkflowDispatchAsync(string owner, string repositoryName, string workflowFileName, string accessToken);
+    Task<bool> CreateOrUpdateRepositorySecretAsync(string owner, string repositoryName, string secretName, string secretValue, string accessToken);
     string GetGitHubPagesUrl(string repositoryName);
+    string GetGitHubPagesUrl(string owner, string repositoryName);
     Task<DateTime?> GetLastCommitDateByUserAsync(string owner, string repo, string username, string? accessToken = null);
     Task<GitHubCommitInfo?> GetLastCommitInfoByUserAsync(string owner, string repo, string username, string? accessToken = null);
     
@@ -24,6 +30,8 @@ public interface IGitHubService
     Task<List<GitHubFileChange>> GetFileChangesAsync(string owner, string repo, string commitSha, string? accessToken = null);
     Task<bool> HasRecentCommitsAsync(string owner, string repo, string username, int hours = 24, string? accessToken = null);
     Task<string?> GetFileContentAsync(string owner, string repo, string filePath, string? accessToken = null, string? branch = null);
+    Task<bool> UpdateFileAsync(string owner, string repo, string filePath, string content, string message, string? accessToken = null, string? branch = null);
+    string GenerateConfigJs(string? webApiUrl);
 }
 
 public class GitHubService : IGitHubService
@@ -329,6 +337,10 @@ public class GitHubService : IGitHubService
             _logger.LogInformation("Using GitHub access token (first 10 chars): {TokenPrefix}", 
                 accessToken.Length > 10 ? accessToken.Substring(0, 10) + "..." : accessToken);
 
+            // Get organization name from configuration (optional - defaults to user account)
+            var organizationName = _configuration["GitHub:Organization"];
+            var useOrganization = !string.IsNullOrEmpty(organizationName);
+
             // Create repository payload
             var repositoryPayload = new
             {
@@ -341,7 +353,14 @@ public class GitHubService : IGitHubService
             var jsonContent = JsonSerializer.Serialize(repositoryPayload);
             var content = new StringContent(jsonContent, System.Text.Encoding.UTF8, "application/json");
 
-            var httpRequest = new HttpRequestMessage(HttpMethod.Post, $"{GitHubApiBaseUrl}/user/repos");
+            // Use organization endpoint if configured, otherwise use user endpoint
+            var endpoint = useOrganization 
+                ? $"{GitHubApiBaseUrl}/orgs/{organizationName}/repos"
+                : $"{GitHubApiBaseUrl}/user/repos";
+            
+            _logger.LogInformation("[BACKEND] Creating repository using endpoint: {Endpoint}", endpoint);
+            
+            var httpRequest = new HttpRequestMessage(HttpMethod.Post, endpoint);
             httpRequest.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", accessToken);
             httpRequest.Content = content;
 
@@ -361,6 +380,24 @@ public class GitHubService : IGitHubService
                 else if (createResponse.StatusCode == System.Net.HttpStatusCode.Unauthorized)
                 {
                     response.ErrorMessage = "Unauthorized. Please check that the GitHub access token is valid and not expired.";
+                }
+                else if (createResponse.StatusCode == System.Net.HttpStatusCode.NotFound)
+                {
+                    if (useOrganization)
+                    {
+                        response.ErrorMessage = $"Organization '{organizationName}' not found or access denied. " +
+                                              $"Please verify:\n" +
+                                              $"1. The organization name '{organizationName}' is correct\n" +
+                                              $"2. The user account associated with the PAT is a member of the organization\n" +
+                                              $"3. The user has permission to create repositories in the organization\n" +
+                                              $"4. The PAT has 'write:org' scope (if organization requires it)";
+                        _logger.LogError("[BACKEND] Organization repository creation failed. Organization: {Org}, Endpoint: {Endpoint}", 
+                            organizationName, endpoint);
+                    }
+                    else
+                    {
+                        response.ErrorMessage = "Repository or user not found. Please check that the GitHub access token is valid.";
+                    }
                 }
                 else
                 {
@@ -384,46 +421,85 @@ public class GitHubService : IGitHubService
                 return response;
             }
 
-            _logger.LogInformation("Parsed repository - HtmlUrl: {HtmlUrl}, Name: {Name}", repository.HtmlUrl, repository.Name);
+            _logger.LogInformation("Parsed repository - HtmlUrl: {HtmlUrl}, Name: {Name}, FullName: {FullName}", repository.HtmlUrl, repository.Name, repository.FullName);
             response.RepositoryUrl = repository.HtmlUrl;
             response.Success = true;
 
             _logger.LogInformation("Successfully created GitHub repository: {RepositoryUrl}", repository.HtmlUrl);
 
-            // Get current user info for subsequent operations
+            // Extract owner from FullName (format: "owner/repo-name") or from configuration
+            string repositoryOwner;
+            if (!string.IsNullOrEmpty(repository.FullName) && repository.FullName.Contains('/'))
+            {
+                repositoryOwner = repository.FullName.Split('/')[0];
+                _logger.LogInformation("[BACKEND] Extracted repository owner from FullName: {Owner}", repositoryOwner);
+            }
+            else if (useOrganization)
+            {
+                repositoryOwner = organizationName!;
+                _logger.LogInformation("[BACKEND] Using organization from configuration: {Owner}", repositoryOwner);
+            }
+            else
+            {
+                // Fallback: get from user info (for user-based repos)
             var userInfo = await GetGitHubUserInfoAsync(accessToken);
             if (userInfo == null)
             {
-                _logger.LogError("Failed to get current user info");
-                response.ErrorMessage = "Failed to get user information for repository operations";
+                    _logger.LogError("Failed to get current user info and cannot determine repository owner");
+                    response.ErrorMessage = "Failed to determine repository owner";
                 return response;
+                }
+                repositoryOwner = userInfo.Login;
+                _logger.LogInformation("[BACKEND] Using user account as owner: {Owner}", repositoryOwner);
             }
 
-            // Set the GitHub Pages URL (based on CNAME file)
-            response.GitHubPagesUrl = GetGitHubPagesUrl(request.Name);
-            _logger.LogInformation("GitHub Pages URL will be: {PagesUrl}", response.GitHubPagesUrl);
+            // Set the GitHub Pages URL using the actual owner
+            // Frontend repos: use repo name directly (no prefix) - URL is https://owner.github.io/{repoName}/
+            // Backend repos: extract boardId by removing "backend_" prefix
+            var repoNameForUrl = request.Name;
+            if (repoNameForUrl.StartsWith("backend_"))
+            {
+                repoNameForUrl = repoNameForUrl.Substring("backend_".Length);
+            }
+            // Frontend repos don't have prefix, so use name as-is
+            response.GitHubPagesUrl = GetGitHubPagesUrl(repositoryOwner, repoNameForUrl);
 
-            // Create initial commit with index.html and README
+            // Skip CreateInitialCommitAsync for backend repos (they use CreateBackendOnlyCommitAsync instead)
+            // Skip CreateInitialCommitAsync for frontend repos (they use CreateFrontendOnlyCommitAsync instead)
+            // Frontend repos: no prefix (just boardId) - detected by absence of ProgrammingLanguage
+            // Backend repos: "backend_" prefix - detected by StartsWith("backend_")
+            var isBackendRepo = request.Name.StartsWith("backend_");
+            var isFrontendRepo = !isBackendRepo && string.IsNullOrEmpty(request.ProgrammingLanguage);
+            
+            if (!isBackendRepo && !isFrontendRepo)
+            {
+                // Only create initial commit for legacy repos (non-prefixed repos)
             _logger.LogInformation("Creating initial commit for repository");
             var projectTitle = request.ProjectTitle ?? request.Name;  // Use project title if provided, otherwise use repo name
-            response.InitialCommitCreated = await CreateInitialCommitAsync(userInfo.Login, request.Name, projectTitle, accessToken, request.DatabaseConnectionString, request.WebApiUrl, request.SwaggerUrl);
+                response.InitialCommitCreated = await CreateInitialCommitAsync(repositoryOwner, request.Name, projectTitle, accessToken, request.DatabaseConnectionString, request.WebApiUrl, request.SwaggerUrl, request.ProgrammingLanguage);
             
             if (!response.InitialCommitCreated)
             {
                 _logger.LogWarning("Failed to create initial commit, but repository was created successfully");
-            }
-
-            // Enable GitHub Pages
-            _logger.LogInformation("Enabling GitHub Pages for repository");
-            response.GitHubPagesEnabled = await EnableGitHubPagesAsync(userInfo.Login, request.Name, accessToken);
-            
-            if (response.GitHubPagesEnabled)
-            {
-                _logger.LogInformation("GitHub Pages enabled successfully at: {PagesUrl}", response.GitHubPagesUrl);
+                }
             }
             else
             {
-                _logger.LogWarning("Failed to enable GitHub Pages (check token permissions), but CNAME is configured for: {PagesUrl}", response.GitHubPagesUrl);
+                // Skip initial commit - will be created separately using CreateBackendOnlyCommitAsync or CreateFrontendOnlyCommitAsync
+                _logger.LogInformation("Skipping initial commit for {RepoType} repo (will be created separately)", isBackendRepo ? "backend" : "frontend");
+                response.InitialCommitCreated = false;
+            }
+
+            // Enable GitHub Pages (only for frontend repos)
+            if (isFrontendRepo)
+            {
+                _logger.LogInformation("[GithubPages] Starting GitHub Pages setup for repository {Repository}", request.Name);
+                response.GitHubPagesEnabled = await EnableGitHubPagesAsync(repositoryOwner, request.Name, accessToken);
+            }
+            else if (isBackendRepo)
+            {
+                // Backend repos don't use GitHub Pages
+                response.GitHubPagesEnabled = false;
             }
 
             // Add collaborators if any
@@ -435,7 +511,7 @@ public class GitHubService : IGitHubService
                 {
                     try
                     {
-                        var collaboratorAdded = await AddCollaboratorAsync(request.Name, collaborator, accessToken);
+                        var collaboratorAdded = await AddCollaboratorAsync(repositoryOwner, request.Name, collaborator, accessToken);
                         if (collaboratorAdded)
                         {
                             response.AddedCollaborators.Add(collaborator);
@@ -468,20 +544,12 @@ public class GitHubService : IGitHubService
     /// <summary>
     /// Adds a collaborator to a GitHub repository
     /// </summary>
-    public async Task<bool> AddCollaboratorAsync(string repositoryName, string collaboratorUsername, string accessToken)
+    public async Task<bool> AddCollaboratorAsync(string owner, string repositoryName, string collaboratorUsername, string accessToken)
     {
         try
         {
-            _logger.LogInformation("Adding collaborator {Collaborator} to repository {Repository}", 
-                collaboratorUsername, repositoryName);
-
-            // Get current user to determine the repository owner
-            var userInfo = await GetGitHubUserInfoAsync(accessToken);
-            if (userInfo == null)
-            {
-                _logger.LogError("Failed to get current user info for adding collaborator");
-                return false;
-            }
+            _logger.LogInformation("Adding collaborator {Collaborator} to repository {Owner}/{Repository}", 
+                collaboratorUsername, owner, repositoryName);
 
             var collaboratorPayload = new
             {
@@ -492,7 +560,7 @@ public class GitHubService : IGitHubService
             var content = new StringContent(jsonContent, System.Text.Encoding.UTF8, "application/json");
 
             var request = new HttpRequestMessage(HttpMethod.Put, 
-                $"{GitHubApiBaseUrl}/repos/{userInfo.Login}/{repositoryName}/collaborators/{collaboratorUsername}");
+                $"{GitHubApiBaseUrl}/repos/{owner}/{repositoryName}/collaborators/{collaboratorUsername}");
             request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", accessToken);
             request.Content = content;
 
@@ -526,11 +594,12 @@ public class GitHubService : IGitHubService
     /// <summary>
     /// Creates initial commit with index.html file
     /// </summary>
-    public async Task<bool> CreateInitialCommitAsync(string owner, string repositoryName, string projectTitle, string accessToken, string? databaseConnectionString = null, string? webApiUrl = null, string? swaggerUrl = null)
+    public async Task<bool> CreateInitialCommitAsync(string owner, string repositoryName, string projectTitle, string accessToken, string? databaseConnectionString = null, string? webApiUrl = null, string? swaggerUrl = null, string? programmingLanguage = null)
     {
         try
         {
-            _logger.LogInformation("Creating initial commit for repository {Owner}/{Repository}", owner, repositoryName);
+            _logger.LogInformation("Creating initial commit for repository {Owner}/{Repository} with programming language: {Language}", 
+                owner, repositoryName, programmingLanguage ?? "none");
 
             // Generate the GitHub Pages URL
             var pagesUrl = GetGitHubPagesUrl(repositoryName);
@@ -546,44 +615,206 @@ public class GitHubService : IGitHubService
                 return false;
             }
 
+            // Build tree items - start with root files
+            var treeItems = new List<object>();
+            // Store file contents for fallback to Contents API
+            var fileContents = new Dictionary<string, string>();
+
+            // Create README.md in root (project overview)
+            var rootReadmeContent = GenerateReadmeContent(projectTitle, databaseConnectionString, webApiUrl, swaggerUrl);
+            var rootReadmeSha = await CreateBlobAsync(owner, repositoryName, rootReadmeContent, accessToken);
+            if (!string.IsNullOrEmpty(rootReadmeSha))
+            {
+                treeItems.Add(new { path = "README.md", mode = "100644", type = "blob", sha = rootReadmeSha });
+                fileContents["README.md"] = rootReadmeContent;
+            }
+
+            // Create frontend files in frontend/ folder
             // Create blob for index.html
             var indexHtmlSha = await CreateBlobAsync(owner, repositoryName, indexHtmlContent, accessToken);
-
             if (string.IsNullOrEmpty(indexHtmlSha))
             {
                 _logger.LogError("Failed to create blob for index.html");
                 return false;
             }
+            treeItems.Add(new { path = "frontend/index.html", mode = "100644", type = "blob", sha = indexHtmlSha });
+            fileContents["frontend/index.html"] = indexHtmlContent;
 
-            // Create README.md with database connection string, WebApi URL, and Swagger URL if provided
-            var readmeContent = GenerateReadmeContent(projectTitle, databaseConnectionString, webApiUrl, swaggerUrl);
-            var readmeSha = await CreateBlobAsync(owner, repositoryName, readmeContent, accessToken);
-
-            // Build tree items
-            var treeItems = new List<object>
+            // Create config.js
+            var configJsContent = GenerateConfigJs(webApiUrl);
+            var configJsSha = await CreateBlobAsync(owner, repositoryName, configJsContent, accessToken);
+            if (string.IsNullOrEmpty(configJsSha))
             {
-                new { path = "index.html", mode = "100644", type = "blob", sha = indexHtmlSha }
-            };
+                _logger.LogError("Failed to create blob for frontend/config.js");
+                return false;
+            }
+            treeItems.Add(new { path = "frontend/config.js", mode = "100644", type = "blob", sha = configJsSha });
+            fileContents["frontend/config.js"] = configJsContent;
 
-            if (!string.IsNullOrEmpty(readmeSha))
+            // Create style.css
+            var styleCssContent = GenerateStyleCss();
+            var styleCssSha = await CreateBlobAsync(owner, repositoryName, styleCssContent, accessToken);
+            if (string.IsNullOrEmpty(styleCssSha))
             {
-                treeItems.Add(new { path = "README.md", mode = "100644", type = "blob", sha = readmeSha });
+                _logger.LogError("Failed to create blob for frontend/style.css");
+                return false;
+            }
+            treeItems.Add(new { path = "frontend/style.css", mode = "100644", type = "blob", sha = styleCssSha });
+            fileContents["frontend/style.css"] = styleCssContent;
+
+            // Create GitHub Actions workflow for deploying frontend to GitHub Pages
+            var frontendWorkflow = GenerateGitHubActionsWorkflow();
+            var frontendWorkflowSha = await CreateBlobAsync(owner, repositoryName, frontendWorkflow, accessToken);
+            if (!string.IsNullOrEmpty(frontendWorkflowSha))
+            {
+                treeItems.Add(new { path = ".github/workflows/deploy-frontend.yml", mode = "100644", type = "blob", sha = frontendWorkflowSha });
+                fileContents[".github/workflows/deploy-frontend.yml"] = frontendWorkflow;
             }
 
-            // Create a tree with index.html and README.md
+            // Create GitHub Actions workflow for deploying backend to Railway
+            if (!string.IsNullOrEmpty(programmingLanguage))
+            {
+                var backendWorkflow = GenerateRailwayDeploymentWorkflow(programmingLanguage);
+                var backendWorkflowSha = await CreateBlobAsync(owner, repositoryName, backendWorkflow, accessToken);
+                if (!string.IsNullOrEmpty(backendWorkflowSha))
+                {
+                    treeItems.Add(new { path = ".github/workflows/deploy-backend.yml", mode = "100644", type = "blob", sha = backendWorkflowSha });
+                    fileContents[".github/workflows/deploy-backend.yml"] = backendWorkflow;
+                }
+            }
+
+            // Create .gitignore
+            var gitignoreContent = GenerateGitIgnore(programmingLanguage);
+            var gitignoreSha = await CreateBlobAsync(owner, repositoryName, gitignoreContent, accessToken);
+            if (!string.IsNullOrEmpty(gitignoreSha))
+            {
+                treeItems.Add(new { path = ".gitignore", mode = "100644", type = "blob", sha = gitignoreSha });
+                fileContents[".gitignore"] = gitignoreContent;
+            }
+
+            // Generate backend files if programming language is provided
+            if (!string.IsNullOrEmpty(programmingLanguage))
+            {
+                _logger.LogInformation("🔧 [BACKEND] Generating backend files for programming language: {Language}", programmingLanguage);
+                var backendFiles = GenerateBackendFiles(programmingLanguage, webApiUrl);
+                _logger.LogInformation("🔧 [BACKEND] Generated {FileCount} backend files", backendFiles.Count);
+
+                foreach (var file in backendFiles)
+                {
+                    _logger.LogDebug("🔧 [BACKEND] Creating blob for: {FilePath} ({ContentLength} chars)", file.Key, file.Value.Length);
+                    var fileSha = await CreateBlobAsync(owner, repositoryName, file.Value, accessToken);
+                    if (!string.IsNullOrEmpty(fileSha))
+                    {
+                        _logger.LogDebug("✅ [BACKEND] Created blob for {FilePath}, SHA: {Sha}", file.Key, fileSha);
+                        treeItems.Add(new { path = file.Key, mode = "100644", type = "blob", sha = fileSha });
+                        fileContents[file.Key] = file.Value;
+                    }
+                    else
+                    {
+                        _logger.LogWarning("⚠️ [BACKEND] Failed to create blob for {FilePath}", file.Key);
+                    }
+                }
+                
+                // Generate Railway configuration files (nixpacks.toml)
+                // Railway will auto-build when repo is connected, so we need nixpacks.toml
+                // GitHub Actions workflow can also deploy, but Railway's build should work too
+                _logger.LogInformation("🔧 [RAILWAY] Generating Railway configuration files for language: {Language}", programmingLanguage);
+                var railwayConfigFiles = GenerateRailwayConfigFiles(programmingLanguage);
+                _logger.LogInformation("🔧 [RAILWAY] Generated {FileCount} Railway configuration files", railwayConfigFiles.Count);
+                
+                bool nixpacksFound = false;
+                
+                foreach (var file in railwayConfigFiles)
+                {
+                    _logger.LogInformation("🔧 [RAILWAY] Creating blob for Railway config: {FilePath} ({ContentLength} chars)", file.Key, file.Value.Length);
+                    
+                    // Log critical configuration files with more detail
+                    if (file.Key == "nixpacks.toml")
+                    {
+                        nixpacksFound = true;
+                        _logger.LogInformation("✅ [RAILWAY] CRITICAL FILE: nixpacks.toml - This configures Railway build process");
+                    }
+                    
+                    var fileSha = await CreateBlobAsync(owner, repositoryName, file.Value, accessToken);
+                    if (!string.IsNullOrEmpty(fileSha))
+                    {
+                        _logger.LogDebug("✅ [RAILWAY] Created blob for {FilePath}, SHA: {Sha}", file.Key, fileSha);
+                        treeItems.Add(new { path = file.Key, mode = "100644", type = "blob", sha = fileSha });
+                        fileContents[file.Key] = file.Value;
+                    }
+                    else
+                    {
+                        _logger.LogWarning("⚠️ [RAILWAY] Failed to create blob for {FilePath}", file.Key);
+                    }
+                }
+                
+                if (!nixpacksFound)
+                {
+                    _logger.LogError("❌ [RAILWAY] CRITICAL: nixpacks.toml was NOT generated! Railway build may fail!");
+                }
+                
+                // Add a minimal root-level .csproj file so Railway's nixpacks can detect it as a .NET project
+                // This allows Railway's auto-detection to succeed, then it will use the explicit phases in nixpacks.toml
+                // This file is a placeholder - actual backend code is in backend/ folder
+                if (programmingLanguage?.ToLowerInvariant() is "c#" or "csharp" or null)
+                {
+                    var rootCsprojContent = @"<Project Sdk=""Microsoft.NET.Sdk"">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+  <!-- This is a placeholder project file for Railway auto-detection -->
+  <!-- Actual backend code is in backend/ folder -->
+</Project>
+";
+                    var rootCsprojSha = await CreateBlobAsync(owner, repositoryName, rootCsprojContent, accessToken);
+                    if (!string.IsNullOrEmpty(rootCsprojSha))
+                    {
+                        _logger.LogInformation("✅ [RAILWAY] Created root-level placeholder .csproj for Railway auto-detection");
+                        treeItems.Add(new { path = "Railway.csproj", mode = "100644", type = "blob", sha = rootCsprojSha });
+                        fileContents["Railway.csproj"] = rootCsprojContent;
+                    }
+                }
+                
+                _logger.LogInformation("📁 [STRUCTURE] Repository structure: backend/ and frontend/ folders at root");
+
+                // Generate database script
+                _logger.LogInformation("📄 [DB SCRIPT] Generating TestProjects.sql script for database setup");
+                var dbScriptContent = GenerateTestProjectsSqlScript();
+                _logger.LogInformation("📄 [DB SCRIPT] Generated SQL script: {ScriptLength} characters", dbScriptContent.Length);
+                
+                var dbScriptSha = await CreateBlobAsync(owner, repositoryName, dbScriptContent, accessToken);
+                if (!string.IsNullOrEmpty(dbScriptSha))
+                {
+                    _logger.LogInformation("✅ [DB SCRIPT] Successfully created GitHub blob for backend/DatabaseScripts/TestProjects.sql, SHA: {Sha}", dbScriptSha);
+                    treeItems.Add(new { path = "backend/DatabaseScripts/TestProjects.sql", mode = "100644", type = "blob", sha = dbScriptSha });
+                    fileContents["backend/DatabaseScripts/TestProjects.sql"] = dbScriptContent;
+                }
+                else
+                {
+                    _logger.LogWarning("⚠️ [DB SCRIPT] Failed to create GitHub blob for database script");
+                }
+            }
+
+            // Create a tree with all files
             var tree = await CreateTreeAsync(owner, repositoryName, branchInfo.TreeSha, 
                 treeItems.ToArray(), 
                 accessToken);
 
             if (string.IsNullOrEmpty(tree))
             {
-                _logger.LogError("Failed to create tree");
-                return false;
+                // Fallback: Use Contents API if Git Trees API fails (e.g., token permissions)
+                _logger.LogWarning("Git Trees API failed, falling back to Contents API to create files individually");
+                return await CreateFilesUsingContentsApiAsync(owner, repositoryName, fileContents, accessToken, programmingLanguage);
             }
 
             // Create a commit
+            var commitMessage = !string.IsNullOrEmpty(programmingLanguage)
+                ? $"Initial commit: Add project structure with {programmingLanguage} backend"
+                : "Initial commit: Add project landing page";
+            
             var commit = await CreateCommitAsync(owner, repositoryName, tree, branchInfo.CommitSha, 
-                "Initial commit: Add project landing page", accessToken);
+                commitMessage, accessToken);
 
             if (string.IsNullOrEmpty(commit))
             {
@@ -596,7 +827,14 @@ public class GitHubService : IGitHubService
 
             if (updated)
             {
-                _logger.LogInformation("Successfully created initial commit for {Owner}/{Repository}", owner, repositoryName);
+                _logger.LogInformation("✅ [GITHUB] Successfully created initial commit for {Owner}/{Repository} with {FileCount} files", 
+                    owner, repositoryName, treeItems.Count);
+                _logger.LogInformation("📋 [GITHUB] Files included in commit:");
+                foreach (var item in treeItems)
+                {
+                    var path = item.GetType().GetProperty("path")?.GetValue(item)?.ToString() ?? "unknown";
+                    _logger.LogInformation("   - {FilePath}", path);
+                }
             }
 
             return updated;
@@ -604,6 +842,234 @@ public class GitHubService : IGitHubService
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error creating initial commit for {Owner}/{Repository}: {Message}", 
+                owner, repositoryName, ex.Message);
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Creates initial commit with frontend files only (at root level, no workflows)
+    /// </summary>
+    public async Task<bool> CreateFrontendOnlyCommitAsync(string owner, string repositoryName, string projectTitle, string accessToken, string? webApiUrl = null)
+    {
+        try
+        {
+            _logger.LogInformation("[FRONTEND] Creating frontend-only commit for repository {Owner}/{Repository}", owner, repositoryName);
+
+            // Generate the GitHub Pages URL
+            // Frontend repos use boardId directly (no prefix), so use repo name as-is
+            var pagesUrl = GetGitHubPagesUrl(owner, repositoryName);
+
+            // Generate the index.html content with project title
+            var indexHtmlContent = GenerateDefaultIndexHtml(projectTitle, pagesUrl);
+
+            // Get the default branch (usually 'main')
+            var branchInfo = await GetDefaultBranchAsync(owner, repositoryName, accessToken);
+            if (branchInfo == null)
+            {
+                _logger.LogError("[FRONTEND] Failed to get default branch information");
+                return false;
+            }
+
+            // Build tree items - start with root files
+            var treeItems = new List<object>();
+            var fileContents = new Dictionary<string, string>();
+
+            // Create README.md in root
+            var rootReadmeContent = GenerateFrontendReadmeContent(projectTitle, pagesUrl, webApiUrl);
+            var rootReadmeSha = await CreateBlobAsync(owner, repositoryName, rootReadmeContent, accessToken);
+            if (!string.IsNullOrEmpty(rootReadmeSha))
+            {
+                treeItems.Add(new { path = "README.md", mode = "100644", type = "blob", sha = rootReadmeSha });
+                fileContents["README.md"] = rootReadmeContent;
+            }
+
+            // Create frontend files at root (not in frontend/ folder)
+            // index.html
+            var indexHtmlSha = await CreateBlobAsync(owner, repositoryName, indexHtmlContent, accessToken);
+            if (string.IsNullOrEmpty(indexHtmlSha))
+            {
+                _logger.LogError("[FRONTEND] Failed to create blob for index.html");
+                return false;
+            }
+            treeItems.Add(new { path = "index.html", mode = "100644", type = "blob", sha = indexHtmlSha });
+            fileContents["index.html"] = indexHtmlContent;
+
+            // config.js
+            var configJsContent = GenerateConfigJs(webApiUrl);
+            var configJsSha = await CreateBlobAsync(owner, repositoryName, configJsContent, accessToken);
+            if (string.IsNullOrEmpty(configJsSha))
+            {
+                _logger.LogError("[FRONTEND] Failed to create blob for config.js");
+                return false;
+            }
+            treeItems.Add(new { path = "config.js", mode = "100644", type = "blob", sha = configJsSha });
+            fileContents["config.js"] = configJsContent;
+
+            // style.css
+            var styleCssContent = GenerateStyleCss();
+            var styleCssSha = await CreateBlobAsync(owner, repositoryName, styleCssContent, accessToken);
+            if (string.IsNullOrEmpty(styleCssSha))
+            {
+                _logger.LogError("[FRONTEND] Failed to create blob for style.css");
+                return false;
+            }
+            treeItems.Add(new { path = "style.css", mode = "100644", type = "blob", sha = styleCssSha });
+            fileContents["style.css"] = styleCssContent;
+
+            // No workflow needed - GitHub Pages can serve files directly from root
+
+            // Create .gitignore
+            var gitignoreContent = GenerateGitIgnore(null); // No programming language for frontend-only
+            var gitignoreSha = await CreateBlobAsync(owner, repositoryName, gitignoreContent, accessToken);
+            if (!string.IsNullOrEmpty(gitignoreSha))
+            {
+                treeItems.Add(new { path = ".gitignore", mode = "100644", type = "blob", sha = gitignoreSha });
+                fileContents[".gitignore"] = gitignoreContent;
+            }
+
+            // Create a tree with all files
+            var tree = await CreateTreeAsync(owner, repositoryName, branchInfo.TreeSha, treeItems.ToArray(), accessToken);
+
+            if (string.IsNullOrEmpty(tree))
+            {
+                _logger.LogWarning("[FRONTEND] Git Trees API failed, falling back to Contents API");
+                return await CreateFilesUsingContentsApiAsync(owner, repositoryName, fileContents, accessToken, null);
+            }
+
+            // Create a commit
+            var commitMessage = "Initial commit: Add frontend files";
+            var commit = await CreateCommitAsync(owner, repositoryName, tree, branchInfo.CommitSha, commitMessage, accessToken);
+
+            if (string.IsNullOrEmpty(commit))
+            {
+                _logger.LogError("[FRONTEND] Failed to create commit");
+                return false;
+            }
+
+            // Update the branch reference
+            var updated = await UpdateReferenceAsync(owner, repositoryName, branchInfo.BranchName, commit, accessToken);
+
+            if (updated)
+            {
+                _logger.LogInformation("[FRONTEND] ✅ Successfully created frontend-only commit for {Owner}/{Repository} with {FileCount} files", 
+                    owner, repositoryName, treeItems.Count);
+            }
+
+            return updated;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "[FRONTEND] Error creating frontend-only commit for repository {Owner}/{Repository}: {Message}", 
+                owner, repositoryName, ex.Message);
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Creates initial commit with backend files only (at root level, no workflows)
+    /// </summary>
+    public async Task<bool> CreateBackendOnlyCommitAsync(string owner, string repositoryName, string projectTitle, string accessToken, string programmingLanguage, string? databaseConnectionString = null, string? webApiUrl = null, string? swaggerUrl = null)
+    {
+        try
+        {
+            _logger.LogInformation("[BACKEND] Creating backend-only commit for repository {Owner}/{Repository} with language: {Language}", 
+                owner, repositoryName, programmingLanguage);
+
+            // Get the default branch (usually 'main')
+            var branchInfo = await GetDefaultBranchAsync(owner, repositoryName, accessToken);
+            if (branchInfo == null)
+            {
+                _logger.LogError("[BACKEND] Failed to get default branch information");
+                return false;
+            }
+
+            // Build tree items
+            var treeItems = new List<object>();
+            var fileContents = new Dictionary<string, string>();
+
+            // Create README.md in root
+            var rootReadmeContent = GenerateBackendReadmeContent(projectTitle, databaseConnectionString, webApiUrl, swaggerUrl);
+            var rootReadmeSha = await CreateBlobAsync(owner, repositoryName, rootReadmeContent, accessToken);
+            if (!string.IsNullOrEmpty(rootReadmeSha))
+            {
+                treeItems.Add(new { path = "README.md", mode = "100644", type = "blob", sha = rootReadmeSha });
+                fileContents["README.md"] = rootReadmeContent;
+            }
+
+            // Generate backend files at root level (no "backend/" prefix)
+            _logger.LogInformation("[BACKEND] Generating backend files at root for language: {Language}", programmingLanguage);
+            var backendFiles = GenerateBackendFilesAtRoot(programmingLanguage, webApiUrl);
+            _logger.LogInformation("[BACKEND] Generated {FileCount} backend files at root", backendFiles.Count);
+
+            foreach (var file in backendFiles)
+            {
+                _logger.LogDebug("[BACKEND] Creating blob for: {FilePath} ({ContentLength} chars)", file.Key, file.Value.Length);
+                var fileSha = await CreateBlobAsync(owner, repositoryName, file.Value, accessToken);
+                if (!string.IsNullOrEmpty(fileSha))
+                {
+                    _logger.LogDebug("[BACKEND] ✅ Created blob for {FilePath}, SHA: {Sha}", file.Key, fileSha);
+                    treeItems.Add(new { path = file.Key, mode = "100644", type = "blob", sha = fileSha });
+                    fileContents[file.Key] = file.Value;
+                }
+                else
+                {
+                    _logger.LogWarning("[BACKEND] ⚠️ Failed to create blob for {FilePath}", file.Key);
+                }
+            }
+
+            // Create GitHub Actions workflow for deploying backend to Railway (root-level files)
+            var backendWorkflow = GenerateRailwayDeploymentWorkflowAtRoot(programmingLanguage);
+            var backendWorkflowSha = await CreateBlobAsync(owner, repositoryName, backendWorkflow, accessToken);
+            if (!string.IsNullOrEmpty(backendWorkflowSha))
+            {
+                treeItems.Add(new { path = ".github/workflows/deploy-backend.yml", mode = "100644", type = "blob", sha = backendWorkflowSha });
+                fileContents[".github/workflows/deploy-backend.yml"] = backendWorkflow;
+                _logger.LogInformation("[BACKEND] ✅ Created workflow file: .github/workflows/deploy-backend.yml");
+            }
+
+            // Create .gitignore
+            var gitignoreContent = GenerateGitIgnore(programmingLanguage);
+            var gitignoreSha = await CreateBlobAsync(owner, repositoryName, gitignoreContent, accessToken);
+            if (!string.IsNullOrEmpty(gitignoreSha))
+            {
+                treeItems.Add(new { path = ".gitignore", mode = "100644", type = "blob", sha = gitignoreSha });
+                fileContents[".gitignore"] = gitignoreContent;
+            }
+
+            // Create a tree with all files
+            var tree = await CreateTreeAsync(owner, repositoryName, branchInfo.TreeSha, treeItems.ToArray(), accessToken);
+
+            if (string.IsNullOrEmpty(tree))
+            {
+                _logger.LogWarning("[BACKEND] Git Trees API failed, falling back to Contents API");
+                return await CreateFilesUsingContentsApiAsync(owner, repositoryName, fileContents, accessToken, programmingLanguage);
+            }
+
+            // Create a commit
+            var commitMessage = $"Initial commit: Add {programmingLanguage} backend files";
+            var commit = await CreateCommitAsync(owner, repositoryName, tree, branchInfo.CommitSha, commitMessage, accessToken);
+
+            if (string.IsNullOrEmpty(commit))
+            {
+                _logger.LogError("[BACKEND] Failed to create commit");
+                return false;
+            }
+
+            // Update the branch reference
+            var updated = await UpdateReferenceAsync(owner, repositoryName, branchInfo.BranchName, commit, accessToken);
+
+            if (updated)
+            {
+                _logger.LogInformation("[BACKEND] ✅ Successfully created backend-only commit for {Owner}/{Repository} with {FileCount} files", 
+                    owner, repositoryName, treeItems.Count);
+            }
+
+            return updated;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "[BACKEND] Error creating backend-only commit for repository {Owner}/{Repository}: {Message}", 
                 owner, repositoryName, ex.Message);
             return false;
         }
@@ -658,11 +1124,323 @@ public class GitHubService : IGitHubService
     }
 
     /// <summary>
+    /// Checks if GitHub Pages is enabled for a repository
+    /// </summary>
+    public async Task<bool> CheckGitHubPagesStatusAsync(string owner, string repositoryName, string accessToken)
+    {
+        try
+        {
+            _logger.LogInformation("[GithubPages] Checking GitHub Pages status for {Owner}/{Repository}", owner, repositoryName);
+            
+            var request = new HttpRequestMessage(HttpMethod.Get, 
+                $"{GitHubApiBaseUrl}/repos/{owner}/{repositoryName}/pages");
+            request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", accessToken);
+
+            var response = await _httpClient.SendAsync(request);
+            var responseContent = await response.Content.ReadAsStringAsync();
+
+            _logger.LogInformation("[GithubPages] Pages status check API Response Status: {StatusCode}", response.StatusCode);
+            _logger.LogInformation("[GithubPages] Pages status check API Response Content: {ResponseContent}", responseContent);
+
+            if (response.IsSuccessStatusCode)
+            {
+                try
+                {
+                    var pagesInfo = JsonSerializer.Deserialize<JsonElement>(responseContent, new JsonSerializerOptions
+                    {
+                        PropertyNameCaseInsensitive = true
+                    });
+                    
+                    var status = pagesInfo.TryGetProperty("status", out var statusProp) ? statusProp.GetString() : "unknown";
+                    var htmlUrl = pagesInfo.TryGetProperty("html_url", out var htmlUrlProp) ? htmlUrlProp.GetString() : null;
+                    var buildType = pagesInfo.TryGetProperty("build_type", out var buildTypeProp) ? buildTypeProp.GetString() : null;
+                    var source = pagesInfo.TryGetProperty("source", out var sourceProp) ? sourceProp.ToString() : null;
+                    var cname = pagesInfo.TryGetProperty("cname", out var cnameProp) ? cnameProp.GetString() : null;
+                    var httpsEnforced = pagesInfo.TryGetProperty("https_enforced", out var httpsProp) ? httpsProp.GetBoolean() : (bool?)null;
+                    
+                    _logger.LogInformation("[GithubPages] ✅ Pages is enabled - Status: {Status}, Build Type: {BuildType}, URL: {Url}", 
+                        status, buildType ?? "unknown", htmlUrl ?? "N/A");
+                    _logger.LogInformation("[GithubPages] Pages Details - Source: {Source}, CNAME: {Cname}, HTTPS Enforced: {Https}", 
+                        source ?? "N/A", cname ?? "N/A", httpsEnforced?.ToString() ?? "N/A");
+                    
+                    if (status == "building" || status == "queued")
+                    {
+                        _logger.LogInformation("[GithubPages] Pages is currently {Status} - deployment in progress", status);
+                    }
+                    else if (status == "built")
+                    {
+                        _logger.LogInformation("[GithubPages] ✅ Pages build completed - site should be live at {Url}", htmlUrl ?? "N/A");
+                    }
+                    
+                    return true;
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "[GithubPages] Failed to parse Pages status response, but API returned success");
+                    _logger.LogInformation("[GithubPages] Raw response: {ResponseContent}", responseContent);
+                    return true;
+                }
+            }
+            else if (response.StatusCode == System.Net.HttpStatusCode.NotFound)
+            {
+                _logger.LogWarning("[GithubPages] ❌ Pages is NOT enabled (404 - Not Found)");
+                _logger.LogWarning("[GithubPages] This means GitHub Pages has not been enabled for this repository yet");
+                _logger.LogInformation("[GithubPages] Pages can be enabled manually in repository Settings > Pages, or via API with 'pages:write' scope");
+                return false;
+            }
+            else
+            {
+                _logger.LogWarning("[GithubPages] Failed to check Pages status: {StatusCode}", response.StatusCode);
+                _logger.LogWarning("[GithubPages] Response content: {ResponseContent}", responseContent);
+                return false;
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "[GithubPages] Error checking GitHub Pages status: {Message}", ex.Message);
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Triggers a GitHub Actions workflow via workflow_dispatch event
+    /// </summary>
+    public async Task<bool> TriggerWorkflowDispatchAsync(string owner, string repositoryName, string workflowFileName, string accessToken)
+    {
+        try
+        {
+            var workflowId = workflowFileName.EndsWith(".yml") || workflowFileName.EndsWith(".yaml") 
+                ? workflowFileName 
+                : $"{workflowFileName}.yml";
+            
+            var dispatchPayload = new
+            {
+                @ref = "main"
+            };
+
+            var jsonContent = JsonSerializer.Serialize(dispatchPayload);
+            var httpContent = new StringContent(jsonContent, System.Text.Encoding.UTF8, "application/json");
+
+            // First, try to get the workflow ID by listing workflows
+            // This is more reliable than using the filename
+            string? actualWorkflowId = await GetWorkflowIdByNameAsync(owner, repositoryName, workflowId, accessToken);
+            
+            if (string.IsNullOrEmpty(actualWorkflowId))
+            {
+                // Fallback: try with filename directly
+                actualWorkflowId = workflowId;
+            }
+
+            var request = new HttpRequestMessage(HttpMethod.Post, 
+                $"{GitHubApiBaseUrl}/repos/{owner}/{repositoryName}/actions/workflows/{actualWorkflowId}/dispatches");
+            request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", accessToken);
+            request.Content = httpContent;
+
+            var response = await _httpClient.SendAsync(request);
+            var responseContent = await response.Content.ReadAsStringAsync();
+
+            if (response.IsSuccessStatusCode)
+            {
+                _logger.LogInformation("[WORKFLOW] ✅ Successfully triggered workflow {WorkflowId} for {Owner}/{Repo}", actualWorkflowId, owner, repositoryName);
+                return true;
+            }
+            
+            _logger.LogWarning("[WORKFLOW] ❌ Failed to trigger workflow {WorkflowId}: {StatusCode} - {ResponseContent}", 
+                actualWorkflowId, response.StatusCode, responseContent);
+            
+            // If filename didn't work, try with full path
+            if (response.StatusCode == System.Net.HttpStatusCode.NotFound && !workflowId.StartsWith(".github/"))
+            {
+                var fullPathWorkflowId = $".github/workflows/{workflowId}";
+                _logger.LogInformation("[WORKFLOW] Retrying with full path: {FullPath}", fullPathWorkflowId);
+                var fullPathEndpoint = $"{GitHubApiBaseUrl}/repos/{owner}/{repositoryName}/actions/workflows/{fullPathWorkflowId}/dispatches";
+                var retryRequest = new HttpRequestMessage(HttpMethod.Post, fullPathEndpoint);
+                retryRequest.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", accessToken);
+                retryRequest.Content = httpContent;
+                response = await _httpClient.SendAsync(retryRequest);
+                responseContent = await response.Content.ReadAsStringAsync();
+                
+                if (response.IsSuccessStatusCode)
+                {
+                    _logger.LogInformation("[WORKFLOW] ✅ Successfully triggered workflow {WorkflowId} for {Owner}/{Repo}", fullPathWorkflowId, owner, repositoryName);
+                    return true;
+                }
+                
+                _logger.LogWarning("[WORKFLOW] ❌ Failed to trigger workflow {WorkflowId}: {StatusCode} - {ResponseContent}", 
+                    fullPathWorkflowId, response.StatusCode, responseContent);
+            }
+            
+            return false;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "[WORKFLOW] Error triggering workflow: {Message}", ex.Message);
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Gets the workflow ID by listing workflows and finding the one that matches the filename
+    /// </summary>
+    private async Task<string?> GetWorkflowIdByNameAsync(string owner, string repo, string workflowFileName, string accessToken)
+    {
+        try
+        {
+            var url = $"{GitHubApiBaseUrl}/repos/{owner}/{repo}/actions/workflows";
+            var request = new HttpRequestMessage(HttpMethod.Get, url);
+            request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", accessToken);
+
+            var response = await _httpClient.SendAsync(request);
+            if (!response.IsSuccessStatusCode)
+            {
+                _logger.LogWarning("[WORKFLOW] Failed to list workflows: {StatusCode}", response.StatusCode);
+                return null;
+            }
+
+            var content = await response.Content.ReadAsStringAsync();
+            var workflowsData = JsonSerializer.Deserialize<JsonElement>(content);
+            
+            _logger.LogInformation("[WORKFLOW] Listing workflows for {Owner}/{Repo}", owner, repo);
+            
+            if (workflowsData.TryGetProperty("workflows", out var workflows))
+            {
+                var workflowCount = workflows.GetArrayLength();
+                _logger.LogInformation("[WORKFLOW] Found {Count} workflows in repository", workflowCount);
+                
+                var foundWorkflows = new List<string>();
+                foreach (var workflow in workflows.EnumerateArray())
+                {
+                    if (workflow.TryGetProperty("path", out var path) && workflow.TryGetProperty("id", out var id))
+                    {
+                        var pathValue = path.GetString();
+                        var workflowId = id.GetInt64().ToString();
+                        foundWorkflows.Add($"ID: {workflowId}, Path: {pathValue}");
+                        
+                        // Match if the path ends with the workflow filename
+                        if (!string.IsNullOrEmpty(pathValue) && pathValue.EndsWith(workflowFileName, StringComparison.OrdinalIgnoreCase))
+                        {
+                            _logger.LogInformation("[WORKFLOW] ✅ Found workflow ID {WorkflowId} for {WorkflowFile}", workflowId, workflowFileName);
+                            return workflowId;
+                        }
+                    }
+                }
+                
+                _logger.LogWarning("[WORKFLOW] Workflow {WorkflowFile} not found in workflows list", workflowFileName);
+                _logger.LogInformation("[WORKFLOW] Available workflows: {Workflows}", string.Join("; ", foundWorkflows));
+            }
+            else
+            {
+                _logger.LogWarning("[WORKFLOW] No 'workflows' property in response");
+            }
+            
+            return null;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[WORKFLOW] Error getting workflow ID: {Message}", ex.Message);
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Creates or updates a GitHub Actions secret for a repository
+    /// GitHub Secrets API requires encryption using the repository's public key (LibSodium sealed box)
+    /// </summary>
+    public async Task<bool> CreateOrUpdateRepositorySecretAsync(string owner, string repositoryName, string secretName, string secretValue, string accessToken)
+    {
+        try
+        {
+            _logger.LogInformation("[GITHUB] Creating/updating secret {SecretName} for {Owner}/{Repo}", secretName, owner, repositoryName);
+            
+            // Step 1: Get the repository's public key
+            var publicKeyRequest = new HttpRequestMessage(HttpMethod.Get, 
+                $"{GitHubApiBaseUrl}/repos/{owner}/{repositoryName}/actions/secrets/public-key");
+            publicKeyRequest.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", accessToken);
+            publicKeyRequest.Headers.Accept.Add(new System.Net.Http.Headers.MediaTypeWithQualityHeaderValue("application/vnd.github+json"));
+            
+            var publicKeyResponse = await _httpClient.SendAsync(publicKeyRequest);
+            var publicKeyResponseContent = await publicKeyResponse.Content.ReadAsStringAsync();
+            
+            if (!publicKeyResponse.IsSuccessStatusCode)
+            {
+                _logger.LogError("[GITHUB] Failed to get public key for repository: {StatusCode} - {Error}", 
+                    publicKeyResponse.StatusCode, publicKeyResponseContent);
+                return false;
+            }
+            
+            var publicKeyJson = JsonSerializer.Deserialize<JsonElement>(publicKeyResponseContent);
+            var publicKeyBase64 = publicKeyJson.GetProperty("key").GetString();
+            var keyId = publicKeyJson.GetProperty("key_id").GetString();
+            
+            if (string.IsNullOrEmpty(publicKeyBase64) || string.IsNullOrEmpty(keyId))
+            {
+                _logger.LogError("[GITHUB] Failed to parse public key response");
+                return false;
+            }
+            
+            // Step 2: Encrypt the secret using LibSodium sealed box (PublicKeyBox.Seal)
+            // GitHub uses X25519 public key encryption with sealed box
+            var publicKeyBytes = Convert.FromBase64String(publicKeyBase64);
+            var plaintextBytes = System.Text.Encoding.UTF8.GetBytes(secretValue);
+            
+            // Use Sodium.Core for LibSodium sealed box encryption
+            // GitHub expects X25519 public key (32 bytes) for sealed box
+            var encryptedBytes = Sodium.SealedPublicKeyBox.Create(plaintextBytes, publicKeyBytes);
+            var encryptedSecret = Convert.ToBase64String(encryptedBytes);
+            
+            // Step 3: Create/update the secret
+            var secretPayload = new
+            {
+                encrypted_value = encryptedSecret,
+                key_id = keyId
+            };
+            
+            var jsonContent = JsonSerializer.Serialize(secretPayload);
+            var content = new StringContent(jsonContent, System.Text.Encoding.UTF8, "application/json");
+            
+            var secretRequest = new HttpRequestMessage(HttpMethod.Put, 
+                $"{GitHubApiBaseUrl}/repos/{owner}/{repositoryName}/actions/secrets/{secretName}");
+            secretRequest.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", accessToken);
+            secretRequest.Headers.Accept.Add(new System.Net.Http.Headers.MediaTypeWithQualityHeaderValue("application/vnd.github+json"));
+            secretRequest.Content = content;
+            
+            var secretResponse = await _httpClient.SendAsync(secretRequest);
+            var secretResponseContent = await secretResponse.Content.ReadAsStringAsync();
+            
+            if (secretResponse.IsSuccessStatusCode || secretResponse.StatusCode == System.Net.HttpStatusCode.NoContent)
+            {
+                _logger.LogInformation("[GITHUB] ✅ Successfully created/updated secret {SecretName} for {Owner}/{Repo}", 
+                    secretName, owner, repositoryName);
+                return true;
+            }
+            else
+            {
+                _logger.LogError("[GITHUB] Failed to create/update secret {SecretName}: {StatusCode} - {Error}", 
+                    secretName, secretResponse.StatusCode, secretResponseContent);
+                return false;
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "[GITHUB] Error creating/updating secret {SecretName}: {Message}", secretName, ex.Message);
+            return false;
+        }
+    }
+
+    /// <summary>
     /// Gets the GitHub Pages URL for a repository
     /// </summary>
     public string GetGitHubPagesUrl(string repositoryName)
     {
+        // Note: This method is called before we know the actual owner
+        // The actual owner will be determined when creating the repository
+        // For now, return a placeholder - the actual URL will be set in CreateRepositoryAsync
         return $"https://skill-in-projects.github.io/{repositoryName}/";
+    }
+    
+    public string GetGitHubPagesUrl(string owner, string repositoryName)
+    {
+        return $"https://{owner}.github.io/{repositoryName}/";
     }
 
     /// <summary>
@@ -1181,8 +1959,13 @@ public class GitHubService : IGitHubService
                 if (branchName == "main")
                 {
                     url = $"{GitHubApiBaseUrl}/repos/{owner}/{repo}/contents/{filePath}?ref=master";
-                    request.RequestUri = new Uri(url);
-                    response = await _httpClient.SendAsync(request);
+                    // Create a new request for the retry (can't reuse HttpRequestMessage)
+                    using var retryRequest = new HttpRequestMessage(HttpMethod.Get, url);
+                    if (!string.IsNullOrEmpty(token))
+                    {
+                        retryRequest.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", token);
+                    }
+                    response = await _httpClient.SendAsync(retryRequest);
                 }
 
                 if (!response.IsSuccessStatusCode)
@@ -1213,6 +1996,255 @@ public class GitHubService : IGitHubService
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error getting file content for {FilePath} in {Owner}/{Repo}", filePath, owner, repo);
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Updates a file in a GitHub repository
+    /// </summary>
+    public async Task<bool> UpdateFileAsync(string owner, string repo, string filePath, string content, string message, string? accessToken = null, string? branch = null)
+    {
+        try
+        {
+            _logger.LogInformation("📝 [GITHUB] Updating file {FilePath} in {Owner}/{Repo}", filePath, owner, repo);
+            
+            if (string.IsNullOrWhiteSpace(owner) || string.IsNullOrWhiteSpace(repo) || string.IsNullOrWhiteSpace(filePath))
+            {
+                _logger.LogWarning("📝 [GITHUB] UpdateFileAsync: Invalid parameters");
+                return false;
+            }
+
+            var token = accessToken ?? _configuration["GitHub:AccessToken"];
+            if (string.IsNullOrEmpty(token))
+            {
+                _logger.LogError("📝 [GITHUB] UpdateFileAsync: No access token available");
+                return false;
+            }
+
+            var branchName = branch ?? "main";
+
+            // First, get the current file to get its SHA (required for update)
+            var currentFileUrl = $"{GitHubApiBaseUrl}/repos/{owner}/{repo}/contents/{filePath}?ref={branchName}";
+            string? fileSha = null;
+            
+            using var getRequest = new HttpRequestMessage(HttpMethod.Get, currentFileUrl);
+            getRequest.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", token);
+            
+            var getResponse = await _httpClient.SendAsync(getRequest);
+            if (getResponse.IsSuccessStatusCode)
+            {
+                var getContent = await getResponse.Content.ReadAsStringAsync();
+                var fileData = JsonSerializer.Deserialize<JsonElement>(getContent);
+                if (fileData.TryGetProperty("sha", out var shaProp))
+                {
+                    fileSha = shaProp.GetString();
+                    _logger.LogDebug("📝 [GITHUB] Found existing file SHA: {Sha}", fileSha);
+                }
+            }
+            else
+            {
+                _logger.LogWarning("📝 [GITHUB] File {FilePath} not found, will create new file", filePath);
+            }
+
+            // Encode content to base64
+            var contentBytes = System.Text.Encoding.UTF8.GetBytes(content);
+            var base64Content = Convert.ToBase64String(contentBytes);
+
+            // Prepare update payload
+            var updatePayload = new
+            {
+                message = message,
+                content = base64Content,
+                branch = branchName,
+                sha = fileSha // Required for update, null for new file
+            };
+
+            var jsonContent = JsonSerializer.Serialize(updatePayload);
+            _logger.LogDebug("📝 [GITHUB] Update payload: {Payload}", jsonContent.Replace(base64Content, "[BASE64_CONTENT]"));
+
+            var updateContent = new StringContent(jsonContent, System.Text.Encoding.UTF8, "application/json");
+            var updateRequest = new HttpRequestMessage(HttpMethod.Put, 
+                $"{GitHubApiBaseUrl}/repos/{owner}/{repo}/contents/{filePath}");
+            updateRequest.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", token);
+            updateRequest.Content = updateContent;
+
+            var updateResponse = await _httpClient.SendAsync(updateRequest);
+            var updateResponseContent = await updateResponse.Content.ReadAsStringAsync();
+
+            if (updateResponse.IsSuccessStatusCode)
+            {
+                _logger.LogInformation("✅ [GITHUB] Successfully updated file {FilePath} in {Owner}/{Repo}", filePath, owner, repo);
+                return true;
+            }
+            else
+            {
+                _logger.LogError("❌ [GITHUB] Failed to update file {FilePath}: {StatusCode} - {Error}", 
+                    filePath, updateResponse.StatusCode, updateResponseContent);
+                return false;
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "❌ [GITHUB] Error updating file {FilePath} in {Owner}/{Repo}: {Message}", filePath, owner, repo, ex.Message);
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Fallback method to create files using Contents API when Git Trees API fails
+    /// </summary>
+    private async Task<bool> CreateFilesUsingContentsApiAsync(string owner, string repositoryName, 
+        Dictionary<string, string> fileContents, string accessToken, string? programmingLanguage)
+    {
+        try
+        {
+            _logger.LogInformation("📝 [GITHUB] Creating {FileCount} files using Contents API (fallback method)", fileContents.Count);
+            
+            var commitMessage = !string.IsNullOrEmpty(programmingLanguage)
+                ? $"Initial commit: Add project structure with {programmingLanguage} backend"
+                : "Initial commit: Add project landing page";
+            
+            // Create files sequentially using Contents API
+            int successCount = 0;
+            int failCount = 0;
+            
+            foreach (var file in fileContents)
+            {
+                try
+                {
+                    // Use CreateFileUsingContentsApiAsync to create new files
+                    var success = await CreateFileUsingContentsApiAsync(owner, repositoryName, file.Key, file.Value, 
+                        commitMessage, accessToken);
+                    
+                    if (success)
+                    {
+                        successCount++;
+                        _logger.LogDebug("✅ [GITHUB] Created file: {FilePath}", file.Key);
+                    }
+                    else
+                    {
+                        failCount++;
+                        _logger.LogWarning("⚠️ [GITHUB] Failed to create file: {FilePath}", file.Key);
+                    }
+                    
+                    // Small delay to avoid rate limiting
+                    await Task.Delay(100);
+                }
+                catch (Exception ex)
+                {
+                    failCount++;
+                    _logger.LogError(ex, "❌ [GITHUB] Error creating file {FilePath}: {Message}", file.Key, ex.Message);
+                }
+            }
+            
+            _logger.LogInformation("✅ [GITHUB] Created {SuccessCount}/{TotalCount} files using Contents API", 
+                successCount, fileContents.Count);
+            
+            return successCount > 0 && failCount == 0;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "❌ [GITHUB] Error creating files using Contents API: {Message}", ex.Message);
+            return false;
+        }
+    }
+    
+    /// <summary>
+    /// Creates a single file using Contents API
+    /// </summary>
+    private async Task<bool> CreateFileUsingContentsApiAsync(string owner, string repo, string filePath, 
+        string content, string message, string accessToken)
+    {
+        try
+        {
+            // Encode content to base64
+            var contentBytes = System.Text.Encoding.UTF8.GetBytes(content);
+            var base64Content = Convert.ToBase64String(contentBytes);
+
+            // Prepare create payload (no SHA for new files)
+            var createPayload = new
+            {
+                message = message,
+                content = base64Content,
+                branch = "main"
+            };
+
+            var jsonContent = JsonSerializer.Serialize(createPayload);
+            var httpContent = new StringContent(jsonContent, System.Text.Encoding.UTF8, "application/json");
+
+            var request = new HttpRequestMessage(HttpMethod.Put, 
+                $"{GitHubApiBaseUrl}/repos/{owner}/{repo}/contents/{filePath}");
+            request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", accessToken);
+            request.Content = httpContent;
+
+            var response = await _httpClient.SendAsync(request);
+            var responseContent = await response.Content.ReadAsStringAsync();
+
+            if (response.IsSuccessStatusCode)
+            {
+                return true;
+            }
+            else
+            {
+                var errorPreview = responseContent.Length > 500 ? responseContent.Substring(0, 500) : responseContent;
+                _logger.LogWarning("Failed to create file {FilePath}: {StatusCode} - {Error}", 
+                    filePath, response.StatusCode, errorPreview);
+                
+                // Log specific error for nested directories
+                if (filePath.Contains("/") && response.StatusCode == System.Net.HttpStatusCode.UnprocessableEntity)
+                {
+                    _logger.LogWarning("⚠️ [GITHUB] File in nested directory {FilePath} - GitHub Contents API should auto-create parent dirs", filePath);
+                }
+                
+                return false;
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error creating file {FilePath}: {Message}", filePath, ex.Message);
+            return false;
+        }
+    }
+    
+    /// <summary>
+    /// Gets the content of a blob by SHA
+    /// </summary>
+    private async Task<string?> GetBlobContentAsync(string owner, string repositoryName, string blobSha, string accessToken)
+    {
+        try
+        {
+            var request = new HttpRequestMessage(HttpMethod.Get, 
+                $"{GitHubApiBaseUrl}/repos/{owner}/{repositoryName}/git/blobs/{blobSha}");
+            request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", accessToken);
+
+            var response = await _httpClient.SendAsync(request);
+            
+            if (!response.IsSuccessStatusCode)
+            {
+                return null;
+            }
+
+            var responseContent = await response.Content.ReadAsStringAsync();
+            var blobData = JsonSerializer.Deserialize<JsonElement>(responseContent);
+            
+            if (blobData.TryGetProperty("content", out var contentProp))
+            {
+                var base64Content = contentProp.GetString();
+                if (!string.IsNullOrEmpty(base64Content))
+                {
+                    // Remove newlines from base64 string and decode
+                    var cleanedBase64 = base64Content.Replace("\n", "").Trim();
+                    var bytes = Convert.FromBase64String(cleanedBase64);
+                    return System.Text.Encoding.UTF8.GetString(bytes);
+                }
+            }
+            
+            return null;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error getting blob content for SHA {BlobSha}: {Message}", blobSha, ex.Message);
             return null;
         }
     }
@@ -1320,12 +2352,15 @@ public class GitHubService : IGitHubService
     {
         try
         {
+            _logger.LogDebug("Creating tree with base SHA: {BaseTreeSha}, {FileCount} files", baseTreeSha, tree.Length);
+            
             var treePayload = new
             {
                 base_tree = baseTreeSha,
                 tree = tree
             };
 
+            // GitHub API requires snake_case property names, so we use default serialization
             var jsonContent = JsonSerializer.Serialize(treePayload);
             var httpContent = new StringContent(jsonContent, System.Text.Encoding.UTF8, "application/json");
 
@@ -1335,19 +2370,48 @@ public class GitHubService : IGitHubService
             request.Content = httpContent;
 
             var response = await _httpClient.SendAsync(request);
+            var responseContent = await response.Content.ReadAsStringAsync();
 
             if (!response.IsSuccessStatusCode)
             {
+                // Check for rate limiting
+                if (response.StatusCode == System.Net.HttpStatusCode.Forbidden)
+                {
+                    var rateLimitRemaining = response.Headers.Contains("X-RateLimit-Remaining") 
+                        ? response.Headers.GetValues("X-RateLimit-Remaining").FirstOrDefault() 
+                        : "unknown";
+                    var rateLimitReset = response.Headers.Contains("X-RateLimit-Reset") 
+                        ? response.Headers.GetValues("X-RateLimit-Reset").FirstOrDefault() 
+                        : "unknown";
+                    
+                    _logger.LogError("403 Forbidden when creating tree. Rate limit remaining: {Remaining}, Reset: {Reset}", 
+                        rateLimitRemaining, rateLimitReset);
+                }
+                
+                _logger.LogError("Failed to create tree. Status: {StatusCode}, Error: {Error}", 
+                    response.StatusCode, responseContent.Length > 1000 ? responseContent.Substring(0, 1000) + "..." : responseContent);
+                _logger.LogDebug("Tree payload size: {Size} bytes, File count: {FileCount}", jsonContent.Length, tree.Length);
+                
+                // Log first few file paths for debugging
+                var filePaths = new List<string>();
+                foreach (var item in tree.Take(10))
+                {
+                    var path = item.GetType().GetProperty("path")?.GetValue(item)?.ToString() ?? "unknown";
+                    filePaths.Add(path);
+                }
+                _logger.LogDebug("First {Count} file paths in tree: {Paths}", Math.Min(10, tree.Length), string.Join(", ", filePaths));
+                
                 return null;
             }
 
-            var responseContent = await response.Content.ReadAsStringAsync();
             var treeData = JsonSerializer.Deserialize<JsonElement>(responseContent);
-            return treeData.GetProperty("sha").GetString();
+            var treeSha = treeData.GetProperty("sha").GetString();
+            _logger.LogDebug("Successfully created tree with SHA: {TreeSha}", treeSha);
+            return treeSha;
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Error creating tree");
+            _logger.LogError(ex, "Error creating tree: {Message}", ex.Message);
             return null;
         }
     }
@@ -1443,6 +2507,62 @@ public class GitHubService : IGitHubService
 
         readme += "## Recommended Tools\n\n";
         readme += "**Recommended SQL Editor tool (Free):** [pgAdmin](https://www.pgadmin.org/download/)\n";
+
+        return readme;
+    }
+
+    /// <summary>
+    /// Generates README content for frontend-only repository
+    /// </summary>
+    private string GenerateFrontendReadmeContent(string projectTitle, string pagesUrl, string? webApiUrl = null)
+    {
+        var readme = $"# {projectTitle} - Frontend\n\n";
+        readme += $"## Frontend Deployment\n\n";
+        readme += $"**GitHub Pages URL:** {pagesUrl}\n\n";
+        
+        if (!string.IsNullOrWhiteSpace(webApiUrl))
+        {
+            readme += $"## Backend API\n\n";
+            readme += $"**API URL:** {webApiUrl}\n\n";
+        }
+        
+        readme += "## Project Structure\n\n";
+        readme += "- `index.html` - Main landing page\n";
+        readme += "- `config.js` - API configuration\n";
+        readme += "- `style.css` - Styling\n\n";
+        
+        return readme;
+    }
+
+    /// <summary>
+    /// Generates README content for backend-only repository
+    /// </summary>
+    private string GenerateBackendReadmeContent(string projectTitle, string? databaseConnectionString, string? webApiUrl = null, string? swaggerUrl = null)
+    {
+        var readme = $"# {projectTitle} - Backend API\n\n";
+
+        if (!string.IsNullOrWhiteSpace(databaseConnectionString))
+        {
+            readme += $"## Application Database\n\n";
+            readme += $"**Application DB Connection String:** `{databaseConnectionString}`\n\n";
+        }
+
+        if (!string.IsNullOrWhiteSpace(webApiUrl))
+        {
+            readme += $"## Web API\n\n";
+            readme += $"**WebApi URL:** {webApiUrl}\n\n";
+        }
+
+        if (!string.IsNullOrWhiteSpace(swaggerUrl))
+        {
+            readme += $"**Swagger API Tester URL:** {swaggerUrl}\n\n";
+        }
+
+        readme += "## Recommended Tools\n\n";
+        readme += "**Recommended SQL Editor tool (Free):** [pgAdmin](https://www.pgadmin.org/download/)\n\n";
+        
+        readme += "## Deployment\n\n";
+        readme += "This backend is configured for Railway deployment using nixpacks.toml.\n";
 
         return readme;
     }
@@ -1641,6 +2761,9 @@ public class GitHubService : IGitHubService
                 <li>Replace this page with your amazing end product!</li>
             </ul>
         </div>
+
+        <button id=""testButton"" onclick=""testBackend()"">Click Me</button>
+        <div id=""response""></div>
         
         <div class=""footer"">
             <p>
@@ -1649,8 +2772,2207 @@ public class GitHubService : IGitHubService
             </p>
         </div>
     </div>
+    <script src=""config.js""></script>
+    <script>
+        // Debug: Log config on load
+        window.addEventListener('DOMContentLoaded', function() {{
+            console.log('📋 Config loaded:', CONFIG);
+            console.log('📋 API_URL from config:', CONFIG?.API_URL);
+        }});
+        
+        async function testBackend() {{
+            const button = document.getElementById('testButton');
+            const responseDiv = document.getElementById('response');
+            
+            button.disabled = true;
+            button.textContent = 'Loading...';
+            responseDiv.className = '';
+            responseDiv.textContent = '';
+            
+            try {{
+                let apiUrl = CONFIG?.API_URL || '';
+                console.log('🔍 Original API_URL from config:', apiUrl);
+                
+                if (!apiUrl) {{
+                    throw new Error('API URL not configured in config.js');
+                }}
+                
+                // Ensure HTTPS for Railway domains (fix Mixed Content errors)
+                if (apiUrl.includes('railway.app')) {{
+                    if (apiUrl.startsWith('http://')) {{
+                        apiUrl = apiUrl.replace('http://', 'https://');
+                        console.warn('⚠️ Converted HTTP to HTTPS for Railway domain');
+                    }}
+                    if (!apiUrl.startsWith('https://')) {{
+                        apiUrl = 'https://' + apiUrl.replace(/^https?:\/\//, '');
+                        console.warn('⚠️ Added HTTPS protocol to Railway domain');
+                    }}
+                }}
+                
+                // Remove trailing slash from base URL if present
+                apiUrl = apiUrl.replace(/\/$/, '');
+                console.log('✅ Final API_URL (after normalization):', apiUrl);
+                
+                // Add trailing slash to prevent Railway redirect (Railway redirects /api/test to /api/test/)
+                // This prevents Railway from redirecting HTTPS to HTTP
+                const fullUrl = apiUrl + '/api/test/';
+                console.log('🌐 Attempting to fetch:', fullUrl);
+                console.log('🌐 Full URL type check:', typeof fullUrl, 'Starts with https?:', fullUrl.startsWith('https://'));
+                
+                // Check if URL is a Railway project URL (not a service URL)
+                if (apiUrl.includes('railway.app/project/')) {{
+                    responseDiv.className = 'error';
+                    responseDiv.innerHTML = `
+                        <strong>❌ Configuration Error:</strong><br>
+                        <strong>The API URL is pointing to a Railway project page, not a service URL.</strong><br><br>
+                        <strong>Current URL:</strong> <code>${{apiUrl}}</code><br><br>
+                        <strong>Issue:</strong><br>
+                        Railway project pages (<code>railway.app/project/...</code>) are not API endpoints.<br>
+                        Your backend service needs to be deployed first to get a real API URL.<br><br>
+                        <strong>Solution:</strong><br>
+                        1. Deploy your backend code to Railway (push to GitHub and connect to Railway)<br>
+                        2. After deployment, Railway will generate a service URL like: <code>https://your-service-name.railway.app</code><br>
+                        3. Update <code>config.js</code> with the actual service URL<br>
+                        4. The service URL can be found in Railway dashboard: Service → Settings → Domains<br><br>
+                        <strong>Note:</strong> The backend code already includes CORS configuration, so once deployed with the correct URL, it will work.
+                    `;
+                    console.error('Invalid API URL (Railway project URL):', apiUrl);
+                    return;
+                }}
+                
+                // Final validation - ensure URL is definitely HTTPS
+                if (!fullUrl.startsWith('https://')) {{
+                    throw new Error('❌ CRITICAL: URL is not HTTPS! URL: ' + fullUrl);
+                }}
+                
+                let response;
+                try {{
+                    // Use fetch with explicit options
+                    console.log('📡 Making fetch request with explicit options...');
+                    console.log('📡 Full URL before fetch (stringified):', String(fullUrl));
+                    console.log('📡 Full URL type:', typeof fullUrl);
+                    console.log('📡 Full URL startsWith https?:', String(fullUrl).startsWith('https://'));
+                    
+                    const controller = new AbortController();
+                    const timeoutId = setTimeout(() => controller.abort(), 10000); // 10 second timeout
+                    
+                    // Create URL object to ensure it's valid and has correct protocol
+                    const urlObj = new URL(fullUrl);
+                    console.log('📡 URL object protocol:', urlObj.protocol);
+                    console.log('📡 URL object href:', urlObj.href);
+                    
+                    // Force HTTPS protocol
+                    if (urlObj.protocol !== 'https:') {{
+                        urlObj.protocol = 'https:';
+                        console.warn('⚠️ FORCED protocol to HTTPS:', urlObj.href);
+                    }}
+                    
+                    const finalFetchUrl = urlObj.href;
+                    console.log('📡 Final fetch URL:', finalFetchUrl);
+                    
+                    response = await fetch(finalFetchUrl, {{
+                        method: 'GET',
+                        mode: 'cors',
+                        credentials: 'omit',
+                        redirect: 'error', // Fail on redirect to catch HTTPS->HTTP redirects
+                        signal: controller.signal,
+                        headers: {{
+                            'Accept': 'application/json'
+                        }}
+                    }});
+                    
+                    clearTimeout(timeoutId);
+                    console.log('✅ Fetch completed, status:', response.status, 'Final URL:', response.url);
+                }} catch (fetchError) {{
+                    // Network error - check if it's a CORS error or connection error
+                    const isCorsError = fetchError.message.includes('CORS') || 
+                                       (fetchError.name === 'TypeError' && fetchError.message.includes('Failed to fetch'));
+                    
+                    let errorDetails = '';
+                    if (isCorsError) {{
+                        errorDetails = `
+                            <strong>❌ CORS Error:</strong><br>
+                            <strong>The API server is not allowing requests from this origin.</strong><br><br>
+                            <strong>Details:</strong><br>
+                            • URL: <code>${{fullUrl}}</code><br>
+                            • Origin: <code>${{window.location.origin}}</code><br>
+                            • Error: ${{fetchError.message}}<br><br>
+                            <strong>Possible causes:</strong><br>
+                            • Backend CORS is not configured correctly<br>
+                            • Service is not deployed or offline<br>
+                            • Wrong API URL (might be pointing to project page instead of service)<br><br>
+                            <strong>Note:</strong> If your backend is deployed, make sure CORS allows your GitHub Pages domain.<br>
+                        `;
+                    }} else {{
+                        errorDetails = `
+                            <strong>❌ Connection Error:</strong><br>
+                            <strong>Cannot connect to the API server</strong><br><br>
+                            <strong>Details:</strong><br>
+                            • URL: <code>${{fullUrl}}</code><br>
+                            • Error: ${{fetchError.message}}<br><br>
+                            <strong>Possible causes:</strong><br>
+                            • Railway service is not deployed yet<br>
+                            • Service is offline or crashed<br>
+                            • Network connectivity problem<br>
+                            • Wrong API URL<br><br>
+                            <strong>Next steps:</strong><br>
+                            1. Check Railway dashboard - is the service deployed?<br>
+                            2. Check service logs in Railway<br>
+                            3. Verify the API URL in config.js is the service URL (not project URL)<br>
+                            4. Service URL should be like: <code>https://your-service-name.railway.app</code><br>
+                        `;
+                    }}
+                    
+                    responseDiv.className = 'error';
+                    responseDiv.innerHTML = errorDetails;
+                    console.error('Fetch error:', fetchError);
+                    return;
+                }}
+                
+                console.log('Response status:', response.status, response.statusText);
+                
+                if (response.ok) {{
+                    const data = await response.json();
+                    responseDiv.className = 'success';
+                    responseDiv.innerHTML = '<strong>✅ Success!</strong><br>Backend API is working. Received ' + data.length + ' test projects.';
+                }} else {{
+                    // HTTP error response
+                    let errorText = '';
+                    try {{
+                        errorText = await response.text();
+                    }} catch (e) {{
+                        errorText = 'Could not read error response';
+                    }}
+                    
+                    responseDiv.className = 'error';
+                    responseDiv.innerHTML = `
+                        <strong>❌ API Error:</strong><br>
+                        <strong>HTTP Status: ${{response.status}} ${{response.statusText}}</strong><br><br>
+                        <strong>URL:</strong> <code>${{fullUrl}}</code><br>
+                        <strong>Response:</strong> <pre>${{errorText.substring(0, 200)}}</pre>
+                    `;
+                    console.error('API error:', response.status, errorText);
+                }}
+            }} catch (error) {{
+                responseDiv.className = 'error';
+                responseDiv.innerHTML = `
+                    <strong>❌ Unexpected Error:</strong><br>
+                    <strong>${{error.name || 'Error'}}:</strong> ${{error.message}}<br><br>
+                    <strong>Stack trace:</strong><br>
+                    <pre style=""font-size: 10px; max-height: 200px; overflow: auto;"">${{error.stack || 'No stack trace available'}}</pre>
+                `;
+                console.error('Unexpected error:', error);
+            }} finally {{
+                button.disabled = false;
+                button.textContent = 'Click Me';
+            }}
+        }}
+    </script>
+    <link rel=""stylesheet"" href=""style.css"">
 </body>
 </html>";
+    }
+
+    private string GenerateTestProjectsSqlScript()
+    {
+        return @"-- TestProjects table for initial project setup
+-- This table is used for testing and learning database interactions
+
+CREATE TABLE IF NOT EXISTS ""TestProjects"" (
+    ""Id"" SERIAL PRIMARY KEY,
+    ""Name"" VARCHAR(255) NOT NULL
+);
+
+-- Insert mock data
+INSERT INTO ""TestProjects"" (""Name"") VALUES
+    ('Sample Project 1'),
+    ('Sample Project 2'),
+    ('Sample Project 3'),
+    ('Learning Project'),
+    ('Test Project');
+";
+    }
+
+    private Dictionary<string, string> GenerateBackendFiles(string programmingLanguage, string? webApiUrl)
+    {
+        var files = new Dictionary<string, string>();
+
+        switch (programmingLanguage?.ToLowerInvariant())
+        {
+            case "c#":
+            case "csharp":
+                files = GenerateCSharpBackend(webApiUrl);
+                break;
+            case "python":
+                files = GeneratePythonBackend(webApiUrl);
+                break;
+            case "nodejs":
+            case "node.js":
+            case "node":
+                files = GenerateNodeJSBackend(webApiUrl);
+                break;
+            case "java":
+                files = GenerateJavaBackend(webApiUrl);
+                break;
+            default:
+                // Default to C# if language not recognized
+                _logger.LogWarning("Unknown programming language '{Language}', defaulting to C#", programmingLanguage);
+                files = GenerateCSharpBackend(webApiUrl);
+                break;
+        }
+
+        return files;
+    }
+
+    private Dictionary<string, string> GenerateCSharpBackend(string? webApiUrl)
+    {
+        var files = new Dictionary<string, string>();
+
+        // TestProjects Model
+        files["backend/Models/TestProjects.cs"] = @"using System.ComponentModel.DataAnnotations;
+using System.ComponentModel.DataAnnotations.Schema;
+
+namespace Backend.Models;
+
+public class TestProjects
+{
+    [Key]
+    [DatabaseGenerated(DatabaseGeneratedOption.Identity)]
+    public int Id { get; set; }
+
+    [Required]
+    [MaxLength(255)]
+    public string Name { get; set; } = string.Empty;
+}
+";
+
+        // TestController
+        files["backend/Controllers/TestController.cs"] = @"using Microsoft.AspNetCore.Mvc;
+using Backend.Models;
+using Npgsql;
+
+namespace Backend.Controllers;
+
+[ApiController]
+[Route(""api/[controller]"")]
+public class TestController : ControllerBase
+{
+    private readonly string _connectionString;
+
+    public TestController(IConfiguration configuration)
+    {
+        var rawConnectionString = configuration.GetConnectionString(""DefaultConnection"") 
+            ?? Environment.GetEnvironmentVariable(""DATABASE_URL"") 
+            ?? throw new InvalidOperationException(""Database connection string not found"");
+        
+        // Convert PostgreSQL URL to Npgsql connection string format if needed
+        _connectionString = ConvertPostgresUrlToConnectionString(rawConnectionString);
+    }
+    
+    private string ConvertPostgresUrlToConnectionString(string connectionString)
+    {
+        // If it's already a connection string (not a URL), return as-is
+        if (!connectionString.StartsWith(""postgresql://"", StringComparison.OrdinalIgnoreCase) &&
+            !connectionString.StartsWith(""postgres://"", StringComparison.OrdinalIgnoreCase))
+        {
+            return connectionString;
+        }
+        
+        try
+        {
+            var uri = new Uri(connectionString);
+            var builder = new System.Text.StringBuilder();
+            
+            // Extract components from URL
+            var host = uri.Host;
+            var port = uri.Port > 0 ? uri.Port : 5432;
+            var database = uri.AbsolutePath.TrimStart('/');
+            var username = Uri.UnescapeDataString(uri.UserInfo.Split(':')[0]);
+            var password = uri.UserInfo.Contains(':') 
+                ? Uri.UnescapeDataString(uri.UserInfo.Substring(uri.UserInfo.IndexOf(':') + 1))
+                : """";
+            
+            // Build Npgsql connection string
+            builder.Append($""Host={host};Port={port};Database={database};Username={username}"");
+            if (!string.IsNullOrEmpty(password))
+            {
+                builder.Append($"";Password={password}"");
+            }
+            
+            // Parse query string for additional parameters (e.g., sslmode)
+            var sslMode = ""Require"";
+            if (!string.IsNullOrEmpty(uri.Query) && uri.Query.Length > 1)
+            {
+                var queryString = uri.Query.Substring(1); // Remove '?'
+                var queryParams = queryString.Split('&');
+                foreach (var param in queryParams)
+                {
+                    var parts = param.Split('=');
+                    if (parts.Length == 2 && parts[0].Equals(""sslmode"", StringComparison.OrdinalIgnoreCase))
+                    {
+                        sslMode = Uri.UnescapeDataString(parts[1]);
+                        break;
+                    }
+                }
+            }
+            builder.Append($"";SSL Mode={sslMode}"");
+            
+            return builder.ToString();
+        }
+        catch
+        {
+            // If parsing fails, return original (Npgsql might handle it)
+            return connectionString;
+        }
+    }
+
+    // GET: api/test
+    [HttpGet]
+    public async Task<ActionResult<IEnumerable<TestProjects>>> GetAll()
+    {
+        var projects = new List<TestProjects>();
+        using var conn = new NpgsqlConnection(_connectionString);
+        await conn.OpenAsync();
+        var quote = Convert.ToChar(34).ToString(); // Double quote for PostgreSQL identifier quoting
+        var sql = ""SELECT "" + quote + ""Id"" + quote + "", "" + quote + ""Name"" + quote + "" FROM "" + quote + ""TestProjects"" + quote + "" ORDER BY "" + quote + ""Id"" + quote + "" "";
+        using var cmd = new NpgsqlCommand(sql, conn);
+        using var reader = await cmd.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            projects.Add(new TestProjects
+            {
+                Id = reader.GetInt32(0),
+                Name = reader.GetString(1)
+            });
+        }
+        return Ok(projects);
+    }
+
+    // GET: api/test/5
+    [HttpGet(""{id}"")]
+    public async Task<ActionResult<TestProjects>> Get(int id)
+    {
+        using var conn = new NpgsqlConnection(_connectionString);
+        await conn.OpenAsync();
+        var quote = Convert.ToChar(34).ToString(); // Double quote for PostgreSQL identifier quoting
+        var sql = ""SELECT "" + quote + ""Id"" + quote + "", "" + quote + ""Name"" + quote + "" FROM "" + quote + ""TestProjects"" + quote + "" WHERE "" + quote + ""Id"" + quote + "" = @id "";
+        using var cmd = new NpgsqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue(""id"", id);
+        using var reader = await cmd.ExecuteReaderAsync();
+        if (await reader.ReadAsync())
+        {
+            return Ok(new TestProjects
+            {
+                Id = reader.GetInt32(0),
+                Name = reader.GetString(1)
+            });
+        }
+        return NotFound();
+    }
+
+    // POST: api/test
+    [HttpPost]
+    public async Task<ActionResult<TestProjects>> Create([FromBody] TestProjects project)
+    {
+        using var conn = new NpgsqlConnection(_connectionString);
+        await conn.OpenAsync();
+        var quote = Convert.ToChar(34).ToString(); // Double quote for PostgreSQL identifier quoting
+        var sql = ""INSERT INTO "" + quote + ""TestProjects"" + quote + "" ("" + quote + ""Name"" + quote + "") VALUES (@name) RETURNING "" + quote + ""Id"" + quote + "" "";
+        using var cmd = new NpgsqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue(""name"", project.Name);
+        var id = await cmd.ExecuteScalarAsync();
+        project.Id = Convert.ToInt32(id);
+        return CreatedAtAction(nameof(Get), new { id = project.Id }, project);
+    }
+
+    // PUT: api/test/5
+    [HttpPut(""{id}"")]
+    public async Task<IActionResult> Update(int id, [FromBody] TestProjects project)
+    {
+        using var conn = new NpgsqlConnection(_connectionString);
+        await conn.OpenAsync();
+        var quote = Convert.ToChar(34).ToString(); // Double quote for PostgreSQL identifier quoting
+        var sql = ""UPDATE "" + quote + ""TestProjects"" + quote + "" SET "" + quote + ""Name"" + quote + "" = @name WHERE "" + quote + ""Id"" + quote + "" = @id "";
+        using var cmd = new NpgsqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue(""name"", project.Name);
+        cmd.Parameters.AddWithValue(""id"", id);
+        var rowsAffected = await cmd.ExecuteNonQueryAsync();
+        if (rowsAffected == 0) return NotFound();
+        return NoContent();
+    }
+
+    // DELETE: api/test/5
+    [HttpDelete(""{id}"")]
+    public async Task<IActionResult> Delete(int id)
+    {
+        using var conn = new NpgsqlConnection(_connectionString);
+        await conn.OpenAsync();
+        var quote = Convert.ToChar(34).ToString(); // Double quote for PostgreSQL identifier quoting
+        var sql = ""DELETE FROM "" + quote + ""TestProjects"" + quote + "" WHERE "" + quote + ""Id"" + quote + "" = @id "";
+        using var cmd = new NpgsqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue(""id"", id);
+        var rowsAffected = await cmd.ExecuteNonQueryAsync();
+        if (rowsAffected == 0) return NotFound();
+        return NoContent();
+    }
+}
+";
+
+        // Program.cs
+        files["backend/Program.cs"] = @"var builder = WebApplication.CreateBuilder(args);
+
+// Add services to the container
+builder.Services.AddControllers();
+builder.Services.AddEndpointsApiExplorer();
+builder.Services.AddSwaggerGen();
+
+// CORS configuration
+builder.Services.AddCors(options =>
+{
+    options.AddPolicy(""AllowAll"", policy =>
+    {
+        policy.AllowAnyOrigin()
+              .AllowAnyMethod()
+              .AllowAnyHeader();
+    });
+});
+
+// Database connection string from Railway environment variable
+// Handle PostgreSQL URLs (e.g., from Neon) by converting to Npgsql connection string format
+var rawConnectionString = Environment.GetEnvironmentVariable(""DATABASE_URL"");
+if (!string.IsNullOrEmpty(rawConnectionString))
+{
+    var connectionString = rawConnectionString;
+    
+    // If it's a PostgreSQL URL (postgresql://), parse and convert it
+    if (connectionString.StartsWith(""postgresql://"", StringComparison.OrdinalIgnoreCase) ||
+        connectionString.StartsWith(""postgres://"", StringComparison.OrdinalIgnoreCase))
+    {
+        try
+        {
+            var uri = new Uri(connectionString);
+            var connStringBuilder = new System.Text.StringBuilder();
+            
+            // Extract components from URL
+            var dbHost = uri.Host;
+            var dbPort = uri.Port > 0 ? uri.Port : 5432;
+            var database = uri.AbsolutePath.TrimStart('/');
+            var username = Uri.UnescapeDataString(uri.UserInfo.Split(':')[0]);
+            var password = uri.UserInfo.Contains(':') 
+                ? Uri.UnescapeDataString(uri.UserInfo.Substring(uri.UserInfo.IndexOf(':') + 1))
+                : """";
+            
+            // Build Npgsql connection string
+            connStringBuilder.Append($""Host={dbHost};Port={dbPort};Database={database};Username={username}"");
+            if (!string.IsNullOrEmpty(password))
+            {
+                connStringBuilder.Append($"";Password={password}"");
+            }
+            
+            // Parse query string for additional parameters (e.g., sslmode)
+            var sslMode = ""Require"";
+            if (!string.IsNullOrEmpty(uri.Query) && uri.Query.Length > 1)
+            {
+                var queryString = uri.Query.Substring(1); // Remove '?'
+                var queryParams = queryString.Split('&');
+                foreach (var param in queryParams)
+                {
+                    var parts = param.Split('=');
+                    if (parts.Length == 2 && parts[0].Equals(""sslmode"", StringComparison.OrdinalIgnoreCase))
+                    {
+                        sslMode = Uri.UnescapeDataString(parts[1]);
+                        break;
+                    }
+                }
+            }
+            connStringBuilder.Append($"";SSL Mode={sslMode}"");
+            
+            connectionString = connStringBuilder.ToString();
+        }
+        catch (Exception ex)
+        {
+            // If parsing fails, log and use original connection string (Npgsql might handle it)
+            Console.WriteLine($""Warning: Failed to parse PostgreSQL URL: {{ex.Message}}"");
+        }
+    }
+    
+    builder.Configuration[""ConnectionStrings:DefaultConnection""] = connectionString;
+}
+
+// Configure URL for Railway deployment
+var port = Environment.GetEnvironmentVariable(""PORT"");
+var url = string.IsNullOrEmpty(port) ? ""http://0.0.0.0:8080"" : $""http://0.0.0.0:{port}"";
+builder.WebHost.UseUrls(url);
+
+var app = builder.Build();
+
+// Enable Swagger in all environments (including production)
+app.UseSwagger();
+app.UseSwaggerUI();
+
+app.UseCors(""AllowAll"");
+app.UseAuthorization();
+app.MapControllers();
+
+// Add a simple root route to verify the service is running
+app.MapGet(""/"", () => new { 
+    message = ""Backend API is running"", 
+    status = ""ok"",
+    swagger = ""/swagger"",
+    api = ""/api/test""
+});
+
+app.Run();
+";
+
+        // appsettings.json
+        files["backend/appsettings.json"] = @"{
+  ""Logging"": {
+    ""LogLevel"": {
+      ""Default"": ""Information"",
+      ""Microsoft.AspNetCore"": ""Warning""
+    }
+  },
+  ""AllowedHosts"": ""*""
+}
+";
+
+        // .csproj file
+        files["backend/Backend.csproj"] = @"<Project Sdk=""Microsoft.NET.Sdk.Web"">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include=""Npgsql"" Version=""8.0.0"" />
+    <PackageReference Include=""Swashbuckle.AspNetCore"" Version=""6.5.0"" />
+  </ItemGroup>
+</Project>
+";
+
+        // Note: Railway configuration files are generated separately based on programming language in GenerateRailwayConfigFiles
+        // Structure:
+        // - nixpacks.toml at REPO ROOT (Railway expects this at root, build commands use 'cd backend &&' to access backend files)
+
+        // Note: We don't create a backend-specific README.md here to avoid conflict with root README.md
+        // The root README.md contains project overview, backend-specific docs can be added later
+
+        return files;
+    }
+    
+    /// <summary>
+    /// Generates Railway configuration files (nixpacks.toml) based on programming language
+    /// </summary>
+    private Dictionary<string, string> GenerateRailwayConfigFiles(string programmingLanguage)
+    {
+        var files = new Dictionary<string, string>();
+        
+        switch (programmingLanguage?.ToLowerInvariant())
+        {
+            case "c#":
+            case "csharp":
+                // .NET/C# backend - backend files are in backend/ folder
+                // Railway expects nixpacks.toml at REPO ROOT, so we put it there
+                // The build commands will cd into backend/ directory
+                files["nixpacks.toml"] = @"# Nixpacks configuration for Railway - .NET/C# Backend
+# Backend files are in backend/ folder, so we cd into it for all commands
+
+[phases.setup]
+nixPkgs = { dotnet = ""8.0"" }
+
+[phases.install]
+cmds = [
+  ""cd backend && dotnet restore Backend.csproj""
+]
+
+[phases.build]
+cmds = [
+  ""cd backend && dotnet publish Backend.csproj -c Release -o /app/publish""
+]
+
+[start]
+cmd = ""dotnet /app/publish/Backend.dll""
+";
+                break;
+                
+            case "python":
+                // Python/FastAPI backend - backend files are in backend/ folder
+                // Railway expects nixpacks.toml at REPO ROOT
+                files["nixpacks.toml"] = @"# Nixpacks configuration for Railway - Python/FastAPI Backend
+# Railway will build from repo root, then cd into backend/ directory
+# Note: No detectors specified - we provide explicit phases
+
+[phases.setup]
+nixPkgs = { python = ""3.12"" }
+
+[phases.install]
+cmds = [
+  ""cd backend && pip install -r requirements.txt""
+]
+
+[phases.build]
+cmds = [
+  ""echo 'Build complete'""
+]
+
+[start]
+cmd = ""cd backend && uvicorn main:app --host 0.0.0.0 --port $PORT""
+";
+                break;
+                
+            case "nodejs":
+            case "node.js":
+            case "node":
+                // Node.js/Express backend - backend files are in backend/ folder
+                // Railway expects nixpacks.toml at REPO ROOT
+                files["nixpacks.toml"] = @"# Nixpacks configuration for Railway - Node.js/Express Backend
+# Railway will build from repo root, then cd into backend/ directory
+# Note: No detectors specified - we provide explicit phases
+
+[phases.setup]
+nixPkgs = { node = ""18"" }
+
+[phases.install]
+cmds = [
+  ""cd backend && npm install""
+]
+
+[phases.build]
+cmds = [
+  ""echo 'Build complete'""
+]
+
+[start]
+cmd = ""cd backend && node app.js""
+";
+                break;
+                
+            case "java":
+                // Java/Spring Boot backend - backend files are in backend/ folder
+                // Railway expects nixpacks.toml at REPO ROOT
+                files["nixpacks.toml"] = @"# Nixpacks configuration for Railway - Java/Spring Boot Backend
+# Railway will build from repo root, then cd into backend/ directory
+# Note: No detectors specified - we provide explicit phases
+
+[phases.setup]
+nixPkgs = { jdk = ""17"" }
+
+[phases.install]
+cmds = [
+  ""cd backend && mvn clean install || echo 'Maven not found, assuming Gradle'""
+]
+
+[phases.build]
+cmds = [
+  ""cd backend && mvn package || gradle build || echo 'Build system not detected'""
+]
+
+[start]
+cmd = ""cd backend && java -jar target/*.jar""
+";
+                break;
+                
+            default:
+                // Default to .NET if language not recognized - backend files are in backend/ folder
+                // Railway expects nixpacks.toml at REPO ROOT
+                files["nixpacks.toml"] = @"# Nixpacks configuration for Railway - Default (.NET)
+# Railway will build from repo root, then cd into backend/ directory
+# Note: No detectors specified - we provide explicit phases
+
+[phases.setup]
+nixPkgs = { csharp = ""8.0"" }
+
+[phases.install]
+cmds = [
+  ""cd backend && dotnet restore Backend.csproj""
+]
+
+[phases.build]
+cmds = [
+  ""cd backend && dotnet publish Backend.csproj -c Release -o /app/publish""
+]
+
+[start]
+cmd = ""dotnet /app/publish/Backend.dll""
+";
+                break;
+        }
+        
+        return files;
+    }
+
+    /// <summary>
+    /// Generates backend files at root level (no "backend/" prefix) for separate backend repository
+    /// </summary>
+    private Dictionary<string, string> GenerateBackendFilesAtRoot(string programmingLanguage, string? webApiUrl)
+    {
+        // First generate files with "backend/" prefix using existing method
+        var filesWithPrefix = GenerateBackendFiles(programmingLanguage, webApiUrl);
+        
+        // Convert to root-level paths by removing "backend/" prefix
+        var filesAtRoot = new Dictionary<string, string>();
+        foreach (var file in filesWithPrefix)
+        {
+            var rootPath = file.Key.StartsWith("backend/") 
+                ? file.Key.Substring("backend/".Length) 
+                : file.Key;
+            filesAtRoot[rootPath] = file.Value;
+        }
+        
+        // Also generate Railway config files at root (update nixpacks.toml to not use "cd backend &&")
+        var railwayConfigFiles = GenerateRailwayConfigFilesAtRoot(programmingLanguage);
+        foreach (var file in railwayConfigFiles)
+        {
+            filesAtRoot[file.Key] = file.Value;
+        }
+        
+        return filesAtRoot;
+    }
+
+    /// <summary>
+    /// Generates Railway configuration files for root-level backend files (no "backend/" subdirectory)
+    /// </summary>
+    private Dictionary<string, string> GenerateRailwayConfigFilesAtRoot(string programmingLanguage)
+    {
+        var files = new Dictionary<string, string>();
+        
+        switch (programmingLanguage?.ToLowerInvariant())
+        {
+            case "c#":
+            case "csharp":
+                // .NET/C# backend - files are at root, no need to cd
+                files["nixpacks.toml"] = @"# Nixpacks configuration for Railway - .NET/C# Backend
+# Backend files are at root level
+
+[phases.setup]
+nixPkgs = { dotnet = ""8.0"" }
+
+[phases.install]
+cmds = [
+  ""dotnet restore Backend.csproj""
+]
+
+[phases.build]
+cmds = [
+  ""dotnet publish Backend.csproj -c Release -o /app/publish""
+]
+
+[start]
+cmd = ""dotnet /app/publish/Backend.dll""
+";
+                break;
+                
+            case "python":
+                // Python/FastAPI backend - files are at root
+                files["nixpacks.toml"] = @"# Nixpacks configuration for Railway - Python/FastAPI Backend
+# Backend files are at root level
+
+[phases.setup]
+nixPkgs = { python = ""3.12"" }
+
+[phases.install]
+cmds = [
+  ""pip install -r requirements.txt""
+]
+
+[phases.build]
+cmds = [
+  ""echo 'Build complete'""
+]
+
+[start]
+cmd = ""python -m uvicorn main:app --host 0.0.0.0 --port $PORT --lifespan on""
+";
+                break;
+                
+            case "nodejs":
+            case "node.js":
+            case "node":
+                // Node.js/Express backend - files are at root
+                files["nixpacks.toml"] = @"# Nixpacks configuration for Railway - Node.js/Express Backend
+# Backend files are at root level
+
+[phases.setup]
+nixPkgs = { node = ""18"" }
+
+[phases.install]
+cmds = [
+  ""npm install""
+]
+
+[phases.build]
+cmds = [
+  ""echo 'Build complete'""
+]
+
+[start]
+cmd = ""node app.js""
+";
+                break;
+                
+            case "java":
+                // Java/Spring Boot backend - files are at root
+                files["nixpacks.toml"] = @"# Nixpacks configuration for Railway - Java/Spring Boot Backend
+# Backend files are at root level
+
+[phases.setup]
+nixPkgs = { jdk = ""17"" }
+
+[phases.install]
+cmds = [
+  ""mvn clean install || echo 'Maven not found, assuming Gradle'""
+]
+
+[phases.build]
+cmds = [
+  ""mvn package || gradle build || echo 'Build system not detected'""
+]
+
+[start]
+cmd = ""java -jar target/*.jar""
+";
+                break;
+                
+            default:
+                // Default to .NET if language not recognized
+                files["nixpacks.toml"] = @"# Nixpacks configuration for Railway - Default (.NET)
+# Backend files are at root level
+
+[phases.setup]
+nixPkgs = { dotnet = ""8.0"" }
+
+[phases.install]
+cmds = [
+  ""dotnet restore Backend.csproj""
+]
+
+[phases.build]
+cmds = [
+  ""dotnet publish Backend.csproj -c Release -o /app/publish""
+]
+
+[start]
+cmd = ""dotnet /app/publish/Backend.dll""
+";
+                break;
+        }
+        
+        return files;
+    }
+
+    private Dictionary<string, string> GeneratePythonBackend(string? webApiUrl)
+    {
+        var files = new Dictionary<string, string>();
+
+        // Models/TestProjects.py
+        files["backend/Models/TestProjects.py"] = @"from pydantic import BaseModel
+from typing import Optional
+
+class TestProjects(BaseModel):
+    id: Optional[int] = None
+    name: str
+";
+
+        // Controllers/TestController.py
+        files["backend/Controllers/TestController.py"] = @"from fastapi import APIRouter, HTTPException
+import os
+import sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from Models.TestProjects import TestProjects
+from psycopg import AsyncConnection
+from psycopg.rows import dict_row
+
+router = APIRouter(prefix=""/api/test"", tags=[""test""])
+
+async def get_db_connection():
+    """"""Get a database connection - only called when endpoint is accessed, not on import""""""
+    connection_string = os.getenv(""DATABASE_URL"")
+    if not connection_string:
+        raise HTTPException(status_code=500, detail=""DATABASE_URL environment variable not set"")
+    try:
+        # Use async connection for FastAPI async endpoints
+        # psycopg3 async connection - AsyncConnection.connect is the correct method
+        conn = await AsyncConnection.connect(connection_string, row_factory=dict_row)
+        return conn
+    except Exception as e:
+        error_msg = f""Database connection error: {str(e)}""
+        print(error_msg)
+        import traceback
+        print(traceback.format_exc())
+        raise HTTPException(status_code=503, detail=error_msg)
+
+@router.get(""/"")
+async def get_all():
+    conn = None
+    try:
+        conn = await get_db_connection()
+        async with conn.cursor() as cur:
+            await cur.execute('SELECT ""Id"", ""Name"" FROM ""TestProjects"" ORDER BY ""Id""')
+            results = await cur.fetchall()
+            await conn.commit()
+            return results
+    except Exception as e:
+        if conn:
+            await conn.rollback()
+        print(f""Error in get_all: {e}"")
+        raise HTTPException(status_code=500, detail=f""Database error: {str(e)}"")
+    finally:
+        if conn:
+            await conn.close()
+
+@router.get(""/{id}"")
+async def get(id: int):
+    conn = None
+    try:
+        conn = await get_db_connection()
+        async with conn.cursor() as cur:
+            await cur.execute('SELECT ""Id"", ""Name"" FROM ""TestProjects"" WHERE ""Id"" = %s', (id,))
+            result = await cur.fetchone()
+            if not result:
+                raise HTTPException(status_code=404, detail=""Project not found"")
+            await conn.commit()
+            return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        if conn:
+            await conn.rollback()
+        print(f""Error in get: {e}"")
+        raise HTTPException(status_code=500, detail=f""Database error: {str(e)}"")
+    finally:
+        if conn:
+            await conn.close()
+
+@router.post(""/"")
+async def create(project: TestProjects):
+    conn = None
+    try:
+        conn = await get_db_connection()
+        async with conn.cursor() as cur:
+            await cur.execute('INSERT INTO ""TestProjects"" (""Name"") VALUES (%s) RETURNING ""Id""', (project.name,))
+            result = await cur.fetchone()
+            project_id = result[""Id""]
+            await conn.commit()
+            project.id = project_id
+            return project
+    except Exception as e:
+        if conn:
+            await conn.rollback()
+        print(f""Error in create: {e}"")
+        raise HTTPException(status_code=500, detail=f""Database error: {str(e)}"")
+    finally:
+        if conn:
+            await conn.close()
+
+@router.put(""/{id}"")
+async def update(id: int, project: TestProjects):
+    conn = None
+    try:
+        conn = await get_db_connection()
+        async with conn.cursor() as cur:
+            await cur.execute('UPDATE ""TestProjects"" SET ""Name"" = %s WHERE ""Id"" = %s', (project.name, id))
+            if cur.rowcount == 0:
+                raise HTTPException(status_code=404, detail=""Project not found"")
+            await conn.commit()
+            return {""message"": ""Updated successfully""}
+    except HTTPException:
+        raise
+    except Exception as e:
+        if conn:
+            await conn.rollback()
+        print(f""Error in update: {e}"")
+        raise HTTPException(status_code=500, detail=f""Database error: {str(e)}"")
+    finally:
+        if conn:
+            await conn.close()
+
+@router.delete(""/{id}"")
+async def delete(id: int):
+    conn = None
+    try:
+        conn = await get_db_connection()
+        async with conn.cursor() as cur:
+            await cur.execute('DELETE FROM ""TestProjects"" WHERE ""Id"" = %s', (id,))
+            if cur.rowcount == 0:
+                raise HTTPException(status_code=404, detail=""Project not found"")
+            await conn.commit()
+            return {""message"": ""Deleted successfully""}
+    except HTTPException:
+        raise
+    except Exception as e:
+        if conn:
+            await conn.rollback()
+        print(f""Error in delete: {e}"")
+        raise HTTPException(status_code=500, detail=f""Database error: {str(e)}"")
+    finally:
+        if conn:
+            await conn.close()
+";
+
+        // main.py
+        files["backend/main.py"] = @"import os
+import sys
+import asyncio
+import traceback
+from contextlib import asynccontextmanager
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+
+# Add current directory to path for imports (where main.py is located)
+current_dir = os.path.dirname(os.path.abspath(__file__))
+if current_dir not in sys.path:
+    sys.path.insert(0, current_dir)
+
+# Note: Models and Controllers are subdirectories of current_dir (root level),
+# so they can be imported directly when current_dir is in sys.path
+
+# Lifespan context manager to handle startup/shutdown gracefully
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """"""Handle application lifespan events - startup and shutdown""""""
+    # Startup
+    print(""Starting Backend API..."")
+    try:
+        yield
+    except asyncio.CancelledError:
+        # Gracefully handle cancellation during shutdown
+        print(""Application shutdown requested"")
+        raise
+    finally:
+        # Shutdown
+        print(""Shutting down Backend API..."")
+
+app = FastAPI(title=""Backend API"", version=""1.0.0"", lifespan=lifespan)
+
+# CORS configuration - allow all origins for GitHub Pages deployments
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[""*""],  # Allow all origins (GitHub Pages uses *.github.io)
+    allow_credentials=True,
+    allow_methods=[""*""],  # Allow all HTTP methods (GET, POST, PUT, DELETE, OPTIONS)
+    allow_headers=[""*""],  # Allow all headers (for CORS preflight)
+)
+
+# Try to import and register router
+try:
+    from Controllers.TestController import router as test_router
+    app.include_router(test_router)
+except Exception as e:
+    print(f""Error importing TestController: {e}"")
+    print(f""Traceback: {traceback.format_exc()}"")
+    # Create a dummy router for error reporting
+    from fastapi import APIRouter
+    test_router = APIRouter(prefix=""/api/test"", tags=[""test""])
+    @test_router.get(""/"")
+    async def error_endpoint():
+        return {
+            ""error"": ""Failed to load TestController"",
+            ""details"": str(e),
+            ""traceback"": traceback.format_exc()
+        }
+    app.include_router(test_router)
+
+@app.get(""/"")
+async def root():
+    return {
+        ""message"": ""Backend API is running"",
+        ""status"": ""ok"",
+        ""swagger"": ""/docs"",
+        ""api"": ""/api/test""
+    }
+
+@app.get(""/swagger"")
+async def swagger_redirect():
+    """"""Redirect /swagger to /docs (FastAPI Swagger UI)""""""
+    from fastapi.responses import RedirectResponse
+    return RedirectResponse(url=""/docs"")
+
+@app.get(""/health"")
+async def health():
+    """"""Health check endpoint that doesn't require database""""""
+    return {
+        ""status"": ""healthy"",
+        ""service"": ""Backend API""
+    }
+
+if __name__ == ""__main__"":
+    import uvicorn
+    import asyncio
+    port = int(os.getenv(""PORT"", 8000))
+    print(f""Starting server on 0.0.0.0:{port}"")
+    # Use lifespan='on' to explicitly enable lifespan handling
+    uvicorn.run(app, host=""0.0.0.0"", port=port, lifespan=""on"")
+";
+
+        // requirements.txt
+        files["backend/requirements.txt"] = @"fastapi==0.115.0
+uvicorn==0.32.0
+psycopg[binary]==3.2.2
+pydantic==2.9.0
+";
+
+        // Note: README.md is created at root level, not here to avoid conflicts
+
+        return files;
+    }
+
+    private Dictionary<string, string> GenerateNodeJSBackend(string? webApiUrl)
+    {
+        var files = new Dictionary<string, string>();
+
+        // Models/TestProjects.js
+        files["backend/Models/TestProjects.js"] = @"class TestProjects {
+    constructor(id, name) {
+        this.id = id;
+        this.name = name;
+    }
+}
+
+module.exports = TestProjects;
+";
+
+        // Controllers/TestController.js
+        files["backend/Controllers/TestController.js"] = @"const { Pool } = require('pg');
+
+/**
+ * @swagger
+ * components:
+ *   schemas:
+ *     TestProject:
+ *       type: object
+ *       required:
+ *         - name
+ *       properties:
+ *         id:
+ *           type: integer
+ *           description: The auto-generated id of the project
+ *         name:
+ *           type: string
+ *           description: The name of the project
+ */
+
+const pool = new Pool({
+    connectionString: process.env.DATABASE_URL,
+    ssl: process.env.DATABASE_URL ? { rejectUnauthorized: false } : false
+});
+
+/**
+ * @swagger
+ * /api/test:
+ *   get:
+ *     summary: Get all test projects
+ *     tags: [Test]
+ *     responses:
+ *       200:
+ *         description: List of all test projects
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: array
+ *               items:
+ *                 $ref: '#/components/schemas/TestProject'
+ */
+const getAll = async (req, res) => {
+    try {
+        const result = await pool.query('SELECT ""Id"", ""Name"" FROM ""TestProjects"" ORDER BY ""Id""');
+        res.json(result.rows);
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+};
+
+/**
+ * @swagger
+ * /api/test/{id}:
+ *   get:
+ *     summary: Get a test project by ID
+ *     tags: [Test]
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         schema:
+ *           type: integer
+ *         required: true
+ *         description: The project ID
+ *     responses:
+ *       200:
+ *         description: The project data
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/TestProject'
+ *       404:
+ *         description: Project not found
+ */
+const getById = async (req, res) => {
+    try {
+        const { id } = req.params;
+        const result = await pool.query('SELECT ""Id"", ""Name"" FROM ""TestProjects"" WHERE ""Id"" = $1', [id]);
+        if (result.rows.length === 0) {
+            return res.status(404).json({ error: 'Project not found' });
+        }
+        res.json(result.rows[0]);
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+};
+
+/**
+ * @swagger
+ * /api/test:
+ *   post:
+ *     summary: Create a new test project
+ *     tags: [Test]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             $ref: '#/components/schemas/TestProject'
+ *     responses:
+ *       201:
+ *         description: The created project
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/TestProject'
+ */
+const create = async (req, res) => {
+    try {
+        const { name } = req.body;
+        const result = await pool.query('INSERT INTO ""TestProjects"" (""Name"") VALUES ($1) RETURNING ""Id"", ""Name""', [name]);
+        res.status(201).json(result.rows[0]);
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+};
+
+/**
+ * @swagger
+ * /api/test/{id}:
+ *   put:
+ *     summary: Update a test project
+ *     tags: [Test]
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         schema:
+ *           type: integer
+ *         required: true
+ *         description: The project ID
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             $ref: '#/components/schemas/TestProject'
+ *     responses:
+ *       200:
+ *         description: The updated project
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/TestProject'
+ *       404:
+ *         description: Project not found
+ */
+const update = async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { name } = req.body;
+        const result = await pool.query('UPDATE ""TestProjects"" SET ""Name"" = $1 WHERE ""Id"" = $2 RETURNING ""Id"", ""Name""', [name, id]);
+        if (result.rows.length === 0) {
+            return res.status(404).json({ error: 'Project not found' });
+        }
+        res.json(result.rows[0]);
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+};
+
+/**
+ * @swagger
+ * /api/test/{id}:
+ *   delete:
+ *     summary: Delete a test project
+ *     tags: [Test]
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         schema:
+ *           type: integer
+ *         required: true
+ *         description: The project ID
+ *     responses:
+ *       200:
+ *         description: Success message
+ *       404:
+ *         description: Project not found
+ */
+const remove = async (req, res) => {
+    try {
+        const { id } = req.params;
+        const result = await pool.query('DELETE FROM ""TestProjects"" WHERE ""Id"" = $1', [id]);
+        if (result.rowCount === 0) {
+            return res.status(404).json({ error: 'Project not found' });
+        }
+        res.json({ message: 'Deleted successfully' });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+};
+
+module.exports = {
+    getAll,
+    getById,
+    create,
+    update,
+    remove
+};
+";
+
+        // app.js
+        files["backend/app.js"] = @"const express = require('express');
+const cors = require('cors');
+const swaggerUi = require('swagger-ui-express');
+const swaggerJsdoc = require('swagger-jsdoc');
+const testController = require('./Controllers/TestController');
+
+const app = express();
+const PORT = process.env.PORT || 8080;
+
+app.use(cors());
+app.use(express.json());
+
+// Swagger configuration
+const swaggerOptions = {
+    definition: {
+        openapi: '3.0.0',
+        info: {
+            title: 'Backend API',
+            version: '1.0.0',
+            description: 'Backend API documentation'
+        },
+        servers: [
+            {
+                url: '/',
+                description: 'Current server'
+            }
+        ]
+    },
+    apis: ['./Controllers/*.js']
+};
+
+const swaggerSpec = swaggerJsdoc(swaggerOptions);
+app.use('/swagger', swaggerUi.serve, swaggerUi.setup(swaggerSpec));
+app.use('/docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec)); // Also support /docs like FastAPI
+
+// Routes
+app.get('/api/test', testController.getAll);
+app.get('/api/test/:id', testController.getById);
+app.post('/api/test', testController.create);
+app.put('/api/test/:id', testController.update);
+app.delete('/api/test/:id', testController.remove);
+
+app.get('/', (req, res) => {
+    res.json({ 
+        message: 'Backend API is running',
+        status: 'ok',
+        swagger: '/swagger',
+        api: '/api/test'
+    });
+});
+
+app.get('/health', (req, res) => {
+    res.json({ 
+        status: 'healthy',
+        service: 'Backend API'
+    });
+});
+
+app.listen(PORT, '0.0.0.0', () => {
+    console.log(`Server is running on 0.0.0.0:${PORT}`);
+});
+";
+
+        // package.json
+        files["backend/package.json"] = @"{
+  ""name"": ""backend"",
+  ""version"": ""1.0.0"",
+  ""description"": ""Backend API"",
+  ""main"": ""app.js"",
+  ""scripts"": {
+    ""start"": ""node app.js"",
+    ""dev"": ""nodemon app.js""
+  },
+  ""dependencies"": {
+    ""express"": ""^4.18.2"",
+    ""cors"": ""^2.8.5"",
+    ""pg"": ""^8.11.3"",
+    ""swagger-ui-express"": ""^5.0.0"",
+    ""swagger-jsdoc"": ""^6.2.8""
+  },
+  ""devDependencies"": {
+    ""nodemon"": ""^3.0.2""
+  }
+}
+";
+
+        // Note: README.md is created at root level, not here to avoid conflicts
+
+        return files;
+    }
+
+    private Dictionary<string, string> GenerateJavaBackend(string? webApiUrl)
+    {
+        var files = new Dictionary<string, string>();
+
+        // pom.xml - Maven configuration
+        files["backend/pom.xml"] = @"<?xml version=""1.0"" encoding=""UTF-8""?>
+<project xmlns=""http://maven.apache.org/POM/4.0.0""
+         xmlns:xsi=""http://www.w3.org/2001/XMLSchema-instance""
+         xsi:schemaLocation=""http://maven.apache.org/POM/4.0.0 
+         http://maven.apache.org/xsd/maven-4.0.0.xsd"">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-parent</artifactId>
+        <version>3.2.0</version>
+        <relativePath/>
+    </parent>
+
+    <groupId>com.backend</groupId>
+    <artifactId>backend</artifactId>
+    <version>1.0.0</version>
+    <name>Backend API</name>
+    <description>Backend API</description>
+
+    <properties>
+        <java.version>17</java.version>
+    </properties>
+
+    <dependencies>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-web</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-data-jpa</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.postgresql</groupId>
+            <artifactId>postgresql</artifactId>
+            <scope>runtime</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.springdoc</groupId>
+            <artifactId>springdoc-openapi-starter-webmvc-ui</artifactId>
+            <version>2.3.0</version>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-maven-plugin</artifactId>
+            </plugin>
+        </plugins>
+    </build>
+</project>
+";
+
+        // Application.java - Spring Boot main class
+        files["backend/src/main/java/com/backend/Application.java"] = "package com.backend;\n\n" +
+"import org.springframework.boot.SpringApplication;\n" +
+"import org.springframework.boot.autoconfigure.SpringBootApplication;\n\n" +
+"@SpringBootApplication\n" +
+"public class Application {\n" +
+"    public static void main(String[] args) {\n" +
+"        SpringApplication.run(Application.class, args);\n" +
+"    }\n" +
+"}\n";
+
+        // RootController.java - Root endpoint handler
+        files["backend/src/main/java/com/backend/Controllers/RootController.java"] = "package com.backend.Controllers;\n\n" +
+"import org.springframework.http.ResponseEntity;\n" +
+"import org.springframework.web.bind.annotation.GetMapping;\n" +
+"import org.springframework.web.bind.annotation.RestController;\n\n" +
+"import java.util.Map;\n\n" +
+"@RestController\n" +
+"public class RootController {\n\n" +
+"    @GetMapping(\"/\")\n" +
+"    public ResponseEntity<Map<String, String>> root() {\n" +
+"        return ResponseEntity.ok(Map.of(\n" +
+"            \"message\", \"Backend API is running\",\n" +
+"            \"status\", \"ok\",\n" +
+"            \"swagger\", \"/swagger-ui/index.html\",\n" +
+"            \"api\", \"/api/test\"\n" +
+"        ));\n" +
+"    }\n" +
+"}\n";
+
+        // DataSourceConfig.java - Configuration to convert DATABASE_URL to JDBC format
+        files["backend/src/main/java/com/backend/Config/DataSourceConfig.java"] = "package com.backend.Config;\n\n" +
+"import com.zaxxer.hikari.HikariConfig;\n" +
+"import com.zaxxer.hikari.HikariDataSource;\n" +
+"import org.springframework.context.annotation.Bean;\n" +
+"import org.springframework.context.annotation.Configuration;\n\n" +
+"import javax.sql.DataSource;\n" +
+"import java.net.URI;\n" +
+"import java.net.URLDecoder;\n" +
+"import java.nio.charset.StandardCharsets;\n\n" +
+"@Configuration\n" +
+"public class DataSourceConfig {\n\n" +
+"    private String safeDecode(String value) {\n" +
+"        try {\n" +
+"            return URLDecoder.decode(value, StandardCharsets.UTF_8);\n" +
+"        } catch (IllegalArgumentException e) {\n" +
+"            // If decoding fails (e.g., invalid % encoding), return original value\n" +
+"            return value;\n" +
+"        }\n" +
+"    }\n\n" +
+"    @Bean\n" +
+"    public DataSource dataSource() {\n" +
+"        String databaseUrl = System.getenv(\"DATABASE_URL\");\n" +
+"        \n" +
+"        if (databaseUrl == null || databaseUrl.isEmpty()) {\n" +
+"            throw new IllegalStateException(\"DATABASE_URL environment variable is not set\");\n" +
+"        }\n\n" +
+"        try {\n" +
+"            // Parse PostgreSQL URL format: postgresql://user:password@host:port/database\n" +
+"            URI dbUri = new URI(databaseUrl);\n" +
+"            \n" +
+"            String userInfo = dbUri.getUserInfo();\n" +
+"            String username;\n" +
+"            String password;\n" +
+"            \n" +
+"            if (userInfo != null && userInfo.contains(\":\")) {\n" +
+"                int colonIndex = userInfo.indexOf(\":\");\n" +
+"                username = userInfo.substring(0, colonIndex);\n" +
+"                password = userInfo.substring(colonIndex + 1);\n" +
+"            } else {\n" +
+"                username = userInfo != null ? userInfo : \"\";\n" +
+"                password = \"\";\n" +
+"            }\n" +
+"            \n" +
+"            // Safely decode username and password\n" +
+"            username = safeDecode(username);\n" +
+"            password = safeDecode(password);\n" +
+"            \n" +
+"            String host = dbUri.getHost();\n" +
+"            int port = dbUri.getPort() > 0 ? dbUri.getPort() : 5432;\n" +
+"            String database = dbUri.getPath().replaceFirst(\"/\", \"\");\n" +
+"            \n" +
+"            // Build JDBC URL\n" +
+"            String jdbcUrl = String.format(\"jdbc:postgresql://%s:%d/%s\", host, port, database);\n" +
+"            \n" +
+"            // Add query parameters if present (e.g., sslmode)\n" +
+"            if (dbUri.getQuery() != null && !dbUri.getQuery().isEmpty()) {\n" +
+"                jdbcUrl += \"?\" + dbUri.getQuery();\n" +
+"            }\n" +
+"            \n" +
+"            HikariConfig config = new HikariConfig();\n" +
+"            config.setJdbcUrl(jdbcUrl);\n" +
+"            config.setUsername(username);\n" +
+"            config.setPassword(password);\n" +
+"            config.setMaximumPoolSize(10);\n" +
+"            \n" +
+"            return new HikariDataSource(config);\n" +
+"        } catch (Exception e) {\n" +
+"            throw new IllegalStateException(\"Failed to parse DATABASE_URL: \" + e.getMessage(), e);\n" +
+"        }\n" +
+"    }\n" +
+"}\n";
+
+        // CorsConfig.java - CORS configuration
+        files["backend/src/main/java/com/backend/Config/CorsConfig.java"] = "package com.backend.Config;\n\n" +
+"import org.springframework.context.annotation.Bean;\n" +
+"import org.springframework.context.annotation.Configuration;\n" +
+"import org.springframework.web.servlet.config.annotation.CorsRegistry;\n" +
+"import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;\n\n" +
+"@Configuration\n" +
+"public class CorsConfig {\n\n" +
+"    @Bean\n" +
+"    public WebMvcConfigurer corsConfigurer() {\n" +
+"        return new WebMvcConfigurer() {\n" +
+"            @Override\n" +
+"            public void addCorsMappings(CorsRegistry registry) {\n" +
+"                registry.addMapping(\"/**\")\n" +
+"                        .allowedOrigins(\"*\")\n" +
+"                        .allowedMethods(\"GET\", \"POST\", \"PUT\", \"DELETE\", \"OPTIONS\")\n" +
+"                        .allowedHeaders(\"*\")\n" +
+"                        .allowCredentials(false);\n" +
+"            }\n" +
+"        };\n" +
+"    }\n" +
+"}\n";
+
+        // TestProjects.java - Model
+        files["backend/src/main/java/com/backend/Models/TestProjects.java"] = "package com.backend.Models;\n\n" +
+"import jakarta.persistence.*;\n\n" +
+"@Entity\n" +
+"@Table(name = \"TestProjects\")\n" +
+"public class TestProjects {\n" +
+"    @Id\n" +
+"    @GeneratedValue(strategy = GenerationType.IDENTITY)\n" +
+"    @Column(name = \"Id\")\n" +
+"    private Integer id;\n\n" +
+"    @Column(name = \"Name\", nullable = false, length = 255)\n" +
+"    private String name;\n\n" +
+"    public Integer getId() {\n" +
+"        return id;\n" +
+"    }\n\n" +
+"    public void setId(Integer id) {\n" +
+"        this.id = id;\n" +
+"    }\n\n" +
+"    public String getName() {\n" +
+"        return name;\n" +
+"    }\n\n" +
+"    public void setName(String name) {\n" +
+"        this.name = name;\n" +
+"    }\n" +
+"}\n";
+
+        // TestController.java - Controller
+        files["backend/src/main/java/com/backend/Controllers/TestController.java"] = "package com.backend.Controllers;\n\n" +
+"import com.backend.Models.TestProjects;\n" +
+"import org.springframework.beans.factory.annotation.Autowired;\n" +
+"import org.springframework.http.HttpStatus;\n" +
+"import org.springframework.http.ResponseEntity;\n" +
+"import org.springframework.web.bind.annotation.*;\n\n" +
+"import jakarta.persistence.EntityManager;\n" +
+"import jakarta.persistence.Query;\n" +
+"import java.util.List;\n" +
+"import java.util.Map;\n\n" +
+"@RestController\n" +
+"@RequestMapping(\"/api/test\")\n" +
+"@CrossOrigin(origins = \"*\")\n" +
+"public class TestController {\n\n" +
+"    @Autowired\n" +
+"    private EntityManager entityManager;\n\n" +
+"    @GetMapping(value = {\"\", \"/\"})\n" +
+"    public ResponseEntity<List<TestProjects>> getAll() {\n" +
+"        try {\n" +
+"            Query query = entityManager.createNativeQuery(\"SELECT \\\"Id\\\", \\\"Name\\\" FROM \\\"TestProjects\\\" ORDER BY \\\"Id\\\"\", TestProjects.class);\n" +
+"            @SuppressWarnings(\"unchecked\")\n" +
+"            List<TestProjects> projects = query.getResultList();\n" +
+"            return ResponseEntity.ok(projects);\n" +
+"        } catch (Exception e) {\n" +
+"            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();\n" +
+"        }\n" +
+"    }\n\n" +
+"    @GetMapping(\"/{id}\")\n" +
+"    public ResponseEntity<TestProjects> getById(@PathVariable Integer id) {\n" +
+"        try {\n" +
+"            Query query = entityManager.createNativeQuery(\"SELECT \\\"Id\\\", \\\"Name\\\" FROM \\\"TestProjects\\\" WHERE \\\"Id\\\" = :id\", TestProjects.class);\n" +
+"            query.setParameter(\"id\", id);\n" +
+"            @SuppressWarnings(\"unchecked\")\n" +
+"            List<TestProjects> results = query.getResultList();\n" +
+"            if (results.isEmpty()) {\n" +
+"                return ResponseEntity.notFound().build();\n" +
+"            }\n" +
+"            return ResponseEntity.ok(results.get(0));\n" +
+"        } catch (Exception e) {\n" +
+"            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();\n" +
+"        }\n" +
+"    }\n\n" +
+"    @PostMapping\n" +
+"    public ResponseEntity<TestProjects> create(@RequestBody Map<String, String> request) {\n" +
+"        try {\n" +
+"            String name = request.get(\"name\");\n" +
+"            Query query = entityManager.createNativeQuery(\"INSERT INTO \\\"TestProjects\\\" (\\\"Name\\\") VALUES (:name) RETURNING \\\"Id\\\", \\\"Name\\\"\", TestProjects.class);\n" +
+"            query.setParameter(\"name\", name);\n" +
+"            @SuppressWarnings(\"unchecked\")\n" +
+"            List<TestProjects> results = query.getResultList();\n" +
+"            if (results.isEmpty()) {\n" +
+"                return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();\n" +
+"            }\n" +
+"            return ResponseEntity.status(HttpStatus.CREATED).body(results.get(0));\n" +
+"        } catch (Exception e) {\n" +
+"            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();\n" +
+"        }\n" +
+"    }\n\n" +
+"    @PutMapping(\"/{id}\")\n" +
+"    public ResponseEntity<TestProjects> update(@PathVariable Integer id, @RequestBody Map<String, String> request) {\n" +
+"        try {\n" +
+"            String name = request.get(\"name\");\n" +
+"            Query query = entityManager.createNativeQuery(\"UPDATE \\\"TestProjects\\\" SET \\\"Name\\\" = :name WHERE \\\"Id\\\" = :id RETURNING \\\"Id\\\", \\\"Name\\\"\", TestProjects.class);\n" +
+"            query.setParameter(\"name\", name);\n" +
+"            query.setParameter(\"id\", id);\n" +
+"            @SuppressWarnings(\"unchecked\")\n" +
+"            List<TestProjects> results = query.getResultList();\n" +
+"            if (results.isEmpty()) {\n" +
+"                return ResponseEntity.notFound().build();\n" +
+"            }\n" +
+"            return ResponseEntity.ok(results.get(0));\n" +
+"        } catch (Exception e) {\n" +
+"            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();\n" +
+"        }\n" +
+"    }\n\n" +
+"    @DeleteMapping(\"/{id}\")\n" +
+"    public ResponseEntity<Map<String, String>> delete(@PathVariable Integer id) {\n" +
+"        try {\n" +
+"            Query query = entityManager.createNativeQuery(\"DELETE FROM \\\"TestProjects\\\" WHERE \\\"Id\\\" = :id\");\n" +
+"            query.setParameter(\"id\", id);\n" +
+"            int deleted = query.executeUpdate();\n" +
+"            if (deleted == 0) {\n" +
+"                return ResponseEntity.notFound().build();\n" +
+"            }\n" +
+"            return ResponseEntity.ok(Map.of(\"message\", \"Deleted successfully\"));\n" +
+"        } catch (Exception e) {\n" +
+"            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();\n" +
+"        }\n" +
+"    }\n" +
+"}\n";
+
+        // application.properties - Configuration
+        files["backend/src/main/resources/application.properties"] = "spring.application.name=Backend API\n" +
+"server.port=${PORT:8080}\n\n" +
+"# Handle forwarded headers for Railway (HTTPS termination)\n" +
+"server.forward-headers-strategy=framework\n\n" +
+"# Web configuration - allow trailing slashes\n" +
+"spring.web.resources.add-mappings=true\n\n" +
+"# Database configuration\n" +
+"# DATABASE_URL is converted to JDBC format in DataSourceConfig.java\n" +
+"spring.jpa.hibernate.ddl-auto=none\n" +
+"spring.jpa.show-sql=false\n" +
+"spring.jpa.properties.hibernate.dialect=org.hibernate.dialect.PostgreSQLDialect\n\n" +
+"# Swagger/OpenAPI configuration\n" +
+"springdoc.api-docs.path=/api-docs\n" +
+"springdoc.swagger-ui.path=/swagger\n";
+
+        // Note: README.md is created at root level, not here to avoid conflicts
+
+        return files;
+    }
+
+    private string GenerateGitHubActionsWorkflow()
+    {
+        return @"name: Deploy Frontend to GitHub Pages
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'frontend/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: ""pages""
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      
+      - name: Setup Pages
+        uses: actions/configure-pages@v4
+      
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: './frontend'
+      
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
+";
+    }
+
+    /// <summary>
+    /// Generates GitHub Actions workflow for deploying backend to Railway
+    /// </summary>
+    private string GenerateRailwayDeploymentWorkflow(string programmingLanguage)
+    {
+        // Build commands vary by programming language
+        var buildCommands = programmingLanguage?.ToLowerInvariant() switch
+        {
+            "c#" or "csharp" => @"      - name: Build .NET application
+        working-directory: ./backend
+        run: |
+          dotnet restore Backend.csproj
+          dotnet publish Backend.csproj -c Release -o ./publish",
+            "python" => @"      - name: Install Python dependencies
+        working-directory: ./backend
+        run: |
+          pip install -r requirements.txt",
+            "nodejs" or "node.js" or "node" => @"      - name: Install Node.js dependencies
+        working-directory: ./backend
+        run: |
+          npm install",
+            "java" => @"      - name: Build Java application
+        working-directory: ./backend
+        run: |
+          mvn clean package || gradle build || echo 'Build system not detected'",
+            _ => @"      - name: Build .NET application (default)
+        working-directory: ./backend
+        run: |
+          dotnet restore Backend.csproj
+          dotnet publish Backend.csproj -c Release -o ./publish"
+        };
+
+        return $@"name: Deploy Backend to Railway
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'backend/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      
+      - name: Setup Railway CLI
+        uses: bervProject/setup-railway@v2.0.0
+        with:
+          railway_token: ${{{{ secrets.RAILWAY_TOKEN }}}}
+      
+{buildCommands}
+      
+      - name: Deploy to Railway
+        working-directory: ./backend
+        env:
+          RAILWAY_SERVICE_ID: ${{{{ secrets.RAILWAY_SERVICE_ID }}}}
+        run: |
+          railway up --service $RAILWAY_SERVICE_ID --detach
+";
+    }
+
+    /// <summary>
+    /// Generates GitHub Actions workflow for deploying backend to Railway (files at root level)
+    /// </summary>
+    private string GenerateRailwayDeploymentWorkflowAtRoot(string programmingLanguage)
+    {
+        // Build commands vary by programming language (files are at root, no backend/ directory)
+        var buildCommands = programmingLanguage?.ToLowerInvariant() switch
+        {
+            "c#" or "csharp" => @"      - name: Build .NET application
+        run: |
+          dotnet restore Backend.csproj
+          dotnet publish Backend.csproj -c Release -o ./out",
+            "python" => @"      - name: Install Python dependencies
+        run: |
+          pip install -r requirements.txt",
+            "nodejs" or "node.js" or "node" => @"      - name: Install Node.js dependencies
+        run: |
+          npm install",
+            "java" => @"      - name: Build Java application
+        run: |
+          mvn clean package || gradle build || echo 'Build system not detected'",
+            _ => @"      - name: Build .NET application (default)
+        run: |
+          dotnet restore Backend.csproj
+          dotnet publish Backend.csproj -c Release -o ./out"
+        };
+
+        return $@"name: Deploy Backend to Railway
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      
+      - name: Setup Railway CLI
+        uses: bervProject/setup-railway@v2.0.0
+        with:
+          railway_token: ${{{{ secrets.RAILWAY_TOKEN }}}}
+      
+{buildCommands}
+      
+      - name: Deploy to Railway
+        env:
+          RAILWAY_SERVICE_ID: ${{{{ secrets.RAILWAY_SERVICE_ID }}}}
+        run: |
+          railway up --service $RAILWAY_SERVICE_ID --detach
+";
+    }
+
+    public string GenerateConfigJs(string? webApiUrl)
+    {
+        // Don't use Railway project URLs - they're not valid API endpoints
+        var isProjectUrl = !string.IsNullOrEmpty(webApiUrl) && webApiUrl.Contains("railway.app/project/");
+        var apiUrl = !string.IsNullOrEmpty(webApiUrl) && !isProjectUrl ? webApiUrl : "";
+        
+        // Convert HTTP to HTTPS for Railway URLs (required for Mixed Content security)
+        if (!string.IsNullOrEmpty(apiUrl) && apiUrl.StartsWith("http://") && apiUrl.Contains("railway.app"))
+        {
+            apiUrl = apiUrl.Replace("http://", "https://");
+        }
+        
+        var warningComment = string.IsNullOrEmpty(apiUrl)
+            ? @"// API Configuration
+// The backend service URL will be automatically configured after deployment.
+// If this is empty after deployment, check Railway dashboard:
+// Service → Settings → Domains to get your service URL.
+"
+            : @"// API Configuration
+// Backend service URL (automatically configured)
+";
+        
+        return $@"{warningComment}const CONFIG = {{
+    API_URL: ""{apiUrl}""
+}};
+";
+    }
+
+    private string GenerateStyleCss()
+    {
+        return @"/* Global Styles */
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+    line-height: 1.6;
+    color: #333;
+    background-color: #f4f4f4;
+}
+
+.container {
+    max-width: 1200px;
+    margin: 0 auto;
+    padding: 20px;
+}
+
+button {
+    padding: 10px 20px;
+    background-color: #667eea;
+    color: white;
+    border: none;
+    border-radius: 5px;
+    cursor: pointer;
+    font-size: 16px;
+    transition: background-color 0.3s;
+}
+
+button:hover {
+    background-color: #5568d3;
+}
+
+button:disabled {
+    background-color: #ccc;
+    cursor: not-allowed;
+}
+
+#response {
+    margin-top: 20px;
+    padding: 15px;
+    border-radius: 5px;
+    display: none;
+}
+
+#response.success {
+    background-color: #d4edda;
+    border: 1px solid #c3e6cb;
+    color: #155724;
+    display: block;
+}
+
+#response.error {
+    background-color: #f8d7da;
+    border: 1px solid #f5c6cb;
+    color: #721c24;
+    display: block;
+}
+";
+    }
+
+    private string GenerateGitIgnore(string programmingLanguage)
+    {
+        var lang = programmingLanguage?.ToLowerInvariant() ?? "csharp";
+        
+        switch (lang)
+        {
+            case "c#":
+            case "csharp":
+                return @"## Ignore Visual Studio temporary files, build results, and
+## files generated by popular Visual Studio add-ons.
+
+# User-specific files
+*.rsuser
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+# Build results
+[Dd]ebug/
+[Dd]ebugPublic/
+[Rr]elease/
+[Rr]eleases/
+x64/
+x86/
+[Ww][Ii][Nn]32/
+[Aa][Rr][Mm]/
+[Aa][Rr][Mm]64/
+bld/
+[Bb]in/
+[Oo]bj/
+[Ll]og/
+[Ll]ogs/
+
+# .NET Core
+project.lock.json
+project.fragment.lock.json
+artifacts/
+
+# NuGet Packages
+*.nupkg
+*.snupkg
+
+# Environment variables
+.env
+.env.local
+
+# IDE
+.vs/
+.idea/
+*.swp
+*.swo
+*~
+";
+            case "python":
+                return @"# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual Environment
+venv/
+env/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Environment variables
+.env
+.env.local
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
+";
+            case "nodejs":
+            case "node.js":
+            case "node":
+                return @"# Dependencies
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Environment variables
+.env
+.env.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs
+logs
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+";
+            case "java":
+                return @"# Compiled class file
+*.class
+
+# Log files
+*.log
+
+# BlueJ files
+*.ctxt
+
+# Package Files
+*.jar
+*.war
+*.nar
+*.ear
+*.zip
+*.tar.gz
+*.rar
+
+# Maven
+target/
+pom.xml.tag
+pom.xml.releaseBackup
+pom.xml.versionsBackup
+pom.xml.next
+release.properties
+
+# IDE
+.idea/
+*.iml
+.vscode/
+*.swp
+*.swo
+
+# Environment variables
+.env
+.env.local
+";
+            default:
+                return @"# Environment variables
+.env
+.env.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+";
+        }
     }
 }
 
@@ -1753,6 +5075,7 @@ public class CreateRepositoryRequest
     public string? DatabaseConnectionString { get; set; }  // Database connection string for README
     public string? WebApiUrl { get; set; }  // Railway WebApi URL for README
     public string? SwaggerUrl { get; set; }  // Swagger API tester URL for README
+    public string? ProgrammingLanguage { get; set; }  // Programming language for backend code generation (e.g., "C#", "Python", "NodeJS", "Java")
 }
 
 /// <summary>
@@ -1812,4 +5135,5 @@ public class DefaultBranchInfo
     public string CommitSha { get; set; } = string.Empty;
     public string TreeSha { get; set; } = string.Empty;
 }
+
 

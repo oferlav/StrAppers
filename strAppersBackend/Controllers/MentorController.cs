@@ -242,39 +242,85 @@ namespace strAppersBackend.Controllers
                     }
                 }
 
-                // E. Fetch GitHub Repository Files
+                // E. Fetch GitHub Repository Files - using role-based repository selection
                 var githubFiles = new List<string>();
                 object? githubCommitSummary = null;
-                // Get GitHub repo from ProjectBoard's GithubUrl or Project's GitHubRepo field
-                var githubRepo = student.ProjectBoard?.GithubUrl ?? "";
-                if (string.IsNullOrEmpty(githubRepo))
+                
+                // Get appropriate repository URL(s) based on role
+                var (frontendRepoUrl, backendRepoUrl, isFullstack) = GetRepositoryUrlsByRole(student);
+                
+                // Determine which repos to fetch based on role
+                var reposToFetch = new List<(string Url, string Type)>();
+                if (!string.IsNullOrEmpty(frontendRepoUrl))
                 {
-                    // Try to extract from project description or other fields if needed
-                    // For now, we'll skip if no GitHub URL is available
+                    reposToFetch.Add((frontendRepoUrl, "frontend"));
                 }
-                else
+                if (!string.IsNullOrEmpty(backendRepoUrl))
+                {
+                    reposToFetch.Add((backendRepoUrl, "backend"));
+                }
+                
+                if (reposToFetch.Any())
                 {
                     try
                     {
-                        // Extract repo name from GitHub URL (format: https://github.com/owner/repo)
-                        var repoName = githubRepo.Replace("https://github.com/", "").Replace("http://github.com/", "").TrimEnd('/');
-                        githubFiles = await GetGitHubRepositoryFilesAsync(repoName);
+                        var allFiles = new List<string>();
+                        var allCommitSummaries = new List<object>();
                         
-                        // Fetch GitHub commit summary for developer roles only
-                        var isDeveloperRole = !string.IsNullOrEmpty(roleName) && 
-                            (roleName.Contains("Developer", StringComparison.OrdinalIgnoreCase) || 
-                             roleName.Contains("Programmer", StringComparison.OrdinalIgnoreCase) ||
-                             roleName.Contains("Engineer", StringComparison.OrdinalIgnoreCase));
-                        
-                        if (isDeveloperRole)
+                        // Fetch files and commits from each repository
+                        foreach (var (repoUrl, repoType) in reposToFetch)
                         {
-                            githubCommitSummary = await GetGitHubCommitSummaryAsync(githubRepo, student.GithubUser);
+                            // Extract repo name from GitHub URL (format: https://github.com/owner/repo)
+                            var repoName = repoUrl.Replace("https://github.com/", "").Replace("http://github.com/", "").TrimEnd('/');
+                            var repoFiles = await GetGitHubRepositoryFilesAsync(repoName);
+                            
+                            // Prefix files with repo type for clarity
+                            if (isFullstack)
+                            {
+                                allFiles.AddRange(repoFiles.Select(f => $"[{repoType.ToUpper()}] {f}"));
+                            }
+                            else
+                            {
+                                allFiles.AddRange(repoFiles);
+                            }
+                            
+                            // Fetch GitHub commit summary for developer roles only
+                            var isDeveloperRole = !string.IsNullOrEmpty(roleName) && 
+                                (roleName.Contains("Developer", StringComparison.OrdinalIgnoreCase) || 
+                                 roleName.Contains("Programmer", StringComparison.OrdinalIgnoreCase) ||
+                                 roleName.Contains("Engineer", StringComparison.OrdinalIgnoreCase));
+                            
+                            if (isDeveloperRole)
+                            {
+                                var commitSummary = await GetGitHubCommitSummaryAsync(repoUrl, student.GithubUser);
+                                if (commitSummary != null)
+                                {
+                                    allCommitSummaries.Add(commitSummary);
+                                }
+                            }
+                        }
+                        
+                        githubFiles = allFiles;
+                        
+                        // Combine commit summaries for fullstack developers
+                        if (isFullstack && allCommitSummaries.Any())
+                        {
+                            githubCommitSummary = CombineCommitSummaries(allCommitSummaries);
+                        }
+                        else if (allCommitSummaries.Any())
+                        {
+                            githubCommitSummary = allCommitSummaries.First();
                         }
                     }
                     catch (Exception ex)
                     {
-                        _logger.LogWarning(ex, "Failed to fetch GitHub files for repo {Repo}", githubRepo);
+                        var repoList = string.Join(", ", reposToFetch.Select(r => r.Url));
+                        _logger.LogWarning(ex, "Failed to fetch GitHub files for repos: {Repos}", repoList);
                     }
+                }
+                else
+                {
+                    _logger.LogWarning("No GitHub repository URLs found for student {StudentId} with role {Role}", studentId, roleName);
                 }
 
                 // F. Fetch Team Members (names and roles)
@@ -397,8 +443,53 @@ namespace strAppersBackend.Controllers
         }
 
         /// <summary>
+        /// Gets the appropriate GitHub repository URL(s) based on the student's role
+        /// Returns: Frontend URL for Frontend Developer, Backend URL for Backend Developer, or both for Fullstack Developer
+        /// </summary>
+        private (string? FrontendRepoUrl, string? BackendRepoUrl, bool IsFullstack) GetRepositoryUrlsByRole(Student student)
+        {
+            if (student?.ProjectBoard == null)
+            {
+                return (null, null, false);
+            }
+
+            var activeRole = student.StudentRoles?.FirstOrDefault(sr => sr.IsActive);
+            var roleName = activeRole?.Role?.Name ?? "";
+
+            if (string.IsNullOrEmpty(roleName))
+            {
+                // Default to backend if no role specified (backward compatibility)
+                return (null, student.ProjectBoard.GithubBackendUrl, false);
+            }
+
+            var roleNameLower = roleName.ToLowerInvariant();
+
+            // Check for Fullstack/Full Stack Developer
+            if (roleNameLower.Contains("full") && (roleNameLower.Contains("stack") || roleNameLower.Contains("stack")))
+            {
+                return (student.ProjectBoard.GithubFrontendUrl, student.ProjectBoard.GithubBackendUrl, true);
+            }
+
+            // Check for Frontend Developer
+            if (roleNameLower.Contains("frontend"))
+            {
+                return (student.ProjectBoard.GithubFrontendUrl, null, false);
+            }
+
+            // Check for Backend Developer
+            if (roleNameLower.Contains("backend"))
+            {
+                return (null, student.ProjectBoard.GithubBackendUrl, false);
+            }
+
+            // Default: use backend repo for backward compatibility
+            return (null, student.ProjectBoard.GithubBackendUrl, false);
+        }
+
+        /// <summary>
         /// Get GitHub commit summary (recent commits with file changes summary) for mentor context
         /// Optimized to save tokens by summarizing instead of including full diffs
+        /// Supports multiple repositories for fullstack developers
         /// </summary>
         private async Task<object?> GetGitHubCommitSummaryAsync(string? githubRepoUrl, string? githubUsername)
         {
@@ -479,6 +570,69 @@ namespace strAppersBackend.Controllers
             {
                 _logger.LogWarning(ex, "Failed to fetch GitHub commit summary for repo {Repo}", githubRepoUrl);
                 return null;
+            }
+        }
+
+        /// <summary>
+        /// Combines commit summaries from multiple repositories (for fullstack developers)
+        /// </summary>
+        private object CombineCommitSummaries(List<object> commitSummaries)
+        {
+            try
+            {
+                var combinedCommits = new List<object>();
+                var allFilesChanged = new HashSet<string>();
+                var totalCommitCount = 0;
+
+                foreach (var summary in commitSummaries)
+                {
+                    if (summary is System.Text.Json.JsonElement jsonElement)
+                    {
+                        if (jsonElement.TryGetProperty("RecentCommits", out var commitsProp) && 
+                            commitsProp.ValueKind == System.Text.Json.JsonValueKind.Array)
+                        {
+                            foreach (var commit in commitsProp.EnumerateArray())
+                            {
+                                combinedCommits.Add(commit);
+                            }
+                        }
+
+                        if (jsonElement.TryGetProperty("AllFilesChanged", out var filesProp) && 
+                            filesProp.ValueKind == System.Text.Json.JsonValueKind.Array)
+                        {
+                            foreach (var file in filesProp.EnumerateArray())
+                            {
+                                if (file.ValueKind == System.Text.Json.JsonValueKind.String)
+                                {
+                                    allFilesChanged.Add(file.GetString() ?? "");
+                                }
+                            }
+                        }
+
+                        if (jsonElement.TryGetProperty("CommitCount", out var countProp))
+                        {
+                            totalCommitCount += countProp.GetInt32();
+                        }
+                    }
+                }
+
+                // Sort commits by date (most recent first) - simplified for now
+                // In a real implementation, you'd parse and sort by actual commit date
+
+                return new
+                {
+                    HasCommits = combinedCommits.Any(),
+                    CommitCount = totalCommitCount,
+                    RecentCommits = combinedCommits.Take(10).ToList(), // Limit to 10 most recent across all repos
+                    AllFilesChanged = allFilesChanged.ToList(),
+                    RepositoryCount = commitSummaries.Count,
+                    Message = "Combined commits from multiple repositories"
+                };
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Error combining commit summaries: {Message}", ex.Message);
+                return commitSummaries.FirstOrDefault() ?? new { HasCommits = false, CommitCount = 0 };
             }
         }
 
@@ -1340,10 +1494,14 @@ namespace strAppersBackend.Controllers
                     return BadRequest(new { Success = false, Message = "Student not found or GitHub username not set" });
                 }
 
-                var githubRepoUrl = student.ProjectBoard?.GithubUrl;
+                // Get appropriate repository URL(s) based on role
+                var (frontendRepoUrl, backendRepoUrl, isFullstack) = GetRepositoryUrlsByRole(student);
+                
+                // For code review, use the primary repo based on role (or backend as default)
+                var githubRepoUrl = !string.IsNullOrEmpty(backendRepoUrl) ? backendRepoUrl : frontendRepoUrl;
                 if (string.IsNullOrEmpty(githubRepoUrl))
                 {
-                    return BadRequest(new { Success = false, Message = "GitHub repository URL not found for this project" });
+                    return BadRequest(new { Success = false, Message = "GitHub repository URL not found for this project. Please ensure the repository is set up for your role." });
                 }
 
                 // Parse GitHub repo URL (format: https://github.com/owner/repo)
@@ -1355,6 +1513,20 @@ namespace strAppersBackend.Controllers
 
                 var owner = repoParts[0];
                 var repo = repoParts[1];
+                
+                // Log which repo is being used for code review
+                if (isFullstack)
+                {
+                    _logger.LogInformation("[CODE_REVIEW] Fullstack developer - reviewing backend repo: {RepoUrl}", githubRepoUrl);
+                }
+                else if (!string.IsNullOrEmpty(frontendRepoUrl) && githubRepoUrl == frontendRepoUrl)
+                {
+                    _logger.LogInformation("[CODE_REVIEW] Frontend developer - reviewing frontend repo: {RepoUrl}", githubRepoUrl);
+                }
+                else
+                {
+                    _logger.LogInformation("[CODE_REVIEW] Backend developer - reviewing backend repo: {RepoUrl}", githubRepoUrl);
+                }
 
                 // Get GitHub access token for API calls
                 var accessToken = _configuration["GitHub:AccessToken"];
@@ -2140,7 +2312,11 @@ namespace strAppersBackend.Controllers
                 var isDeveloperRole = student.StudentRoles?
                     .Any(sr => sr.IsActive && (sr.Role?.Type == 1 || sr.Role?.Type == 2)) ?? false;
 
-                var githubRepoUrl = student.ProjectBoard?.GithubUrl ?? "";
+                // Get appropriate repository URL(s) based on role
+                var (frontendRepoUrl, backendRepoUrl, isFullstack) = GetRepositoryUrlsByRole(student);
+                
+                // Use the primary repo for help text (backend for backend/fullstack, frontend for frontend)
+                var githubRepoUrl = !string.IsNullOrEmpty(backendRepoUrl) ? backendRepoUrl : frontendRepoUrl ?? "";
                 var githubUser = student.GithubUser ?? "";
 
                 var helpText = BuildGitHubHelpText(githubRepoUrl, githubUser, intent.Parameters, isDeveloperRole);
@@ -2359,9 +2535,12 @@ namespace strAppersBackend.Controllers
                 {
                     try
                     {
-                        if (!string.IsNullOrEmpty(student.GithubUser) && !string.IsNullOrEmpty(student.ProjectBoard?.GithubUrl))
+                        // Get appropriate repository URL based on role
+                        var (frontendRepoUrl, backendRepoUrl, _) = GetRepositoryUrlsByRole(student);
+                        var githubRepoUrl = !string.IsNullOrEmpty(backendRepoUrl) ? backendRepoUrl : frontendRepoUrl;
+                        
+                        if (!string.IsNullOrEmpty(student.GithubUser) && !string.IsNullOrEmpty(githubRepoUrl))
                         {
-                            var githubRepoUrl = student.ProjectBoard.GithubUrl;
                             var repoParts = githubRepoUrl.Replace("https://github.com/", "").Replace("http://github.com/", "").TrimEnd('/').Split('/');
                             
                             if (repoParts.Length >= 2)
@@ -2405,9 +2584,12 @@ namespace strAppersBackend.Controllers
                 {
                     try
                     {
-                        if (!string.IsNullOrEmpty(student.GithubUser) && !string.IsNullOrEmpty(student.ProjectBoard?.GithubUrl))
+                        // Get appropriate repository URL based on role
+                        var (frontendRepoUrl, backendRepoUrl, _) = GetRepositoryUrlsByRole(student);
+                        var githubRepoUrl = !string.IsNullOrEmpty(backendRepoUrl) ? backendRepoUrl : frontendRepoUrl;
+                        
+                        if (!string.IsNullOrEmpty(student.GithubUser) && !string.IsNullOrEmpty(githubRepoUrl))
                         {
-                            var githubRepoUrl = student.ProjectBoard.GithubUrl;
                             var repoParts = githubRepoUrl.Replace("https://github.com/", "").Replace("http://github.com/", "").TrimEnd('/').Split('/');
                             
                             if (repoParts.Length >= 2)
@@ -2478,7 +2660,8 @@ namespace strAppersBackend.Controllers
                 if (student != null && isDeveloperRole)
                 {
                     var githubUser = student.GithubUser ?? "";
-                    var githubRepoUrl = student.ProjectBoard?.GithubUrl ?? "";
+                    var (frontendRepoUrl, backendRepoUrl, _) = GetRepositoryUrlsByRole(student);
+                    var githubRepoUrl = !string.IsNullOrEmpty(backendRepoUrl) ? backendRepoUrl : frontendRepoUrl ?? "";
                     
                     // Always add GitHub info for developer roles, especially if asking about GitHub or repeating instructions
                     if (isAskingAboutRepo || isAskingToRepeat || !string.IsNullOrEmpty(githubUser) || !string.IsNullOrEmpty(githubRepoUrl))
@@ -2829,24 +3012,68 @@ namespace strAppersBackend.Controllers
                     }
                 }
 
-                // Get GitHub files
+                // Get GitHub files - use role-based repository selection
                 var githubFiles = new List<string>();
-                var githubRepo = student.ProjectBoard?.GithubUrl ?? "";
-                if (!string.IsNullOrEmpty(githubRepo))
+                object? githubCommitSummary = null;
+                
+                var (frontendRepoUrl, backendRepoUrl, isFullstack) = GetRepositoryUrlsByRole(student);
+                
+                // Determine which repos to fetch based on role
+                var reposToFetch = new List<(string Url, string Type)>();
+                if (!string.IsNullOrEmpty(frontendRepoUrl))
+                {
+                    reposToFetch.Add((frontendRepoUrl, "frontend"));
+                }
+                if (!string.IsNullOrEmpty(backendRepoUrl))
+                {
+                    reposToFetch.Add((backendRepoUrl, "backend"));
+                }
+                
+                if (reposToFetch.Any())
                 {
                     try
                     {
-                        var repoName = githubRepo.Replace("https://github.com/", "").Replace("http://github.com/", "").TrimEnd('/');
-                        githubFiles = await GetGitHubRepositoryFilesAsync(repoName);
+                        var allFiles = new List<string>();
+                        var allCommitSummaries = new List<object>();
+                        
+                        foreach (var (repoUrl, repoType) in reposToFetch)
+                        {
+                            var repoName = repoUrl.Replace("https://github.com/", "").Replace("http://github.com/", "").TrimEnd('/');
+                            var repoFiles = await GetGitHubRepositoryFilesAsync(repoName);
+                            
+                            if (isFullstack)
+                            {
+                                allFiles.AddRange(repoFiles.Select(f => $"[{repoType.ToUpper()}] {f}"));
+                            }
+                            else
+                            {
+                                allFiles.AddRange(repoFiles);
+                            }
+                            
+                            var summary = await GetGitHubCommitSummaryAsync(repoUrl, student.GithubUser);
+                            if (summary != null)
+                            {
+                                allCommitSummaries.Add(summary);
+                            }
+                        }
+                        
+                        githubFiles = allFiles;
+                        
+                        if (isFullstack && allCommitSummaries.Any())
+                        {
+                            githubCommitSummary = CombineCommitSummaries(allCommitSummaries);
+                        }
+                        else if (allCommitSummaries.Any())
+                        {
+                            githubCommitSummary = allCommitSummaries.First();
+                        }
                     }
                     catch (Exception ex)
                     {
-                        _logger.LogWarning(ex, "Failed to fetch GitHub files for repo {Repo}", githubRepo);
+                        var repoList = string.Join(", ", reposToFetch.Select(r => r.Url));
+                        _logger.LogWarning(ex, "Failed to fetch GitHub files for repos: {Repos}", repoList);
                     }
                 }
-
-                // Get GitHub commit summary
-                var githubCommitSummary = await GetGitHubCommitSummaryAsync(githubRepo, student.GithubUser);
 
                 // Get team members
                 var teamMembers = new List<object>();

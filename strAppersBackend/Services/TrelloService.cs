@@ -267,7 +267,7 @@ namespace strAppersBackend.Services
                             _logger.LogInformation("💡 SOLUTION: User needs to create a Trello account with email {Email} first, then they can be added to the board", member.Email);
                         }
                         
-                        var inviteUrl = $"https://api.trello.com/1/boards/{trelloBoardId}/members?email={Uri.EscapeDataString(member.Email)}&type=normal&key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
+                        var inviteUrl = $"https://api.trello.com/1/boards/{trelloBoardId}/members?email={Uri.EscapeDataString(member.Email)}&type=normal&allowBillableGuest=true&key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
                         _logger.LogInformation("Trello invitation URL: {Url}", inviteUrl);
                         
                         var inviteResponse = await _httpClient.PutAsync(inviteUrl, null);

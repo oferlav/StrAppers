@@ -380,7 +380,14 @@ public class ApplicationDbContext : DbContext
             entity.Property(e => e.MovieUrl).HasColumnName("MovieUrl").HasMaxLength(500);
             entity.Property(e => e.NextMeetingTime).HasColumnName("NextMeetingTime").HasColumnType("timestamp with time zone");
             entity.Property(e => e.NextMeetingUrl).HasColumnName("NextMeetingUrl").HasMaxLength(1000);
-            entity.Property(e => e.GithubUrl).HasColumnName("GithubUrl").HasMaxLength(1000);
+            entity.Property(e => e.GithubBackendUrl).HasColumnName("GithubBackendUrl").HasMaxLength(1000);
+            entity.Property(e => e.GithubFrontendUrl).HasColumnName("GithubFrontendUrl").HasMaxLength(1000);
+            entity.Property(e => e.WebApiUrl).HasColumnName("WebApiUrl").HasMaxLength(1000);
+            entity.Property(e => e.FacebookUrl).HasColumnName("FacebookUrl").HasMaxLength(1000);
+            entity.Property(e => e.PresentationUrl).HasColumnName("PresentationUrl").HasMaxLength(1000);
+            entity.Property(e => e.LinkedInUrl).HasColumnName("LinkedInUrl").HasMaxLength(1000);
+            entity.Property(e => e.InstagramUrl).HasColumnName("InstagramUrl").HasMaxLength(1000);
+            entity.Property(e => e.YoutubeUrl).HasColumnName("YoutubeUrl").HasMaxLength(1000);
             entity.Property(e => e.GroupChat).HasColumnName("GroupChat").HasColumnType("text");
             entity.Property(e => e.Observed).HasColumnName("Observed").HasDefaultValue(0);
             
