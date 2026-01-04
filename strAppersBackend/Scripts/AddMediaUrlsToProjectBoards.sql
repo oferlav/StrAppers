@@ -24,3 +24,4 @@ COMMENT ON COLUMN "ProjectBoards"."InstagramUrl" IS 'Instagram URL for the proje
 COMMENT ON COLUMN "ProjectBoards"."YoutubeUrl" IS 'YouTube URL for the project';
 
 
+

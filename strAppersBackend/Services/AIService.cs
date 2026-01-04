@@ -13,7 +13,7 @@ public interface IAIService
 {
     Task<SystemDesignResponse> GenerateSystemDesignAsync(SystemDesignRequest request);
     Task<SprintPlanningResponse> GenerateSprintPlanAsync(SprintPlanningRequest request);
-    Task<InitiateModulesResponse> InitiateModulesAsync(int projectId, string extendedDescription, int maxModules, int minWordsPerModule, string? contentForLanguageDetection = null);
+    Task<InitiateModulesResponse> InitiateModulesAsync(int projectId, string extendedDescription, int exactModules, int minWordsPerModule, string? contentForLanguageDetection = null);
     Task<CreateDataModelResponse> CreateDataModelAsync(int projectId, string modulesData);
     Task<UpdateModuleResponse> UpdateModuleAsync(int moduleId, string currentDescription, string userInput);
     Task<UpdateDataModelResponse> UpdateDataModelAsync(int projectId, string currentSqlScript, string userInput);
@@ -220,6 +220,10 @@ public class AIService : IAIService
 
     private string BuildSprintPlanningPrompt(SprintPlanningRequest request)
     {
+        var promptConfig = _configuration.GetSection("PromptConfig:SprintPlanning");
+        var systemPromptTemplate = promptConfig["SystemPrompt"] ?? "Generate a detailed sprint plan for a {0}-week project with {1}-week sprints.";
+        var userPromptTemplate = promptConfig["UserPromptTemplate"] ?? "";
+        
         var teamRolesText = string.Join(", ", request.TeamRoles.Select(r => $"{r.RoleName} ({r.StudentCount} students)"));
         var totalSprints = request.ProjectLengthWeeks / request.SprintLengthWeeks; // Calculate from project length and sprint length
         
@@ -229,76 +233,231 @@ public class AIService : IAIService
         // Build role-specific task instructions
         var roleInstructions = BuildRoleSpecificInstructions(request.TeamRoles);
         
-        return $@"Generate a detailed sprint plan for a {request.ProjectLengthWeeks}-week project with {request.SprintLengthWeeks}-week sprints.
+        // Build Trello requirements section
+        var trelloRequirementsSection = BuildTrelloRequirementsSection(promptConfig, totalSprints);
+        
+        // Build system prompt with dynamic values
+        var systemPrompt = string.Format(systemPromptTemplate,
+            request.ProjectLengthWeeks,
+            request.SprintLengthWeeks,
+            teamRolesText,
+            request.StartDate.ToString("yyyy-MM-dd"),
+            totalSprints,
+            filteredSystemDesign ?? "No system design available"
+        );
+        
+        // Build user prompt with all dynamic values
+        // Placeholder order: {0}=roleInstructions, {1}=trelloRequirements, {2}=moduleCount, {3}=totalSprints, {4}=teamRolesList, {5}=startDate, {6}=endDate, {7}=projectLengthWeeks
+        var moduleCount = GetModuleCount(filteredSystemDesign);
+        var teamRolesList = string.Join(", ", request.TeamRoles.Select(r => r.RoleName));
+        var startDateStr = request.StartDate.ToString("yyyy-MM-dd");
+        var endDateStr = request.StartDate.AddDays(request.SprintLengthWeeks * 7 - 1).ToString("yyyy-MM-dd");
+        
+        // Build ProjectModules information section for AI to use actual database IDs
+        var projectModulesSection = BuildProjectModulesSection(request.ProjectModules);
+        
+        var userPrompt = !string.IsNullOrEmpty(userPromptTemplate)
+            ? string.Format(userPromptTemplate,
+                roleInstructions,
+                trelloRequirementsSection,
+                moduleCount,
+                totalSprints,
+                teamRolesList,
+                startDateStr,
+                endDateStr,
+                request.ProjectLengthWeeks
+            )
+            : BuildFallbackUserPrompt(request, roleInstructions, trelloRequirementsSection, filteredSystemDesign, totalSprints, moduleCount, projectModulesSection);
+        
+        return $"{systemPrompt}\n\n{userPrompt}";
+    }
 
-TEAM: {teamRolesText}
-START DATE: {request.StartDate:yyyy-MM-dd}
-TOTAL SPRINTS: {totalSprints} (CONFIGURED - must fill ALL sprints even if fewer modules)
+    /// <summary>
+    /// Builds the Trello requirements section from configuration
+    /// </summary>
+    private string BuildTrelloRequirementsSection(IConfigurationSection promptConfig, int totalSprints)
+    {
+        var trelloConfig = promptConfig.GetSection("TrelloCardRequirements");
+        var firstSprintConfig = promptConfig.GetSection("FirstSprintRequirements");
+        
+        var sections = new List<string>
+        {
+            "📋 TRELLO CARD METADATA & STRUCTURE REQUIREMENTS ⚠️",
+            "The following requirements ensure proper card organization, tracking, and workflow management in Trello:\n",
+            trelloConfig["CardIdFormat"] ?? "",
+            trelloConfig["TaskDistribution"] ?? "",
+            trelloConfig["BranchedField"] ?? "",
+            trelloConfig["ModuleId"] ?? "",
+            trelloConfig["Dependencies"] ?? "",
+            trelloConfig["MetadataFields"] ?? "",
+            trelloConfig["DeveloperCodeChecklist"] ?? "",
+            trelloConfig["DeveloperDatabaseChecklist"] ?? "",
+            trelloConfig["ProductManagerChecklist"] ?? "",
+            trelloConfig["SystemDesignCoverage"] ?? "",
+            "\n11. FIRST SPRINT SPECIAL REQUIREMENTS:",
+            "The first sprint focuses on environment setup and project familiarization:\n",
+            firstSprintConfig["UIUXDesigner"] ?? "",
+            firstSprintConfig["ProductManager"] ?? "",
+            firstSprintConfig["Marketing"] ?? "",
+            firstSprintConfig["BackendDeveloper"] ?? "",
+            firstSprintConfig["FrontendDeveloper"] ?? "",
+            trelloConfig["FinalSprintRequirement"]?.Replace("{totalSprints}", totalSprints.ToString()) ?? ""
+        };
+        
+        return string.Join("\n\n", sections.Where(s => !string.IsNullOrEmpty(s)));
+    }
 
-SYSTEM DESIGN (READ CAREFULLY - ALL TASKS MUST REFERENCE THIS):
-{filteredSystemDesign ?? "No system design available"}
+    /// <summary>
+    /// Builds a section describing project modules with their database IDs
+    /// </summary>
+    private string BuildProjectModulesSection(List<ProjectModuleInfo> projectModules)
+    {
+        if (projectModules == null || !projectModules.Any())
+        {
+            return "\n📋 PROJECT MODULES (Database IDs):\nNo project modules found in database. Use module identifiers from System Design.";
+        }
+        
+        var modulesList = projectModules.Select((pm, index) => 
+            $"{index + 1}. Module ID: {pm.Id}, Title: {pm.Title ?? "Untitled"}, Description: {(string.IsNullOrEmpty(pm.Description) ? "No description" : pm.Description.Substring(0, Math.Min(100, pm.Description.Length)) + (pm.Description.Length > 100 ? "..." : ""))}"
+        );
+        
+        return $"\n📋 PROJECT MODULES (Database IDs) - CRITICAL FOR MODULEID FIELD:\n" +
+               $"The following modules exist in the database. You MUST use the exact Module ID (integer) when setting the moduleId field in task metadata:\n\n" +
+               string.Join("\n", modulesList) +
+               $"\n\n⚠️ CRITICAL: When creating tasks for a module, use the Module ID (integer) from above, NOT generic names like \"Module1\" or \"Module2\".\n" +
+               $"Example: If creating a task for \"User Authentication\" module with Module ID: 5, then moduleId should be \"5\" (not \"Module1\" or \"User Authentication\").";
+    }
 
-⚠️ CRITICAL BUSINESS LOGIC REQUIREMENTS ⚠️
+    /// <summary>
+    /// Fallback user prompt if configuration is not available (backward compatibility)
+    /// </summary>
+    private string BuildFallbackUserPrompt(SprintPlanningRequest request, string roleInstructions, string trelloRequirementsSection, string? filteredSystemDesign, int totalSprints, int moduleCount, string projectModulesSection)
+    {
+        var teamRolesList = string.Join(", ", request.TeamRoles.Select(r => r.RoleName));
+        var startDateStr = request.StartDate.ToString("yyyy-MM-dd");
+        var endDateStr = request.StartDate.AddDays(request.SprintLengthWeeks * 7 - 1).ToString("yyyy-MM-dd");
+        
+        return $@"⚠️ CRITICAL BUSINESS LOGIC REQUIREMENTS ⚠️
 - You MUST create exactly {totalSprints} sprints (configured number, not based on modules)
-- Each sprint MUST have AT LEAST ONE task for EACH role: {string.Join(", ", request.TeamRoles.Select(r => r.RoleName))}
-- EVERY task title and description MUST directly reference specific modules, inputs, outputs, or business logic from the System Design above
-- NO GENERIC TASKS ALLOWED - Every task must be tied to specific business functionality described in the System Design
-- Tasks must implement the actual business logic described in the modules (inputs, outputs, functionality)
-- ONE sprint must include database layer tasks for Backend/Full Stack developers based on the Data Model section
+- CRITICAL: ONLY create tasks for roles that are in the team: {teamRolesList}
+- DO NOT create tasks for roles that are NOT in this list (e.g., if there is no Product Manager in the team, do NOT create Product Manager tasks)
+- Each sprint MUST have AT LEAST ONE task for EACH role in the team: {teamRolesList}
+- CRITICAL: If ""UI/UX Designer"" is in the team roles ({teamRolesList}), you MUST create a UI/UX Designer task in EVERY sprint with roleName=""UI/UX Designer"" and cardId=""{{SprintNumber}}-U""
+- CRITICAL: If ""Product Manager"" is in the team roles ({teamRolesList}), you MUST create a Product Manager task in EVERY sprint with roleName=""Product Manager"" and cardId=""{{SprintNumber}}-P""
+- CRITICAL: If ""Full Stack Developer"" is in the team roles ({teamRolesList}), you MUST create TWO separate tasks in EVERY sprint:
+  * ONE Backend task with cardId=""{{SprintNumber}}-B"" and roleName=""Full Stack Developer""
+  * ONE Frontend task with cardId=""{{SprintNumber}}-F"" and roleName=""Full Stack Developer""
+- 🚨 SPRINT 1 SPECIAL RULE - SETUP ONLY, NO BUSINESS LOGIC 🚨:
+  * Sprint 1 is ONLY for getting familiar, setup, and preparations
+  * Sprint 1 tasks MUST NOT include business logic implementation
+  * Sprint 1 tasks MUST follow FirstSprintRequirements (see requirement #11)
+  * NO module implementation, NO business logic, NO feature development in Sprint 1
+  * Business logic implementation starts from Sprint 2 onwards
+- Sprints 2-{totalSprints}: EVERY task title and description MUST directly reference specific modules, inputs, outputs, or business logic from the System Design
+- Sprints 2-{totalSprints}: NO GENERIC TASKS ALLOWED - Every task must be tied to specific business functionality described in the System Design
+- Sprints 2-{totalSprints}: Tasks must implement the actual business logic described in the modules (inputs, outputs, functionality)
+- ONE sprint (Sprint 2 or later) must include database layer tasks for Backend/Full Stack developers based on the Data Model section
 
-MANDATORY TASK REQUIREMENTS:
+MANDATORY TASK REQUIREMENTS (Sprints 2+ only - Sprint 1 is setup only):
 - Task titles MUST include the module name or specific business function from System Design
 - Task descriptions MUST explain how it implements specific inputs/outputs from the System Design
+- Task descriptions MUST NOT mention ""Module 1"", ""Module 2"", etc. - use natural language that users will understand
 - Example GOOD title: ""Implement User Registration Module - Email validation and password hashing""
 - Example BAD title: ""Create registration feature"" (too generic, doesn't reference System Design)
-- Example GOOD description: ""Build the User Registration module that accepts email, password, and full name (as specified in Module 1 inputs) and returns a confirmation token (as specified in Module 1 outputs)""
+- Example GOOD description: ""Build the User Registration module that accepts email, password, and full name and returns a confirmation token""
 - Example BAD description: ""Implement user registration"" (too generic, no reference to System Design)
+- Example BAD description: ""Build module that processes Module 1 inputs and returns Module 1 outputs"" (mentions Module 1 - users won't understand)
 
 ROLE-SPECIFIC TASK GENERATION (MUST REFERENCE SYSTEM DESIGN):
 {roleInstructions}
 
 TASK GENERATION STRATEGY:
-1. Read the System Design carefully and identify ALL modules with their inputs and outputs
-2. For EACH module, create tasks that directly implement the described functionality
-3. Task titles must reference the module name or number from System Design
-4. Task descriptions must explain which inputs/outputs from System Design are being implemented
-5. Distribute modules across sprints, ensuring each sprint has at least one task per role
-6. If you have fewer modules than sprints, create additional tasks that extend the business logic (e.g., ""Add email notification to User Registration module"", ""Implement error handling for Login Module"")
-7. NEVER create generic tasks like ""Write tests"" or ""Update documentation"" without specifying which module they relate to
+🚨 CRITICAL: Sprint 1 is SETUP ONLY - NO business logic implementation 🚨
+- Sprint 1: Use ONLY FirstSprintRequirements (see requirement #11) - setup, getting familiar, preparations
+- Sprint 1: NO module implementation, NO business logic, NO feature development
+- Sprints 2-{totalSprints}: Read the System Design carefully and identify ALL modules with their inputs and outputs
+- Sprints 2-{totalSprints}: For EACH module, create tasks that directly implement the described functionality
+- Sprints 2-{totalSprints}: Task titles must reference the module name or number from System Design
+- Sprints 2-{totalSprints}: Task descriptions must explain which inputs/outputs from System Design are being implemented
+- Sprints 2-{totalSprints}: Distribute modules across sprints, ensuring each sprint has at least one task per role
+- Sprints 2-{totalSprints}: If you have fewer modules than sprints, create additional tasks that extend the business logic (e.g., ""Add email notification to User Registration module"", ""Implement error handling for Login Module"")
+- NEVER create generic tasks like ""Write tests"" or ""Update documentation"" without specifying which module they relate to
 
 SPRINT DISTRIBUTION STRATEGY:
-- Distribute the {GetModuleCount(filteredSystemDesign)} system modules across {totalSprints} sprints
-- Each sprint must have at least one task per role that directly implements System Design modules
-- One sprint should focus on database layer implementation based on the Data Model section
-- Ensure every sprint has meaningful, business-logic-specific work for all roles
-- If you have fewer modules than sprints, create tasks that extend or enhance the existing modules from System Design
+- Sprint 1: Setup and preparation ONLY - follow FirstSprintRequirements strictly
+- Sprints 2-{totalSprints}: Distribute the {moduleCount} system modules across these sprints
+- Sprints 2-{totalSprints}: Each sprint must have at least one task per role that directly implements System Design modules
+- One sprint (Sprint 2 or later) should focus on database layer implementation based on the Data Model section
+- Sprints 2-{totalSprints}: Ensure every sprint has meaningful, business-logic-specific work for all roles
+- If you have fewer modules than sprints (excluding Sprint 1), create tasks that extend or enhance the existing modules from System Design
 
-⚠️ CHECKLIST REQUIREMENTS - BUSINESS LOGIC SPECIFIC ⚠️
+⚠️ CHECKLIST REQUIREMENTS ⚠️
+🚨 SPRINT 1 SPECIAL RULES 🚨:
+- Sprint 1 tasks MUST follow FirstSprintRequirements (see requirement #11) - setup and preparation ONLY
+- Sprint 1 tasks MUST NOT include business logic implementation checklist items
+- Sprint 1 is ONLY about getting familiar, setup, and preparations
+
+Sprints 2-{totalSprints} - BUSINESS LOGIC SPECIFIC:
 - Each task MUST include a ""checklistItems"" array with AT LEAST 4 sub-tasks
 - EVERY checklist item MUST directly reference specific business logic, inputs, outputs, or functionality from the System Design
 - Checklist items must break down the task into specific implementation steps for the business logic described
 - Checklist items MUST NOT be generic (NEVER use: ""Implement feature"", ""Test code"", ""Write documentation"", ""Code review"", ""Deploy"" without specifics)
 - Each checklist item must specify WHAT part of the System Design module is being implemented
-- Example GOOD checklist items for ""Implement User Registration Module"":
-  * ""Create API endpoint POST /api/users/register that accepts email, password, fullName (Module 1 inputs)""
-  * ""Implement email format validation using regex pattern for email input from Module 1""
-  * ""Hash password using bcrypt before storing in database (Module 1 security requirement)""
-  * ""Return JSON response with userId and confirmationToken (Module 1 outputs)""
+- CRITICAL: For Backend Developer tasks in Sprints 2-{totalSprints}, MUST include ""Prepare mockup data"" for each module
+- Example GOOD checklist items for Backend Developer ""Implement User Registration Module"" (Sprint 2+):
+  * ""Create Branch (Name: 2-B)"" (MUST be first)
+  * ""Prepare mockup data for User Registration module"" (MUST be second)
+  * ""Create API endpoint for user registration""
+  * ""Implement email format validation""
+  * ""Hash password before storing in database""
+  * ""Return JSON response with user data""
+  * ""Commit changes""
+  * ""Push changes""
+  * ""Create a PR""
+  * ""Merge branch (once approved by PM)""
+- Example GOOD checklist items for Frontend Developer (Sprint 2+):
+  * ""Create Branch (Name: 2-F)"" (MUST be first)
+  * ""Collect endpoints (REST API) for the module"" (MUST be second)
+  * ""Implement login form with email and password fields""
+  * ""Add form validation for required fields""
+  * ""Handle API response and display success/error messages""
+  * ""Commit changes""
+  * ""Push changes""
+  * ""Create a PR""
+  * ""Merge branch (once approved by PM)""
 - Example BAD checklist items (TOO GENERIC - DO NOT USE):
   * ""Implement registration""
   * ""Write tests""
   * ""Code review""
   * ""Deploy to production""
 
-Return ONLY valid JSON with exactly {totalSprints} sprints (NO EPICS):
+{trelloRequirementsSection}
+
+{projectModulesSection}
+
+Return ONLY valid JSON with exactly {totalSprints} sprints. The last sprint list MUST be named ""Bugs"" (NOT ""Sprint {totalSprints}""). JSON structure:
 {{
-  ""sprints"": [{{""sprintNumber"": 1, ""name"": ""Sprint 1"", ""startDate"": ""{request.StartDate:yyyy-MM-dd}"", ""endDate"": ""{request.StartDate.AddDays(request.SprintLengthWeeks * 7 - 1):yyyy-MM-dd}"", ""tasks"": [{{""id"": ""task1"", ""title"": ""Implement [Module Name from System Design] - [Specific Business Function]"", ""description"": ""Build [Module Name] that processes [specific inputs from System Design] and returns [specific outputs from System Design]. This implements the business logic described in Module X."", ""roleId"": 1, ""roleName"": ""Role"", ""estimatedHours"": 8, ""priority"": 1, ""dependencies"": [], ""checklistItems"": [""Create [specific component] that handles [specific input from Module X]"", ""Implement [specific business rule] for [specific output from Module X]"", ""Add validation for [specific input field] as described in Module X inputs"", ""Return [specific output format] matching Module X outputs specification""]}}], ""totalStoryPoints"": 10, ""roleWorkload"": {{""1"": 8}}}}],
+  ""sprints"": [{{""sprintNumber"": 1, ""name"": ""Sprint 1"", ""startDate"": ""{startDateStr}"", ""endDate"": ""{endDateStr}"", ""tasks"": [{{""id"": ""task1"", ""cardId"": ""1-B"", ""title"": ""Implement [Module Name from System Design] - [Specific Business Function]"", ""description"": ""Build [Module Name] that processes [specific inputs from System Design] and returns [specific outputs from System Design]. This implements the business logic described in Module X."", ""roleId"": 1, ""roleName"": ""Backend Developer"", ""estimatedHours"": 8, ""priority"": 3, ""status"": ""To Do"", ""risk"": ""Medium"", ""moduleId"": ""Module1"", ""dependencies"": [], ""branched"": false, ""checklistItems"": [""Create [specific component] that handles [specific input from Module X]"", ""Implement [specific business rule] for [specific output from Module X]"", ""Add validation for [specific input field] as described in Module X inputs"", ""Return [specific output format] matching Module X outputs specification"", ""Create Branch (Name: 1-B)"", ""Commit changes"", ""Push changes"", ""Create a PR"", ""Merge branch (once approved by PM)""]}}], ""totalStoryPoints"": 10, ""roleWorkload"": {{""1"": 8}}}}],
   ""totalSprints"": {totalSprints},
   ""totalTasks"": 0,
   ""estimatedWeeks"": {request.ProjectLengthWeeks}
 }}
 
-REMEMBER: Every task title, description, and checklist item MUST directly reference the System Design modules, inputs, outputs, or business logic. NO GENERIC TASKS ALLOWED.";
+⚠️ CRITICAL JSON FIELD REQUIREMENTS:
+- ""cardId"": Must follow format ""{{SprintNumber}}-{{RoleFirstLetter}}"" (e.g., ""1-B"", ""2-F"", ""3-U"")
+- ""moduleId"": MUST use the exact Module ID (integer) from the PROJECT MODULES section above (e.g., ""5"" for Module ID 5), NOT generic names like ""Module1"" or ""Module2""
+- ""priority"": Integer 1-5 (1 = Highest, 5 = Lowest)
+- ""status"": Must be ""To Do"" for all new cards
+- ""risk"": Must be ""Low"", ""Medium"", or ""High""
+- ""dependencies"": Array of card IDs (e.g., [""1-B"", ""1-U""]) if task depends on other cards
+- ""branched"": Boolean (false for new cards, only include for Developer roles)
+- ""checklistItems"": Must include role-appropriate items as specified in requirements above
+- Last sprint name: MUST be ""Bugs"" (not ""Sprint {totalSprints}"")
+
+REMEMBER: 
+- Sprint 1: Setup and preparation ONLY - follow FirstSprintRequirements strictly, NO business logic
+- Sprints 2-{totalSprints}: Every task title, description, and checklist item MUST directly reference the System Design modules, inputs, outputs, or business logic. NO GENERIC TASKS ALLOWED. 
+- Follow all Trello card metadata requirements specified above.";
     }
 
     /// <summary>
@@ -803,7 +962,7 @@ REMEMBER: Every task title, description, and checklist item MUST directly refere
         return content;
     }
 
-    public async Task<InitiateModulesResponse> InitiateModulesAsync(int projectId, string extendedDescription, int maxModules, int minWordsPerModule, string? contentForLanguageDetection = null)
+    public async Task<InitiateModulesResponse> InitiateModulesAsync(int projectId, string extendedDescription, int exactModules, int minWordsPerModule, string? contentForLanguageDetection = null)
     {
         try
         {
@@ -841,10 +1000,11 @@ REMEMBER: Every task title, description, and checklist item MUST directly refere
                 ? "\n\n⚠️ CRITICAL JSON FORMAT REQUIREMENT - MANDATORY ⚠️\n- You MUST return valid JSON that can be parsed by a standard JSON parser.\n- ALL Hebrew text MUST be inside properly quoted string values (between double quotes).\n- CRITICAL: Replace ALL actual newline characters (line breaks) in your text with the escape sequence \\n (backslash followed by n).\n- CRITICAL: Replace ALL actual tab characters with \\t.\n- Ensure ALL quotes inside Hebrew text are escaped with backslash (\\\").\n- DO NOT include actual line breaks or newlines in the JSON - use \\n instead.\n- The JSON must be on a single line or properly formatted with escaped newlines.\n- Example CORRECT format: {\"title\": \"מודול\", \"description\": \"תיאור ארוך עם\\nשורות מרובות\"}\n- Example WRONG format: {\"title\": \"מודול\", \"description\": \"תיאור ארוך עם\nשורות מרובות\"} (actual newline breaks JSON)\n- DO NOT put Hebrew characters outside of quoted strings.\n- Test your JSON: it must parse without errors."
                 : "\n\n⚠️ CRITICAL JSON FORMAT REQUIREMENT - MANDATORY ⚠️\n- You MUST return valid JSON that can be parsed by a standard JSON parser.\n- ALL text MUST be inside properly quoted string values (between double quotes).\n- CRITICAL: Replace ALL actual newline characters (line breaks) in your text with the escape sequence \\n (backslash followed by n).\n- CRITICAL: Replace ALL actual tab characters with \\t.\n- Ensure ALL quotes inside text are escaped with backslash (\\\").\n- DO NOT include actual line breaks or newlines in the JSON - use \\n instead.\n- The JSON must be on a single line or properly formatted with escaped newlines.\n- Test your JSON: it must parse without errors.";
             
-            // Enhance the user prompt with MaxModules and MinWordsPerModule constraints
+            // Enhance the user prompt with ExactModules and MinWordsPerModule constraints
             var enhancedUserPrompt = $"{string.Format(userPromptTemplate, extendedDescription)}\n\n" +
                                    $"🚨 CRITICAL REQUIREMENTS - NON-NEGOTIABLE 🚨\n" +
-                                   $"- Generate modules based on the given content, but do not exceed {maxModules} modules\n" +
+                                   $"- Generate EXACTLY {exactModules} modules (not more, not less)\n" +
+                                   $"- You MUST return exactly {exactModules} modules in the JSON response\n" +
                                    $"- Each module description MUST be EXACTLY {minWordsPerModule} words or MORE\n" +
                                    $"- Count your words carefully - descriptions under {minWordsPerModule} words will be REJECTED\n" +
                                    $"- Write extremely detailed, comprehensive descriptions for each module\n" +
@@ -854,7 +1014,8 @@ REMEMBER: Every task title, description, and checklist item MUST directly refere
                                    $"- Add examples, scenarios, and detailed explanations\n" +
                                    $"- Be verbose and thorough - aim for {minWordsPerModule}+ words per description\n" +
                                    $"- Ensure each module has detailed inputs and outputs\n" +
-                                   $"- DO NOT write brief or concise descriptions - be comprehensive and detailed\n\n" +
+                                   $"- DO NOT write brief or concise descriptions - be comprehensive and detailed\n" +
+                                   $"- CRITICAL: The JSON must contain exactly {exactModules} modules in the modules array\n\n" +
                                    $"{languageInstruction}" +
                                    $"{jsonFormatInstruction}";
             
@@ -864,7 +1025,7 @@ REMEMBER: Every task title, description, and checklist item MUST directly refere
             _logger.LogInformation("=== AI PROMPT DEBUG ===");
             _logger.LogInformation("System Prompt: {SystemPrompt}", systemPrompt);
             _logger.LogInformation("User Prompt: {UserPrompt}", userPrompt);
-            _logger.LogInformation("MaxModules: {MaxModules}, MinWordsPerModule: {MinWordsPerModule}", maxModules, minWordsPerModule);
+            _logger.LogInformation("ExactModules: {ExactModules}, MinWordsPerModule: {MinWordsPerModule}", exactModules, minWordsPerModule);
             _logger.LogInformation("=== END AI PROMPT DEBUG ===");
 
             var messages = new[]
@@ -1089,6 +1250,18 @@ REMEMBER: Every task title, description, and checklist item MUST directly refere
 
             _logger.LogInformation("Successfully parsed {Count} modules with complete inputs and outputs", modulesResponse.Modules.Count);
             
+            // Validate exact module count
+            if (modulesResponse.Modules.Count != exactModules)
+            {
+                _logger.LogWarning("AI returned {ActualCount} modules but {ExactCount} were requested", 
+                    modulesResponse.Modules.Count, exactModules);
+                return new InitiateModulesResponse
+                {
+                    Success = false,
+                    Message = $"AI returned {modulesResponse.Modules.Count} modules but exactly {exactModules} modules were requested. Please try again."
+                };
+            }
+            
             // Log details about each module for debugging
             for (int i = 0; i < modulesResponse.Modules.Count; i++)
             {
@@ -1096,6 +1269,8 @@ REMEMBER: Every task title, description, and checklist item MUST directly refere
                 var wordCount = module.Description?.Split(' ', StringSplitOptions.RemoveEmptyEntries).Length ?? 0;
                 _logger.LogInformation("Module {Index}: '{Title}' - {WordCount} words", i + 1, module.Title, wordCount);
             }
+
+            _logger.LogInformation("Validation passed: Exactly {Count} modules returned as requested", exactModules);
 
             return new InitiateModulesResponse
             {

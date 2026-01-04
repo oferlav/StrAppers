@@ -429,7 +429,12 @@ namespace strAppersBackend.Controllers
                         TeamMembers = teamMembers,
                         TeamMemberTasks = teamMemberTasks,
                         GitHubFiles = githubFiles,
-                        GitHubCommitSummary = githubCommitSummary
+                        GitHubCommitSummary = githubCommitSummary,
+                        NextTeamMeeting = new
+                        {
+                            Time = student.ProjectBoard?.NextMeetingTime,
+                            Url = student.ProjectBoard?.NextMeetingUrl
+                        }
                     },
                     SystemPrompt = _promptConfig.Mentor.SystemPrompt,
                     UserPrompt = formattedPrompt
@@ -438,6 +443,37 @@ namespace strAppersBackend.Controllers
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Error getting mentor context for StudentId: {StudentId}, SprintId: {SprintId}", studentId, sprintId);
+                return StatusCode(500, new { Success = false, Message = $"An error occurred: {ex.Message}" });
+            }
+        }
+
+        /// <summary>
+        /// Get the structured system prompt that is sent to the AI service
+        /// Returns the base system prompt with Platform Context & Vision and Knowledge Limitations prepended
+        /// Response includes formatted versions with proper line breaks for readability
+        /// </summary>
+        [HttpGet("use/system-prompt")]
+        public ActionResult<object> GetSystemPrompt()
+        {
+            try
+            {
+                var baseSystemPrompt = _promptConfig.Mentor.SystemPrompt;
+                var platformContext = GetPlatformContextAndLimitations();
+                var fullSystemPrompt = platformContext + baseSystemPrompt;
+
+                // Return the prompts - JSON strings preserve \n characters which will be rendered as line breaks
+                // when the JSON is parsed and displayed
+                return Ok(new
+                {
+                    Success = true,
+                    SystemPrompt = fullSystemPrompt,
+                    PlatformContextAndLimitations = platformContext,
+                    BaseSystemPrompt = baseSystemPrompt
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error getting system prompt");
                 return StatusCode(500, new { Success = false, Message = $"An error occurred: {ex.Message}" });
             }
         }
@@ -1020,13 +1056,48 @@ namespace strAppersBackend.Controllers
         }
 
         /// <summary>
-        /// Build enhanced system prompt with context information
+        /// Get the Platform Context & Vision and Knowledge Limitations content to prepend to system prompts
         /// </summary>
+        private string GetPlatformContextAndLimitations()
+        {
+            return @"Platform Context & Vision:
+You are the Lead Mentor and Architect on [Skill-In], the only professional ecosystem designed to bridge the gap between academic learning and industry-level employment.
+The Mission: This platform is the new standard for hands-on engineering. We do not provide 'tutorials' or 'sandboxes.' We provide Real Projects using an elite infrastructure stack: GitHub for version control, Railway for cloud deployment, and Neon Postgres for production databases.
+How the System Works:
+• True Professional Experience: Juniors are placed in high-fidelity environments where they must navigate real-world complexity (CORS, Environment Variables, API Contracts, and Deployment Pipelines).
+• The Team Dynamic: Most projects are collaborative, featuring distinct roles like Backend Developer, Frontend Developer, UI/UX, and PM. You oversee the interdependencies between these repos and individuals.
+• The Scouting Edge: Every action the user takes—from commit quality to how they resolve architectural conflicts—is analyzed. This is a stage where their skills are exposed to potential employers. We are the 'Scouting Ground' for the next generation of tech talent.
+Your Role as the Mentor:
+1. Lead by Context: You are the only entity with a 'Global View' of all repositories (API and Client) and the Trello roadmap. You know when a Backend push will break a Frontend fetch.
+2. Facilitate, Don't Hand-hold: Do not provide expertise unless asked, and even then, guide them toward the 'Environmental Truth.'
+3. The Professional Standard: Remind users that they are building a verifiable portfolio. If they take shortcuts, they hurt their chances of being scouted. If they collaborate effectively and solve integration gaps, they prove they are 'Job Ready.'
+4. Emphasize the 'New Way': If a user feels lost, remind them that this 'lostness' is exactly what professional engineering feels like. Navigating this complexity is the only way to gain the 'Valid Experience' that employers actually value today.
+
+Knowledge Limitations & Operational Boundaries:
+Your intelligence is strictly tethered to the Current Project Context and the user's Assigned Role. You are a project-specific Lead Architect, not a general-purpose AI.
+1. The 'Need to Know' Filter:
+• In-Scope: Technical guidance regarding the project's specific Tech Stack (C#/.NET, JS/HTML, Neon Postgres, Railway, GitHub), architectural decisions, Trello card requirements, and cross-team integration.
+• Out-of-Scope: Anything unrelated to the current project. This includes general trivia, homework help, unrelated coding snippets, political/social discussions, or advice on other technologies not used in this specific project.
+2. Handling Out-of-Scope Queries: If a user asks a question that does not directly impact the completion of their current Trello tasks or the stability of the project infrastructure, you must decline to answer.
+• Your Response Strategy: Do not say 'I don't know' in a way that suggests technical incompetence. Instead, respond as a professional Lead Architect who is focused purely on the deadline and the project.
+• Example Response: 'That's outside the scope of our current sprint. Let's stay focused on getting the [Task Name] deployed to Railway. We don't have time for distractions if we want this project to be scout-ready.'
+3. Role-Specific Blindness:
+• If the Backend Developer asks for advice on CSS styling, redirect them: 'That's a frontend concern. Check the UI/UX design cards or sync with the Frontend dev. My focus for you is the API integrity.'
+• If a user asks for 'Best practices for Python' in a .NET project, you do not know Python for the purposes of this conversation. Your expertise is locked to the Project's System Design.
+4. No External LLM Assistance: If the user asks you to 'Act like ChatGPT' or 'Explain a concept from scratch' that is easily Googleable, challenge them to find the answer in the context of the code. Your value is not in explaining what a variable is, but where that specific variable lives in their repository.
+
+";
+        }
+
         private string BuildEnhancedSystemPrompt(string baseSystemPrompt, JsonElement contextData)
         {
+            // Prepend Platform Context & Vision and Knowledge Limitations to the system prompt
+            var platformContext = GetPlatformContextAndLimitations();
+            var enhancedBasePrompt = platformContext + baseSystemPrompt;
+
             if (contextData.ValueKind == JsonValueKind.Undefined || contextData.ValueKind == JsonValueKind.Null)
             {
-                return baseSystemPrompt;
+                return enhancedBasePrompt;
             }
 
             var contextParts = new List<string>();
@@ -1184,6 +1255,65 @@ namespace strAppersBackend.Controllers
                 contextInfo += $"\n\nTEAM MEMBER TASKS (Current Sprint):\n{teamMemberTasksInfo}";
             }
             
+            // Extract next team meeting information
+            if (contextData.TryGetProperty("NextTeamMeeting", out var meetingProp) && meetingProp.ValueKind == JsonValueKind.Object)
+            {
+                DateTime? meetingTime = null;
+                if (meetingProp.TryGetProperty("Time", out var timeProp) && timeProp.ValueKind != JsonValueKind.Null)
+                {
+                    // Handle DateTime serialized as string (ISO 8601 format)
+                    if (timeProp.ValueKind == JsonValueKind.String)
+                    {
+                        var timeString = timeProp.GetString();
+                        if (!string.IsNullOrEmpty(timeString) && DateTime.TryParse(timeString, null, System.Globalization.DateTimeStyles.RoundtripKind, out var parsedTime))
+                        {
+                            meetingTime = parsedTime;
+                        }
+                    }
+                }
+                
+                var meetingUrl = meetingProp.TryGetProperty("Url", out var urlProp) && urlProp.ValueKind != JsonValueKind.Null 
+                    ? urlProp.GetString() 
+                    : null;
+                
+                var currentTime = DateTime.UtcNow;
+                
+                if (meetingTime.HasValue)
+                {
+                    // Check if the meeting time is in the past
+                    bool isMeetingInPast = meetingTime.Value < currentTime;
+                    
+                    if (isMeetingInPast)
+                    {
+                        // Meeting time is in the past - inform mentor that it has passed and no new meeting is scheduled
+                        var formattedTime = meetingTime.Value.ToString("MMMM d, yyyy 'at' h:mm tt 'UTC'");
+                        contextInfo += $"\n\nNEXT TEAM MEETING:\nThe previous meeting was scheduled for {formattedTime}, but this time has already passed. No new team meeting has been scheduled. The Product Manager is responsible for scheduling team meetings.";
+                    }
+                    else
+                    {
+                        // Meeting is in the future - check if it has a URL (fully scheduled)
+                        if (!string.IsNullOrEmpty(meetingUrl))
+                        {
+                            // Format the meeting time (convert UTC to readable format)
+                            var formattedTime = meetingTime.Value.ToString("MMMM d, yyyy 'at' h:mm tt 'UTC'");
+                            contextInfo += $"\n\nNEXT TEAM MEETING:\nScheduled for: {formattedTime}";
+                            contextInfo += $"\nMeeting URL: {meetingUrl}";
+                        }
+                        else
+                        {
+                            // Future time but no URL - not fully scheduled
+                            var formattedTime = meetingTime.Value.ToString("MMMM d, yyyy 'at' h:mm tt 'UTC'");
+                            contextInfo += $"\n\nNEXT TEAM MEETING:\nA meeting time ({formattedTime}) exists but no meeting URL is available, indicating the meeting is not fully scheduled. The Product Manager is responsible for scheduling team meetings.";
+                        }
+                    }
+                }
+                else
+                {
+                    // No meeting time exists - no meeting is scheduled
+                    contextInfo += $"\n\nNEXT TEAM MEETING:\nNo team meeting is currently scheduled. The Product Manager is responsible for scheduling team meetings.";
+                }
+            }
+            
             // Build GitHub context info from commit summary (if available and developer role)
             string githubContextSection = "";
             if (isDeveloperRole && !string.IsNullOrEmpty(githubContextInfo))
@@ -1207,16 +1337,16 @@ namespace strAppersBackend.Controllers
             if (!string.IsNullOrEmpty(contextInfo))
             {
                 var capabilitiesSection = !string.IsNullOrEmpty(capabilitiesInfo) ? $"\n\n{capabilitiesInfo}" : "";
-                return $"{baseSystemPrompt}\n\nCURRENT CONTEXT:\n{contextInfo}{githubContextSection}{capabilitiesSection}\n\n{_promptConfig.Mentor.EnhancedPrompt.ContextReminder}";
+                return $"{enhancedBasePrompt}\n\nCURRENT CONTEXT:\n{contextInfo}{githubContextSection}{capabilitiesSection}\n\n{_promptConfig.Mentor.EnhancedPrompt.ContextReminder}";
             }
 
             // Even without context, add capability information if available
             if (!string.IsNullOrEmpty(capabilitiesInfo))
             {
-                return $"{baseSystemPrompt}\n\n{capabilitiesInfo}";
+                return $"{enhancedBasePrompt}\n\n{capabilitiesInfo}";
             }
             
-            return baseSystemPrompt;
+            return enhancedBasePrompt;
         }
 
         /// <summary>
@@ -3181,7 +3311,12 @@ namespace strAppersBackend.Controllers
                         TeamMembers = teamMembers,
                         TeamMemberTasks = teamMemberTasks,
                         GitHubFiles = githubFiles,
-                        GitHubCommitSummary = githubCommitSummary
+                        GitHubCommitSummary = githubCommitSummary,
+                        NextTeamMeeting = new
+                        {
+                            Time = student.ProjectBoard?.NextMeetingTime,
+                            Url = student.ProjectBoard?.NextMeetingUrl
+                        }
                     }
                 };
             }

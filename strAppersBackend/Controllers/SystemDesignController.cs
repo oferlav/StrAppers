@@ -426,11 +426,15 @@ public class SystemDesignController : ControllerBase
             var contentForLanguageDetection = !string.IsNullOrEmpty(systemDesign) ? systemDesign : extendedDescription;
 
             // Get configuration values
-            var maxModules = _configuration.GetValue<int>("SystemDesignAIAgent:MaxModules", 10);
+            var projectLengthInWeeks = _configuration.GetValue<int>("BusinessLogicConfig:ProjectLengthInWeeks", 8);
+            var exactModules = projectLengthInWeeks - 2; // Generate exactly (ProjectLengthInWeeks - 2) modules
             var minWordsPerModule = _configuration.GetValue<int>("SystemDesignAIAgent:MinWordsPerModule", 100);
 
-            // Call AI service to generate modules with constraints
-            var aiResponse = await _aiService.InitiateModulesAsync(request.ProjectId, extendedDescription, maxModules, minWordsPerModule, contentForLanguageDetection);
+            _logger.LogInformation("Calculated exact module count: {ExactModules} (ProjectLengthInWeeks: {ProjectLength} - 2)", 
+                exactModules, projectLengthInWeeks);
+
+            // Call AI service to generate exactly the calculated number of modules
+            var aiResponse = await _aiService.InitiateModulesAsync(request.ProjectId, extendedDescription, exactModules, minWordsPerModule, contentForLanguageDetection);
             if (!aiResponse.Success)
             {
                 return BadRequest(aiResponse);

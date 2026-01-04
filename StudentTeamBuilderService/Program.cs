@@ -46,11 +46,15 @@ public class Program
         }
         
         // Load only the specific config file (no environment variable dependency)
+        var configPath = Path.Combine(builder.Environment.ContentRootPath, configFile);
         builder.Configuration.Sources.Clear();
         builder.Configuration
             .SetBasePath(builder.Environment.ContentRootPath)
             .AddJsonFile(configFile, optional: false, reloadOnChange: true)
             .AddCommandLine(args);
+        
+        // Store config file path for logging
+        builder.Configuration["ConfigFilePath"] = configPath;
         
         builder.Logging.ClearProviders();
         builder.Logging.AddEventLog();

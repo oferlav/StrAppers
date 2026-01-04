@@ -45,7 +45,19 @@ public class ProjectsController : ControllerBase
         try
         {
             var projects = await _context.Projects
-                .Include(p => p.Organization)
+                .Select(p => new Project
+                {
+                    Id = p.Id,
+                    Title = p.Title,
+                    Description = p.Description,
+                    ExtendedDescription = p.ExtendedDescription,
+                    Priority = p.Priority,
+                    OrganizationId = p.OrganizationId,
+                    IsAvailable = p.IsAvailable,
+                    CreatedAt = p.CreatedAt,
+                    UpdatedAt = p.UpdatedAt
+                    // Exclude SystemDesign, SystemDesignDoc, and Organization to avoid serialization issues
+                })
                 .ToListAsync();
 
             return Ok(projects);
@@ -67,8 +79,21 @@ public class ProjectsController : ControllerBase
         try
         {
             var project = await _context.Projects
-                .Include(p => p.Organization)
-                .FirstOrDefaultAsync(p => p.Id == id);
+                .Where(p => p.Id == id)
+                .Select(p => new Project
+                {
+                    Id = p.Id,
+                    Title = p.Title,
+                    Description = p.Description,
+                    ExtendedDescription = p.ExtendedDescription,
+                    Priority = p.Priority,
+                    OrganizationId = p.OrganizationId,
+                    IsAvailable = p.IsAvailable,
+                    CreatedAt = p.CreatedAt,
+                    UpdatedAt = p.UpdatedAt
+                    // Exclude SystemDesign, SystemDesignDoc, and Organization to avoid serialization issues
+                })
+                .FirstOrDefaultAsync();
 
             if (project == null)
             {

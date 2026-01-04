@@ -64,6 +64,18 @@ public class SprintPlanningRequest
     public string? CreatedBy { get; set; }
     
     public string? SystemDesign { get; set; }
+    
+    /// <summary>
+    /// List of project modules with their database IDs - used for ModuleId custom field
+    /// </summary>
+    public List<ProjectModuleInfo> ProjectModules { get; set; } = new List<ProjectModuleInfo>();
+}
+
+public class ProjectModuleInfo
+{
+    public int Id { get; set; }
+    public string? Title { get; set; }
+    public string? Description { get; set; }
 }
 
 public class SprintPlanningResponse
@@ -111,7 +123,12 @@ public class ProjectTask
     public string RoleName { get; set; } = string.Empty;
     public int EstimatedHours { get; set; }
     public int Priority { get; set; }
+    public string Status { get; set; } = "To Do";
+    public string Risk { get; set; } = "Medium";
+    public string ModuleId { get; set; } = string.Empty;
+    public string CardId { get; set; } = string.Empty;
     public List<string> Dependencies { get; set; } = new List<string>();
+    public bool? Branched { get; set; }
     public List<string> ChecklistItems { get; set; } = new List<string>();
 }
 

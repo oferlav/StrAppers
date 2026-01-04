@@ -88,3 +88,4 @@ The `nixpacks.toml` file is also at the root and configured appropriately for ea
 3. **Language Detection**: Improve language detection and validation
 4. **Build Validation**: Add validation to ensure all required files are generated before deployment
 
+

@@ -112,6 +112,12 @@ namespace strAppersBackend.Models
         public int Priority { get; set; }
         public int EstimatedHours { get; set; }
         public string RoleName { get; set; } = string.Empty;
+        public string Status { get; set; } = "To Do";
+        public string Risk { get; set; } = "Medium";
+        public string ModuleId { get; set; } = string.Empty;
+        public string CardId { get; set; } = string.Empty;
+        public List<string> Dependencies { get; set; } = new List<string>();
+        public bool? Branched { get; set; }
         public List<string> ChecklistItems { get; set; } = new List<string>();
     }
 

@@ -1245,6 +1245,18 @@ namespace strAppersBackend.Controllers
                     });
                 }
 
+                // Fetch ProjectModules for this project to pass module IDs to AI
+                var projectModules = await _context.ProjectModules
+                    .Where(pm => pm.ProjectId == projectId && pm.ModuleType != 3) // Exclude data model modules (ModuleType 3)
+                    .OrderBy(pm => pm.Sequence)
+                    .Select(pm => new ProjectModuleInfo
+                    {
+                        Id = pm.Id,
+                        Title = pm.Title,
+                        Description = pm.Description
+                    })
+                    .ToListAsync();
+                
                 // Create SprintPlanningRequest (same as in BoardsController)
                 var sprintPlanRequest = new SprintPlanningRequest
                 {
@@ -1254,6 +1266,7 @@ namespace strAppersBackend.Controllers
                     StartDate = DateTime.UtcNow,
                     SystemDesign = project.SystemDesign,
                     TeamRoles = roleGroups,
+                    ProjectModules = projectModules, // Include project modules with their database IDs
                     Students = students.Select(s => new StudentInfo
                     {
                         Id = s.Id,

@@ -31,3 +31,4 @@ COMMENT ON COLUMN "ProjectBoards"."GithubFrontendUrl" IS 'GitHub frontend reposi
 COMMENT ON COLUMN "ProjectBoards"."WebApiUrl" IS 'Web API URL (Swagger URL from Railway deployment)';
 
 
+

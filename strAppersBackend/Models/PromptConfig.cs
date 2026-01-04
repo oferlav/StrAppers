@@ -7,6 +7,7 @@ namespace strAppersBackend.Models
     {
         public ProjectModulesPrompts ProjectModules { get; set; } = new();
         public MentorPrompts Mentor { get; set; } = new();
+        public SprintPlanningPrompts SprintPlanning { get; set; } = new();
     }
 
     /// <summary>
@@ -52,6 +53,47 @@ namespace strAppersBackend.Models
         public InitiateModulesPrompt InitiateModules { get; set; } = new();
         public CreateDataModelPrompt CreateDataModel { get; set; } = new();
         public UpdateModulePrompt UpdateModule { get; set; } = new();
+    }
+
+    /// <summary>
+    /// AI prompts for Sprint Planning functionality
+    /// </summary>
+    public class SprintPlanningPrompts
+    {
+        public string SystemPrompt { get; set; } = string.Empty;
+        public string UserPromptTemplate { get; set; } = string.Empty;
+        public TrelloCardRequirements TrelloCardRequirements { get; set; } = new();
+        public FirstSprintRequirements FirstSprintRequirements { get; set; } = new();
+    }
+
+    /// <summary>
+    /// Trello card requirements for sprint planning
+    /// </summary>
+    public class TrelloCardRequirements
+    {
+        public string CardIdFormat { get; set; } = string.Empty;
+        public string TaskDistribution { get; set; } = string.Empty;
+        public string BranchedField { get; set; } = string.Empty;
+        public string ModuleId { get; set; } = string.Empty;
+        public string Dependencies { get; set; } = string.Empty;
+        public string MetadataFields { get; set; } = string.Empty;
+        public string DeveloperCodeChecklist { get; set; } = string.Empty;
+        public string DeveloperDatabaseChecklist { get; set; } = string.Empty;
+        public string ProductManagerChecklist { get; set; } = string.Empty;
+        public string SystemDesignCoverage { get; set; } = string.Empty;
+        public string FinalSprintRequirement { get; set; } = string.Empty;
+    }
+
+    /// <summary>
+    /// First sprint special requirements by role
+    /// </summary>
+    public class FirstSprintRequirements
+    {
+        public string UIUXDesigner { get; set; } = string.Empty;
+        public string ProductManager { get; set; } = string.Empty;
+        public string Marketing { get; set; } = string.Empty;
+        public string BackendDeveloper { get; set; } = string.Empty;
+        public string FrontendDeveloper { get; set; } = string.Empty;
     }
 
     /// <summary>

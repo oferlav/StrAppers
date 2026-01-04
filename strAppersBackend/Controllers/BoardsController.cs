@@ -238,6 +238,21 @@ public class BoardsController : ControllerBase
                 roleGroups.Count, 
                 string.Join(", ", roleGroups.Select(r => $"{r.RoleName} ({r.StudentCount} students)")));
             
+            // Fetch ProjectModules for this project to pass module IDs to AI
+            var projectModules = await _context.ProjectModules
+                .Where(pm => pm.ProjectId == request.ProjectId && pm.ModuleType != 3) // Exclude data model modules (ModuleType 3)
+                .OrderBy(pm => pm.Sequence)
+                .Select(pm => new strAppersBackend.Models.ProjectModuleInfo
+                {
+                    Id = pm.Id,
+                    Title = pm.Title,
+                    Description = pm.Description
+                })
+                .ToListAsync();
+            
+            _logger.LogInformation("Found {ModuleCount} project modules for ProjectId {ProjectId}", 
+                projectModules.Count, request.ProjectId);
+            
             var sprintPlanRequest = new SprintPlanningRequest
             {
                 ProjectId = request.ProjectId,
@@ -246,6 +261,7 @@ public class BoardsController : ControllerBase
                 StartDate = DateTime.UtcNow, // Start from today
                 SystemDesign = project.SystemDesign, // Include system design for AI sprint generation
                 TeamRoles = roleGroups, // Include team roles for proper task distribution
+                ProjectModules = projectModules, // Include project modules with their database IDs
                 Students = students.Select(s => 
                 {
                     _logger.LogInformation("Processing student {StudentId}: {FirstName} {LastName}", s.Id, s.FirstName, s.LastName);
@@ -342,6 +358,13 @@ public class BoardsController : ControllerBase
                     RoleName = t.RoleName,
                     DueDate = s.EndDate,
                     Priority = t.Priority,
+                    EstimatedHours = t.EstimatedHours,
+                    Status = t.Status ?? "To Do",
+                    Risk = t.Risk ?? "Medium",
+                    ModuleId = t.ModuleId ?? string.Empty,
+                    CardId = t.CardId ?? string.Empty,
+                    Dependencies = t.Dependencies ?? new List<string>(),
+                    Branched = t.Branched,
                     ChecklistItems = t.ChecklistItems ?? new List<string>()
                 }) ?? new List<TrelloCard>()).ToList() ?? new List<TrelloCard>(),
                 TotalSprints = sprintPlanResponse.SprintPlan.TotalSprints,
@@ -3236,6 +3259,7 @@ The actual prompt generation would require access to project details and student
             _logger.LogInformation("✅ [NEON] Granted CONNECT privilege to role {RoleName} on database '{DbName}'", roleName, dbName);
             
             // Connect to the specific database to grant schema and table privileges
+            // Wait for database to become available (Neon databases may take a moment to propagate)
             var dbSpecificBuilder = new NpgsqlConnectionStringBuilder
             {
                 Host = originalHost,
@@ -3246,8 +3270,10 @@ The actual prompt generation would require access to project details and student
                 SslMode = SslMode.Require
             };
             var dbSpecificConnString = dbSpecificBuilder.ConnectionString;
+            
+            // Wait for database to become available with retries
             using var dbConn = new NpgsqlConnection(dbSpecificConnString);
-            await dbConn.OpenAsync();
+            await WaitForDatabaseAvailableAsync(dbConn, dbName, maxRetries: 10, delayMs: 1000);
             _logger.LogDebug("🔐 [NEON] Connected to database '{DbName}' to grant privileges", dbName);
             
             // Grant USAGE and CREATE on schema (CREATE is needed to create tables)
@@ -3285,6 +3311,53 @@ The actual prompt generation would require access to project details and student
             _logger.LogError(ex, "❌ [NEON] Error creating isolated database role for database '{DbName}': {Message}", dbName, ex.Message);
             return null;
         }
+    }
+    
+    /// <summary>
+    /// Waits for a database to become available by retrying the connection
+    /// </summary>
+    private async Task WaitForDatabaseAvailableAsync(NpgsqlConnection connection, string dbName, int maxRetries = 10, int delayMs = 1000)
+    {
+        var retryCount = 0;
+        while (retryCount < maxRetries)
+        {
+            try
+            {
+                // Close connection if already open from previous attempt
+                if (connection.State == System.Data.ConnectionState.Open)
+                {
+                    await connection.CloseAsync();
+                }
+                
+                await connection.OpenAsync();
+                _logger.LogDebug("🔐 [NEON] Successfully connected to database '{DbName}' after {RetryCount} retries", dbName, retryCount);
+                return; // Success - database is available
+            }
+            catch (PostgresException pgEx) when (pgEx.SqlState == "3D000" && retryCount < maxRetries - 1)
+            {
+                // Database doesn't exist yet - wait and retry
+                retryCount++;
+                _logger.LogInformation("⏳ [NEON] Database '{DbName}' not yet available (attempt {RetryCount}/{MaxRetries}), waiting {DelayMs}ms before retry...", 
+                    dbName, retryCount, maxRetries, delayMs);
+                await Task.Delay(delayMs);
+            }
+            catch (Exception ex) when (retryCount < maxRetries - 1)
+            {
+                // Other connection errors - wait and retry
+                retryCount++;
+                _logger.LogWarning("⏳ [NEON] Connection to database '{DbName}' failed (attempt {RetryCount}/{MaxRetries}): {Error}, waiting {DelayMs}ms before retry...", 
+                    dbName, retryCount, maxRetries, ex.Message, delayMs);
+                await Task.Delay(delayMs);
+            }
+            catch
+            {
+                // Last retry failed or non-retryable error - rethrow
+                throw;
+            }
+        }
+        
+        // If we get here, all retries failed
+        throw new InvalidOperationException($"Database '{dbName}' did not become available after {maxRetries} retries");
     }
     
     /// <summary>
@@ -3380,7 +3453,8 @@ WHERE NOT EXISTS (SELECT 1 FROM ""TestProjects"");
 ";
             
             using var conn = new NpgsqlConnection(builder.ConnectionString);
-            await conn.OpenAsync();
+            // Wait for database to become available (Neon databases may take a moment to propagate)
+            await WaitForDatabaseAvailableAsync(conn, dbName, maxRetries: 10, delayMs: 1000);
             _logger.LogDebug("📊 [NEON] Connected to database '{DbName}' to execute schema script", dbName);
             
             using var cmd = new NpgsqlCommand(sqlScript, conn);

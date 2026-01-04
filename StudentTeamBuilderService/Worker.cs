@@ -32,8 +32,12 @@ public class Worker : BackgroundService
         var intervalMinutes = _configuration.GetValue<int>("Worker:IntervalMinutes", 5);
         var baseUrl = _configuration.GetValue<string>("Backend:BaseUrl") ?? "http://localhost:9001";
         var connectionString = _configuration.GetConnectionString("DefaultConnection")!;
+        var configFilePath = _configuration["ConfigFilePath"] ?? "Unknown";
 
         _logger.LogInformation("Student Team Builder Worker started. Interval: {Interval} minutes, Backend: {Backend}, DB: {HasConn}", intervalMinutes, baseUrl, !string.IsNullOrWhiteSpace(connectionString));
+        _logger.LogInformation("[CONFIG] Config file path: {ConfigPath}", configFilePath);
+        _logger.LogInformation("[CONFIG] KickoffConfig values: MinimumStudents={MinimumStudents}, RequireAdmin={RequireAdmin}, RequireUIUXDesigner={RequireUIUXDesigner}, RequireProductManager={RequireProductManager}, RequireDeveloperRule={RequireDeveloperRule}, MaxPendingTime={MaxPendingTime}",
+            _kickoffConfig.MinimumStudents, _kickoffConfig.RequireAdmin, _kickoffConfig.RequireUIUXDesigner, _kickoffConfig.RequireProductManager, _kickoffConfig.RequireDeveloperRule, _kickoffConfig.MaxPendingTime);
 
         while (!stoppingToken.IsCancellationRequested)
         {
@@ -340,19 +344,61 @@ public class Worker : BackgroundService
             }
             
             // Check if we can stop early, but only if all required roles are satisfied
+            // CRITICAL: Don't stop early if we haven't processed all candidates yet - we might miss required roles
             var hasMinimumStudents = byRole.Count >= cfg.MinimumStudents;
-            var hasRequiredUIUX = !cfg.RequireUIUXDesigner || byRole.Values.Count(x => x.RoleType == 3) == 1;
-            var hasRequiredProductManager = !cfg.RequireProductManager || byRole.Values.Count(x => x.RoleType == 4) == 1;
+            var uiuxCount = byRole.Values.Count(x => x.RoleType == 3);
+            var pmCount = byRole.Values.Count(x => x.RoleType == 4);
+            var hasRequiredUIUX = !cfg.RequireUIUXDesigner || uiuxCount == 1;
+            var hasRequiredProductManager = !cfg.RequireProductManager || pmCount == 1;
             
-            if (hasMinimumStudents && hasRequiredUIUX && hasRequiredProductManager)
+            // Check if there are more candidates that might contain required roles
+            // CRITICAL: Always check for remaining required roles, even if current check passes
+            // This ensures we don't stop early if a required role candidate is coming up
+            var currentIndex = candidates.IndexOf(c);
+            var remainingCandidates = candidates.Skip(currentIndex + 1).ToList();
+            var hasRemainingCandidatesWithRequiredRoles = false;
+            
+            // Check for UI/UX in remaining candidates if UI/UX is required and not satisfied
+            if (cfg.RequireUIUXDesigner && uiuxCount != 1)
             {
-                logger.LogInformation("[SELECT] Stopping early: byRole.Count={Count} >= MinimumStudents={Min} AND required roles satisfied", byRole.Count, cfg.MinimumStudents);
+                var hasUIUXInRemaining = remainingCandidates.Any(x => x.RoleType == 3);
+                if (hasUIUXInRemaining)
+                {
+                    hasRemainingCandidatesWithRequiredRoles = true;
+                    logger.LogInformation("[SELECT] Found UI/UX candidate in remaining candidates (count={RemainingCount}), will not stop early", remainingCandidates.Count);
+                }
+            }
+            
+            // Check for PM in remaining candidates if PM is required and not satisfied
+            // CRITICAL: Check based on actual requirement, not the boolean result
+            if (cfg.RequireProductManager && pmCount != 1)
+            {
+                var hasPMInRemaining = remainingCandidates.Any(x => x.RoleType == 4);
+                if (hasPMInRemaining)
+                {
+                    hasRemainingCandidatesWithRequiredRoles = true;
+                    logger.LogInformation("[SELECT] Found PM candidate in remaining candidates (count={RemainingCount}), will not stop early. PM candidates: [{PMCandidates}]", 
+                        remainingCandidates.Count,
+                        string.Join(", ", remainingCandidates.Where(x => x.RoleType == 4).Select(c => $"StudentId={c.Id}, RoleId={c.RoleId}")));
+                }
+                else
+                {
+                    logger.LogInformation("[SELECT] No PM candidate in remaining {RemainingCount} candidates", remainingCandidates.Count);
+                }
+            }
+            
+            logger.LogInformation("[SELECT] Early stop check: hasMinimumStudents={Min}, hasRequiredUIUX={UIUX} (count={UIUXCount}), hasRequiredProductManager={PM} (count={PMCount}), hasRemainingCandidatesWithRequiredRoles={HasRemaining}, remainingCandidates={RemainingCount}",
+                hasMinimumStudents, hasRequiredUIUX, uiuxCount, hasRequiredProductManager, pmCount, hasRemainingCandidatesWithRequiredRoles, remainingCandidates.Count);
+            
+            if (hasMinimumStudents && hasRequiredUIUX && hasRequiredProductManager && !hasRemainingCandidatesWithRequiredRoles)
+            {
+                logger.LogInformation("[SELECT] Stopping early: byRole.Count={Count} >= MinimumStudents={Min} AND required roles satisfied AND no more candidates with required roles", byRole.Count, cfg.MinimumStudents);
                 break;
             }
             else if (hasMinimumStudents && (!hasRequiredUIUX || !hasRequiredProductManager))
             {
-                logger.LogInformation("[SELECT] Continuing: byRole.Count={Count} >= MinimumStudents={Min} but required roles not yet satisfied (UI/UX={UIUX}, PM={PM}), continuing search...", 
-                    byRole.Count, cfg.MinimumStudents, hasRequiredUIUX, hasRequiredProductManager);
+                logger.LogInformation("[SELECT] Continuing: byRole.Count={Count} >= MinimumStudents={Min} but required roles not yet satisfied (UI/UX={UIUX}, PM={PM}), remaining candidates with required roles={HasRemaining}, continuing search...", 
+                    byRole.Count, cfg.MinimumStudents, hasRequiredUIUX, hasRequiredProductManager, hasRemainingCandidatesWithRequiredRoles);
             }
         }
 
@@ -424,16 +470,29 @@ public class Worker : BackgroundService
         if (cfg.RequireProductManager)
         {
             var pmCount = group.Count(x => x.RoleType == 4);
+            logger.LogInformation("[SELECT] PM Fix check: RequireProductManager={Require}, pmCount={Count}, groupCount={GroupCount}", 
+                cfg.RequireProductManager, pmCount, group.Count);
+            
             if (pmCount == 0)
             {
                 logger.LogInformation("[SELECT] Product Manager required but not in group. Attempting to add Product Manager candidate...");
+                logger.LogInformation("[SELECT] Searching in {Count} candidates for PM (RoleType=4)...", candidates.Count);
+                var pmCandidates = candidates.Where(x => x.RoleType == 4 && x.RoleId != null).ToList();
+                logger.LogInformation("[SELECT] Found {Count} PM candidates: [{Details}]", 
+                    pmCandidates.Count,
+                    string.Join(", ", pmCandidates.Select(c => $"StudentId={c.Id}, RoleId={c.RoleId}, RoleName={c.RoleName}")));
+                
                 var pmCandidate = candidates.FirstOrDefault(x => x.RoleType == 4 && x.RoleId != null);
                 if (pmCandidate != null)
                 {
                     var pmRoleId = pmCandidate.RoleId!.Value;
+                    logger.LogInformation("[SELECT] Found PM candidate: StudentId={StudentId}, RoleId={RoleId}, checking if already in byRole...", 
+                        pmCandidate.Id, pmRoleId);
+                    
                     if (byRole.ContainsKey(pmRoleId))
                     {
-                        logger.LogWarning("[SELECT] WARNING: Product Manager RoleId={RoleId} already in group but RoleType mismatch!", pmRoleId);
+                        logger.LogWarning("[SELECT] WARNING: Product Manager RoleId={RoleId} already in group but RoleType mismatch! Existing: StudentId={ExistingId}, RoleType={ExistingType}", 
+                            pmRoleId, byRole[pmRoleId].Id, byRole[pmRoleId].RoleType);
                     }
                     else
                     {
@@ -445,7 +504,7 @@ public class Worker : BackgroundService
                 }
                 else
                 {
-                    logger.LogInformation("[SELECT] No Product Manager candidate found in candidates list to add");
+                    logger.LogWarning("[SELECT] No Product Manager candidate found in candidates list to add. Total candidates: {Count}", candidates.Count);
                 }
             }
             else if (pmCount > 1)

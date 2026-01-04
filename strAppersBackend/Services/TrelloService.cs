@@ -323,8 +323,12 @@ namespace strAppersBackend.Services
                 }
 
                 // Step 3: Create role labels
+                // Get unique roles from BOTH team members AND cards (to handle cases where AI generates tasks for roles not in team)
+                var teamMemberRoles = request.TeamMembers.Select(m => m.RoleName).Where(r => !string.IsNullOrEmpty(r)).Distinct().ToList();
+                var cardRoles = request.SprintPlan.Cards.Select(c => c.RoleName).Where(r => !string.IsNullOrEmpty(r)).Distinct().ToList();
+                var uniqueRoles = teamMemberRoles.Union(cardRoles).Distinct().ToList();
+                
                 var roleLabelIds = new Dictionary<string, string>();
-                var uniqueRoles = request.TeamMembers.Select(m => m.RoleName).Distinct().ToList();
                 foreach (var roleName in uniqueRoles)
                 {
                     try
@@ -383,7 +387,10 @@ namespace strAppersBackend.Services
                     }
                 }
 
-                // Step 5: Create cards (tasks)
+                // Step 5: Ensure custom fields exist on the board
+                var customFieldIds = await EnsureCustomFieldsExistAsync(trelloBoardId, errors);
+
+                // Step 6: Create cards (tasks)
                 foreach (var card in request.SprintPlan.Cards)
                 {
                     try
@@ -484,6 +491,9 @@ namespace strAppersBackend.Services
                             {
                                 _logger.LogInformation("No checklist items provided for card {CardName}, skipping checklist creation", card.Name);
                             }
+
+                            // Set custom fields on the card
+                            await SetCardCustomFieldsAsync(trelloBoardId, cardId, card, customFieldIds, errors);
 
                             response.CreatedCards.Add(new TrelloCreatedCard
                             {
@@ -1212,6 +1222,310 @@ namespace strAppersBackend.Services
                     Message = $"Error getting cards and lists by label: {ex.Message}",
                     LabelFound = false
                 };
+            }
+        }
+
+        /// <summary>
+        /// Ensures custom fields exist on the board, creating them if they don't exist
+        /// Returns a dictionary mapping field names to field IDs
+        /// </summary>
+        private async Task<Dictionary<string, string>> EnsureCustomFieldsExistAsync(string boardId, List<string> errors)
+        {
+            var customFieldIds = new Dictionary<string, string>();
+            
+            try
+            {
+                // Get existing custom fields
+                var getFieldsUrl = $"https://api.trello.com/1/boards/{boardId}/customFields?key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
+                var getFieldsResponse = await _httpClient.GetAsync(getFieldsUrl);
+                
+                var existingFields = new Dictionary<string, string>();
+                if (getFieldsResponse.IsSuccessStatusCode)
+                {
+                    var fieldsJson = await getFieldsResponse.Content.ReadAsStringAsync();
+                    var fieldsArray = JsonSerializer.Deserialize<JsonElement[]>(fieldsJson);
+                    
+                    foreach (var field in fieldsArray ?? Array.Empty<JsonElement>())
+                    {
+                        var fieldId = field.TryGetProperty("id", out var idProp) ? idProp.GetString() : null;
+                        var fieldName = field.TryGetProperty("name", out var nameProp) ? nameProp.GetString() : null;
+                        
+                        if (!string.IsNullOrEmpty(fieldId) && !string.IsNullOrEmpty(fieldName))
+                        {
+                            existingFields[fieldName] = fieldId;
+                            customFieldIds[fieldName] = fieldId;
+                        }
+                    }
+                }
+
+                // Define required custom fields
+                var requiredFields = new[]
+                {
+                    new { Name = "Priority", Type = "number", Options = (string[]?)null },
+                    new { Name = "Status", Type = "list", Options = new[] { "To Do", "In Progress", "Done" } },
+                    new { Name = "Risk", Type = "list", Options = new[] { "Low", "Medium", "High" } },
+                    new { Name = "ModuleId", Type = "text", Options = (string[]?)null },
+                    new { Name = "CardId", Type = "text", Options = (string[]?)null },
+                    new { Name = "Dependencies", Type = "text", Options = (string[]?)null },
+                    new { Name = "Branched", Type = "checkbox", Options = (string[]?)null }
+                };
+
+                // Create missing custom fields
+                foreach (var field in requiredFields)
+                {
+                    if (existingFields.ContainsKey(field.Name))
+                    {
+                        _logger.LogInformation("Custom field '{FieldName}' already exists on board", field.Name);
+                        continue;
+                    }
+
+                    try
+                    {
+                        // Trello API: POST /1/customFields (not /boards/{id}/customFields)
+                        // Note: Custom Fields Power-Up must be enabled on the board
+                        var createFieldUrl = $"https://api.trello.com/1/customFields?key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
+                        
+                        // Trello API format for creating custom fields
+                        // idModel is the board ID, modelType must be "board"
+                        var fieldData = new Dictionary<string, object>
+                        {
+                            { "idModel", boardId },
+                            { "modelType", "board" },
+                            { "name", field.Name },
+                            { "type", field.Type },
+                            { "pos", "bottom" }
+                        };
+                        
+                        var fieldJson = JsonSerializer.Serialize(fieldData);
+                        var content = new StringContent(fieldJson, Encoding.UTF8, "application/json");
+                        
+                        _logger.LogInformation("Creating custom field '{FieldName}' of type '{FieldType}' on board {BoardId}", field.Name, field.Type, boardId);
+                        var createFieldResponse = await _httpClient.PostAsync(createFieldUrl, content);
+                        
+                        var responseContent = await createFieldResponse.Content.ReadAsStringAsync();
+                        _logger.LogInformation("Custom field creation response for '{FieldName}': Status {StatusCode}, Content: {Content}", field.Name, createFieldResponse.StatusCode, responseContent);
+                        
+                        if (createFieldResponse.IsSuccessStatusCode)
+                        {
+                            var responseJson = responseContent;
+                            var fieldResponse = JsonSerializer.Deserialize<JsonElement>(responseJson);
+                            var fieldId = fieldResponse.GetProperty("id").GetString();
+                            customFieldIds[field.Name] = fieldId;
+                            
+                            _logger.LogInformation("Created custom field '{FieldName}' with ID '{FieldId}'", field.Name, fieldId);
+                            
+                            // For list type fields, add options
+                            if (field.Type == "list" && field.Options != null)
+                            {
+                                foreach (var option in field.Options)
+                                {
+                                    try
+                                    {
+                                        var addOptionUrl = $"https://api.trello.com/1/customFields/{fieldId}/options?key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
+                                        var optionData = new { value = new { text = option } };
+                                        var optionJson = JsonSerializer.Serialize(optionData);
+                                        var optionContent = new StringContent(optionJson, Encoding.UTF8, "application/json");
+                                        
+                                        var addOptionResponse = await _httpClient.PostAsync(addOptionUrl, optionContent);
+                                        if (addOptionResponse.IsSuccessStatusCode)
+                                        {
+                                            _logger.LogInformation("Added option '{Option}' to custom field '{FieldName}'", option, field.Name);
+                                        }
+                                    }
+                                    catch (Exception ex)
+                                    {
+                                        _logger.LogWarning(ex, "Failed to add option '{Option}' to custom field '{FieldName}'", option, field.Name);
+                                    }
+                                }
+                            }
+                        }
+                        else
+                        {
+                            var errorContent = await createFieldResponse.Content.ReadAsStringAsync();
+                            _logger.LogWarning("Failed to create custom field '{FieldName}': {Error}. This may be because the Custom Fields Power-Up is not enabled on the board. Custom fields require the Power-Up to be enabled manually in Trello.", field.Name, errorContent);
+                            // Don't add to errors - this is non-blocking. Custom fields are optional if Power-Up isn't enabled.
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogError(ex, "Error creating custom field '{FieldName}'", field.Name);
+                        errors.Add($"Error creating custom field '{field.Name}': {ex.Message}");
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error ensuring custom fields exist on board {BoardId}", boardId);
+                _logger.LogWarning("Custom fields may not be available if the Custom Fields Power-Up is not enabled on the Trello board. To enable: Open the board in Trello → Power-Ups → Search for 'Custom Fields' → Enable it.");
+                // Don't add to errors - custom fields are optional if Power-Up isn't enabled
+            }
+            
+            if (customFieldIds.Count == 0)
+            {
+                _logger.LogWarning("No custom fields are available on board {BoardId}. This may be because the Custom Fields Power-Up is not enabled. Cards will be created without custom fields.", boardId);
+            }
+            
+            return customFieldIds;
+        }
+
+        /// <summary>
+        /// Sets custom field values on a Trello card
+        /// </summary>
+        private async Task SetCardCustomFieldsAsync(string boardId, string cardId, TrelloCard card, Dictionary<string, string> customFieldIds, List<string> errors)
+        {
+            try
+            {
+                // Set Priority (number)
+                if (customFieldIds.ContainsKey("Priority") && card.Priority > 0)
+                {
+                    await SetCustomFieldValueAsync(cardId, customFieldIds["Priority"], "number", card.Priority.ToString(), errors);
+                }
+
+                // Set Status (list)
+                if (customFieldIds.ContainsKey("Status") && !string.IsNullOrEmpty(card.Status))
+                {
+                    await SetCustomFieldValueAsync(cardId, customFieldIds["Status"], "list", card.Status, errors);
+                }
+
+                // Set Risk (list)
+                if (customFieldIds.ContainsKey("Risk") && !string.IsNullOrEmpty(card.Risk))
+                {
+                    await SetCustomFieldValueAsync(cardId, customFieldIds["Risk"], "list", card.Risk, errors);
+                }
+
+                // Set ModuleId (text)
+                if (customFieldIds.ContainsKey("ModuleId") && !string.IsNullOrEmpty(card.ModuleId))
+                {
+                    await SetCustomFieldValueAsync(cardId, customFieldIds["ModuleId"], "text", card.ModuleId, errors);
+                }
+
+                // Set CardId (text)
+                if (customFieldIds.ContainsKey("CardId") && !string.IsNullOrEmpty(card.CardId))
+                {
+                    await SetCustomFieldValueAsync(cardId, customFieldIds["CardId"], "text", card.CardId, errors);
+                }
+
+                // Set Dependencies (text - comma-separated)
+                if (customFieldIds.ContainsKey("Dependencies") && card.Dependencies != null && card.Dependencies.Count > 0)
+                {
+                    var dependenciesText = string.Join(", ", card.Dependencies);
+                    await SetCustomFieldValueAsync(cardId, customFieldIds["Dependencies"], "text", dependenciesText, errors);
+                }
+
+                // Set Branched (checkbox) - only for developer roles
+                if (customFieldIds.ContainsKey("Branched") && card.Branched.HasValue)
+                {
+                    var isDeveloper = !string.IsNullOrEmpty(card.RoleName) && 
+                                     (card.RoleName.Contains("Developer", StringComparison.OrdinalIgnoreCase) ||
+                                      card.RoleName.Contains("Backend", StringComparison.OrdinalIgnoreCase) ||
+                                      card.RoleName.Contains("Frontend", StringComparison.OrdinalIgnoreCase));
+                    
+                    if (isDeveloper)
+                    {
+                        await SetCustomFieldValueAsync(cardId, customFieldIds["Branched"], "checkbox", card.Branched.Value ? "true" : "false", errors);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error setting custom fields for card {CardId}", cardId);
+                errors.Add($"Error setting custom fields for card '{card.Name}': {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Sets a single custom field value on a card
+        /// </summary>
+        private async Task SetCustomFieldValueAsync(string cardId, string customFieldId, string fieldType, string value, List<string> errors)
+        {
+            try
+            {
+                var setFieldUrl = $"https://api.trello.com/1/cards/{cardId}/customField/{customFieldId}/item?key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
+                
+                object fieldValue;
+                if (fieldType == "number")
+                {
+                    if (double.TryParse(value, out var numValue))
+                    {
+                        fieldValue = new { value = new { number = numValue.ToString() } };
+                    }
+                    else
+                    {
+                        _logger.LogWarning("Invalid number value for custom field: {Value}", value);
+                        return;
+                    }
+                }
+                else if (fieldType == "list")
+                {
+                    // For list fields, we need to get the option ID by matching the text value
+                    // First, get the custom field definition to find the option ID
+                    var getFieldUrl = $"https://api.trello.com/1/customFields/{customFieldId}?key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
+                    var getFieldResponse = await _httpClient.GetAsync(getFieldUrl);
+                    
+                    string? optionId = null;
+                    if (getFieldResponse.IsSuccessStatusCode)
+                    {
+                        var fieldDefJson = await getFieldResponse.Content.ReadAsStringAsync();
+                        var fieldDef = JsonSerializer.Deserialize<JsonElement>(fieldDefJson);
+                        
+                        if (fieldDef.TryGetProperty("options", out var optionsProp) && optionsProp.ValueKind == JsonValueKind.Array)
+                        {
+                            foreach (var option in optionsProp.EnumerateArray())
+                            {
+                                var optionText = option.TryGetProperty("value", out var optVal) && optVal.TryGetProperty("text", out var optText) 
+                                    ? optText.GetString() 
+                                    : null;
+                                
+                                if (string.Equals(optionText, value, StringComparison.OrdinalIgnoreCase))
+                                {
+                                    optionId = option.TryGetProperty("id", out var optId) ? optId.GetString() : null;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    
+                    if (!string.IsNullOrEmpty(optionId))
+                    {
+                        fieldValue = new { idValue = optionId };
+                    }
+                    else
+                    {
+                        // Fallback: try using text value directly (some Trello versions might accept this)
+                        _logger.LogWarning("Could not find option ID for list value '{Value}', trying text format", value);
+                        fieldValue = new { value = new { text = value } };
+                    }
+                }
+                else if (fieldType == "checkbox")
+                {
+                    var boolValue = value.Equals("true", StringComparison.OrdinalIgnoreCase);
+                    fieldValue = new { value = new { @checked = boolValue } };
+                }
+                else // text
+                {
+                    fieldValue = new { value = new { text = value } };
+                }
+                
+                var fieldJson = JsonSerializer.Serialize(fieldValue);
+                var content = new StringContent(fieldJson, Encoding.UTF8, "application/json");
+                
+                var response = await _httpClient.PutAsync(setFieldUrl, content);
+                
+                if (response.IsSuccessStatusCode)
+                {
+                    _logger.LogDebug("Set custom field '{FieldId}' to '{Value}' on card {CardId}", customFieldId, value, cardId);
+                }
+                else
+                {
+                    var errorContent = await response.Content.ReadAsStringAsync();
+                    _logger.LogWarning("Failed to set custom field '{FieldId}' to '{Value}' on card {CardId}: {Error}", customFieldId, value, cardId, errorContent);
+                    errors.Add($"Failed to set custom field on card: {errorContent}");
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error setting custom field '{FieldId}' to '{Value}' on card {CardId}", customFieldId, value, cardId);
+                errors.Add($"Error setting custom field: {ex.Message}");
             }
         }
     }
