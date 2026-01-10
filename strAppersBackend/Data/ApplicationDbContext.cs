@@ -390,6 +390,8 @@ public class ApplicationDbContext : DbContext
             entity.Property(e => e.YoutubeUrl).HasColumnName("YoutubeUrl").HasMaxLength(1000);
             entity.Property(e => e.GroupChat).HasColumnName("GroupChat").HasColumnType("text");
             entity.Property(e => e.Observed).HasColumnName("Observed").HasDefaultValue(0);
+            entity.Property(e => e.DBPassword).HasColumnName("DBPassword").HasMaxLength(200);
+            entity.Property(e => e.NeonBranchId).HasColumnName("NeonBranchId").HasMaxLength(100);
             
             // Foreign key relationships
             entity.HasOne(e => e.Project)

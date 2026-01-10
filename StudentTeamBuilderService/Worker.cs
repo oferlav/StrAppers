@@ -141,7 +141,9 @@ public class Worker : BackgroundService
                 "SELECT \"Title\" FROM \"Projects\" WHERE \"Id\"=@Id", new { Id = projectId }, cancellationToken: ct));
 
             var client = _httpClientFactory.CreateClient();
-            client.Timeout = TimeSpan.FromMinutes(5);
+            // Increase timeout to 20 minutes - board creation can take 10-15 minutes due to Neon branch creation,
+            // database setup, GitHub repos, Railway deployment, etc.
+            client.Timeout = TimeSpan.FromMinutes(20);
 
             var body = new CreateBoardRequest
             {
@@ -159,6 +161,18 @@ public class Worker : BackgroundService
                 {
                     var errorText = await resp.Content.ReadAsStringAsync(ct);
                     _logger.LogWarning("[CREATE_BOARD] Failed for project {ProjectId}. Status={Status}. Body={Body}", projectId, resp.StatusCode, errorText);
+                    
+                    // Before rolling back, check if board was actually created (might have succeeded before error response)
+                    var boardExists = await conn.ExecuteScalarAsync<int?>(new CommandDefinition(
+                        "SELECT COUNT(*) FROM \"ProjectBoards\" WHERE \"ProjectId\"=@ProjectId",
+                        new { ProjectId = projectId }, cancellationToken: ct));
+                    
+                    if (boardExists > 0)
+                    {
+                        _logger.LogWarning("[CREATE_BOARD] Board exists for project {ProjectId} despite error response. NOT rolling back students.", projectId);
+                        return 1; // Board was created, consider it success
+                    }
+                    
                     await conn.ExecuteAsync(new CommandDefinition(
                         "UPDATE \"Students\" SET \"Status\"=1, \"ProjectId\"=NULL, \"UpdatedAt\"=NOW() WHERE \"Id\" = ANY(@Ids)",
                         new { Ids = ids }, cancellationToken: ct));
@@ -172,6 +186,21 @@ public class Worker : BackgroundService
             catch (Exception ex)
             {
                 _logger.LogError(ex, "[CREATE_BOARD] Exception for project {ProjectId}: {Message}", projectId, ex.Message);
+                
+                // Before rolling back, check if board was actually created (might have succeeded before timeout)
+                // This prevents rollback when board creation succeeded but HTTP response timed out
+                var boardExists = await conn.ExecuteScalarAsync<int?>(new CommandDefinition(
+                    "SELECT COUNT(*) FROM \"ProjectBoards\" WHERE \"ProjectId\"=@ProjectId",
+                    new { ProjectId = projectId }, cancellationToken: ct));
+                
+                if (boardExists > 0)
+                {
+                    _logger.LogWarning("[CREATE_BOARD] Board exists for project {ProjectId} despite exception (likely timeout). NOT rolling back students. Exception: {Exception}", 
+                        projectId, ex.Message);
+                    return 1; // Board was created, consider it success despite timeout
+                }
+                
+                _logger.LogInformation("[CREATE_BOARD] No board found for project {ProjectId}. Rolling back students.", projectId);
                 await conn.ExecuteAsync(new CommandDefinition(
                     "UPDATE \"Students\" SET \"Status\"=1, \"ProjectId\"=NULL, \"UpdatedAt\"=NOW() WHERE \"Id\" = ANY(@Ids)",
                     new { Ids = ids }, cancellationToken: ct));
@@ -387,13 +416,28 @@ public class Worker : BackgroundService
                 }
             }
             
-            logger.LogInformation("[SELECT] Early stop check: hasMinimumStudents={Min}, hasRequiredUIUX={UIUX} (count={UIUXCount}), hasRequiredProductManager={PM} (count={PMCount}), hasRemainingCandidatesWithRequiredRoles={HasRemaining}, remainingCandidates={RemainingCount}",
-                hasMinimumStudents, hasRequiredUIUX, uiuxCount, hasRequiredProductManager, pmCount, hasRemainingCandidatesWithRequiredRoles, remainingCandidates.Count);
+            // CRITICAL FIX: Also check if there are remaining candidates that could improve the team
+            // Even if all required roles are satisfied, we should continue if there are more candidates
+            // that haven't been processed yet (they might be better matches or add missing roles)
+            // Only stop early if we've processed ALL candidates
+            var hasMoreCandidates = remainingCandidates.Count > 0;
             
-            if (hasMinimumStudents && hasRequiredUIUX && hasRequiredProductManager && !hasRemainingCandidatesWithRequiredRoles)
+            logger.LogInformation("[SELECT] Early stop check: hasMinimumStudents={Min}, hasRequiredUIUX={UIUX} (count={UIUXCount}), hasRequiredProductManager={PM} (count={PMCount}), hasRemainingCandidatesWithRequiredRoles={HasRemaining}, remainingCandidates={RemainingCount}, hasMoreCandidates={HasMore}",
+                hasMinimumStudents, hasRequiredUIUX, uiuxCount, hasRequiredProductManager, pmCount, hasRemainingCandidatesWithRequiredRoles, remainingCandidates.Count, hasMoreCandidates);
+            
+            // Only stop early if:
+            // 1. We have minimum students
+            // 2. All required roles are satisfied
+            // 3. No remaining candidates with required roles
+            // 4. We've processed ALL candidates (no more candidates to process)
+            if (hasMinimumStudents && hasRequiredUIUX && hasRequiredProductManager && !hasRemainingCandidatesWithRequiredRoles && !hasMoreCandidates)
             {
-                logger.LogInformation("[SELECT] Stopping early: byRole.Count={Count} >= MinimumStudents={Min} AND required roles satisfied AND no more candidates with required roles", byRole.Count, cfg.MinimumStudents);
+                logger.LogInformation("[SELECT] Stopping early: byRole.Count={Count} >= MinimumStudents={Min} AND required roles satisfied AND no more candidates to process", byRole.Count, cfg.MinimumStudents);
                 break;
+            }
+            else if (hasMinimumStudents && hasRequiredUIUX && hasRequiredProductManager && !hasRemainingCandidatesWithRequiredRoles && hasMoreCandidates)
+            {
+                logger.LogInformation("[SELECT] Continuing: All requirements met but {RemainingCount} more candidates to process - may find better matches", remainingCandidates.Count);
             }
             else if (hasMinimumStudents && (!hasRequiredUIUX || !hasRequiredProductManager))
             {

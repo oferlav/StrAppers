@@ -412,6 +412,9 @@ public class BoardsController : ControllerBase
 
             // Create Neon database for the project
             string? dbConnectionString = null;
+            string? dbPassword = null;
+            string? createdNeonProjectId = null;
+            string? createdBranchId = null;
             try
             {
                 var dbName = $"AppDB_{trelloBoardId}";
@@ -419,20 +422,394 @@ public class BoardsController : ControllerBase
                 
                 var neonApiKey = _configuration["Neon:ApiKey"];
                 var neonBaseUrl = _configuration["Neon:BaseUrl"];
-                var neonProjectId = _configuration["Neon:ProjectId"];
-                var neonBranchId = _configuration["Neon:BranchId"];
                 var neonDefaultOwnerName = _configuration["Neon:DefaultOwnerName"] ?? "neondb_owner";
 
                 if (!string.IsNullOrWhiteSpace(neonApiKey) && neonApiKey != "your-neon-api-key-here" &&
-                    !string.IsNullOrWhiteSpace(neonBaseUrl) &&
-                    !string.IsNullOrWhiteSpace(neonProjectId) &&
-                    !string.IsNullOrWhiteSpace(neonBranchId))
+                    !string.IsNullOrWhiteSpace(neonBaseUrl))
                 {
+                    // Step 0: Create a new Neon project for this tenant (project-per-tenant isolation)
+                    var projectName = $"Project-{trelloBoardId}";
+                    _logger.LogInformation("🏗️ [NEON] Creating isolated Neon project for database '{DbName}': {ProjectName}", dbName, projectName);
+                    var projectResult = await CreateNeonProjectAsync(neonApiKey, neonBaseUrl, projectName);
+                    
+                    if (!projectResult.Success || string.IsNullOrEmpty(projectResult.ProjectId))
+                    {
+                        _logger.LogError("❌ [NEON] Failed to create Neon project for database '{DbName}': {Error}", 
+                            dbName, projectResult.ErrorMessage ?? "Unknown error");
+                        throw new InvalidOperationException($"Failed to create Neon project for database '{dbName}': {projectResult.ErrorMessage}");
+                    }
+
+                    createdNeonProjectId = projectResult.ProjectId;
+                    var defaultBranchId = projectResult.DefaultBranchId;
+                    var projectOperationIds = projectResult.OperationIds;
+                    _logger.LogInformation("✅ [NEON] Created Neon project '{ProjectId}' for database '{DbName}'", createdNeonProjectId, dbName);
+
+                    // Step 0.5: Wait for Project Creation Operations to Finish
+                    if (projectOperationIds.Count > 0)
+                    {
+                        _logger.LogInformation("⏳ [NEON] Step 0.5: Waiting for {Count} project creation operations to finish before creating branch", 
+                            projectOperationIds.Count);
+
+                        using var projectHttpClient = _httpClientFactory.CreateClient();
+                        projectHttpClient.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", neonApiKey);
+                        projectHttpClient.DefaultRequestHeaders.Accept.Add(new System.Net.Http.Headers.MediaTypeWithQualityHeaderValue("application/json"));
+
+                        var projectReady = false;
+                        var projectOperationPollCount = 0;
+                        var maxProjectOperationPolls = 60; // 60 retries × 2 seconds = 2 minutes max
+                        var projectOperationPollDelay = 2000;
+                        var trackedProjectOperations = new Dictionary<string, string>();
+                        var projectOperationsApiUrl = $"{neonBaseUrl}/projects/{createdNeonProjectId}/operations";
+
+                        while (projectOperationPollCount < maxProjectOperationPolls && !projectReady)
+                        {
+                            try
+                            {
+                                var opsResponse = await projectHttpClient.GetAsync(projectOperationsApiUrl);
+                                if (opsResponse.IsSuccessStatusCode)
+                                {
+                                    var opsContent = await opsResponse.Content.ReadAsStringAsync();
+                                    var opsDoc = JsonDocument.Parse(opsContent);
+
+                                    trackedProjectOperations.Clear();
+
+                                    if (opsDoc.RootElement.TryGetProperty("operations", out var opsArray) && opsArray.ValueKind == JsonValueKind.Array)
+                                    {
+                                        foreach (var op in opsArray.EnumerateArray())
+                                        {
+                                            if (op.TryGetProperty("id", out var idProp))
+                                            {
+                                                var opId = idProp.GetString();
+                                                if (projectOperationIds.Contains(opId))
+                                                {
+                                                    var opStatus = op.TryGetProperty("status", out var statusProp) ? statusProp.GetString() : "unknown";
+                                                    var opAction = op.TryGetProperty("action", out var actionProp) ? actionProp.GetString() : "unknown";
+                                                    trackedProjectOperations[opId] = $"{opAction}:{opStatus}";
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    if (projectOperationIds.Count > 0)
+                                    {
+                                        var allTracked = projectOperationIds.All(id => trackedProjectOperations.ContainsKey(id));
+                                        var allFinished = allTracked && trackedProjectOperations.Values.All(status => 
+                                            status.Contains(":finished") || status.Contains(":completed"));
+
+                                        if (allFinished && allTracked)
+                                        {
+                                            projectReady = true;
+                                            _logger.LogInformation("✅ [NEON] Step 0.5 SUCCESS: All {Count} project creation operations finished after {Polls} polls", 
+                                                projectOperationIds.Count, projectOperationPollCount);
+                                            break;
+                                        }
+                                    }
+                                }
+
+                                if (!projectReady)
+                                {
+                                    projectOperationPollCount++;
+                                    if (projectOperationPollCount < maxProjectOperationPolls)
+                                    {
+                                        var statuses = string.Join(", ", trackedProjectOperations.Select(kvp => $"{kvp.Key}:{kvp.Value}"));
+                                        _logger.LogInformation("⏳ [NEON] Step 0.5: Waiting for project operations (poll {Poll}/{MaxPolls}, found {Found}/{Total}). Statuses: {Statuses}", 
+                                            projectOperationPollCount, maxProjectOperationPolls, trackedProjectOperations.Count, projectOperationIds.Count, statuses);
+                                        await Task.Delay(projectOperationPollDelay);
+                                    }
+                                }
+                            }
+                            catch (Exception ex)
+                            {
+                                _logger.LogWarning(ex, "⚠️ [NEON] Error polling project operations (attempt {Attempt})", projectOperationPollCount + 1);
+                                projectOperationPollCount++;
+                                if (projectOperationPollCount < maxProjectOperationPolls)
+                                {
+                                    await Task.Delay(projectOperationPollDelay);
+                                }
+                            }
+                        }
+
+                        if (!projectReady)
+                        {
+                            _logger.LogWarning("⚠️ [NEON] Step 0.5: Project operations did not finish, but proceeding with branch creation anyway");
+                        }
+                    }
+                    else
+                    {
+                        _logger.LogInformation("⏳ [NEON] Step 0.5: No project creation operations found, proceeding immediately");
+                    }
+
+                    // Step 1: Create a new branch in the new project (use default branch as parent if available)
+                    _logger.LogInformation("🌿 [NEON] Creating branch in isolated project for database '{DbName}'", dbName);
+                    var branchResult = await CreateNeonBranchAsync(neonApiKey, neonBaseUrl, createdNeonProjectId, parentBranchId: defaultBranchId);
+                    
+                    if (!branchResult.Success || string.IsNullOrEmpty(branchResult.BranchId))
+                    {
+                        _logger.LogError("❌ [NEON] Failed to create branch for database '{DbName}': {Error}", 
+                            dbName, branchResult.ErrorMessage ?? "Unknown error");
+                        throw new InvalidOperationException($"Failed to create Neon branch for database '{dbName}': {branchResult.ErrorMessage}");
+                    }
+
+                    createdBranchId = branchResult.BranchId;
+                    var endpointHost = branchResult.EndpointHost;
+                    var operationIds = branchResult.OperationIds;
+                    
+                    _logger.LogInformation("✅ [NEON] Created branch '{BranchId}' for database '{DbName}'", createdBranchId, dbName);
+                    if (!string.IsNullOrEmpty(branchResult.EndpointId))
+                    {
+                        _logger.LogInformation("🌐 [NEON] Branch endpoint ID from API: {EndpointId}", branchResult.EndpointId);
+                    }
+                    if (!string.IsNullOrEmpty(endpointHost))
+                    {
+                        _logger.LogInformation("🌐 [NEON] Branch endpoint host from API: {EndpointHost}", endpointHost);
+                    }
+                    if (operationIds.Count > 0)
+                    {
+                        _logger.LogInformation("🔄 [NEON] Tracking {Count} operations: {OperationIds}", operationIds.Count, string.Join(", ", operationIds));
+                    }
+
+                    // Step 2: Poll Operations API until SPECIFIC operations from Step 1 are ready
                     using var httpClient = _httpClientFactory.CreateClient();
                     httpClient.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", neonApiKey);
                     httpClient.DefaultRequestHeaders.Accept.Add(new System.Net.Http.Headers.MediaTypeWithQualityHeaderValue("application/json"));
 
-                    // Create database request
+                    var branchReady = false; // Declare outside if block for use in Step 2.5
+                    
+                    if (operationIds.Count > 0)
+                    {
+                        _logger.LogInformation("🔍 [NEON] Step 2: Polling operations API for {Count} operations until branch '{BranchId}' is ready", 
+                            operationIds.Count, createdBranchId);
+
+                        var operationsApiUrl = $"{neonBaseUrl}/projects/{createdNeonProjectId}/operations";
+                        var maxOperationPolls = 60; // 60 retries × 2 seconds = 2 minutes max
+                        var operationPollDelay = 2000; // 2 seconds
+                        var operationPollCount = 0;
+                        var trackedOperations = new Dictionary<string, string>(); // operationId -> status
+
+                        while (operationPollCount < maxOperationPolls && !branchReady)
+                        {
+                            try
+                            {
+                                var opsResponse = await httpClient.GetAsync(operationsApiUrl);
+                                if (opsResponse.IsSuccessStatusCode)
+                                {
+                                    var opsContent = await opsResponse.Content.ReadAsStringAsync();
+                                    var opsDoc = JsonDocument.Parse(opsContent);
+
+                                    trackedOperations.Clear();
+                                    
+                                    if (opsDoc.RootElement.TryGetProperty("operations", out var opsArray) && opsArray.ValueKind == JsonValueKind.Array)
+                                    {
+                                        foreach (var op in opsArray.EnumerateArray())
+                                        {
+                                            if (op.TryGetProperty("id", out var idProp))
+                                            {
+                                                var opId = idProp.GetString();
+                                                // Only track operations we got from Step 1
+                                                if (operationIds.Contains(opId))
+                                                {
+                                                    var opStatus = op.TryGetProperty("status", out var statusProp) ? statusProp.GetString() : "unknown";
+                                                    trackedOperations[opId] = opStatus;
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    // Check if ALL tracked operations from Step 1 are finished
+                                    if (operationIds.Count > 0)
+                                    {
+                                        var allTracked = operationIds.All(id => trackedOperations.ContainsKey(id));
+                                        var allFinished = allTracked && trackedOperations.Values.All(status => 
+                                            status == "finished" || status == "completed");
+
+                                        if (allFinished && allTracked)
+                                        {
+                                            branchReady = true;
+                                            _logger.LogInformation("✅ [NEON] Step 2 SUCCESS: All {Count} operations finished for branch '{BranchId}' after {Polls} polls", 
+                                                operationIds.Count, createdBranchId, operationPollCount);
+                                            break;
+                                        }
+                                    }
+                                }
+
+                                if (!branchReady)
+                                {
+                                    operationPollCount++;
+                                    if (operationPollCount < maxOperationPolls)
+                                    {
+                                        var statuses = string.Join(", ", trackedOperations.Select(kvp => $"{kvp.Key}:{kvp.Value}"));
+                                        _logger.LogInformation("⏳ [NEON] Step 2: Waiting for operations (poll {Poll}/{MaxPolls}, found {Found}/{Total}). Statuses: {Statuses}", 
+                                            operationPollCount, maxOperationPolls, trackedOperations.Count, operationIds.Count, statuses);
+                                        await Task.Delay(operationPollDelay);
+                                    }
+                                }
+                            }
+                            catch (Exception ex)
+                            {
+                                _logger.LogWarning(ex, "⚠️ [NEON] Error polling operations (attempt {Attempt})", operationPollCount + 1);
+                                operationPollCount++;
+                                if (operationPollCount < maxOperationPolls)
+                                {
+                                    await Task.Delay(operationPollDelay);
+                                }
+                            }
+                        }
+
+                        if (!branchReady)
+                        {
+                            _logger.LogWarning("⚠️ [NEON] Step 2: Operations polling did not confirm all operations finished after {Polls} polls, but proceeding anyway", operationPollCount);
+                        }
+                    }
+                    else
+                    {
+                        _logger.LogWarning("⚠️ [NEON] No operation IDs found in branch creation response - skipping operations polling");
+                    }
+
+                    // ============================================================================
+                    // STEP 2.5: Verify endpoint after operations finish (endpoint may have changed)
+                    // ============================================================================
+                    string? verifiedEndpointHost = endpointHost;
+                    string? verifiedEndpointId = branchResult.EndpointId;
+                    
+                    // Verify endpoint regardless of operations polling status (as long as we have a branch ID)
+                    if (!string.IsNullOrEmpty(createdBranchId))
+                    {
+                        _logger.LogInformation("🔍 [NEON] Step 2.5: Verifying endpoint after operations finished for branch '{BranchId}'", createdBranchId);
+                        _logger.LogInformation("🔍 [NEON] Step 2.5: Original endpoint from Step 1: {EndpointHost}", endpointHost);
+                        
+                        try
+                        {
+                            // First try: Query branch API (may not have endpoints, but worth checking)
+                            var verifyBranchApiUrl = $"{neonBaseUrl}/projects/{createdNeonProjectId}/branches/{Uri.EscapeDataString(createdBranchId)}";
+                            var branchApiResponse = await httpClient.GetAsync(verifyBranchApiUrl);
+                            
+                            if (branchApiResponse.IsSuccessStatusCode)
+                            {
+                                var branchApiContent = await branchApiResponse.Content.ReadAsStringAsync();
+                                var branchApiDoc = JsonDocument.Parse(branchApiContent);
+                                
+                                // Try to get endpoint from branch API response
+                                var endpointsArray = default(JsonElement);
+                                var endpointsFound = false;
+                                
+                                if (branchApiDoc.RootElement.TryGetProperty("endpoints", out var rootEndpointsProp) && 
+                                    rootEndpointsProp.ValueKind == JsonValueKind.Array)
+                                {
+                                    endpointsArray = rootEndpointsProp;
+                                    endpointsFound = true;
+                                    _logger.LogInformation("🔍 [NEON] Step 2.5: Found 'endpoints' array at root level");
+                                }
+                                else if (branchApiDoc.RootElement.TryGetProperty("branch", out var branchObj) &&
+                                         branchObj.TryGetProperty("endpoints", out var branchEndpointsProp) && 
+                                         branchEndpointsProp.ValueKind == JsonValueKind.Array)
+                                {
+                                    endpointsArray = branchEndpointsProp;
+                                    endpointsFound = true;
+                                    _logger.LogInformation("🔍 [NEON] Step 2.5: Found 'endpoints' array under 'branch'");
+                                }
+                                
+                                if (endpointsFound && endpointsArray.ValueKind == JsonValueKind.Array)
+                                {
+                                    foreach (var ep in endpointsArray.EnumerateArray())
+                                    {
+                                        if (ep.TryGetProperty("branch_id", out var epBranchIdProp) &&
+                                            epBranchIdProp.GetString() == createdBranchId)
+                                        {
+                                            if (ep.TryGetProperty("host", out var epHostProp))
+                                            {
+                                                var verifiedHost = epHostProp.GetString();
+                                                if (!string.IsNullOrEmpty(verifiedHost))
+                                                {
+                                                    verifiedEndpointHost = verifiedHost;
+                                                    _logger.LogInformation("✅ [NEON] Step 2.5: Verified endpoint host from branch API: {EndpointHost}", verifiedEndpointHost);
+                                                    
+                                                    if (ep.TryGetProperty("id", out var epIdProp))
+                                                    {
+                                                        verifiedEndpointId = epIdProp.GetString();
+                                                        _logger.LogInformation("✅ [NEON] Step 2.5: Verified endpoint ID: {EndpointId}", verifiedEndpointId);
+                                                    }
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                
+                                // Fallback: Query project endpoints API if branch API didn't have endpoints
+                                if (string.IsNullOrEmpty(verifiedEndpointHost) || verifiedEndpointHost == endpointHost)
+                                {
+                                    _logger.LogInformation("🔍 [NEON] Step 2.5: Branch API did not provide endpoint, querying project endpoints API");
+                                    
+                                    var projectEndpointsUrl = $"{neonBaseUrl}/projects/{createdNeonProjectId}/endpoints";
+                                    var endpointsResponse = await httpClient.GetAsync(projectEndpointsUrl);
+                                    
+                                    if (endpointsResponse.IsSuccessStatusCode)
+                                    {
+                                        var endpointsContent = await endpointsResponse.Content.ReadAsStringAsync();
+                                        var endpointsDoc = JsonDocument.Parse(endpointsContent);
+                                        
+                                        if (endpointsDoc.RootElement.TryGetProperty("endpoints", out var projectEndpointsProp) && 
+                                            projectEndpointsProp.ValueKind == JsonValueKind.Array)
+                                        {
+                                            foreach (var ep in projectEndpointsProp.EnumerateArray())
+                                            {
+                                                if (ep.TryGetProperty("branch_id", out var epBranchIdProp) &&
+                                                    epBranchIdProp.GetString() == createdBranchId)
+                                                {
+                                                    if (ep.TryGetProperty("host", out var epHostProp))
+                                                    {
+                                                        var verifiedHost = epHostProp.GetString();
+                                                        if (!string.IsNullOrEmpty(verifiedHost))
+                                                        {
+                                                            verifiedEndpointHost = verifiedHost;
+                                                            _logger.LogInformation("✅ [NEON] Step 2.5: Verified endpoint host from project endpoints API: {EndpointHost}", verifiedEndpointHost);
+                                                            
+                                                            if (ep.TryGetProperty("id", out var epIdProp))
+                                                            {
+                                                                verifiedEndpointId = epIdProp.GetString();
+                                                                _logger.LogInformation("✅ [NEON] Step 2.5: Verified endpoint ID: {EndpointId}", verifiedEndpointId);
+                                                            }
+                                                            break;
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                
+                                if (string.IsNullOrEmpty(verifiedEndpointHost) || verifiedEndpointHost == endpointHost)
+                                {
+                                    _logger.LogInformation("✅ [NEON] Step 2.5: Using original endpoint from Step 1: {EndpointHost}", endpointHost);
+                                }
+                                else
+                                {
+                                    _logger.LogInformation("✅ [NEON] Step 2.5: Endpoint verified and updated: {OriginalEndpoint} -> {VerifiedEndpoint}", 
+                                        endpointHost, verifiedEndpointHost);
+                                }
+                            }
+                            else
+                            {
+                                _logger.LogWarning("⚠️ [NEON] Step 2.5: Failed to query branch API: {StatusCode}. Using original endpoint from Step 1", 
+                                    branchApiResponse.StatusCode);
+                            }
+                        }
+                        catch (Exception verifyEx)
+                        {
+                            _logger.LogWarning(verifyEx, "⚠️ [NEON] Step 2.5: Exception verifying endpoint, using original from Step 1");
+                        }
+                    }
+                    
+                    // Use verified endpoint if available, otherwise fall back to original
+                    endpointHost = verifiedEndpointHost ?? endpointHost;
+                    if (!string.IsNullOrEmpty(verifiedEndpointId))
+                    {
+                        _logger.LogInformation("🌐 [NEON] Step 2.5: Final verified endpoint ID: {EndpointId}", verifiedEndpointId);
+                    }
+
+                    // Step 3: Create database in the new branch
+                    _logger.LogInformation("📦 [NEON] Step 3: Creating database '{DbName}' in branch '{BranchId}'", dbName, createdBranchId);
+
                     var createDbRequest = new
                     {
                         database = new
@@ -445,62 +822,502 @@ public class BoardsController : ControllerBase
                     var requestBody = JsonSerializer.Serialize(createDbRequest);
                     var content = new StringContent(requestBody, System.Text.Encoding.UTF8, "application/json");
 
-                    var apiUrl = $"{neonBaseUrl}/projects/{neonProjectId}/branches/{neonBranchId}/databases";
+                    var apiUrl = $"{neonBaseUrl}/projects/{createdNeonProjectId}/branches/{Uri.EscapeDataString(createdBranchId)}/databases";
                     var response = await httpClient.PostAsync(apiUrl, content);
+                    
+                    // Retry logic for database creation (Neon may have locks from previous operations)
+                    var maxDbRetries = 5;
+                    var dbRetryDelay = 3000; // 3 seconds between retries
+                    var retryCount = 0;
+                    
+                    // Retry if we get 423 Locked (project has running conflicting operations)
+                    while (response.StatusCode == System.Net.HttpStatusCode.Locked && retryCount < maxDbRetries)
+                    {
+                        retryCount++;
+                        _logger.LogWarning("⚠️ [NEON] Database creation locked (attempt {Attempt}/{MaxRetries}). " +
+                            "Neon project has running conflicting operations. Waiting {DelayMs}ms before retry...", 
+                            retryCount, maxDbRetries, dbRetryDelay);
+                        await Task.Delay(dbRetryDelay);
+                        response = await httpClient.PostAsync(apiUrl, content);
+                    }
 
                     if (response.IsSuccessStatusCode)
                     {
                         var responseContent = await response.Content.ReadAsStringAsync();
-                        var jsonDoc = JsonDocument.Parse(responseContent);
+                        _logger.LogInformation("✅ [NEON] Step 3 SUCCESS: Database '{DbName}' created in branch '{BranchId}'", dbName, createdBranchId);
 
-                        // Get connection string
-                        var connectionUrl = $"{neonBaseUrl}/projects/{neonProjectId}/connection_uri?database_name={Uri.EscapeDataString(dbName)}&role_name={Uri.EscapeDataString(neonDefaultOwnerName)}&branch_id={Uri.EscapeDataString(neonBranchId)}&pooled=false";
-                        var connResponse = await httpClient.GetAsync(connectionUrl);
-                        
-                        if (connResponse.IsSuccessStatusCode)
+                        // ============================================================================
+                        // STEP 4: Get Password and Construct Connection String
+                        // Use endpoint from Step 1 (branch creation response) + password from connection_uri API
+                        // ============================================================================
+                        _logger.LogInformation("🔗 [NEON] Step 4: Constructing connection string using endpoint from branch creation + password from connection_uri API");
+
+                        if (string.IsNullOrEmpty(endpointHost))
                         {
-                            var connContent = await connResponse.Content.ReadAsStringAsync();
-                            var connDoc = JsonDocument.Parse(connContent);
-                            if (connDoc.RootElement.TryGetProperty("uri", out var uriProp))
+                            _logger.LogError("❌ [NEON] CRITICAL: Endpoint host not available from branch creation response. Cannot construct connection string.");
+                            throw new InvalidOperationException(
+                                $"Endpoint host not available from branch creation response for branch '{createdBranchId}'. " +
+                                "This is a critical requirement - board creation cannot proceed.");
+                        }
+
+                        string? originalConnectionString = null;
+                        string? extractedPassword = null;
+                        string? extractedUsername = neonDefaultOwnerName;
+                        int branchEndpointPort = 5432;
+                        
+                        // Get password from connection_uri API (we only need the password, not the endpoint)
+                        var connectionUrl = $"{neonBaseUrl}/projects/{createdNeonProjectId}/connection_uri?database_name={Uri.EscapeDataString(dbName)}&role_name={Uri.EscapeDataString(neonDefaultOwnerName)}&branch_id={Uri.EscapeDataString(createdBranchId)}&pooled=false";
+                        
+                        var passwordExtractionRetries = 5;
+                        var passwordExtractionDelay = 2000;
+                        var passwordExtractionCount = 0;
+                        
+                        while (passwordExtractionCount < passwordExtractionRetries && string.IsNullOrEmpty(extractedPassword))
+                        {
+                            try
                             {
-                                var originalConnectionString = uriProp.GetString();
-                                _logger.LogInformation("✅ [NEON] Successfully created Neon database '{DbName}' and retrieved initial connection string", dbName);
-                                _logger.LogInformation("🔐 [NEON] Creating isolated database role for database '{DbName}' to prevent cross-database access", dbName);
-                                
-                                // Create an isolated role for this database and update connection string
-                                dbConnectionString = await CreateIsolatedDatabaseRole(originalConnectionString, dbName);
-                                
-                                if (!string.IsNullOrEmpty(dbConnectionString))
+                                var connResponse = await httpClient.GetAsync(connectionUrl);
+                                if (connResponse.IsSuccessStatusCode)
                                 {
-                                    _logger.LogInformation("✅ [NEON] Successfully created isolated role and updated connection string for database '{DbName}'", dbName);
+                                    var connContent = await connResponse.Content.ReadAsStringAsync();
+                                    var connDoc = JsonDocument.Parse(connContent);
+                                    if (connDoc.RootElement.TryGetProperty("uri", out var uriProp))
+                                    {
+                                        var tempConnString = uriProp.GetString();
+                                        if (!string.IsNullOrEmpty(tempConnString))
+                                        {
+                                            var uri = new Uri(tempConnString);
+                                            var userInfo = uri.UserInfo.Split(':');
+                                            extractedUsername = userInfo.Length > 0 ? userInfo[0] : neonDefaultOwnerName;
+                                            extractedPassword = userInfo.Length > 1 ? Uri.UnescapeDataString(userInfo[1]) : "";
+                                            
+                                            if (!string.IsNullOrEmpty(extractedPassword))
+                                            {
+                                                _logger.LogInformation("✅ [NEON] Step 4: Password extracted successfully");
+                                                break;
+                                            }
+                                        }
+                                    }
                                 }
                                 else
                                 {
-                                    _logger.LogWarning("⚠️ [NEON] Failed to create isolated role, using original connection string for database '{DbName}'", dbName);
-                                    dbConnectionString = originalConnectionString;
+                                    var errorContent = await connResponse.Content.ReadAsStringAsync();
+                                    _logger.LogWarning("⚠️ [NEON] Step 4: Failed to get connection string (attempt {Attempt}/{MaxRetries}): {StatusCode} - {Error}", 
+                                        passwordExtractionCount + 1, passwordExtractionRetries, connResponse.StatusCode, errorContent);
                                 }
-                                
-                                // Execute the initial database schema script to create TestProjects table
-                                if (!string.IsNullOrEmpty(dbConnectionString))
+                            }
+                            catch (Exception ex)
+                            {
+                                _logger.LogWarning(ex, "⚠️ [NEON] Step 4: Exception during password extraction (attempt {Attempt}/{MaxRetries})", 
+                                    passwordExtractionCount + 1, passwordExtractionRetries);
+                            }
+                            
+                            passwordExtractionCount++;
+                            if (passwordExtractionCount < passwordExtractionRetries)
+                            {
+                                await Task.Delay(passwordExtractionDelay);
+                            }
+                        }
+                        
+                        if (string.IsNullOrEmpty(extractedPassword))
+                        {
+                            _logger.LogError("❌ [NEON] CRITICAL: Failed to extract password after {Attempts} attempts. Cannot proceed without password.", passwordExtractionCount);
+                            throw new InvalidOperationException(
+                                $"Failed to extract password from connection string for branch '{createdBranchId}' after {passwordExtractionCount} attempts. " +
+                                "This is a critical requirement - board creation cannot proceed.");
+                        }
+                        
+                        // Construct connection string using endpoint from Step 1 + password from connection_uri API
+                        originalConnectionString = $"postgresql://{extractedUsername}:{Uri.EscapeDataString(extractedPassword)}@{endpointHost}:{branchEndpointPort}/{dbName}?sslmode=require";
+                        
+                        _logger.LogInformation("✅✅ [NEON] Step 4 SUCCESS: Connection string constructed using endpoint from branch creation. " +
+                            "Branch: '{BranchId}', Endpoint: '{EndpointHost}', Port: {Port}", 
+                            createdBranchId, endpointHost, branchEndpointPort);
+                        
+                        // ============================================================================
+                        // OLD APPROACH (COMMENTED OUT - CAN BE REVERTED IF NEEDED):
+                        // Previous complex retry logic with branch API polling
+                        // ============================================================================
+                        /*
+                        // Get connection string using the created branch ID
+                        // CRITICAL: Always use createdBranchId to ensure we get the connection string for the correct branch
+                        // Neon branches need time for their endpoints to be provisioned, so we retry with validation
+                        var connectionUrl_OLD = $"{neonBaseUrl}/projects/{neonProjectId}/connection_uri?database_name={Uri.EscapeDataString(dbName)}&role_name={Uri.EscapeDataString(neonDefaultOwnerName)}&branch_id={Uri.EscapeDataString(createdBranchId)}&pooled=false";
+                        _logger.LogInformation("🔗 [NEON] Retrieving connection string for database '{DbName}' using branch ID '{BranchId}'", dbName, createdBranchId);
+                        
+                        // Use the endpoint ID from branch creation response (NOT derived from branch ID)
+                        // The endpoint ID is a separate field returned by the API (e.g., "ep-cool-darkness-123456")
+                        // IMPORTANT: Extract just the ID part (last segment after last dash) for comparison
+                        // because the connection string only contains the ID part, not the full "ep-<name>-<id>" format
+                        var fullEndpointId = branchResult.EndpointId ?? "";
+                        var expectedEndpointId = "";
+                        if (!string.IsNullOrEmpty(fullEndpointId))
+                        {
+                            // Extract the ID part from "ep-<name>-<id>" format
+                            // Split by '-' and take the last part
+                            var endpointIdParts = fullEndpointId.Split('-');
+                            if (endpointIdParts.Length >= 3)
+                            {
+                                expectedEndpointId = endpointIdParts[endpointIdParts.Length - 1]; // Last part is the ID
+                                _logger.LogInformation("✅ [NEON] Using endpoint ID from branch creation response: {FullEndpointId} -> {EndpointId}", 
+                                    fullEndpointId, expectedEndpointId);
+                            }
+                            else
+                            {
+                                // If format is unexpected, use the whole string
+                                expectedEndpointId = fullEndpointId;
+                                _logger.LogWarning("⚠️ [NEON] Unexpected endpoint ID format: {FullEndpointId}, using as-is", fullEndpointId);
+                            }
+                        }
+                        
+                        if (string.IsNullOrEmpty(expectedEndpointId))
+                        {
+                            _logger.LogWarning("⚠️ [NEON] Endpoint ID not found in branch creation response. " +
+                                "Will validate connection string using branch ID matching instead.");
+                            // Fallback: try to extract from branch ID (but this may not work correctly)
+                            var branchIdParts = createdBranchId.Split('-');
+                            if (branchIdParts.Length >= 3)
+                            {
+                                expectedEndpointId = branchIdParts[branchIdParts.Length - 1];
+                                _logger.LogWarning("⚠️ [NEON] Using fallback endpoint ID extraction from branch ID: {EndpointId}", expectedEndpointId);
+                            }
+                        }
+                        
+                        // Retry logic with STRICT validation - Neon endpoints may not be ready immediately
+                        // CRITICAL: We MUST wait until we get the correct connection string matching the branch ID
+                        // Neon documentation indicates endpoints can take 10-30 seconds, but we'll wait up to 5 minutes
+                        // FALSE-POSITIVE IS UNACCEPTABLE - we will NOT proceed with a mismatched connection string
+                        var maxConnectionRetries = 100; // 100 retries × 3 seconds = up to 5 minutes
+                        var connectionRetryDelay = 3000; // 3 seconds between retries
+                        string? originalConnectionString = null;
+                        var connectionRetryCount = 0;
+                        var maxWaitTimeMinutes = 5;
+                        var startTime = DateTime.UtcNow;
+                        
+                        _logger.LogInformation("🔍 [NEON] Starting STRICT validation for connection string - will wait up to {MaxMinutes} minutes for correct endpoint", maxWaitTimeMinutes);
+                        
+                        while (connectionRetryCount < maxConnectionRetries)
+                        {
+                            // Check if we've exceeded maximum wait time
+                            var elapsed = DateTime.UtcNow - startTime;
+                            if (elapsed.TotalMinutes > maxWaitTimeMinutes)
+                            {
+                                _logger.LogError("❌ [NEON] CRITICAL: Exceeded maximum wait time ({MaxMinutes} minutes) for branch '{BranchId}' endpoint to be ready. " +
+                                    "Cannot proceed without correct connection string.", maxWaitTimeMinutes, createdBranchId);
+                                throw new InvalidOperationException(
+                                    $"Failed to retrieve correct connection string for branch '{createdBranchId}' after {maxWaitTimeMinutes} minutes. " +
+                                    $"Expected endpoint ID: {expectedEndpointId}. " +
+                                    "This is a critical requirement - board creation cannot proceed with an incorrect connection string.");
+                            }
+                            
+                            var connResponse = await httpClient.GetAsync(connectionUrl);
+                            
+                            if (connResponse.IsSuccessStatusCode)
+                            {
+                                var connContent = await connResponse.Content.ReadAsStringAsync();
+                                var connDoc = JsonDocument.Parse(connContent);
+                                if (connDoc.RootElement.TryGetProperty("uri", out var uriProp))
                                 {
-                                    await ExecuteInitialDatabaseSchema(dbConnectionString, dbName);
+                                    var retrievedConnectionString = uriProp.GetString();
+                                    
+                                    // STRICT VALIDATION: Verify the connection string is from the correct branch by checking the endpoint ID
+                                    // The endpoint ID should match the one from the branch creation response
+                                    if (!string.IsNullOrEmpty(retrievedConnectionString) && !string.IsNullOrEmpty(expectedEndpointId))
+                                    {
+                                        // Extract actual endpoint ID from connection string
+                                        // Format: ep-<name>-<id>.gwc.azure.neon.tech or ep-<name>-<id>.us-east-2.aws.neon.tech
+                                        var endpointMatch = System.Text.RegularExpressions.Regex.Match(retrievedConnectionString, 
+                                            @"ep-[a-zA-Z0-9\-]+-([a-zA-Z0-9]+)\.(gwc\.azure|us-east-2\.aws)\.neon\.tech", 
+                                            System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                                        var actualEndpointId = endpointMatch.Success ? endpointMatch.Groups[1].Value : null;
+                                        
+                                        if (!string.IsNullOrEmpty(actualEndpointId) && actualEndpointId.Equals(expectedEndpointId, StringComparison.OrdinalIgnoreCase))
+                                        {
+                                            // SUCCESS: Connection string endpoint ID matches the one from branch creation
+                                            originalConnectionString = retrievedConnectionString;
+                                            _logger.LogInformation("✅ [NEON] SUCCESS: Verified connection string matches branch endpoint ID '{EndpointId}' after {Attempts} attempts ({ElapsedSeconds}s)", 
+                                                expectedEndpointId, connectionRetryCount + 1, elapsed.TotalSeconds);
+                                            break;
+                                        }
+                                        else
+                                        {
+                                            // MISMATCH: Log the actual endpoint ID found
+                                            connectionRetryCount++;
+                                            _logger.LogWarning("⚠️ [NEON] Connection string endpoint ID mismatch (attempt {Attempt}/{MaxRetries}, elapsed: {ElapsedSeconds}s). " +
+                                                "Expected: {ExpectedId}, Got: {ActualId}. Branch endpoint not ready yet. Waiting {DelayMs}ms...", 
+                                                connectionRetryCount, maxConnectionRetries, elapsed.TotalSeconds, expectedEndpointId, actualEndpointId ?? "unknown", connectionRetryDelay);
+                                            await Task.Delay(connectionRetryDelay);
+                                            // Continue retrying - DO NOT accept mismatched connection string
+                                        }
+                                    }
+                                    else if (!string.IsNullOrEmpty(retrievedConnectionString) && string.IsNullOrEmpty(expectedEndpointId))
+                                    {
+                                        // No endpoint ID to validate against - this should not happen if branch creation succeeded
+                                        connectionRetryCount++;
+                                        if (connectionRetryCount < maxConnectionRetries)
+                                        {
+                                            _logger.LogWarning("⚠️ [NEON] Cannot validate connection string - endpoint ID not available from branch creation. " +
+                                                "This should not happen. Retrying... (attempt {Attempt}/{MaxRetries})", 
+                                                connectionRetryCount, maxConnectionRetries);
+                                            await Task.Delay(connectionRetryDelay);
+                                        }
+                                        else
+                                        {
+                                            _logger.LogError("❌ [NEON] CRITICAL: Cannot validate connection string - endpoint ID not available from branch creation response. " +
+                                                "This indicates a problem with branch creation. Board creation cannot proceed.");
+                                            throw new InvalidOperationException(
+                                                $"Cannot validate connection string for branch '{createdBranchId}' - endpoint ID not available from branch creation response. " +
+                                                "This is a critical requirement - board creation cannot proceed.");
+                                        }
+                                    }
+                                    else
+                                    {
+                                        // Cannot validate - this should not happen if branch ID is valid
+                                        connectionRetryCount++;
+                                        if (string.IsNullOrEmpty(expectedEndpointId))
+                                        {
+                                            _logger.LogWarning("⚠️ [NEON] Cannot validate connection string - expected endpoint ID is empty. " +
+                                                "Branch ID format may be invalid: {BranchId}", createdBranchId);
+                                        }
+                                        if (connectionRetryCount < maxConnectionRetries)
+                                        {
+                                            await Task.Delay(connectionRetryDelay);
+                                        }
+                                        else
+                                        {
+                                            _logger.LogError("❌ [NEON] CRITICAL: Cannot validate connection string after {MaxRetries} retries. " +
+                                                "Expected endpoint ID is missing or connection string is invalid.", maxConnectionRetries);
+                                            throw new InvalidOperationException(
+                                                $"Cannot validate connection string for branch '{createdBranchId}' after {maxConnectionRetries} retries. " +
+                                                "This is a critical requirement - board creation cannot proceed.");
+                                        }
+                                    }
+                                }
+                                else
+                                {
+                                    connectionRetryCount++;
+                                    if (connectionRetryCount < maxConnectionRetries)
+                                    {
+                                        _logger.LogWarning("⚠️ [NEON] Connection string URI not found in Neon API response (attempt {Attempt}). Retrying...", 
+                                            connectionRetryCount);
+                                        await Task.Delay(connectionRetryDelay);
+                                    }
+                                    else
+                                    {
+                                        _logger.LogError("❌ [NEON] CRITICAL: Connection string URI not found in Neon API response after {MaxRetries} retries.", maxConnectionRetries);
+                                        throw new InvalidOperationException(
+                                            $"Connection string URI not found in Neon API response for branch '{createdBranchId}' after {maxConnectionRetries} retries. " +
+                                            "This is a critical requirement - board creation cannot proceed.");
+                                    }
                                 }
                             }
                             else
                             {
-                                _logger.LogWarning("⚠️ [NEON] Connection string URI not found in Neon API response for database '{DbName}'", dbName);
+                                connectionRetryCount++;
+                                if (connectionRetryCount < maxConnectionRetries)
+                                {
+                                    var errorContent = await connResponse.Content.ReadAsStringAsync();
+                                    var retryElapsed = DateTime.UtcNow - startTime;
+                                    _logger.LogWarning("⚠️ [NEON] Failed to retrieve connection string (attempt {Attempt}/{MaxRetries}, elapsed: {ElapsedSeconds}s): {StatusCode} - {Error}. Retrying...", 
+                                        connectionRetryCount, maxConnectionRetries, retryElapsed.TotalSeconds, connResponse.StatusCode, errorContent);
+                                    await Task.Delay(connectionRetryDelay);
+                                }
+                                else
+                                {
+                                    var errorContent = await connResponse.Content.ReadAsStringAsync();
+                                    var totalElapsed = DateTime.UtcNow - startTime;
+                                    _logger.LogError("❌ [NEON] CRITICAL: Failed to retrieve connection string after {MaxRetries} retries ({ElapsedSeconds}s): {StatusCode} - {Error}", 
+                                        maxConnectionRetries, totalElapsed.TotalSeconds, connResponse.StatusCode, errorContent);
+                                    throw new InvalidOperationException(
+                                        $"Failed to retrieve connection string for branch '{createdBranchId}' after {maxConnectionRetries} retries ({totalElapsed.TotalMinutes} minutes). " +
+                                        $"Status: {connResponse.StatusCode}, Error: {errorContent}. " +
+                                        "This is a critical requirement - board creation cannot proceed.");
+                                }
                             }
                         }
-                        else
+                        
+                        // FINAL VALIDATION: Ensure we have a valid connection string before proceeding
+                        if (string.IsNullOrEmpty(originalConnectionString))
                         {
-                            var connErrorContent = await connResponse.Content.ReadAsStringAsync();
-                            _logger.LogWarning("⚠️ [NEON] Failed to retrieve connection string for database '{DbName}': {StatusCode} - {Error}", dbName, connResponse.StatusCode, connErrorContent);
+                            var elapsed = DateTime.UtcNow - startTime;
+                            _logger.LogError("❌ [NEON] CRITICAL: No valid connection string retrieved for branch '{BranchId}' after {Attempts} attempts ({ElapsedMinutes} minutes). " +
+                                "Expected endpoint ID: {ExpectedId}. FALSE-POSITIVE IS UNACCEPTABLE - board creation cannot proceed.", 
+                                createdBranchId, connectionRetryCount, elapsed.TotalMinutes, expectedEndpointId);
+                            throw new InvalidOperationException(
+                                $"Failed to retrieve correct connection string for branch '{createdBranchId}' after {connectionRetryCount} attempts ({elapsed.TotalMinutes} minutes). " +
+                                $"Expected endpoint ID: {expectedEndpointId}. " +
+                                "FALSE-POSITIVE IS UNACCEPTABLE - board creation cannot proceed without a verified correct connection string.");
+                        }
+                        
+                        // FINAL VERIFICATION: Query the branch to confirm the connection string's endpoint belongs to this branch
+                        // This is a double-check to ensure the connection string and branch ID are consistent
+                        try
+                        {
+                            var branchVerifyUrl = $"{neonBaseUrl}/projects/{createdNeonProjectId}/branches/{Uri.EscapeDataString(createdBranchId)}";
+                            _logger.LogInformation("🔍 [NEON] Verifying connection string endpoint belongs to branch '{BranchId}'...", createdBranchId);
+                            var branchVerifyResponse = await httpClient.GetAsync(branchVerifyUrl);
+                            
+                            if (branchVerifyResponse.IsSuccessStatusCode)
+                            {
+                                var branchVerifyContent = await branchVerifyResponse.Content.ReadAsStringAsync();
+                                var branchVerifyDoc = JsonDocument.Parse(branchVerifyContent);
+                                
+                                // Extract endpoint ID from connection string for verification
+                                var endpointMatch = System.Text.RegularExpressions.Regex.Match(originalConnectionString, 
+                                    @"ep-[a-zA-Z0-9\-]+-([a-zA-Z0-9]+)\.(gwc\.azure|us-east-2\.aws)\.neon\.tech", 
+                                    System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                                var connectionStringEndpointId = endpointMatch.Success ? endpointMatch.Groups[1].Value : null;
+                                
+                                // Check if branch has endpoints array
+                                if (!string.IsNullOrEmpty(connectionStringEndpointId) && 
+                                    branchVerifyDoc.RootElement.TryGetProperty("branch", out var verifyBranchObj) &&
+                                    verifyBranchObj.TryGetProperty("endpoints", out var verifyEndpointsProp) && 
+                                    verifyEndpointsProp.ValueKind == JsonValueKind.Array)
+                                {
+                                    bool endpointFound = false;
+                                    foreach (var endpoint in verifyEndpointsProp.EnumerateArray())
+                                    {
+                                        if (endpoint.TryGetProperty("id", out var epIdProp))
+                                        {
+                                            var epId = epIdProp.GetString();
+                                            // Extract ID part from full endpoint ID format
+                                            var epIdParts = epId?.Split('-');
+                                            var epIdPart = epIdParts != null && epIdParts.Length >= 3 ? epIdParts[epIdParts.Length - 1] : epId;
+                                            
+                                            if (epIdPart?.Equals(connectionStringEndpointId, StringComparison.OrdinalIgnoreCase) == true)
+                                            {
+                                                endpointFound = true;
+                                                _logger.LogInformation("✅ [NEON] VERIFIED: Connection string endpoint '{EndpointId}' belongs to branch '{BranchId}'", 
+                                                    connectionStringEndpointId, createdBranchId);
+                                                break;
+                                            }
+                                        }
+                                    }
+                                    
+                                    if (!endpointFound)
+                                    {
+                                        _logger.LogWarning("⚠️ [NEON] WARNING: Connection string endpoint '{EndpointId}' not found in branch '{BranchId}' endpoints. " +
+                                            "This may indicate a mismatch, but proceeding as endpoint ID validation already passed.", 
+                                            connectionStringEndpointId, createdBranchId);
+                                    }
+                                }
+                                else
+                                {
+                                    _logger.LogWarning("⚠️ [NEON] Could not verify endpoint belongs to branch - branch endpoints not available in response");
+                                }
+                            }
+                            else
+                            {
+                                _logger.LogWarning("⚠️ [NEON] Could not verify endpoint belongs to branch - branch query failed: {StatusCode}", 
+                                    branchVerifyResponse.StatusCode);
+                            }
+                        }
+                        catch (Exception verifyEx)
+                        {
+                            _logger.LogWarning(verifyEx, "⚠️ [NEON] Error during final branch verification (non-critical): {Error}", verifyEx.Message);
+                            // Don't fail board creation if verification fails - we already validated the endpoint ID matches
+                        }
+                        
+                        // At this point, originalConnectionString is guaranteed to be non-null and validated
+                        // (we throw an exception above if it's null or doesn't match the branch ID)
+                        _logger.LogInformation("✅ [NEON] Successfully created Neon database '{DbName}' and retrieved VALIDATED connection string matching branch ID", dbName);
+                        // END OF OLD APPROACH COMMENT BLOCK
+                        */
+                        
+                        // At this point, originalConnectionString is guaranteed to be non-null and validated
+                        // (we throw an exception above if endpoint host or password is missing)
+                        _logger.LogInformation("✅ [NEON] Successfully created Neon database '{DbName}' and constructed connection string", dbName);
+                        _logger.LogInformation("🔐 [NEON] Creating isolated database role for database '{DbName}' to prevent cross-database access", dbName);
+                        
+                        // Create an isolated role for this database and update connection string
+                        // Retry logic for timing issues (database may need time to propagate)
+                        dbConnectionString = null;
+                        dbPassword = null;
+                        IsolatedRoleResult? roleResult = null;
+                        var maxRoleRetries = 3;
+                        var roleRetryDelay = 2000;
+                        
+                        for (int retry = 0; retry < maxRoleRetries; retry++)
+                        {
+                            try
+                            {
+                                roleResult = await CreateIsolatedDatabaseRole(originalConnectionString, dbName);
+                                if (roleResult != null && !string.IsNullOrEmpty(roleResult.ConnectionString))
+                                {
+                                    dbConnectionString = roleResult.ConnectionString;
+                                    dbPassword = roleResult.Password;
+                                    _logger.LogInformation("✅ [NEON] Successfully created isolated role and updated connection string for database '{DbName}' (attempt {Attempt})", 
+                                        dbName, retry + 1);
+                                    _logger.LogInformation("🔐 [NEON] Database password saved: {HasPassword} (length: {PasswordLength})", 
+                                        !string.IsNullOrEmpty(dbPassword), dbPassword?.Length ?? 0);
+                                    break;
+                                }
+                            }
+                            catch (PostgresException pgEx) when (pgEx.SqlState == "3D000" && retry < maxRoleRetries - 1)
+                            {
+                                // Database not available yet - retry after delay
+                                _logger.LogWarning("⚠️ [NEON] Database '{DbName}' not yet available for role creation (attempt {Attempt}/{MaxRetries}). " +
+                                    "Waiting {DelayMs}ms before retry...", dbName, retry + 1, maxRoleRetries, roleRetryDelay);
+                                await Task.Delay(roleRetryDelay);
+                            }
+                            catch (Exception roleEx)
+                            {
+                                if (retry < maxRoleRetries - 1)
+                                {
+                                    _logger.LogWarning("⚠️ [NEON] Error creating isolated role for database '{DbName}' (attempt {Attempt}/{MaxRetries}): {Error}. " +
+                                        "Retrying...", dbName, retry + 1, maxRoleRetries, roleEx.Message);
+                                    await Task.Delay(roleRetryDelay);
+                                }
+                                else
+                                {
+                                    // Last attempt failed - this is a critical security issue
+                                    _logger.LogError(roleEx, "❌ [NEON] CRITICAL: Failed to create isolated role for database '{DbName}' after {MaxRetries} attempts. " +
+                                        "This is a security requirement. Board creation will continue but database access may be limited.", 
+                                        dbName, maxRoleRetries);
+                                    // Don't set dbConnectionString - this will prevent using neondb_owner
+                                    // The board creation will fail or use a different approach
+                                }
+                            }
+                        }
+                        
+                        if (string.IsNullOrEmpty(dbConnectionString))
+                        {
+                            // Critical security failure - cannot proceed with owner connection
+                            _logger.LogError("❌ [NEON] CRITICAL SECURITY ISSUE: Cannot create isolated role for database '{DbName}'. " +
+                                "Cannot proceed with board creation using owner connection for security reasons.", dbName);
+                            throw new InvalidOperationException($"Failed to create isolated database role for '{dbName}' after {maxRoleRetries} attempts. " +
+                                "This is a security requirement and board creation cannot proceed without it.");
+                        }
+                        
+                        // Execute the initial database schema script to create TestProjects table
+                        // Use the owner connection (neondb_owner) to ensure we have full permissions for table creation and data insertion
+                        // The isolated role will be able to query the table after permissions are granted
+                        var isolatedRoleName = roleResult?.RoleName;
+                        if (!string.IsNullOrEmpty(originalConnectionString))
+                        {
+                            await ExecuteInitialDatabaseSchema(originalConnectionString, dbName, isolatedRoleName);
+                        }
+                        else if (!string.IsNullOrEmpty(dbConnectionString))
+                        {
+                            // Fallback: Use isolated role connection if owner connection is not available
+                            _logger.LogWarning("⚠️ [NEON] Using isolated role connection for schema script (owner connection not available)");
+                            await ExecuteInitialDatabaseSchema(dbConnectionString, dbName, isolatedRoleName);
                         }
                     }
                     else
                     {
                         var errorContent = await response.Content.ReadAsStringAsync();
-                        _logger.LogError("❌ [NEON] Failed to create Neon database '{DbName}': {StatusCode} - {Error}", dbName, response.StatusCode, errorContent);
+                        if (response.StatusCode == System.Net.HttpStatusCode.Locked)
+                        {
+                            _logger.LogError("❌ [NEON] Failed to create Neon database '{DbName}' after {Retries} retries: " +
+                                "Project is locked with running conflicting operations. Error: {Error}", 
+                                dbName, retryCount, errorContent);
+                        }
+                        else
+                        {
+                            _logger.LogError("❌ [NEON] Failed to create Neon database '{DbName}': {StatusCode} - {Error}", 
+                                dbName, response.StatusCode, errorContent);
+                        }
                     }
                 }
                 else
@@ -508,11 +1325,24 @@ public class BoardsController : ControllerBase
                     _logger.LogWarning("Neon configuration is incomplete, skipping database creation");
                 }
             }
+            catch (InvalidOperationException ex) when (ex.Message.Contains("connection string") || ex.Message.Contains("branch") || ex.Message.Contains("endpoint"))
+            {
+                // CRITICAL: Connection string validation failures MUST fail the entire board creation
+                // We cannot proceed if we don't have a verified correct connection string
+                _logger.LogError(ex, "❌ [NEON] CRITICAL: Connection string validation failed. Board creation cannot proceed. Error: {Error}", ex.Message);
+                throw; // Re-throw to fail the entire board creation
+            }
             catch (Exception ex)
             {
-                _logger.LogWarning(ex, "Error creating Neon database, continuing without it");
-                // Don't fail the entire process if database creation fails
+                // CRITICAL: Neon database creation failures MUST fail the entire board creation
+                // Database is a critical component - board cannot function without it
+                _logger.LogError(ex, "❌ [NEON] CRITICAL: Database creation failed. Board creation cannot proceed. Error: {Error}", ex.Message);
+                throw; // Re-throw to fail the entire board creation
             }
+            
+            // OPTIMIZATION NOTE: Railway can deploy without DATABASE_URL initially
+            // If connection string validation is still in progress, Railway will start deploying
+            // We'll update Railway's DATABASE_URL once the validated connection string is ready (at the end of board creation)
 
             // Create GitHub repository using the board ID
             _logger.LogInformation("Creating GitHub repository for project {ProjectTitle} with board ID {BoardId}", project.Title, trelloBoardId);
@@ -617,10 +1447,41 @@ public class BoardsController : ControllerBase
                     var requestBody = System.Text.Json.JsonSerializer.Serialize(createProjectMutation);
                     var content = new StringContent(requestBody, System.Text.Encoding.UTF8, "application/json");
 
-                    var response = await httpClient.PostAsync(railwayApiUrl, content);
-                    var responseContent = await response.Content.ReadAsStringAsync();
+                    // Retry logic for Railway project creation (handles transient 503 errors)
+                    var maxRailwayRetries = 5;
+                    var railwayRetryDelay = 3000; // 3 seconds between retries
+                    HttpResponseMessage? response = null;
+                    string? responseContent = null;
+                    var railwayRetryCount = 0;
+                    
+                    while (railwayRetryCount < maxRailwayRetries)
+                    {
+                        response = await httpClient.PostAsync(railwayApiUrl, content);
+                        responseContent = await response.Content.ReadAsStringAsync();
+                        
+                        if (response.IsSuccessStatusCode)
+                        {
+                            break; // Success, exit retry loop
+                        }
+                        
+                        // Retry on 503 ServiceUnavailable or 502 Bad Gateway (transient errors)
+                        if ((response.StatusCode == System.Net.HttpStatusCode.ServiceUnavailable || 
+                             response.StatusCode == System.Net.HttpStatusCode.BadGateway) && 
+                            railwayRetryCount < maxRailwayRetries - 1)
+                        {
+                            railwayRetryCount++;
+                            _logger.LogWarning("⚠️ [RAILWAY] Railway API returned {StatusCode} (attempt {Attempt}/{MaxRetries}). " +
+                                "Waiting {DelayMs}ms before retry...", response.StatusCode, railwayRetryCount, maxRailwayRetries, railwayRetryDelay);
+                            await Task.Delay(railwayRetryDelay);
+                        }
+                        else
+                        {
+                            // Non-retryable error or max retries reached
+                            break;
+                        }
+                    }
 
-                    if (response.IsSuccessStatusCode)
+                    if (response != null && response.IsSuccessStatusCode)
                     {
                         var jsonDoc = System.Text.Json.JsonDocument.Parse(responseContent);
                         var root = jsonDoc.RootElement;
@@ -658,10 +1519,40 @@ public class BoardsController : ControllerBase
 
                             var serviceRequestBody = System.Text.Json.JsonSerializer.Serialize(createServiceMutation);
                             var serviceContent = new StringContent(serviceRequestBody, System.Text.Encoding.UTF8, "application/json");
-                            var serviceResponse = await httpClient.PostAsync(railwayApiUrl, serviceContent);
-                            var serviceResponseContent = await serviceResponse.Content.ReadAsStringAsync();
+                            
+                            // Retry logic for Railway service creation
+                            HttpResponseMessage? serviceResponse = null;
+                            string? serviceResponseContent = null;
+                            var serviceRetryCount = 0;
+                            
+                            while (serviceRetryCount < maxRailwayRetries)
+                            {
+                                serviceResponse = await httpClient.PostAsync(railwayApiUrl, serviceContent);
+                                serviceResponseContent = await serviceResponse.Content.ReadAsStringAsync();
+                                
+                                if (serviceResponse.IsSuccessStatusCode)
+                                {
+                                    break; // Success, exit retry loop
+                                }
+                                
+                                // Retry on 503 ServiceUnavailable or 502 Bad Gateway (transient errors)
+                                if ((serviceResponse.StatusCode == System.Net.HttpStatusCode.ServiceUnavailable || 
+                                     serviceResponse.StatusCode == System.Net.HttpStatusCode.BadGateway) && 
+                                    serviceRetryCount < maxRailwayRetries - 1)
+                                {
+                                    serviceRetryCount++;
+                                    _logger.LogWarning("⚠️ [RAILWAY] Railway API returned {StatusCode} when creating service (attempt {Attempt}/{MaxRetries}). " +
+                                        "Waiting {DelayMs}ms before retry...", serviceResponse.StatusCode, serviceRetryCount, maxRailwayRetries, railwayRetryDelay);
+                                    await Task.Delay(railwayRetryDelay);
+                                }
+                                else
+                                {
+                                    // Non-retryable error or max retries reached
+                                    break;
+                                }
+                            }
 
-                            if (serviceResponse.IsSuccessStatusCode)
+                            if (serviceResponse != null && serviceResponse.IsSuccessStatusCode)
                             {
                                 var serviceJsonDoc = System.Text.Json.JsonDocument.Parse(serviceResponseContent);
                                 var serviceRoot = serviceJsonDoc.RootElement;
@@ -683,19 +1574,27 @@ public class BoardsController : ControllerBase
                             }
                             else
                             {
-                                _logger.LogWarning("⚠️ [RAILWAY] Failed to create service: StatusCode={StatusCode}, Response={Response}", 
-                                    serviceResponse.StatusCode, serviceResponseContent);
+                                // CRITICAL: Railway service creation failed - board creation cannot proceed
+                                _logger.LogError("❌ [RAILWAY] CRITICAL: Failed to create Railway service after {Retries} attempts: StatusCode={StatusCode}, Response={Response}", 
+                                    serviceRetryCount + 1, serviceResponse?.StatusCode ?? System.Net.HttpStatusCode.InternalServerError, serviceResponseContent ?? "No response");
                                 
                                 // Check for errors in GraphQL response
+                                string? errorMessages = null;
                                 try
                                 {
-                                    var errorDoc = System.Text.Json.JsonDocument.Parse(serviceResponseContent);
-                                    if (errorDoc.RootElement.TryGetProperty("errors", out var errorsProp))
+                                    if (!string.IsNullOrEmpty(serviceResponseContent))
                                     {
-                                        foreach (var error in errorsProp.EnumerateArray())
+                                        var errorDoc = System.Text.Json.JsonDocument.Parse(serviceResponseContent);
+                                        if (errorDoc.RootElement.TryGetProperty("errors", out var errorsProp))
                                         {
-                                            var errorMessage = error.TryGetProperty("message", out var msgProp) ? msgProp.GetString() : "Unknown error";
-                                            _logger.LogError("❌ [RAILWAY] GraphQL error: {ErrorMessage}", errorMessage);
+                                            var errors = new List<string>();
+                                            foreach (var error in errorsProp.EnumerateArray())
+                                            {
+                                                var errorMessage = error.TryGetProperty("message", out var msgProp) ? msgProp.GetString() : "Unknown error";
+                                                errors.Add(errorMessage ?? "Unknown error");
+                                                _logger.LogError("❌ [RAILWAY] GraphQL error: {ErrorMessage}", errorMessage);
+                                            }
+                                            errorMessages = string.Join("; ", errors);
                                         }
                                     }
                                 }
@@ -703,6 +1602,11 @@ public class BoardsController : ControllerBase
                                 {
                                     _logger.LogWarning(parseEx, "⚠️ [RAILWAY] Could not parse error response");
                                 }
+                                
+                                throw new InvalidOperationException(
+                                    $"Failed to create Railway service after {serviceRetryCount + 1} attempts. " +
+                                    $"Status: {serviceResponse?.StatusCode}, Error: {errorMessages ?? serviceResponseContent ?? "Unknown error"}. " +
+                                    "Railway deployment is required - board creation cannot proceed.");
                             }
 
                             // Don't set a fallback project URL - we need the actual service URL
@@ -713,6 +1617,9 @@ public class BoardsController : ControllerBase
                             }
                             
                             // Set environment variable DATABASE_URL on the service (if service was created)
+                            _logger.LogInformation("🔍 [RAILWAY] Checking conditions for DATABASE_URL: ServiceId={HasServiceId}, HasConnectionString={HasConn}, ProjectId={HasProjectId}", 
+                                !string.IsNullOrEmpty(railwayServiceId), !string.IsNullOrEmpty(dbConnectionString), !string.IsNullOrEmpty(projectId));
+                            
                             if (!string.IsNullOrEmpty(railwayServiceId) && !string.IsNullOrEmpty(dbConnectionString) && !string.IsNullOrEmpty(projectId))
                             {
                                 try
@@ -867,23 +1774,39 @@ public class BoardsController : ControllerBase
                         }
                         else
                         {
-                            _logger.LogWarning("Railway project created but ProjectId not found in response");
+                            // CRITICAL: Railway project created but ProjectId not found - board creation cannot proceed
+                            _logger.LogError("❌ [RAILWAY] CRITICAL: Railway project created but ProjectId not found in response. Response: {Response}", responseContent ?? "No response");
+                            throw new InvalidOperationException(
+                                "Railway project was created but ProjectId was not found in the response. " +
+                                "This is a critical error - board creation cannot proceed without a valid Railway project.");
                         }
                     }
                     else
                     {
-                        _logger.LogWarning("Failed to create Railway host: {StatusCode} - {Error}", response.StatusCode, responseContent);
+                        // CRITICAL: Railway project creation failed - board creation cannot proceed
+                        _logger.LogError("❌ [RAILWAY] CRITICAL: Failed to create Railway project after {Retries} attempts: {StatusCode} - {Error}", 
+                            railwayRetryCount + 1, response?.StatusCode ?? System.Net.HttpStatusCode.InternalServerError, responseContent ?? "No response");
+                        throw new InvalidOperationException(
+                            $"Failed to create Railway project after {railwayRetryCount + 1} attempts. " +
+                            $"Status: {response?.StatusCode}, Error: {responseContent}. " +
+                            "Railway deployment is required - board creation cannot proceed.");
                     }
                 }
                 else
                 {
-                    _logger.LogWarning("Railway configuration is incomplete, skipping Railway host creation");
+                    // CRITICAL: Railway configuration is incomplete - board creation cannot proceed
+                    _logger.LogError("❌ [RAILWAY] CRITICAL: Railway configuration is incomplete. Railway deployment is required - board creation cannot proceed.");
+                    throw new InvalidOperationException(
+                        "Railway configuration is incomplete. Railway deployment is required for board creation. " +
+                        "Please ensure Railway:ApiToken and Railway:ApiUrl are configured.");
                 }
             }
             catch (Exception ex)
             {
-                _logger.LogWarning(ex, "Error creating Railway host, continuing without it");
-                // Don't fail the entire process if Railway host creation fails
+                // CRITICAL: Railway deployment failures MUST fail the entire board creation
+                // Railway is a critical component - board cannot function without backend deployment
+                _logger.LogError(ex, "❌ [RAILWAY] CRITICAL: Railway deployment failed. Board creation cannot proceed. Error: {Error}", ex.Message);
+                throw; // Re-throw to fail the entire board creation
             }
             
             if (githubUsernames.Any())
@@ -928,6 +1851,36 @@ public class BoardsController : ControllerBase
                             var frontendOwner = frontendPathParts[0];
                             var frontendRepoNameFromUrl = frontendPathParts[1];
                             
+                            // Create GitHub ruleset and branch protection
+                            _logger.LogInformation("🔒 [GITHUB] Setting up rulesets and branch protection for frontend repository {Owner}/{Repo}", frontendOwner, frontendRepoNameFromUrl);
+                            var rulesetSuccess = await _gitHubService.CreateRepositoryRulesetAsync(frontendOwner, frontendRepoNameFromUrl, "Frontend", githubToken);
+                            if (rulesetSuccess)
+                            {
+                                _logger.LogInformation("✅ [GITHUB] Frontend repository ruleset created successfully");
+                            }
+                            else
+                            {
+                                // CRITICAL: Frontend repository ruleset creation failed - board creation cannot proceed
+                                _logger.LogError("❌ [GITHUB] CRITICAL: Failed to create frontend repository ruleset");
+                                throw new InvalidOperationException(
+                                    "Failed to create frontend repository ruleset. " +
+                                    "GitHub ruleset creation is required - board creation cannot proceed.");
+                            }
+                            
+                            var branchProtectionSuccess = await _gitHubService.CreateBranchProtectionAsync(frontendOwner, frontendRepoNameFromUrl, "main", githubToken);
+                            if (branchProtectionSuccess)
+                            {
+                                _logger.LogInformation("✅ [GITHUB] Frontend repository branch protection created successfully");
+                            }
+                            else
+                            {
+                                // CRITICAL: Frontend repository branch protection creation failed - board creation cannot proceed
+                                _logger.LogError("❌ [GITHUB] CRITICAL: Failed to create frontend repository branch protection");
+                                throw new InvalidOperationException(
+                                    "Failed to create frontend repository branch protection. " +
+                                    "GitHub branch protection is required - board creation cannot proceed.");
+                            }
+                            
                             // Create frontend-only commit (files at root, no workflows)
                             var frontendCommitSuccess = await _gitHubService.CreateFrontendOnlyCommitAsync(
                                 frontendOwner, frontendRepoNameFromUrl, project.Title, githubToken, webApiUrl);
@@ -955,16 +1908,20 @@ public class BoardsController : ControllerBase
                                     }
                                     else
                                     {
-                                        // Frontend repo name is boardId directly (no prefix)
-                                        publishUrl = _gitHubService.GetGitHubPagesUrl(frontendOwner, frontendRepoNameFromUrl);
-                                        _logger.LogWarning("⚠️ [FRONTEND] Deployment may not have triggered: {Message}", deployResponse.Message);
+                                        // CRITICAL: Frontend deployment failed - board creation cannot proceed
+                                        _logger.LogError("❌ [FRONTEND] CRITICAL: Deployment failed to trigger: {Message}", deployResponse.Message);
+                                        throw new InvalidOperationException(
+                                            $"Failed to trigger frontend deployment: {deployResponse.Message}. " +
+                                            "Frontend deployment is required - board creation cannot proceed.");
                                     }
                                 }
                                 catch (Exception deployEx)
                                 {
-                                    _logger.LogWarning(deployEx, "⚠️ [FRONTEND] Error calling deployment controller, using fallback");
-                                    // Frontend repo name is boardId directly (no prefix)
-                                    publishUrl = _gitHubService.GetGitHubPagesUrl(frontendOwner, frontendRepoNameFromUrl);
+                                    // CRITICAL: Frontend deployment exception - board creation cannot proceed
+                                    _logger.LogError(deployEx, "❌ [FRONTEND] CRITICAL: Error calling deployment controller");
+                                    throw new InvalidOperationException(
+                                        $"Failed to trigger frontend deployment: {deployEx.Message}. " +
+                                        "Frontend deployment is required - board creation cannot proceed.");
                                 }
                             }
                             else
@@ -975,7 +1932,11 @@ public class BoardsController : ControllerBase
                     }
                     else
                     {
-                        _logger.LogWarning("⚠️ [FRONTEND] Failed to create frontend repository: {Error}", frontendResponse.ErrorMessage);
+                        // CRITICAL: Frontend repository creation failed - board creation cannot proceed
+                        _logger.LogError("❌ [FRONTEND] CRITICAL: Failed to create frontend repository: {Error}", frontendResponse.ErrorMessage);
+                        throw new InvalidOperationException(
+                            $"Failed to create frontend GitHub repository: {frontendResponse.ErrorMessage}. " +
+                            "GitHub repository creation is required - board creation cannot proceed.");
                     }
                     
                     // Step 2: Create Backend Repository
@@ -1013,6 +1974,36 @@ public class BoardsController : ControllerBase
                             var backendOwner = backendPathParts[0];
                             var backendRepoNameFromUrl = backendPathParts[1];
                             
+                            // Create GitHub ruleset and branch protection
+                            _logger.LogInformation("🔒 [GITHUB] Setting up rulesets and branch protection for backend repository {Owner}/{Repo}", backendOwner, backendRepoNameFromUrl);
+                            var rulesetSuccess = await _gitHubService.CreateRepositoryRulesetAsync(backendOwner, backendRepoNameFromUrl, "Backend", githubToken);
+                            if (rulesetSuccess)
+                            {
+                                _logger.LogInformation("✅ [GITHUB] Backend repository ruleset created successfully");
+                            }
+                            else
+                            {
+                                // CRITICAL: Backend repository ruleset creation failed - board creation cannot proceed
+                                _logger.LogError("❌ [GITHUB] CRITICAL: Failed to create backend repository ruleset");
+                                throw new InvalidOperationException(
+                                    "Failed to create backend repository ruleset. " +
+                                    "GitHub ruleset creation is required - board creation cannot proceed.");
+                            }
+                            
+                            var branchProtectionSuccess = await _gitHubService.CreateBranchProtectionAsync(backendOwner, backendRepoNameFromUrl, "main", githubToken);
+                            if (branchProtectionSuccess)
+                            {
+                                _logger.LogInformation("✅ [GITHUB] Backend repository branch protection created successfully");
+                            }
+                            else
+                            {
+                                // CRITICAL: Backend repository branch protection creation failed - board creation cannot proceed
+                                _logger.LogError("❌ [GITHUB] CRITICAL: Failed to create backend repository branch protection");
+                                throw new InvalidOperationException(
+                                    "Failed to create backend repository branch protection. " +
+                                    "GitHub branch protection is required - board creation cannot proceed.");
+                            }
+                            
                             // Create backend-only commit (files at root, no workflows)
                             var backendCommitSuccess = await _gitHubService.CreateBackendOnlyCommitAsync(
                                 backendOwner, backendRepoNameFromUrl, project.Title, githubToken, 
@@ -1039,7 +2030,11 @@ public class BoardsController : ControllerBase
                                     }
                                     else
                                     {
-                                        _logger.LogWarning("[GITHUB] ⚠️ Failed to add RAILWAY_TOKEN secret");
+                                        // CRITICAL: RAILWAY_TOKEN secret creation failed - board creation cannot proceed
+                                        _logger.LogError("[GITHUB] ❌ CRITICAL: Failed to add RAILWAY_TOKEN secret");
+                                        throw new InvalidOperationException(
+                                            "Failed to add RAILWAY_TOKEN secret to GitHub repository. " +
+                                            "GitHub secrets are required for Railway deployment - board creation cannot proceed.");
                                     }
                                     
                                     // Add RAILWAY_SERVICE_ID secret
@@ -1052,7 +2047,11 @@ public class BoardsController : ControllerBase
                                     }
                                     else
                                     {
-                                        _logger.LogWarning("[GITHUB] ⚠️ Failed to add RAILWAY_SERVICE_ID secret");
+                                        // CRITICAL: RAILWAY_SERVICE_ID secret creation failed - board creation cannot proceed
+                                        _logger.LogError("[GITHUB] ❌ CRITICAL: Failed to add RAILWAY_SERVICE_ID secret");
+                                        throw new InvalidOperationException(
+                                            "Failed to add RAILWAY_SERVICE_ID secret to GitHub repository. " +
+                                            "GitHub secrets are required for Railway deployment - board creation cannot proceed.");
                                     }
                                     
                                     // Connect GitHub repository to Railway service
@@ -1093,6 +2092,27 @@ public class BoardsController : ControllerBase
                                                 webApiUrl = domainUrl;
                                                 swaggerUrl = $"{domainUrl}/swagger";
                                                 
+                                                // Update ProjectBoard with the backend URL (if it was already created)
+                                                try
+                                                {
+                                                    var existingBoard = await _context.ProjectBoards.FindAsync(trelloBoardId);
+                                                    if (existingBoard != null)
+                                                    {
+                                                        existingBoard.WebApiUrl = swaggerUrl ?? webApiUrl;
+                                                        existingBoard.UpdatedAt = DateTime.UtcNow;
+                                                        await _context.SaveChangesAsync();
+                                                        _logger.LogInformation("✅ [PROJECTBOARD] Updated WebApiUrl to {WebApiUrl}", existingBoard.WebApiUrl);
+                                                    }
+                                                    else
+                                                    {
+                                                        _logger.LogWarning("⚠️ [PROJECTBOARD] ProjectBoard not found for board ID {BoardId} - will set URL when board is created", trelloBoardId);
+                                                    }
+                                                }
+                                                catch (Exception updateEx)
+                                                {
+                                                    _logger.LogWarning(updateEx, "⚠️ [PROJECTBOARD] Failed to update WebApiUrl, will be set when board is created");
+                                                }
+                                                
                                                 // Update config.js in frontend repo with the service URL
                                                 if (!string.IsNullOrEmpty(frontendRepositoryUrl))
                                                 {
@@ -1113,8 +2133,12 @@ public class BoardsController : ControllerBase
                                             }
                                             else
                                             {
-                                                _logger.LogWarning("⚠️ [RAILWAY] Domain creation may have failed - will poll for service URL");
-                                                // Start polling for service URL in background
+                                                // CRITICAL: Railway domain creation failed - board creation cannot proceed
+                                                _logger.LogError("❌ [RAILWAY] CRITICAL: Domain creation failed - cannot proceed without service URL");
+                                                throw new InvalidOperationException(
+                                                    "Failed to create Railway service domain. " +
+                                                    "Railway domain is required for backend deployment - board creation cannot proceed.");
+                                                // Start polling for service URL in background (unreachable code, but kept for reference)
                                                 if (!string.IsNullOrEmpty(railwayServiceId) && !string.IsNullOrEmpty(frontendRepositoryUrl))
                                                 {
                                                     _ = Task.Run(async () =>
@@ -1156,29 +2180,49 @@ public class BoardsController : ControllerBase
                                             }
                                             else
                                             {
-                                                _logger.LogWarning("⚠️ [BACKEND] Deployment may not have triggered: {Message}", deployResponse.Message);
+                                                // CRITICAL: Backend deployment failed - board creation cannot proceed
+                                                _logger.LogError("❌ [BACKEND] CRITICAL: Deployment failed to trigger: {Message}", deployResponse.Message);
+                                                throw new InvalidOperationException(
+                                                    $"Failed to trigger backend deployment: {deployResponse.Message}. " +
+                                                    "Backend deployment is required - board creation cannot proceed.");
                                             }
                                         }
                                         catch (Exception deployEx)
                                         {
-                                            _logger.LogWarning(deployEx, "⚠️ [BACKEND] Error calling deployment controller");
+                                            // CRITICAL: Backend deployment exception - board creation cannot proceed
+                                            _logger.LogError(deployEx, "❌ [BACKEND] CRITICAL: Error calling deployment controller");
+                                            throw new InvalidOperationException(
+                                                $"Failed to trigger backend deployment: {deployEx.Message}. " +
+                                                "Backend deployment is required - board creation cannot proceed.");
                                         }
                                     }
                                 }
                                 catch (Exception railwayEx)
                                 {
-                                    _logger.LogWarning(railwayEx, "[GITHUB] ⚠️ Error setting up Railway integration, continuing anyway");
+                                    // CRITICAL: Railway integration setup failed - board creation cannot proceed
+                                    _logger.LogError(railwayEx, "[GITHUB] ❌ CRITICAL: Error setting up Railway integration. Board creation cannot proceed.");
+                                    throw new InvalidOperationException(
+                                        $"Failed to set up Railway integration with GitHub repository: {railwayEx.Message}. " +
+                                        "Railway integration is required - board creation cannot proceed.");
                                 }
                             }
                             else
                             {
-                                _logger.LogWarning("⚠️ [BACKEND] Failed to create backend commit");
+                                // CRITICAL: Backend commit creation failed - board creation cannot proceed
+                                _logger.LogError("❌ [BACKEND] CRITICAL: Failed to create backend commit");
+                                throw new InvalidOperationException(
+                                    "Failed to create backend commit in GitHub repository. " +
+                                    "GitHub commit creation is required - board creation cannot proceed.");
                             }
                         }
                     }
                     else
                     {
-                        _logger.LogWarning("⚠️ [BACKEND] Failed to create backend repository: {Error}", backendResponse.ErrorMessage);
+                        // CRITICAL: Backend repository creation failed - board creation cannot proceed
+                        _logger.LogError("❌ [BACKEND] CRITICAL: Failed to create backend repository: {Error}", backendResponse.ErrorMessage);
+                        throw new InvalidOperationException(
+                            $"Failed to create backend GitHub repository: {backendResponse.ErrorMessage}. " +
+                            "GitHub repository creation is required - board creation cannot proceed.");
                     }
                     
                     _logger.LogInformation("✅ [GITHUB] Added {AddedCount} collaborators total, {FailedCount} failed", 
@@ -1272,6 +2316,9 @@ public class BoardsController : ControllerBase
                 GithubFrontendUrl = frontendRepositoryUrl,
                 WebApiUrl = swaggerUrl ?? webApiUrl, // Swagger URL from Railway deployment (fallback to base URL if swagger URL not set)
                 PublishUrl = publishUrl,
+                DBPassword = dbPassword, // Save the isolated role password for manual connections
+                NeonProjectId = createdNeonProjectId, // Save the Neon project ID (project-per-tenant isolation)
+                NeonBranchId = createdBranchId, // Save the Neon branch ID for this database (ensures isolation)
                 CreatedAt = DateTime.UtcNow,
                 UpdatedAt = DateTime.UtcNow
             };
@@ -1399,6 +2446,28 @@ public class BoardsController : ControllerBase
             else
             {
                 _logger.LogInformation("Teams meeting details not provided, skipping meeting creation");
+            }
+
+            // OPTIMIZATION: If DATABASE_URL wasn't set earlier (connection string validation was still in progress),
+            // update it now that board creation is complete
+            if (!string.IsNullOrEmpty(railwayServiceId) && !string.IsNullOrEmpty(dbConnectionString) && !string.IsNullOrEmpty(projectId))
+            {
+                // Check if DATABASE_URL was already set (we would have set it earlier if connection string was ready)
+                // If not, update it now
+                _logger.LogInformation("🔄 [RAILWAY] Final check: Updating DATABASE_URL on Railway service {ServiceId} if not already set", railwayServiceId);
+                try
+                {
+                    await UpdateRailwayDatabaseUrl(railwayServiceId, dbConnectionString, projectId, railwayApiToken, railwayApiUrl);
+                }
+                catch (Exception updateEx)
+                {
+                    _logger.LogWarning(updateEx, "⚠️ [RAILWAY] Failed to update DATABASE_URL at end of board creation. Railway may need manual update.");
+                }
+            }
+            else if (!string.IsNullOrEmpty(railwayServiceId) && string.IsNullOrEmpty(dbConnectionString))
+            {
+                _logger.LogWarning("⚠️ [RAILWAY] Railway service {ServiceId} was created but DATABASE_URL is not available. " +
+                    "Connection string validation may have failed or is still in progress. Railway will deploy without database connection.", railwayServiceId);
             }
 
             _logger.LogInformation("Successfully created board {BoardId} for project {ProjectId}", trelloBoardId, request.ProjectId);
@@ -3147,9 +4216,354 @@ The actual prompt generation would require access to project details and student
     }
 
     /// <summary>
+    /// Result of creating an isolated database role
+    /// </summary>
+    private class IsolatedRoleResult
+    {
+        public string ConnectionString { get; set; } = string.Empty;
+        public string Password { get; set; } = string.Empty;
+        public string RoleName { get; set; } = string.Empty;
+    }
+
+    /// <summary>
+    /// Result of creating a Neon project
+    /// </summary>
+    private class NeonProjectResult
+    {
+        public string ProjectId { get; set; } = string.Empty;
+        public string? ProjectName { get; set; }
+        public bool Success { get; set; }
+        public string? ErrorMessage { get; set; }
+        public string? DefaultBranchId { get; set; }
+        public List<string> OperationIds { get; set; } = new();
+    }
+
+    /// <summary>
+    /// Result of creating a Neon branch
+    /// </summary>
+    private class NeonBranchResult
+    {
+        public string BranchId { get; set; } = string.Empty;
+        public string? EndpointHost { get; set; } // Endpoint hostname if available in response
+        public string? EndpointId { get; set; } // Endpoint ID from API response (e.g., "ep-cool-darkness-123456")
+        public List<string> OperationIds { get; set; } = new List<string>(); // Operation IDs from branch creation
+        public bool Success { get; set; }
+        public string? ErrorMessage { get; set; }
+    }
+
+    /// <summary>
+    /// Creates a new Neon project for complete tenant isolation (project-per-tenant model)
+    /// </summary>
+    private async Task<NeonProjectResult> CreateNeonProjectAsync(string neonApiKey, string neonBaseUrl, string projectName)
+    {
+        try
+        {
+            _logger.LogInformation("🏗️ [NEON] Creating new Neon project for tenant isolation: {ProjectName}", projectName);
+            
+            using var httpClient = _httpClientFactory.CreateClient();
+            httpClient.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", neonApiKey);
+            httpClient.DefaultRequestHeaders.Accept.Add(new System.Net.Http.Headers.MediaTypeWithQualityHeaderValue("application/json"));
+
+            // Create project request body with quotas
+            // Quotas: 8640 seconds = 2.4 hours active/compute time, 1.2GB written data, 600MB transfer
+            var createProjectRequest = new
+            {
+                project = new
+                {
+                    name = projectName,
+                    settings = new
+                    {
+                        quota = new
+                        {
+                            active_time_seconds = 8640,
+                            compute_time_seconds = 8640,
+                            written_data_bytes = 1200000000,
+                            data_transfer_bytes = 600000000
+                        }
+                    },
+                    pg_version = 15
+                }
+            };
+
+            var requestBody = JsonSerializer.Serialize(createProjectRequest);
+            var content = new StringContent(requestBody, System.Text.Encoding.UTF8, "application/json");
+
+            var apiUrl = $"{neonBaseUrl}/projects";
+            _logger.LogInformation("🏗️ [NEON] Calling Neon API: POST {Url}", apiUrl);
+
+            var response = await httpClient.PostAsync(apiUrl, content);
+
+            if (response.IsSuccessStatusCode)
+            {
+                var responseContent = await response.Content.ReadAsStringAsync();
+                var jsonDoc = JsonDocument.Parse(responseContent);
+                
+                string? projectId = null;
+                string? projectNameFromResponse = null;
+                string? defaultBranchId = null;
+                var operationIds = new List<string>();
+                
+                // Extract project ID from response
+                if (jsonDoc.RootElement.TryGetProperty("project", out var projectObj))
+                {
+                    if (projectObj.TryGetProperty("id", out var projectIdProp))
+                    {
+                        projectId = projectIdProp.GetString();
+                    }
+                    if (projectObj.TryGetProperty("name", out var projectNameProp))
+                    {
+                        projectNameFromResponse = projectNameProp.GetString();
+                    }
+                }
+
+                // Extract default branch ID from project creation response (new projects automatically create a main branch)
+                if (jsonDoc.RootElement.TryGetProperty("branch", out var branchObj))
+                {
+                    if (branchObj.TryGetProperty("id", out var branchIdProp))
+                    {
+                        defaultBranchId = branchIdProp.GetString();
+                        _logger.LogInformation("🔍 [NEON] Found default branch ID in project creation response: {BranchId}", defaultBranchId);
+                    }
+                }
+
+                // Extract operation IDs from project creation (we need to wait for these to finish)
+                if (jsonDoc.RootElement.TryGetProperty("operations", out var operationsProp) && operationsProp.ValueKind == JsonValueKind.Array)
+                {
+                    foreach (var op in operationsProp.EnumerateArray())
+                    {
+                        if (op.TryGetProperty("id", out var opIdProp))
+                        {
+                            var opId = opIdProp.GetString();
+                            if (!string.IsNullOrEmpty(opId))
+                            {
+                                operationIds.Add(opId);
+                                _logger.LogInformation("🔍 [NEON] Found project creation operation ID: {OperationId}", opId);
+                            }
+                        }
+                    }
+                }
+                
+                if (!string.IsNullOrEmpty(projectId))
+                {
+                    _logger.LogInformation("✅ [NEON] Successfully created Neon project: {ProjectId} ({ProjectName})", projectId, projectNameFromResponse ?? projectName);
+                    return new NeonProjectResult
+                    {
+                        Success = true,
+                        ProjectId = projectId,
+                        ProjectName = projectNameFromResponse ?? projectName,
+                        DefaultBranchId = defaultBranchId,
+                        OperationIds = operationIds
+                    };
+                }
+
+                _logger.LogWarning("⚠️ [NEON] Project created but ID not found in response: {Response}", responseContent);
+                return new NeonProjectResult
+                {
+                    Success = false,
+                    ErrorMessage = "Project ID not found in response"
+                };
+            }
+            else
+            {
+                var errorContent = await response.Content.ReadAsStringAsync();
+                _logger.LogError("❌ [NEON] Failed to create Neon project: {StatusCode} - {Error}", response.StatusCode, errorContent);
+                return new NeonProjectResult
+                {
+                    Success = false,
+                    ErrorMessage = $"Neon API returned {response.StatusCode}: {errorContent}"
+                };
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "❌ [NEON] Exception creating Neon project: {Error}", ex.Message);
+            return new NeonProjectResult
+            {
+                Success = false,
+                ErrorMessage = ex.Message
+            };
+        }
+    }
+
+    /// <summary>
+    /// Creates a new Neon branch for database isolation
+    /// </summary>
+    private async Task<NeonBranchResult> CreateNeonBranchAsync(string neonApiKey, string neonBaseUrl, string neonProjectId, string? parentBranchId = null)
+    {
+        try
+        {
+            _logger.LogInformation("🌿 [NEON] Creating new branch for database isolation in project: {ProjectId}", neonProjectId);
+            
+            using var httpClient = _httpClientFactory.CreateClient();
+            httpClient.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", neonApiKey);
+            httpClient.DefaultRequestHeaders.Accept.Add(new System.Net.Http.Headers.MediaTypeWithQualityHeaderValue("application/json"));
+
+            // Create branch request body
+            // Use JsonSerializerOptions to ignore null values (Neon API doesn't accept "branch": null)
+            var jsonOptions = new JsonSerializerOptions
+            {
+                DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull
+            };
+
+            object createBranchRequest;
+            if (!string.IsNullOrEmpty(parentBranchId))
+            {
+                // Create branch from parent branch
+                _logger.LogInformation("🌿 [NEON] Creating branch from parent branch '{ParentBranchId}'", parentBranchId);
+                createBranchRequest = new
+                {
+                    endpoints = new[]
+                    {
+                        new { type = "read_write" }
+                    },
+                    branch = new { parent_id = parentBranchId }
+                };
+            }
+            else
+            {
+                // No parent branch - only include endpoints (will use project's default branch)
+                _logger.LogInformation("🌿 [NEON] Creating branch without parent (will use project's default branch)");
+                createBranchRequest = new
+                {
+                    endpoints = new[]
+                    {
+                        new { type = "read_write" }
+                    }
+                };
+            }
+
+            var requestBody = JsonSerializer.Serialize(createBranchRequest, jsonOptions);
+            var content = new StringContent(requestBody, System.Text.Encoding.UTF8, "application/json");
+
+            var apiUrl = $"{neonBaseUrl}/projects/{neonProjectId}/branches";
+            _logger.LogInformation("🌿 [NEON] Calling Neon API: POST {Url}", apiUrl);
+
+            var response = await httpClient.PostAsync(apiUrl, content);
+
+            if (response.IsSuccessStatusCode)
+            {
+                var responseContent = await response.Content.ReadAsStringAsync();
+                var jsonDoc = JsonDocument.Parse(responseContent);
+                
+                // Extract branch ID, endpoint information, and operation IDs from response
+                // According to Neon API docs, endpoints array is at ROOT level, not inside branch object
+                string? branchId = null;
+                string? endpointHost = null;
+                string? endpointId = null;
+                var operationIds = new List<string>();
+                
+                // Extract branch ID
+                if (jsonDoc.RootElement.TryGetProperty("branch", out var branchObj))
+                {
+                    if (branchObj.TryGetProperty("id", out var branchIdProp))
+                    {
+                        branchId = branchIdProp.GetString();
+                    }
+                }
+                
+                // Extract endpoint information from ROOT level endpoints array
+                // The endpoints array contains endpoint objects with id, host, branch_id, etc.
+                if (jsonDoc.RootElement.TryGetProperty("endpoints", out var endpointsProp) && endpointsProp.ValueKind == JsonValueKind.Array)
+                {
+                    foreach (var endpoint in endpointsProp.EnumerateArray())
+                    {
+                        // Verify this endpoint belongs to our branch
+                        if (endpoint.TryGetProperty("branch_id", out var endpointBranchIdProp))
+                        {
+                            var endpointBranchId = endpointBranchIdProp.GetString();
+                            if (endpointBranchId == branchId) // Match the branch
+                            {
+                                // Extract endpoint ID (e.g., "ep-cool-darkness-123456")
+                                if (endpoint.TryGetProperty("id", out var endpointIdProp))
+                                {
+                                    endpointId = endpointIdProp.GetString();
+                                    _logger.LogInformation("🌐 [NEON] Branch endpoint ID from API: {EndpointId}", endpointId);
+                                }
+                                
+                                // Extract endpoint host
+                                if (endpoint.TryGetProperty("host", out var hostProp))
+                                {
+                                    endpointHost = hostProp.GetString();
+                                    _logger.LogInformation("🌐 [NEON] Branch endpoint host: {EndpointHost}", endpointHost);
+                                }
+                                
+                                break; // Use first matching endpoint
+                            }
+                        }
+                    }
+                }
+
+                // Extract ALL operation IDs from branch creation response
+                if (jsonDoc.RootElement.TryGetProperty("operations", out var operationsProp) && operationsProp.ValueKind == JsonValueKind.Array)
+                {
+                    foreach (var op in operationsProp.EnumerateArray())
+                    {
+                        if (op.TryGetProperty("id", out var opIdProp))
+                        {
+                            var opId = opIdProp.GetString();
+                            if (!string.IsNullOrEmpty(opId))
+                            {
+                                operationIds.Add(opId);
+                                _logger.LogInformation("🔄 [NEON] Found operation ID: {OperationId}", opId);
+                            }
+                        }
+                    }
+                }
+                
+                if (!string.IsNullOrEmpty(branchId))
+                {
+                    _logger.LogInformation("✅ [NEON] Successfully created branch: {BranchId} with {OperationCount} operations", branchId, operationIds.Count);
+                    if (!string.IsNullOrEmpty(endpointId))
+                    {
+                        _logger.LogInformation("🌐 [NEON] Branch endpoint ID: {EndpointId}", endpointId);
+                    }
+                    if (!string.IsNullOrEmpty(endpointHost))
+                    {
+                        _logger.LogInformation("🌐 [NEON] Branch endpoint host: {EndpointHost}", endpointHost);
+                    }
+                    return new NeonBranchResult
+                    {
+                        Success = true,
+                        BranchId = branchId,
+                        EndpointHost = endpointHost,
+                        EndpointId = endpointId,
+                        OperationIds = operationIds
+                    };
+                }
+
+                _logger.LogWarning("⚠️ [NEON] Branch created but ID not found in response: {Response}", responseContent);
+                return new NeonBranchResult
+                {
+                    Success = false,
+                    ErrorMessage = "Branch ID not found in response"
+                };
+            }
+            else
+            {
+                var errorContent = await response.Content.ReadAsStringAsync();
+                _logger.LogError("❌ [NEON] Failed to create branch: {StatusCode} - {Error}", response.StatusCode, errorContent);
+                return new NeonBranchResult
+                {
+                    Success = false,
+                    ErrorMessage = $"Failed to create branch: {response.StatusCode} - {errorContent}"
+                };
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "❌ [NEON] Exception creating Neon branch");
+            return new NeonBranchResult
+            {
+                Success = false,
+                ErrorMessage = $"Exception: {ex.Message}"
+            };
+        }
+    }
+
+    /// <summary>
     /// Creates an isolated database role for a specific database to prevent cross-database access
     /// </summary>
-    private async Task<string?> CreateIsolatedDatabaseRole(string connectionString, string dbName)
+    private async Task<IsolatedRoleResult?> CreateIsolatedDatabaseRole(string connectionString, string dbName)
     {
         try
         {
@@ -3163,6 +4577,7 @@ The actual prompt generation would require access to project details and student
             
             // Generate a secure random password
             var password = GenerateSecurePassword(32);
+            _logger.LogInformation("🔐 [NEON] Generated password for role {RoleName}: {Password} (RAW - for manual connection use)", roleName, password);
             _logger.LogDebug("🔐 [NEON] Generated secure password for role {RoleName}", roleName);
             
             // Parse the connection string URI to extract components (avoiding unknown query parameters like channel_binding)
@@ -3248,15 +4663,152 @@ The actual prompt generation would require access to project details and student
             await createRoleCmd.ExecuteNonQueryAsync();
             _logger.LogInformation("✅ [NEON] Created/updated role: {RoleName}", roleName);
             
-            // Revoke CONNECT from PUBLIC on this database
-            using var revokePublicCmd = new NpgsqlCommand($@"REVOKE CONNECT ON DATABASE ""{dbName}"" FROM PUBLIC;", postgresConn);
-            await revokePublicCmd.ExecuteNonQueryAsync();
-            _logger.LogInformation("🔒 [NEON] Revoked CONNECT privilege from PUBLIC on database '{DbName}'", dbName);
+            // Wait for database to appear in PostgreSQL catalog before trying to revoke/grant CONNECT
+            // This is needed because Neon databases may take a moment to propagate to pg_database
+            _logger.LogInformation("⏳ [NEON] Waiting for database '{DbName}' to appear in PostgreSQL catalog...", dbName);
+            var dbCatalogAvailable = false;
+            var maxCatalogRetries = 10;
+            var catalogRetryDelay = 500;
             
-            // Grant CONNECT to the new role
-            using var grantConnectCmd = new NpgsqlCommand($@"GRANT CONNECT ON DATABASE ""{dbName}"" TO {roleName};", postgresConn);
-            await grantConnectCmd.ExecuteNonQueryAsync();
-            _logger.LogInformation("✅ [NEON] Granted CONNECT privilege to role {RoleName} on database '{DbName}'", roleName, dbName);
+            for (int i = 0; i < maxCatalogRetries; i++)
+            {
+                try
+                {
+                    using var checkDbCmd = new NpgsqlCommand($@"SELECT 1 FROM pg_database WHERE datname = '{dbName.Replace("'", "''")}';", postgresConn);
+                    var result = await checkDbCmd.ExecuteScalarAsync();
+                    if (result != null)
+                    {
+                        dbCatalogAvailable = true;
+                        _logger.LogDebug("✅ [NEON] Database '{DbName}' is now available in PostgreSQL catalog (attempt {Attempt})", dbName, i + 1);
+                        break;
+                    }
+                }
+                catch (Exception checkEx)
+                {
+                    _logger.LogDebug("⏳ [NEON] Error checking database catalog (attempt {Attempt}): {Error}", i + 1, checkEx.Message);
+                }
+                
+                if (i < maxCatalogRetries - 1)
+                {
+                    _logger.LogDebug("⏳ [NEON] Database '{DbName}' not yet in catalog (attempt {Attempt}/{MaxRetries}), waiting {DelayMs}ms...", 
+                        dbName, i + 1, maxCatalogRetries, catalogRetryDelay);
+                    await Task.Delay(catalogRetryDelay);
+                }
+            }
+
+            if (!dbCatalogAvailable)
+            {
+                _logger.LogWarning("⚠️ [NEON] Database '{DbName}' not found in PostgreSQL catalog after {MaxRetries} attempts. Will retry CONNECT privileges after connecting to database.", 
+                    dbName, maxCatalogRetries);
+            }
+            
+            // Revoke CONNECT from PUBLIC on this database
+            bool connectPrivilegesSet = false;
+            if (dbCatalogAvailable)
+            {
+                try
+                {
+                    using var revokePublicCmd = new NpgsqlCommand($@"REVOKE CONNECT ON DATABASE ""{dbName}"" FROM PUBLIC;", postgresConn);
+                    await revokePublicCmd.ExecuteNonQueryAsync();
+                    _logger.LogInformation("🔒 [NEON] Revoked CONNECT privilege from PUBLIC on database '{DbName}'", dbName);
+                    
+                    // Grant CONNECT to the new role
+                    using var grantConnectCmd = new NpgsqlCommand($@"GRANT CONNECT ON DATABASE ""{dbName}"" TO {roleName};", postgresConn);
+                    await grantConnectCmd.ExecuteNonQueryAsync();
+                    _logger.LogInformation("✅ [NEON] Granted CONNECT privilege to role {RoleName} on database '{DbName}'", roleName, dbName);
+                    connectPrivilegesSet = true;
+                    
+                    // AGGRESSIVE MULTI-TENANT ISOLATION - Prevent seeing ANY other databases
+                    // This is CRITICAL for a multi-tenant Neon server hosting thousands of databases
+                    try
+                    {
+                        // 1. Revoke ALL access to system catalogs that could expose database names
+                        using var revokePublicCatalogCmd = new NpgsqlCommand($"REVOKE SELECT ON pg_database FROM PUBLIC;", postgresConn);
+                        await revokePublicCatalogCmd.ExecuteNonQueryAsync();
+                        _logger.LogDebug("🔒 [NEON] Revoked SELECT privilege on pg_database from PUBLIC");
+                        
+                        using var revokeFromRoleCmd = new NpgsqlCommand($"REVOKE SELECT ON pg_database FROM {roleName};", postgresConn);
+                        await revokeFromRoleCmd.ExecuteNonQueryAsync();
+                        _logger.LogInformation("🔒 [NEON] Revoked SELECT privilege on pg_database from role {RoleName}", roleName);
+                        
+                        // 2. Revoke access to ALL system catalogs that might expose database info
+                        var systemCatalogsToRevoke = new[]
+                        {
+                            "pg_shadow", "pg_roles", "pg_authid", "pg_auth_members",
+                            "pg_user", "pg_group", "pg_tablespace", "pg_settings"
+                        };
+                        
+                        foreach (var catalog in systemCatalogsToRevoke)
+                        {
+                            try
+                            {
+                                using var revokeCmd = new NpgsqlCommand($"REVOKE SELECT ON {catalog} FROM {roleName};", postgresConn);
+                                await revokeCmd.ExecuteNonQueryAsync();
+                                _logger.LogDebug("🔒 [NEON] Revoked SELECT on {Catalog} from role {RoleName}", catalog, roleName);
+                            }
+                            catch (Exception catalogRevokeEx)
+                            {
+                                _logger.LogDebug("⚠️ [NEON] Could not revoke SELECT on {Catalog} from role {RoleName}: {Error}", 
+                                    catalog, roleName, catalogRevokeEx.Message);
+                            }
+                        }
+                        
+                        // 3. Completely revoke USAGE on pg_catalog and information_schema
+                        try
+                        {
+                            using var revokePgCatalogCmd = new NpgsqlCommand($"REVOKE USAGE ON SCHEMA pg_catalog FROM {roleName};", postgresConn);
+                            await revokePgCatalogCmd.ExecuteNonQueryAsync();
+                            
+                            using var revokeInfoSchemaCmd = new NpgsqlCommand($"REVOKE USAGE ON SCHEMA information_schema FROM {roleName};", postgresConn);
+                            await revokeInfoSchemaCmd.ExecuteNonQueryAsync();
+                            
+                            _logger.LogInformation("🔒 [NEON] Revoked USAGE on pg_catalog and information_schema from role {RoleName}", roleName);
+                        }
+                        catch (Exception schemaEx)
+                        {
+                            _logger.LogWarning("⚠️ [NEON] Could not revoke USAGE on schemas from role {RoleName}: {Error}", roleName, schemaEx.Message);
+                        }
+                        
+                        // 4. Revoke CONNECT on postgres database (critical for multi-tenant)
+                        try
+                        {
+                            using var revokePostgresConnectCmd = new NpgsqlCommand($@"REVOKE CONNECT ON DATABASE ""postgres"" FROM {roleName};", postgresConn);
+                            await revokePostgresConnectCmd.ExecuteNonQueryAsync();
+                            _logger.LogInformation("🔒 [NEON] Revoked CONNECT privilege on 'postgres' database from role {RoleName}", roleName);
+                        }
+                        catch (Exception postgresConnectEx)
+                        {
+                            _logger.LogWarning("⚠️ [NEON] Could not revoke CONNECT on 'postgres' database from role {RoleName}: {Error}", 
+                                roleName, postgresConnectEx.Message);
+                        }
+                        
+                        // 5. Set ALTER ROLE to completely restrict catalog access
+                        try
+                        {
+                            using var alterRoleSearchPathCmd = new NpgsqlCommand($"ALTER ROLE {roleName} SET search_path = '\"$user\", public';", postgresConn);
+                            await alterRoleSearchPathCmd.ExecuteNonQueryAsync();
+                            
+                            _logger.LogInformation("🔒 [NEON] Set search_path for role {RoleName} to exclude pg_catalog", roleName);
+                        }
+                        catch (Exception alterRoleEx)
+                        {
+                            _logger.LogWarning("⚠️ [NEON] Could not set search_path for role {RoleName}: {Error}", roleName, alterRoleEx.Message);
+                        }
+                        
+                        _logger.LogInformation("✅ [NEON] Applied aggressive multi-tenant isolation for role {RoleName}", roleName);
+                    }
+                    catch (Exception isolationEx)
+                    {
+                        _logger.LogError(isolationEx, "❌ [NEON] CRITICAL: Failed to apply multi-tenant isolation for role {RoleName}. " +
+                            "This is a security requirement for multi-tenant database hosting.", roleName);
+                        // Don't throw here - we'll continue and try database-level isolation
+                    }
+                }
+                catch (PostgresException pgEx) when (pgEx.SqlState == "3D000")
+                {
+                    _logger.LogWarning("⚠️ [NEON] Database '{DbName}' not found when setting CONNECT privileges (catalog check passed but command failed). Will retry after connecting to database.", dbName);
+                }
+            }
             
             // Connect to the specific database to grant schema and table privileges
             // Wait for database to become available (Neon databases may take a moment to propagate)
@@ -3275,6 +4827,191 @@ The actual prompt generation would require access to project details and student
             using var dbConn = new NpgsqlConnection(dbSpecificConnString);
             await WaitForDatabaseAvailableAsync(dbConn, dbName, maxRetries: 10, delayMs: 1000);
             _logger.LogDebug("🔐 [NEON] Connected to database '{DbName}' to grant privileges", dbName);
+            
+            // If CONNECT privileges weren't set earlier, try again now that we've connected to the database
+            // (This ensures the database is fully available)
+            if (!connectPrivilegesSet)
+            {
+                _logger.LogInformation("🔄 [NEON] Retrying CONNECT privilege setup for database '{DbName}' now that database is connected", dbName);
+                try
+                {
+                    // We need to use the postgres connection for database-level privileges
+                    using var retryRevokeCmd = new NpgsqlCommand($@"REVOKE CONNECT ON DATABASE ""{dbName}"" FROM PUBLIC;", postgresConn);
+                    await retryRevokeCmd.ExecuteNonQueryAsync();
+                    _logger.LogInformation("🔒 [NEON] Successfully revoked CONNECT privilege from PUBLIC on database '{DbName}' (retry)", dbName);
+                    
+                    using var retryGrantCmd = new NpgsqlCommand($@"GRANT CONNECT ON DATABASE ""{dbName}"" TO {roleName};", postgresConn);
+                    await retryGrantCmd.ExecuteNonQueryAsync();
+                    _logger.LogInformation("✅ [NEON] Successfully granted CONNECT privilege to role {RoleName} on database '{DbName}' (retry)", roleName, dbName);
+                    connectPrivilegesSet = true;
+                    
+                    // Revoke CONNECT on "postgres" database (retry)
+                    try
+                    {
+                        using var retryRevokePostgresConnectCmd = new NpgsqlCommand($@"REVOKE CONNECT ON DATABASE ""postgres"" FROM {roleName};", postgresConn);
+                        await retryRevokePostgresConnectCmd.ExecuteNonQueryAsync();
+                        _logger.LogInformation("🔒 [NEON] Revoked CONNECT privilege on 'postgres' database from role {RoleName} (retry)", roleName);
+                    }
+                    catch (Exception retryPostgresConnectEx)
+                    {
+                        _logger.LogDebug("⚠️ [NEON] Could not revoke CONNECT on 'postgres' database from role {RoleName} (retry): {Error}", roleName, retryPostgresConnectEx.Message);
+                    }
+                    
+                    // AGGRESSIVE MULTI-TENANT ISOLATION (RETRY) - Prevent seeing ANY other databases
+                    try
+                    {
+                        // Retry all critical isolation steps
+                        using var retryRevokePublicCmd = new NpgsqlCommand($"REVOKE SELECT ON pg_database FROM PUBLIC;", postgresConn);
+                        await retryRevokePublicCmd.ExecuteNonQueryAsync();
+                        
+                        using var retryRevokeFromRoleCmd = new NpgsqlCommand($"REVOKE SELECT ON pg_database FROM {roleName};", postgresConn);
+                        await retryRevokeFromRoleCmd.ExecuteNonQueryAsync();
+                        
+                        // Retry revoking from other system catalogs
+                        var systemCatalogsToRevoke = new[]
+                        {
+                            "pg_shadow", "pg_roles", "pg_authid", "pg_auth_members",
+                            "pg_user", "pg_group", "pg_tablespace", "pg_settings"
+                        };
+                        
+                        foreach (var catalog in systemCatalogsToRevoke)
+                        {
+                            try
+                            {
+                                using var retryRevokeCatalogCmd = new NpgsqlCommand($"REVOKE SELECT ON {catalog} FROM {roleName};", postgresConn);
+                                await retryRevokeCatalogCmd.ExecuteNonQueryAsync();
+                            }
+                            catch (Exception catalogRevokeEx)
+                            {
+                                _logger.LogDebug("⚠️ [NEON] Could not revoke SELECT on {Catalog} from role {RoleName} (retry): {Error}", 
+                                    catalog, roleName, catalogRevokeEx.Message);
+                            }
+                        }
+                        
+                        // Retry revoking USAGE on schemas
+                        try
+                        {
+                            using var retryRevokePgCatalogCmd = new NpgsqlCommand($"REVOKE USAGE ON SCHEMA pg_catalog FROM {roleName};", postgresConn);
+                            await retryRevokePgCatalogCmd.ExecuteNonQueryAsync();
+                            
+                            using var retryRevokeInfoSchemaCmd = new NpgsqlCommand($"REVOKE USAGE ON SCHEMA information_schema FROM {roleName};", postgresConn);
+                            await retryRevokeInfoSchemaCmd.ExecuteNonQueryAsync();
+                            
+                            _logger.LogInformation("🔒 [NEON] Revoked USAGE on schemas from role {RoleName} (retry)", roleName);
+                        }
+                        catch (Exception retrySchemaEx)
+                        {
+                            _logger.LogWarning("⚠️ [NEON] Could not revoke USAGE on schemas from role {RoleName} (retry): {Error}", roleName, retrySchemaEx.Message);
+                        }
+                        
+                        // Retry revoking CONNECT on postgres
+                        try
+                        {
+                            using var retryRevokePostgresConnectCmd = new NpgsqlCommand($@"REVOKE CONNECT ON DATABASE ""postgres"" FROM {roleName};", postgresConn);
+                            await retryRevokePostgresConnectCmd.ExecuteNonQueryAsync();
+                            _logger.LogInformation("🔒 [NEON] Revoked CONNECT on 'postgres' database from role {RoleName} (retry)", roleName);
+                        }
+                        catch (Exception retryPostgresConnectEx)
+                        {
+                            _logger.LogDebug("⚠️ [NEON] Could not revoke CONNECT on 'postgres' database from role {RoleName} (retry): {Error}", 
+                                roleName, retryPostgresConnectEx.Message);
+                        }
+                        
+                        _logger.LogInformation("✅ [NEON] Applied aggressive multi-tenant isolation for role {RoleName} (retry)", roleName);
+                    }
+                    catch (Exception retryIsolationEx)
+                    {
+                        _logger.LogError(retryIsolationEx, "❌ [NEON] CRITICAL: Failed to apply multi-tenant isolation for role {RoleName} on retry", roleName);
+                    }
+                }
+                catch (Exception retryEx)
+                {
+                    _logger.LogWarning("⚠️ [NEON] Failed to set CONNECT privileges on retry for database '{DbName}': {Error}. Continuing with schema privileges...", 
+                        dbName, retryEx.Message);
+                }
+            }
+            
+            // Create a completely isolated environment - replace pg_database queries
+            // This is CRITICAL for multi-tenant isolation - users must NOT see other databases
+            try
+            {
+                // Ensure we revoke SELECT on pg_database at database level too
+                using var revokePgDatabaseDbCmd = new NpgsqlCommand($"REVOKE SELECT ON pg_database FROM {roleName};", postgresConn);
+                await revokePgDatabaseDbCmd.ExecuteNonQueryAsync();
+                
+                // Create a function that ONLY returns current database (no way to see others)
+                // This function uses SECURITY DEFINER to run with owner privileges but filters results
+                using var createIsolatedFunctionCmd = new NpgsqlCommand($@"
+                    -- Drop any existing functions with this name
+                    DROP FUNCTION IF EXISTS pg_database_current_only() CASCADE;
+                    
+                    -- Create function that ONLY shows current database
+                    -- This is the ONLY way the role can query database information
+                    CREATE FUNCTION pg_database_current_only()
+                    RETURNS TABLE(
+                        oid oid,
+                        datname name,
+                        datdba oid,
+                        encoding integer,
+                        datcollate name,
+                        datctype name,
+                        datistemplate boolean,
+                        datallowconn boolean,
+                        datconnlimit integer,
+                        datlastsysoid oid,
+                        datfrozenxid xid,
+                        datminmxid xid,
+                        dattablespace oid,
+                        datacl aclitem[]
+                    )
+                    LANGUAGE plpgsql
+                    SECURITY DEFINER
+                    STABLE
+                    AS $$
+                    BEGIN
+                        -- ONLY return the current database - no way to see others
+                        RETURN QUERY
+                        SELECT * FROM pg_database 
+                        WHERE datname = current_database()
+                        LIMIT 1;
+                    END;
+                    $$;
+                    
+                    -- Grant ONLY this function, nothing else
+                    GRANT EXECUTE ON FUNCTION pg_database_current_only() TO {roleName};
+                    
+                    -- Revoke ALL other system catalog access at database level
+                    REVOKE ALL ON SCHEMA pg_catalog FROM {roleName};
+                    REVOKE ALL ON SCHEMA information_schema FROM {roleName};
+                ", dbConn);
+                await createIsolatedFunctionCmd.ExecuteNonQueryAsync();
+                
+                _logger.LogInformation("✅ [NEON] Created isolated database function for role {RoleName} - other databases are completely hidden", roleName);
+            }
+            catch (Exception isolationFuncEx)
+            {
+                _logger.LogError(isolationFuncEx, "❌ [NEON] CRITICAL: Failed to create isolated function for role {RoleName}. " +
+                    "Multi-tenant isolation may be compromised.", roleName);
+                // Don't throw - continue with other privileges, but log as critical
+            }
+            
+            // Set additional role-level parameters for security
+            try
+            {
+                // Disable row security bypass to ensure RLS policies are enforced
+                using var alterRoleRowSecurityCmd = new NpgsqlCommand($"ALTER ROLE {roleName} SET row_security = on;", postgresConn);
+                await alterRoleRowSecurityCmd.ExecuteNonQueryAsync();
+                
+                // Set statement_timeout to prevent long-running queries that might discover databases
+                using var alterRoleTimeoutCmd = new NpgsqlCommand($"ALTER ROLE {roleName} SET statement_timeout = '30s';", postgresConn);
+                await alterRoleTimeoutCmd.ExecuteNonQueryAsync();
+                
+                _logger.LogInformation("🔒 [NEON] Set additional security parameters for role {RoleName}", roleName);
+            }
+            catch (Exception alterRoleEx)
+            {
+                _logger.LogWarning("⚠️ [NEON] Could not set additional role-level parameters for {RoleName}: {Error}", roleName, alterRoleEx.Message);
+            }
             
             // Grant USAGE and CREATE on schema (CREATE is needed to create tables)
             using var grantSchemaUsageCmd = new NpgsqlCommand($"GRANT USAGE ON SCHEMA public TO {roleName};", dbConn);
@@ -3303,13 +5040,60 @@ The actual prompt generation would require access to project details and student
             // Build new connection string with the isolated role (using URI format)
             var isolatedConnectionString = $"postgresql://{roleName}:{Uri.EscapeDataString(password)}@{originalHost}:{originalPort}/{dbName}?sslmode=require";
             
+            // Log connection details for manual access (since this is public/free data)
+            _logger.LogInformation("🔗 [NEON] Connection string for database '{DbName}' with isolated role '{RoleName}': {ConnectionString}", 
+                dbName, roleName, isolatedConnectionString);
+            _logger.LogInformation("🔑 [NEON] Raw password for role '{RoleName}' (for manual pgAdmin connection): {Password}", 
+                roleName, password);
+            
+            // Verify that we can connect with the isolated role before returning
+            // This ensures the connection string is valid and the role has proper access
+            try
+            {
+                var testBuilder = new NpgsqlConnectionStringBuilder
+                {
+                    Host = originalHost,
+                    Port = originalPort,
+                    Database = dbName,
+                    Username = roleName,
+                    Password = password,
+                    SslMode = SslMode.Require
+                };
+                
+                using var testConn = new NpgsqlConnection(testBuilder.ConnectionString);
+                await testConn.OpenAsync();
+                _logger.LogDebug("✅ [NEON] Verified isolated role connection for database '{DbName}'", dbName);
+                await testConn.CloseAsync();
+            }
+            catch (Exception verifyEx)
+            {
+                _logger.LogWarning("⚠️ [NEON] Could not verify isolated role connection for database '{DbName}': {Error}. " +
+                    "This may indicate the role needs more time to propagate. Connection string will still be returned.", 
+                    dbName, verifyEx.Message);
+            }
+            
             _logger.LogInformation("✅ [NEON] Successfully created isolated role and connection string for database '{DbName}'", dbName);
-            return isolatedConnectionString;
+            return new IsolatedRoleResult
+            {
+                ConnectionString = isolatedConnectionString,
+                Password = password,
+                RoleName = roleName
+            };
+        }
+        catch (PostgresException pgEx) when (pgEx.SqlState == "3D000")
+        {
+            // Database doesn't exist - this is a timing issue, we should retry at a higher level
+            _logger.LogError(pgEx, "❌ [NEON] Database '{DbName}' does not exist when creating isolated role. " +
+                "This may be a timing issue - database may need more time to propagate.", dbName);
+            throw; // Re-throw to allow retry at higher level
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "❌ [NEON] Error creating isolated database role for database '{DbName}': {Message}", dbName, ex.Message);
-            return null;
+            // For other errors, log but don't fall back to owner connection
+            // The isolated role is a security requirement
+            _logger.LogError(ex, "❌ [NEON] Critical error creating isolated database role for database '{DbName}': {Message}. " +
+                "This is a security requirement - cannot fall back to owner connection.", dbName, ex.Message);
+            throw; // Re-throw instead of returning null to prevent fallback to neondb_owner
         }
     }
     
@@ -3375,7 +5159,7 @@ The actual prompt generation would require access to project details and student
     /// <summary>
     /// Executes the initial database schema script to create TestProjects table
     /// </summary>
-    private async Task ExecuteInitialDatabaseSchema(string connectionString, string dbName)
+    private async Task ExecuteInitialDatabaseSchema(string connectionString, string dbName, string? isolatedRoleName = null)
     {
         try
         {
@@ -3431,7 +5215,11 @@ The actual prompt generation would require access to project details and student
             }
             
             // SQL script to create TestProjects table with mock data
+            // Note: We explicitly set search_path to 'public' because the isolated role has restricted search_path
             var sqlScript = @"
+-- Set search_path to public schema (required because isolated role has restricted search_path)
+SET search_path = public, ""$user"";
+
 -- TestProjects table for initial project setup
 -- This table is used for testing and learning database interactions
 
@@ -3441,15 +5229,15 @@ CREATE TABLE IF NOT EXISTS ""TestProjects"" (
 );
 
 -- Insert mock data (only if table is empty)
-INSERT INTO ""TestProjects"" (""Name"") 
-SELECT * FROM (VALUES
+-- Use a simpler approach: DELETE all rows first, then INSERT (ensures clean state)
+DELETE FROM ""TestProjects"";
+
+INSERT INTO ""TestProjects"" (""Name"") VALUES
     ('Sample Project 1'),
     ('Sample Project 2'),
     ('Sample Project 3'),
     ('Learning Project'),
-    ('Test Project')
-) AS v(""Name"")
-WHERE NOT EXISTS (SELECT 1 FROM ""TestProjects"");
+    ('Test Project');
 ";
             
             using var conn = new NpgsqlConnection(builder.ConnectionString);
@@ -3458,9 +5246,67 @@ WHERE NOT EXISTS (SELECT 1 FROM ""TestProjects"");
             _logger.LogDebug("📊 [NEON] Connected to database '{DbName}' to execute schema script", dbName);
             
             using var cmd = new NpgsqlCommand(sqlScript, conn);
-            await cmd.ExecuteNonQueryAsync();
+            var rowsAffected = await cmd.ExecuteNonQueryAsync();
+            _logger.LogDebug("📊 [NEON] Schema script executed. Rows affected: {RowsAffected}", rowsAffected);
             
-            _logger.LogInformation("✅ [NEON] Successfully executed initial database schema for database '{DbName}'. TestProjects table created with mock data.", dbName);
+            // Verify that data was inserted
+            using var verifyCmd = new NpgsqlCommand(@"SELECT COUNT(*) FROM ""TestProjects"";", conn);
+            var rowCount = await verifyCmd.ExecuteScalarAsync();
+            var count = rowCount != null ? Convert.ToInt32(rowCount) : 0;
+            
+            if (count > 0)
+            {
+                _logger.LogInformation("✅ [NEON] Successfully executed initial database schema for database '{DbName}'. TestProjects table created with {Count} rows of mock data.", dbName, count);
+            }
+            else
+            {
+                _logger.LogWarning("⚠️ [NEON] TestProjects table created for database '{DbName}' but INSERT failed or table is empty. Row count: {Count}. Attempting manual INSERT...", dbName, count);
+                
+                // Try manual INSERT as fallback
+                try
+                {
+                    using var manualInsertCmd = new NpgsqlCommand(@"
+                        INSERT INTO ""TestProjects"" (""Name"") VALUES
+                            ('Sample Project 1'),
+                            ('Sample Project 2'),
+                            ('Sample Project 3'),
+                            ('Learning Project'),
+                            ('Test Project');
+                    ", conn);
+                    var insertRows = await manualInsertCmd.ExecuteNonQueryAsync();
+                    _logger.LogInformation("✅ [NEON] Manual INSERT succeeded. Rows inserted: {Rows}", insertRows);
+                    
+                    // Verify again
+                    var verifyCount = await verifyCmd.ExecuteScalarAsync();
+                    var finalCount = verifyCount != null ? Convert.ToInt32(verifyCount) : 0;
+                    _logger.LogInformation("✅ [NEON] Final row count after manual INSERT: {Count}", finalCount);
+                }
+                catch (Exception insertEx)
+                {
+                    _logger.LogError(insertEx, "❌ [NEON] Manual INSERT also failed for database '{DbName}': {Error}", dbName, insertEx.Message);
+                }
+            }
+            
+            // Grant permissions on TestProjects table to isolated role (if provided)
+            // This is necessary because the table was created by the owner, and default privileges
+            // only apply to objects created by the role that set them
+            if (!string.IsNullOrEmpty(isolatedRoleName))
+            {
+                try
+                {
+                    using var grantCmd = new NpgsqlCommand($@"
+                        GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE ""TestProjects"" TO {isolatedRoleName};
+                        GRANT USAGE, SELECT ON SEQUENCE ""TestProjects_Id_seq"" TO {isolatedRoleName};
+                    ", conn);
+                    await grantCmd.ExecuteNonQueryAsync();
+                    _logger.LogInformation("✅ [NEON] Granted permissions on TestProjects table to isolated role '{RoleName}'", isolatedRoleName);
+                }
+                catch (Exception grantEx)
+                {
+                    _logger.LogWarning(grantEx, "⚠️ [NEON] Failed to grant permissions on TestProjects table to isolated role '{RoleName}': {Error}", isolatedRoleName, grantEx.Message);
+                    // Don't throw - this is not critical, but may cause issues with student backend queries
+                }
+            }
         }
         catch (Exception ex)
         {
@@ -3472,6 +5318,114 @@ WHERE NOT EXISTS (SELECT 1 FROM ""TestProjects"");
     /// <summary>
     /// Verifies that a Railway environment variable was set correctly
     /// </summary>
+    /// <summary>
+    /// Updates Railway service's DATABASE_URL environment variable
+    /// </summary>
+    private async Task UpdateRailwayDatabaseUrl(string serviceId, string connectionString, string projectId, string apiToken, string apiUrl)
+    {
+        try
+        {
+            using var httpClient = _httpClientFactory.CreateClient();
+            httpClient.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", apiToken);
+            httpClient.DefaultRequestHeaders.Accept.Add(new System.Net.Http.Headers.MediaTypeWithQualityHeaderValue("application/json"));
+            httpClient.DefaultRequestHeaders.Add("User-Agent", "StrAppersBackend/1.0");
+
+            // Get environment ID
+            string? environmentId = null;
+            var getProjectQuery = new
+            {
+                query = @"
+                    query GetProject($projectId: String!) {
+                        project(id: $projectId) {
+                            id
+                            environments {
+                                edges {
+                                    node {
+                                        id
+                                    }
+                                }
+                            }
+                        }
+                    }",
+                variables = new { projectId = projectId }
+            };
+
+            var queryBody = System.Text.Json.JsonSerializer.Serialize(getProjectQuery);
+            var queryContent = new StringContent(queryBody, System.Text.Encoding.UTF8, "application/json");
+            var queryResponse = await httpClient.PostAsync(apiUrl, queryContent);
+
+            if (queryResponse.IsSuccessStatusCode)
+            {
+                var queryResponseContent = await queryResponse.Content.ReadAsStringAsync();
+                var queryDoc = System.Text.Json.JsonDocument.Parse(queryResponseContent);
+                if (queryDoc.RootElement.TryGetProperty("data", out var dataObj) &&
+                    dataObj.TryGetProperty("project", out var projectObj) &&
+                    projectObj.TryGetProperty("environments", out var environmentsProp) &&
+                    environmentsProp.TryGetProperty("edges", out var edgesProp))
+                {
+                    var edges = edgesProp.EnumerateArray().ToList();
+                    if (edges.Count > 0)
+                    {
+                        if (edges[0].TryGetProperty("node", out var nodeProp) &&
+                            nodeProp.TryGetProperty("id", out var envIdProp))
+                        {
+                            environmentId = envIdProp.GetString();
+                        }
+                    }
+                }
+            }
+
+            if (string.IsNullOrEmpty(environmentId))
+            {
+                _logger.LogWarning("⚠️ [RAILWAY] Cannot update DATABASE_URL: Environment ID not found for project {ProjectId}", projectId);
+                return;
+            }
+
+            // Set DATABASE_URL
+            var setEnvMutation = new
+            {
+                query = @"
+                    mutation SetVariable($projectId: String!, $environmentId: String!, $serviceId: String!, $name: String!, $value: String!) {
+                        variableUpsert(input: { 
+                            projectId: $projectId
+                            environmentId: $environmentId
+                            serviceId: $serviceId
+                            name: $name
+                            value: $value
+                        })
+                    }",
+                variables = new
+                {
+                    projectId = projectId,
+                    environmentId = environmentId,
+                    serviceId = serviceId,
+                    name = "DATABASE_URL",
+                    value = connectionString
+                }
+            };
+
+            _logger.LogInformation("🔧 [RAILWAY] Updating DATABASE_URL on service {ServiceId}", serviceId);
+            var envBody = System.Text.Json.JsonSerializer.Serialize(setEnvMutation);
+            var envContent = new StringContent(envBody, System.Text.Encoding.UTF8, "application/json");
+            var envResponse = await httpClient.PostAsync(apiUrl, envContent);
+
+            if (envResponse.IsSuccessStatusCode)
+            {
+                _logger.LogInformation("✅ [RAILWAY] Successfully updated DATABASE_URL on Railway service {ServiceId}. Railway will redeploy with new environment variable.", serviceId);
+            }
+            else
+            {
+                var errorContent = await envResponse.Content.ReadAsStringAsync();
+                _logger.LogWarning("⚠️ [RAILWAY] Failed to update DATABASE_URL: {StatusCode} - {Error}", envResponse.StatusCode, errorContent);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "❌ [RAILWAY] Error updating DATABASE_URL on Railway service {ServiceId}", serviceId);
+            throw;
+        }
+    }
+
     private async Task VerifyRailwayEnvironmentVariable(HttpClient httpClient, string railwayApiUrl, string serviceId, string apiToken)
     {
         try

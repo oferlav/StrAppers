@@ -32,6 +32,9 @@ public interface IGitHubService
     Task<string?> GetFileContentAsync(string owner, string repo, string filePath, string? accessToken = null, string? branch = null);
     Task<bool> UpdateFileAsync(string owner, string repo, string filePath, string content, string message, string? accessToken = null, string? branch = null);
     string GenerateConfigJs(string? webApiUrl);
+    Task<bool> CreateRepositoryRulesetAsync(string owner, string repo, string repoType, string accessToken);
+    Task<bool> CreateBranchProtectionAsync(string owner, string repo, string branchName, string accessToken);
+    Task<CreateBranchResponse> CreateBranchAsync(string owner, string repo, string branchName, string sourceBranch, string accessToken);
 }
 
 public class GitHubService : IGitHubService
@@ -337,9 +340,14 @@ public class GitHubService : IGitHubService
             _logger.LogInformation("Using GitHub access token (first 10 chars): {TokenPrefix}", 
                 accessToken.Length > 10 ? accessToken.Substring(0, 10) + "..." : accessToken);
 
-            // Get organization name from configuration (optional - defaults to user account)
+            // Get organization/user account name from configuration
+            // Note: If this is a user account (not an organization), we use /user/repos endpoint
+            // The repository will be created under the authenticated user's account (token owner)
             var organizationName = _configuration["GitHub:Organization"];
             var useOrganization = !string.IsNullOrEmpty(organizationName);
+
+            _logger.LogInformation("📦 [GITHUB] Repository creation config - Organization/Account: {Org}, RepoName: {RepoName}", 
+                organizationName ?? "authenticated user", request.Name);
 
             // Create repository payload
             var repositoryPayload = new
@@ -353,12 +361,22 @@ public class GitHubService : IGitHubService
             var jsonContent = JsonSerializer.Serialize(repositoryPayload);
             var content = new StringContent(jsonContent, System.Text.Encoding.UTF8, "application/json");
 
-            // Use organization endpoint if configured, otherwise use user endpoint
-            var endpoint = useOrganization 
-                ? $"{GitHubApiBaseUrl}/orgs/{organizationName}/repos"
-                : $"{GitHubApiBaseUrl}/user/repos";
+            // Always use /user/repos endpoint - this creates repos under the authenticated user's account
+            // If organizationName is set, it's just for reference/logging - the token owner determines where the repo is created
+            // To create under a specific organization, use /orgs/{org}/repos (requires org membership and write:org scope)
+            // To create under a specific user account, the token must belong to that account and use /user/repos
+            var endpoint = $"{GitHubApiBaseUrl}/user/repos";
             
-            _logger.LogInformation("[BACKEND] Creating repository using endpoint: {Endpoint}", endpoint);
+            if (useOrganization)
+            {
+                _logger.LogInformation("📦 [GITHUB] Organization/Account name configured: {Org}. Using /user/repos endpoint (repo will be created under token owner's account)", organizationName);
+            }
+            else
+            {
+                _logger.LogInformation("📦 [GITHUB] No organization configured. Using /user/repos endpoint (repo will be created under token owner's account)");
+            }
+            
+            _logger.LogInformation("📦 [GITHUB] Creating repository using endpoint: {Endpoint}", endpoint);
             
             var httpRequest = new HttpRequestMessage(HttpMethod.Post, endpoint);
             httpRequest.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", accessToken);
@@ -369,8 +387,8 @@ public class GitHubService : IGitHubService
             if (!createResponse.IsSuccessStatusCode)
             {
                 var errorContent = await createResponse.Content.ReadAsStringAsync();
-                _logger.LogError("Failed to create GitHub repository. Status: {StatusCode}, Error: {Error}", 
-                    createResponse.StatusCode, errorContent);
+                _logger.LogError("❌ [GITHUB] Failed to create GitHub repository. Status: {StatusCode}, Error: {Error}, Endpoint: {Endpoint}", 
+                    createResponse.StatusCode, errorContent, endpoint);
                 
                 // Provide more specific error messages
                 if (createResponse.StatusCode == System.Net.HttpStatusCode.Forbidden)
@@ -383,21 +401,7 @@ public class GitHubService : IGitHubService
                 }
                 else if (createResponse.StatusCode == System.Net.HttpStatusCode.NotFound)
                 {
-                    if (useOrganization)
-                    {
-                        response.ErrorMessage = $"Organization '{organizationName}' not found or access denied. " +
-                                              $"Please verify:\n" +
-                                              $"1. The organization name '{organizationName}' is correct\n" +
-                                              $"2. The user account associated with the PAT is a member of the organization\n" +
-                                              $"3. The user has permission to create repositories in the organization\n" +
-                                              $"4. The PAT has 'write:org' scope (if organization requires it)";
-                        _logger.LogError("[BACKEND] Organization repository creation failed. Organization: {Org}, Endpoint: {Endpoint}", 
-                            organizationName, endpoint);
-                    }
-                    else
-                    {
-                        response.ErrorMessage = "Repository or user not found. Please check that the GitHub access token is valid.";
-                    }
+                    response.ErrorMessage = "Repository or user not found. Please check that the GitHub access token is valid and belongs to the correct account.";
                 }
                 else
                 {
@@ -427,30 +431,33 @@ public class GitHubService : IGitHubService
 
             _logger.LogInformation("Successfully created GitHub repository: {RepositoryUrl}", repository.HtmlUrl);
 
-            // Extract owner from FullName (format: "owner/repo-name") or from configuration
+            // Extract owner from FullName (format: "owner/repo-name") or from authenticated user
+            // Since we use /user/repos endpoint, the repo is created under the token owner's account
             string repositoryOwner;
             if (!string.IsNullOrEmpty(repository.FullName) && repository.FullName.Contains('/'))
             {
                 repositoryOwner = repository.FullName.Split('/')[0];
-                _logger.LogInformation("[BACKEND] Extracted repository owner from FullName: {Owner}", repositoryOwner);
-            }
-            else if (useOrganization)
-            {
-                repositoryOwner = organizationName!;
-                _logger.LogInformation("[BACKEND] Using organization from configuration: {Owner}", repositoryOwner);
+                _logger.LogInformation("📦 [GITHUB] Extracted repository owner from FullName: {Owner}", repositoryOwner);
             }
             else
             {
-                // Fallback: get from user info (for user-based repos)
-            var userInfo = await GetGitHubUserInfoAsync(accessToken);
-            if (userInfo == null)
-            {
-                    _logger.LogError("Failed to get current user info and cannot determine repository owner");
+                // Get from user info (the token owner - this is where the repo was actually created)
+                var userInfo = await GetGitHubUserInfoAsync(accessToken);
+                if (userInfo == null)
+                {
+                    _logger.LogError("❌ [GITHUB] Failed to get current user info and cannot determine repository owner");
                     response.ErrorMessage = "Failed to determine repository owner";
-                return response;
+                    return response;
                 }
                 repositoryOwner = userInfo.Login;
-                _logger.LogInformation("[BACKEND] Using user account as owner: {Owner}", repositoryOwner);
+                _logger.LogInformation("📦 [GITHUB] Repository created under authenticated user account: {Owner}", repositoryOwner);
+                
+                // Log if configured organization/account name differs from actual owner
+                if (useOrganization && !string.IsNullOrEmpty(organizationName) && organizationName != repositoryOwner)
+                {
+                    _logger.LogWarning("⚠️ [GITHUB] Configured organization/account name '{ConfigName}' differs from token owner '{ActualOwner}'. Repository created under '{ActualOwner}'.", 
+                        organizationName, repositoryOwner, repositoryOwner);
+                }
             }
 
             // Set the GitHub Pages URL using the actual owner
@@ -916,8 +923,6 @@ public class GitHubService : IGitHubService
             }
             treeItems.Add(new { path = "style.css", mode = "100644", type = "blob", sha = styleCssSha });
             fileContents["style.css"] = styleCssContent;
-
-            // No workflow needed - GitHub Pages can serve files directly from root
 
             // Create .gitignore
             var gitignoreContent = GenerateGitIgnore(null); // No programming language for frontend-only
@@ -2772,12 +2777,29 @@ public class GitHubService : IGitHubService
             </p>
         </div>
     </div>
-    <script src=""config.js""></script>
+    <script>
+        // Load config.js and ensure it's available
+        let configLoaded = false;
+        const configScript = document.createElement('script');
+        configScript.src = 'config.js';
+        configScript.onload = function() {{
+            configLoaded = true;
+            console.log('✅ config.js loaded successfully');
+            console.log('📋 CONFIG:', typeof CONFIG !== 'undefined' ? CONFIG : 'CONFIG not defined');
+            console.log('📋 window.CONFIG:', typeof window !== 'undefined' && window.CONFIG ? window.CONFIG : 'window.CONFIG not defined');
+        }};
+        configScript.onerror = function() {{
+            console.error('❌ Failed to load config.js');
+            configLoaded = false;
+        }};
+        document.head.appendChild(configScript);
+    </script>
     <script>
         // Debug: Log config on load
         window.addEventListener('DOMContentLoaded', function() {{
-            console.log('📋 Config loaded:', CONFIG);
-            console.log('📋 API_URL from config:', CONFIG?.API_URL);
+            console.log('📋 Config loaded:', typeof CONFIG !== 'undefined' ? CONFIG : 'CONFIG not defined');
+            console.log('📋 window.CONFIG:', typeof window !== 'undefined' && window.CONFIG ? window.CONFIG : 'window.CONFIG not defined');
+            console.log('📋 API_URL from config:', typeof CONFIG !== 'undefined' ? CONFIG?.API_URL : (window.CONFIG?.API_URL || 'not found'));
         }});
         
         async function testBackend() {{
@@ -2790,11 +2812,27 @@ public class GitHubService : IGitHubService
             responseDiv.textContent = '';
             
             try {{
-                let apiUrl = CONFIG?.API_URL || '';
+                // Wait a moment for config.js to load if it hasn't yet
+                if (!configLoaded) {{
+                    await new Promise(resolve => setTimeout(resolve, 100));
+                }}
+                
+                // Try multiple ways to access CONFIG (handle scope issues)
+                let config = typeof CONFIG !== 'undefined' ? CONFIG : (typeof window !== 'undefined' && window.CONFIG ? window.CONFIG : null);
+                let apiUrl = config?.API_URL || '';
+                
+                console.log('🔍 CONFIG object:', config);
                 console.log('🔍 Original API_URL from config:', apiUrl);
+                console.log('🔍 typeof CONFIG:', typeof CONFIG);
+                console.log('🔍 window.CONFIG:', typeof window !== 'undefined' ? window.CONFIG : 'window not available');
+                console.log('🔍 configLoaded flag:', configLoaded);
                 
                 if (!apiUrl) {{
-                    throw new Error('API URL not configured in config.js');
+                    const errorMsg = 'API URL not configured in config.js. ' +
+                        'CONFIG object: ' + JSON.stringify(config) + 
+                        ', window.CONFIG: ' + JSON.stringify(typeof window !== 'undefined' ? window.CONFIG : 'N/A') +
+                        ', configLoaded: ' + configLoaded;
+                    throw new Error(errorMsg);
                 }}
                 
                 // Ensure HTTPS for Railway domains (fix Mixed Content errors)
@@ -3130,90 +3168,183 @@ public class TestController : ControllerBase
     [HttpGet]
     public async Task<ActionResult<IEnumerable<TestProjects>>> GetAll()
     {
-        var projects = new List<TestProjects>();
-        using var conn = new NpgsqlConnection(_connectionString);
-        await conn.OpenAsync();
-        var quote = Convert.ToChar(34).ToString(); // Double quote for PostgreSQL identifier quoting
-        var sql = ""SELECT "" + quote + ""Id"" + quote + "", "" + quote + ""Name"" + quote + "" FROM "" + quote + ""TestProjects"" + quote + "" ORDER BY "" + quote + ""Id"" + quote + "" "";
-        using var cmd = new NpgsqlCommand(sql, conn);
-        using var reader = await cmd.ExecuteReaderAsync();
-        while (await reader.ReadAsync())
+        try
         {
-            projects.Add(new TestProjects
+            var projects = new List<TestProjects>();
+            using var conn = new NpgsqlConnection(_connectionString);
+            await conn.OpenAsync();
+            
+            // Set search_path to public schema (required because isolated role has restricted search_path)
+            // Note: Using string concatenation to avoid $ interpolation issues
+            using var setPathCmd = new NpgsqlCommand(""SET search_path = public, \"""" + ""$"" + ""user\"";"", conn);
+            await setPathCmd.ExecuteNonQueryAsync();
+            
+            var quote = Convert.ToChar(34).ToString(); // Double quote for PostgreSQL identifier quoting
+            var sql = ""SELECT "" + quote + ""Id"" + quote + "", "" + quote + ""Name"" + quote + "" FROM "" + quote + ""TestProjects"" + quote + "" ORDER BY "" + quote + ""Id"" + quote + "" "";
+            using var cmd = new NpgsqlCommand(sql, conn);
+            using var reader = await cmd.ExecuteReaderAsync();
+            while (await reader.ReadAsync())
             {
-                Id = reader.GetInt32(0),
-                Name = reader.GetString(1)
-            });
+                projects.Add(new TestProjects
+                {
+                    Id = reader.GetInt32(0),
+                    Name = reader.GetString(1)
+                });
+            }
+            return Ok(projects);
         }
-        return Ok(projects);
+        catch (PostgresException ex) when (ex.SqlState == ""42P01"") // Table does not exist
+        {
+            // TestProjects table doesn't exist - return empty list gracefully
+            // This can happen if the database schema wasn't fully initialized
+            return Ok(new List<TestProjects>());
+        }
+        catch (Exception ex)
+        {
+            return StatusCode(500, new { error = ex.Message, message = ""Failed to query TestProjects table"" });
+        }
     }
 
     // GET: api/test/5
     [HttpGet(""{id}"")]
     public async Task<ActionResult<TestProjects>> Get(int id)
     {
-        using var conn = new NpgsqlConnection(_connectionString);
-        await conn.OpenAsync();
-        var quote = Convert.ToChar(34).ToString(); // Double quote for PostgreSQL identifier quoting
-        var sql = ""SELECT "" + quote + ""Id"" + quote + "", "" + quote + ""Name"" + quote + "" FROM "" + quote + ""TestProjects"" + quote + "" WHERE "" + quote + ""Id"" + quote + "" = @id "";
-        using var cmd = new NpgsqlCommand(sql, conn);
-        cmd.Parameters.AddWithValue(""id"", id);
-        using var reader = await cmd.ExecuteReaderAsync();
-        if (await reader.ReadAsync())
+        try
         {
-            return Ok(new TestProjects
+            using var conn = new NpgsqlConnection(_connectionString);
+            await conn.OpenAsync();
+            
+            // Set search_path to public schema (required because isolated role has restricted search_path)
+            // Note: Using string concatenation to avoid $ interpolation issues
+            using var setPathCmd = new NpgsqlCommand(""SET search_path = public, \"""" + ""$"" + ""user\"";"", conn);
+            await setPathCmd.ExecuteNonQueryAsync();
+            
+            var quote = Convert.ToChar(34).ToString(); // Double quote for PostgreSQL identifier quoting
+            var sql = ""SELECT "" + quote + ""Id"" + quote + "", "" + quote + ""Name"" + quote + "" FROM "" + quote + ""TestProjects"" + quote + "" WHERE "" + quote + ""Id"" + quote + "" = @id "";
+            using var cmd = new NpgsqlCommand(sql, conn);
+            cmd.Parameters.AddWithValue(""id"", id);
+            using var reader = await cmd.ExecuteReaderAsync();
+            if (await reader.ReadAsync())
             {
-                Id = reader.GetInt32(0),
-                Name = reader.GetString(1)
-            });
+                return Ok(new TestProjects
+                {
+                    Id = reader.GetInt32(0),
+                    Name = reader.GetString(1)
+                });
+            }
+            return NotFound();
         }
-        return NotFound();
+        catch (PostgresException ex) when (ex.SqlState == ""42P01"") // Table does not exist
+        {
+            // TestProjects table doesn't exist - return 404 gracefully
+            // This can happen if the database schema wasn't fully initialized
+            return NotFound();
+        }
+        catch (Exception ex)
+        {
+            return StatusCode(500, new { error = ex.Message, message = ""Failed to query TestProjects table"" });
+        }
     }
 
     // POST: api/test
     [HttpPost]
     public async Task<ActionResult<TestProjects>> Create([FromBody] TestProjects project)
     {
-        using var conn = new NpgsqlConnection(_connectionString);
-        await conn.OpenAsync();
-        var quote = Convert.ToChar(34).ToString(); // Double quote for PostgreSQL identifier quoting
-        var sql = ""INSERT INTO "" + quote + ""TestProjects"" + quote + "" ("" + quote + ""Name"" + quote + "") VALUES (@name) RETURNING "" + quote + ""Id"" + quote + "" "";
-        using var cmd = new NpgsqlCommand(sql, conn);
-        cmd.Parameters.AddWithValue(""name"", project.Name);
-        var id = await cmd.ExecuteScalarAsync();
-        project.Id = Convert.ToInt32(id);
-        return CreatedAtAction(nameof(Get), new { id = project.Id }, project);
+        try
+        {
+            using var conn = new NpgsqlConnection(_connectionString);
+            await conn.OpenAsync();
+            
+            // Set search_path to public schema (required because isolated role has restricted search_path)
+            // Note: Using string concatenation to avoid $ interpolation issues
+            using var setPathCmd = new NpgsqlCommand(""SET search_path = public, \"""" + ""$"" + ""user\"";"", conn);
+            await setPathCmd.ExecuteNonQueryAsync();
+            
+            var quote = Convert.ToChar(34).ToString(); // Double quote for PostgreSQL identifier quoting
+            var sql = ""INSERT INTO "" + quote + ""TestProjects"" + quote + "" ("" + quote + ""Name"" + quote + "") VALUES (@name) RETURNING "" + quote + ""Id"" + quote + "" "";
+            using var cmd = new NpgsqlCommand(sql, conn);
+            cmd.Parameters.AddWithValue(""name"", project.Name);
+            var id = await cmd.ExecuteScalarAsync();
+            project.Id = Convert.ToInt32(id);
+            return CreatedAtAction(nameof(Get), new { id = project.Id }, project);
+        }
+        catch (PostgresException ex) when (ex.SqlState == ""42P01"") // Table does not exist
+        {
+            // TestProjects table doesn't exist - return 503 gracefully
+            // This can happen if the database schema wasn't fully initialized
+            return StatusCode(503, new { error = ""Service Unavailable"", message = ""Database schema not initialized. Please contact support."" });
+        }
+        catch (Exception ex)
+        {
+            return StatusCode(500, new { error = ex.Message, message = ""Failed to create TestProjects record"" });
+        }
     }
 
     // PUT: api/test/5
     [HttpPut(""{id}"")]
     public async Task<IActionResult> Update(int id, [FromBody] TestProjects project)
     {
-        using var conn = new NpgsqlConnection(_connectionString);
-        await conn.OpenAsync();
-        var quote = Convert.ToChar(34).ToString(); // Double quote for PostgreSQL identifier quoting
-        var sql = ""UPDATE "" + quote + ""TestProjects"" + quote + "" SET "" + quote + ""Name"" + quote + "" = @name WHERE "" + quote + ""Id"" + quote + "" = @id "";
-        using var cmd = new NpgsqlCommand(sql, conn);
-        cmd.Parameters.AddWithValue(""name"", project.Name);
-        cmd.Parameters.AddWithValue(""id"", id);
-        var rowsAffected = await cmd.ExecuteNonQueryAsync();
-        if (rowsAffected == 0) return NotFound();
-        return NoContent();
+        try
+        {
+            using var conn = new NpgsqlConnection(_connectionString);
+            await conn.OpenAsync();
+            
+            // Set search_path to public schema (required because isolated role has restricted search_path)
+            // Note: Using string concatenation to avoid $ interpolation issues
+            using var setPathCmd = new NpgsqlCommand(""SET search_path = public, \"""" + ""$"" + ""user\"";"", conn);
+            await setPathCmd.ExecuteNonQueryAsync();
+            
+            var quote = Convert.ToChar(34).ToString(); // Double quote for PostgreSQL identifier quoting
+            var sql = ""UPDATE "" + quote + ""TestProjects"" + quote + "" SET "" + quote + ""Name"" + quote + "" = @name WHERE "" + quote + ""Id"" + quote + "" = @id "";
+            using var cmd = new NpgsqlCommand(sql, conn);
+            cmd.Parameters.AddWithValue(""name"", project.Name);
+            cmd.Parameters.AddWithValue(""id"", id);
+            var rowsAffected = await cmd.ExecuteNonQueryAsync();
+            if (rowsAffected == 0) return NotFound();
+            return NoContent();
+        }
+        catch (PostgresException ex) when (ex.SqlState == ""42P01"") // Table does not exist
+        {
+            // TestProjects table doesn't exist - return 404 gracefully
+            return NotFound();
+        }
+        catch (Exception ex)
+        {
+            return StatusCode(500, new { error = ex.Message, message = ""Failed to update TestProjects record"" });
+        }
     }
 
     // DELETE: api/test/5
     [HttpDelete(""{id}"")]
     public async Task<IActionResult> Delete(int id)
     {
-        using var conn = new NpgsqlConnection(_connectionString);
-        await conn.OpenAsync();
-        var quote = Convert.ToChar(34).ToString(); // Double quote for PostgreSQL identifier quoting
-        var sql = ""DELETE FROM "" + quote + ""TestProjects"" + quote + "" WHERE "" + quote + ""Id"" + quote + "" = @id "";
-        using var cmd = new NpgsqlCommand(sql, conn);
-        cmd.Parameters.AddWithValue(""id"", id);
-        var rowsAffected = await cmd.ExecuteNonQueryAsync();
-        if (rowsAffected == 0) return NotFound();
-        return NoContent();
+        try
+        {
+            using var conn = new NpgsqlConnection(_connectionString);
+            await conn.OpenAsync();
+            
+            // Set search_path to public schema (required because isolated role has restricted search_path)
+            // Note: Using string concatenation to avoid $ interpolation issues
+            using var setPathCmd = new NpgsqlCommand(""SET search_path = public, \"""" + ""$"" + ""user\"";"", conn);
+            await setPathCmd.ExecuteNonQueryAsync();
+            
+            var quote = Convert.ToChar(34).ToString(); // Double quote for PostgreSQL identifier quoting
+            var sql = ""DELETE FROM "" + quote + ""TestProjects"" + quote + "" WHERE "" + quote + ""Id"" + quote + "" = @id "";
+            using var cmd = new NpgsqlCommand(sql, conn);
+            cmd.Parameters.AddWithValue(""id"", id);
+            var rowsAffected = await cmd.ExecuteNonQueryAsync();
+            if (rowsAffected == 0) return NotFound();
+            return NoContent();
+        }
+        catch (PostgresException ex) when (ex.SqlState == ""42P01"") // Table does not exist
+        {
+            // TestProjects table doesn't exist - return 404 gracefully
+            return NotFound();
+        }
+        catch (Exception ex)
+        {
+            return StatusCode(500, new { error = ex.Message, message = ""Failed to delete TestProjects record"" });
+        }
     }
 }
 ";
@@ -3226,14 +3357,34 @@ builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 
-// CORS configuration
+// CORS configuration - Allow GitHub Pages and all origins
 builder.Services.AddCors(options =>
 {
     options.AddPolicy(""AllowAll"", policy =>
     {
-        policy.AllowAnyOrigin()
-              .AllowAnyMethod()
-              .AllowAnyHeader();
+        // Allow any origin including GitHub Pages (*.github.io), localhost, and Railway domains
+        // Using SetIsOriginAllowed to explicitly allow GitHub Pages and other common origins
+        policy.SetIsOriginAllowed(origin =>
+        {
+            // Allow all origins (GitHub Pages, localhost, Railway, etc.)
+            // This is more flexible than AllowAnyOrigin() and allows for future credential support if needed
+            if (string.IsNullOrEmpty(origin)) return false;
+            
+            var uri = new Uri(origin);
+            // Allow GitHub Pages (*.github.io)
+            if (uri.Host.EndsWith("".github.io"", StringComparison.OrdinalIgnoreCase))
+                return true;
+            // Allow localhost (development)
+            if (uri.Host == ""localhost"" || uri.Host == ""127.0.0.1"")
+                return true;
+            // Allow Railway domains
+            if (uri.Host.EndsWith("".railway.app"", StringComparison.OrdinalIgnoreCase))
+                return true;
+            // Allow all other origins for maximum flexibility
+            return true;
+        })
+        .AllowAnyMethod()
+        .AllowAnyHeader();
     });
 });
 
@@ -3310,6 +3461,7 @@ var app = builder.Build();
 app.UseSwagger();
 app.UseSwaggerUI();
 
+// CORS must be early in the pipeline, before Authorization
 app.UseCors(""AllowAll"");
 app.UseAuthorization();
 app.MapControllers();
@@ -3708,6 +3860,8 @@ async def get_all():
     try:
         conn = await get_db_connection()
         async with conn.cursor() as cur:
+            # Set search_path to public schema (required because isolated role has restricted search_path)
+            await cur.execute('SET search_path = public, ""$user""')
             await cur.execute('SELECT ""Id"", ""Name"" FROM ""TestProjects"" ORDER BY ""Id""')
             results = await cur.fetchall()
             await conn.commit()
@@ -3727,6 +3881,8 @@ async def get(id: int):
     try:
         conn = await get_db_connection()
         async with conn.cursor() as cur:
+            # Set search_path to public schema (required because isolated role has restricted search_path)
+            await cur.execute('SET search_path = public, ""$user""')
             await cur.execute('SELECT ""Id"", ""Name"" FROM ""TestProjects"" WHERE ""Id"" = %s', (id,))
             result = await cur.fetchone()
             if not result:
@@ -3750,6 +3906,8 @@ async def create(project: TestProjects):
     try:
         conn = await get_db_connection()
         async with conn.cursor() as cur:
+            # Set search_path to public schema (required because isolated role has restricted search_path)
+            await cur.execute('SET search_path = public, ""$user""')
             await cur.execute('INSERT INTO ""TestProjects"" (""Name"") VALUES (%s) RETURNING ""Id""', (project.name,))
             result = await cur.fetchone()
             project_id = result[""Id""]
@@ -3771,6 +3929,8 @@ async def update(id: int, project: TestProjects):
     try:
         conn = await get_db_connection()
         async with conn.cursor() as cur:
+            # Set search_path to public schema (required because isolated role has restricted search_path)
+            await cur.execute('SET search_path = public, ""$user""')
             await cur.execute('UPDATE ""TestProjects"" SET ""Name"" = %s WHERE ""Id"" = %s', (project.name, id))
             if cur.rowcount == 0:
                 raise HTTPException(status_code=404, detail=""Project not found"")
@@ -3793,6 +3953,8 @@ async def delete(id: int):
     try:
         conn = await get_db_connection()
         async with conn.cursor() as cur:
+            # Set search_path to public schema (required because isolated role has restricted search_path)
+            await cur.execute('SET search_path = public, ""$user""')
             await cur.execute('DELETE FROM ""TestProjects"" WHERE ""Id"" = %s', (id,))
             if cur.rowcount == 0:
                 raise HTTPException(status_code=404, detail=""Project not found"")
@@ -3975,6 +4137,8 @@ const pool = new Pool({
  */
 const getAll = async (req, res) => {
     try {
+        // Set search_path to public schema (required because isolated role has restricted search_path)
+        await pool.query('SET search_path = public, ""$user""');
         const result = await pool.query('SELECT ""Id"", ""Name"" FROM ""TestProjects"" ORDER BY ""Id""');
         res.json(result.rows);
     } catch (error) {
@@ -4007,6 +4171,8 @@ const getAll = async (req, res) => {
  */
 const getById = async (req, res) => {
     try {
+        // Set search_path to public schema (required because isolated role has restricted search_path)
+        await pool.query('SET search_path = public, ""$user""');
         const { id } = req.params;
         const result = await pool.query('SELECT ""Id"", ""Name"" FROM ""TestProjects"" WHERE ""Id"" = $1', [id]);
         if (result.rows.length === 0) {
@@ -4040,6 +4206,8 @@ const getById = async (req, res) => {
  */
 const create = async (req, res) => {
     try {
+        // Set search_path to public schema (required because isolated role has restricted search_path)
+        await pool.query('SET search_path = public, ""$user""');
         const { name } = req.body;
         const result = await pool.query('INSERT INTO ""TestProjects"" (""Name"") VALUES ($1) RETURNING ""Id"", ""Name""', [name]);
         res.status(201).json(result.rows[0]);
@@ -4079,6 +4247,8 @@ const create = async (req, res) => {
  */
 const update = async (req, res) => {
     try {
+        // Set search_path to public schema (required because isolated role has restricted search_path)
+        await pool.query('SET search_path = public, ""$user""');
         const { id } = req.params;
         const { name } = req.body;
         const result = await pool.query('UPDATE ""TestProjects"" SET ""Name"" = $1 WHERE ""Id"" = $2 RETURNING ""Id"", ""Name""', [name, id]);
@@ -4112,6 +4282,8 @@ const update = async (req, res) => {
  */
 const remove = async (req, res) => {
     try {
+        // Set search_path to public schema (required because isolated role has restricted search_path)
+        await pool.query('SET search_path = public, ""$user""');
         const { id } = req.params;
         const result = await pool.query('DELETE FROM ""TestProjects"" WHERE ""Id"" = $1', [id]);
         if (result.rowCount === 0) {
@@ -4443,9 +4615,14 @@ app.listen(PORT, '0.0.0.0', () => {
 "import org.springframework.beans.factory.annotation.Autowired;\n" +
 "import org.springframework.http.HttpStatus;\n" +
 "import org.springframework.http.ResponseEntity;\n" +
+"import org.springframework.transaction.annotation.Transactional;\n" +
 "import org.springframework.web.bind.annotation.*;\n\n" +
 "import jakarta.persistence.EntityManager;\n" +
 "import jakarta.persistence.Query;\n" +
+"import org.hibernate.Session;\n" +
+"import org.hibernate.jdbc.Work;\n" +
+"import java.sql.Connection;\n" +
+"import java.sql.Statement;\n" +
 "import java.util.List;\n" +
 "import java.util.Map;\n\n" +
 "@RestController\n" +
@@ -4454,20 +4631,43 @@ app.listen(PORT, '0.0.0.0', () => {
 "public class TestController {\n\n" +
 "    @Autowired\n" +
 "    private EntityManager entityManager;\n\n" +
+"    private void setSearchPath() {\n" +
+"        // Use Hibernate Session.doWork() to execute on the JDBC connection\n" +
+"        Session session = entityManager.unwrap(Session.class);\n" +
+"        session.doWork(new Work() {\n" +
+"            @Override\n" +
+"            public void execute(Connection connection) {\n" +
+"                try (Statement stmt = connection.createStatement()) {\n" +
+"                    stmt.execute(\"SET search_path = public, \\\"$user\\\"\");\n" +
+"                } catch (Exception e) {\n" +
+"                    throw new RuntimeException(e);\n" +
+"                }\n" +
+"            }\n" +
+"        });\n" +
+"    }\n\n" +
 "    @GetMapping(value = {\"\", \"/\"})\n" +
+"    @Transactional\n" +
 "    public ResponseEntity<List<TestProjects>> getAll() {\n" +
 "        try {\n" +
+"            // Set search_path to public schema (required because isolated role has restricted search_path)\n" +
+"            setSearchPath();\n" +
+"            \n" +
 "            Query query = entityManager.createNativeQuery(\"SELECT \\\"Id\\\", \\\"Name\\\" FROM \\\"TestProjects\\\" ORDER BY \\\"Id\\\"\", TestProjects.class);\n" +
 "            @SuppressWarnings(\"unchecked\")\n" +
 "            List<TestProjects> projects = query.getResultList();\n" +
 "            return ResponseEntity.ok(projects);\n" +
 "        } catch (Exception e) {\n" +
+"            e.printStackTrace();\n" +
 "            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();\n" +
 "        }\n" +
 "    }\n\n" +
 "    @GetMapping(\"/{id}\")\n" +
+"    @Transactional\n" +
 "    public ResponseEntity<TestProjects> getById(@PathVariable Integer id) {\n" +
 "        try {\n" +
+"            // Set search_path to public schema (required because isolated role has restricted search_path)\n" +
+"            setSearchPath();\n" +
+"            \n" +
 "            Query query = entityManager.createNativeQuery(\"SELECT \\\"Id\\\", \\\"Name\\\" FROM \\\"TestProjects\\\" WHERE \\\"Id\\\" = :id\", TestProjects.class);\n" +
 "            query.setParameter(\"id\", id);\n" +
 "            @SuppressWarnings(\"unchecked\")\n" +
@@ -4477,12 +4677,17 @@ app.listen(PORT, '0.0.0.0', () => {
 "            }\n" +
 "            return ResponseEntity.ok(results.get(0));\n" +
 "        } catch (Exception e) {\n" +
+"            e.printStackTrace();\n" +
 "            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();\n" +
 "        }\n" +
 "    }\n\n" +
 "    @PostMapping\n" +
+"    @Transactional\n" +
 "    public ResponseEntity<TestProjects> create(@RequestBody Map<String, String> request) {\n" +
 "        try {\n" +
+"            // Set search_path to public schema (required because isolated role has restricted search_path)\n" +
+"            setSearchPath();\n" +
+"            \n" +
 "            String name = request.get(\"name\");\n" +
 "            Query query = entityManager.createNativeQuery(\"INSERT INTO \\\"TestProjects\\\" (\\\"Name\\\") VALUES (:name) RETURNING \\\"Id\\\", \\\"Name\\\"\", TestProjects.class);\n" +
 "            query.setParameter(\"name\", name);\n" +
@@ -4493,12 +4698,17 @@ app.listen(PORT, '0.0.0.0', () => {
 "            }\n" +
 "            return ResponseEntity.status(HttpStatus.CREATED).body(results.get(0));\n" +
 "        } catch (Exception e) {\n" +
+"            e.printStackTrace();\n" +
 "            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();\n" +
 "        }\n" +
 "    }\n\n" +
 "    @PutMapping(\"/{id}\")\n" +
+"    @Transactional\n" +
 "    public ResponseEntity<TestProjects> update(@PathVariable Integer id, @RequestBody Map<String, String> request) {\n" +
 "        try {\n" +
+"            // Set search_path to public schema (required because isolated role has restricted search_path)\n" +
+"            setSearchPath();\n" +
+"            \n" +
 "            String name = request.get(\"name\");\n" +
 "            Query query = entityManager.createNativeQuery(\"UPDATE \\\"TestProjects\\\" SET \\\"Name\\\" = :name WHERE \\\"Id\\\" = :id RETURNING \\\"Id\\\", \\\"Name\\\"\", TestProjects.class);\n" +
 "            query.setParameter(\"name\", name);\n" +
@@ -4510,12 +4720,17 @@ app.listen(PORT, '0.0.0.0', () => {
 "            }\n" +
 "            return ResponseEntity.ok(results.get(0));\n" +
 "        } catch (Exception e) {\n" +
+"            e.printStackTrace();\n" +
 "            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();\n" +
 "        }\n" +
 "    }\n\n" +
 "    @DeleteMapping(\"/{id}\")\n" +
+"    @Transactional\n" +
 "    public ResponseEntity<Map<String, String>> delete(@PathVariable Integer id) {\n" +
 "        try {\n" +
+"            // Set search_path to public schema (required because isolated role has restricted search_path)\n" +
+"            setSearchPath();\n" +
+"            \n" +
 "            Query query = entityManager.createNativeQuery(\"DELETE FROM \\\"TestProjects\\\" WHERE \\\"Id\\\" = :id\");\n" +
 "            query.setParameter(\"id\", id);\n" +
 "            int deleted = query.executeUpdate();\n" +
@@ -4524,6 +4739,7 @@ app.listen(PORT, '0.0.0.0', () => {
 "            }\n" +
 "            return ResponseEntity.ok(Map.of(\"message\", \"Deleted successfully\"));\n" +
 "        } catch (Exception e) {\n" +
+"            e.printStackTrace();\n" +
 "            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();\n" +
 "        }\n" +
 "    }\n" +
@@ -4748,6 +4964,11 @@ jobs:
         return $@"{warningComment}const CONFIG = {{
     API_URL: ""{apiUrl}""
 }};
+
+// Ensure CONFIG is globally accessible
+if (typeof window !== 'undefined') {{
+    window.CONFIG = CONFIG;
+}}
 ";
     }
 
@@ -4974,6 +5195,260 @@ release.properties
 ";
         }
     }
+
+    /// <summary>
+    /// Creates a GitHub repository ruleset to restrict branch creation to admins only (blocks collaborators from creating branches)
+    /// </summary>
+    public async Task<bool> CreateRepositoryRulesetAsync(string owner, string repo, string repoType, string accessToken)
+    {
+        try
+        {
+            _logger.LogInformation("🔒 [GITHUB RULESET] Creating ruleset for {Owner}/{Repo} (Type: {RepoType})", owner, repo, repoType);
+
+            var enableRulesets = _configuration.GetValue<bool>("GitHub:EnableRulesets", true);
+
+            if (!enableRulesets)
+            {
+                _logger.LogInformation("🔒 [GITHUB RULESET] Rulesets are disabled in configuration, skipping");
+                return true;
+            }
+
+            // Create ruleset payload to block branch creation for non-admins
+            // The owner (PAT holder) is an implicit bypass actor, so they can still create branches
+            var rulesetPayload = new
+            {
+                name = $"Restrict Branch Creation - {repoType}",
+                target = "branch",
+                enforcement = "active",
+                conditions = new
+                {
+                    ref_name = new
+                    {
+                        include = new[] { "~ALL" },
+                        exclude = new string[] { }
+                    }
+                },
+                rules = new[]
+                {
+                    new
+                    {
+                        type = "creation"
+                    }
+                },
+                bypass_actors = new object[] { }
+            };
+
+            var jsonContent = JsonSerializer.Serialize(rulesetPayload);
+            var content = new StringContent(jsonContent, System.Text.Encoding.UTF8, "application/json");
+
+            var endpoint = $"{GitHubApiBaseUrl}/repos/{owner}/{repo}/rulesets";
+            
+            var httpRequest = new HttpRequestMessage(HttpMethod.Post, endpoint);
+            httpRequest.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", accessToken);
+            httpRequest.Headers.Add("X-GitHub-Api-Version", "2022-11-28");
+            httpRequest.Content = content;
+
+            _logger.LogInformation("🔒 [GITHUB RULESET] Sending request to {Endpoint}", endpoint);
+            var response = await _httpClient.SendAsync(httpRequest);
+
+            if (response.IsSuccessStatusCode)
+            {
+                var responseContent = await response.Content.ReadAsStringAsync();
+                _logger.LogInformation("✅ [GITHUB RULESET] Successfully created ruleset for {Owner}/{Repo}: {Response}", 
+                    owner, repo, responseContent);
+                return true;
+            }
+            else
+            {
+                var errorContent = await response.Content.ReadAsStringAsync();
+                _logger.LogWarning("⚠️ [GITHUB RULESET] Failed to create ruleset for {Owner}/{Repo}. Status: {StatusCode}, Error: {Error}", 
+                    owner, repo, response.StatusCode, errorContent);
+                return false;
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "❌ [GITHUB RULESET] Error creating ruleset for {Owner}/{Repo}: {Message}", owner, repo, ex.Message);
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Creates a new branch from a source branch using the GitHub API
+    /// </summary>
+    public async Task<CreateBranchResponse> CreateBranchAsync(string owner, string repo, string branchName, string sourceBranch, string accessToken)
+    {
+        try
+        {
+            _logger.LogInformation("🌿 [GITHUB BRANCH] Creating branch '{BranchName}' from '{SourceBranch}' in {Owner}/{Repo}", 
+                branchName, sourceBranch, owner, repo);
+
+            // First, get the SHA of the source branch
+            var refEndpoint = $"{GitHubApiBaseUrl}/repos/{owner}/{repo}/git/refs/heads/{sourceBranch}";
+            var refRequest = new HttpRequestMessage(HttpMethod.Get, refEndpoint);
+            refRequest.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", accessToken);
+
+            var refResponse = await _httpClient.SendAsync(refRequest);
+            if (!refResponse.IsSuccessStatusCode)
+            {
+                var errorContent = await refResponse.Content.ReadAsStringAsync();
+                _logger.LogError("❌ [GITHUB BRANCH] Failed to get source branch '{SourceBranch}' SHA. Status: {StatusCode}, Error: {Error}", 
+                    sourceBranch, refResponse.StatusCode, errorContent);
+                return new CreateBranchResponse
+                {
+                    Success = false,
+                    ErrorMessage = $"Failed to get source branch SHA: {errorContent}",
+                    StatusCode = (int)refResponse.StatusCode
+                };
+            }
+
+            var refContent = await refResponse.Content.ReadAsStringAsync();
+            var refJson = JsonDocument.Parse(refContent);
+            var sourceSha = refJson.RootElement.GetProperty("object").GetProperty("sha").GetString();
+
+            if (string.IsNullOrEmpty(sourceSha))
+            {
+                _logger.LogError("❌ [GITHUB BRANCH] Source branch SHA is null or empty");
+                return new CreateBranchResponse
+                {
+                    Success = false,
+                    ErrorMessage = "Source branch SHA is null or empty",
+                    StatusCode = 500
+                };
+            }
+
+            // Create the new branch by creating a new reference
+            var createRefEndpoint = $"{GitHubApiBaseUrl}/repos/{owner}/{repo}/git/refs";
+            var createRefPayload = new
+            {
+                @ref = $"refs/heads/{branchName}",
+                sha = sourceSha
+            };
+
+            var createRefJson = JsonSerializer.Serialize(createRefPayload);
+            var createRefContent = new StringContent(createRefJson, System.Text.Encoding.UTF8, "application/json");
+            var createRefRequest = new HttpRequestMessage(HttpMethod.Post, createRefEndpoint);
+            createRefRequest.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", accessToken);
+            createRefRequest.Content = createRefContent;
+
+            _logger.LogInformation("🌿 [GITHUB BRANCH] Creating branch reference at {Endpoint}", createRefEndpoint);
+            var createRefResponse = await _httpClient.SendAsync(createRefRequest);
+
+            if (createRefResponse.IsSuccessStatusCode)
+            {
+                var responseContent = await createRefResponse.Content.ReadAsStringAsync();
+                var branchUrl = $"https://github.com/{owner}/{repo}/tree/{branchName}";
+                
+                _logger.LogInformation("✅ [GITHUB BRANCH] Successfully created branch '{BranchName}' in {Owner}/{Repo}: {BranchUrl}", 
+                    branchName, owner, repo, branchUrl);
+
+                return new CreateBranchResponse
+                {
+                    Success = true,
+                    BranchUrl = branchUrl,
+                    BranchName = branchName,
+                    GitHubResponse = responseContent,
+                    StatusCode = (int)createRefResponse.StatusCode
+                };
+            }
+            else
+            {
+                var errorContent = await createRefResponse.Content.ReadAsStringAsync();
+                _logger.LogError("❌ [GITHUB BRANCH] Failed to create branch '{BranchName}'. Status: {StatusCode}, Error: {Error}", 
+                    branchName, createRefResponse.StatusCode, errorContent);
+                return new CreateBranchResponse
+                {
+                    Success = false,
+                    ErrorMessage = errorContent,
+                    StatusCode = (int)createRefResponse.StatusCode
+                };
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "❌ [GITHUB BRANCH] Error creating branch '{BranchName}' in {Owner}/{Repo}: {Message}", 
+                branchName, owner, repo, ex.Message);
+            return new CreateBranchResponse
+            {
+                Success = false,
+                ErrorMessage = ex.Message,
+                StatusCode = 500
+            };
+        }
+    }
+
+    /// <summary>
+    /// Creates branch protection rules for the main branch to require PR reviews
+    /// </summary>
+    public async Task<bool> CreateBranchProtectionAsync(string owner, string repo, string branchName, string accessToken)
+    {
+        try
+        {
+            _logger.LogInformation("🛡️ [GITHUB BRANCH PROTECTION] Creating branch protection for {Owner}/{Repo}:{Branch}", owner, repo, branchName);
+
+            var enableBranchProtection = _configuration.GetValue<bool>("GitHub:EnableBranchProtection", true);
+
+            if (!enableBranchProtection)
+            {
+                _logger.LogInformation("🛡️ [GITHUB BRANCH PROTECTION] Branch protection is disabled in configuration, skipping");
+                return true;
+            }
+
+            // Create branch protection payload
+            var protectionPayload = new
+            {
+                required_status_checks = (object?)null,
+                enforce_admins = false,
+                required_pull_request_reviews = new
+                {
+                    required_approving_review_count = 1,
+                    dismiss_stale_reviews = false,
+                    require_code_owner_reviews = false,
+                    require_last_push_approval = false
+                },
+                restrictions = (object?)null,
+                allow_force_pushes = false,
+                allow_deletions = false,
+                block_creations = false,
+                required_conversation_resolution = true,
+                lock_branch = false,
+                allow_fork_syncing = false
+            };
+
+            var jsonContent = JsonSerializer.Serialize(protectionPayload);
+            var content = new StringContent(jsonContent, System.Text.Encoding.UTF8, "application/json");
+
+            var endpoint = $"{GitHubApiBaseUrl}/repos/{owner}/{repo}/branches/{branchName}/protection";
+            
+            var httpRequest = new HttpRequestMessage(HttpMethod.Put, endpoint);
+            httpRequest.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", accessToken);
+            httpRequest.Content = content;
+
+            _logger.LogInformation("🛡️ [GITHUB BRANCH PROTECTION] Sending request to {Endpoint}", endpoint);
+            var response = await _httpClient.SendAsync(httpRequest);
+
+            if (response.IsSuccessStatusCode)
+            {
+                var responseContent = await response.Content.ReadAsStringAsync();
+                _logger.LogInformation("✅ [GITHUB BRANCH PROTECTION] Successfully created branch protection for {Owner}/{Repo}:{Branch}: {Response}", 
+                    owner, repo, branchName, responseContent);
+                return true;
+            }
+            else
+            {
+                var errorContent = await response.Content.ReadAsStringAsync();
+                _logger.LogWarning("⚠️ [GITHUB BRANCH PROTECTION] Failed to create branch protection for {Owner}/{Repo}:{Branch}. Status: {StatusCode}, Error: {Error}", 
+                    owner, repo, branchName, response.StatusCode, errorContent);
+                return false;
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "❌ [GITHUB BRANCH PROTECTION] Error creating branch protection for {Owner}/{Repo}:{Branch}: {Message}", 
+                owner, repo, branchName, ex.Message);
+            return false;
+        }
+    }
 }
 
 /// <summary>
@@ -5134,6 +5609,19 @@ public class DefaultBranchInfo
     public string BranchName { get; set; } = string.Empty;
     public string CommitSha { get; set; } = string.Empty;
     public string TreeSha { get; set; } = string.Empty;
+}
+
+/// <summary>
+/// Response model for branch creation
+/// </summary>
+public class CreateBranchResponse
+{
+    public bool Success { get; set; }
+    public string? BranchUrl { get; set; }
+    public string? BranchName { get; set; }
+    public string? GitHubResponse { get; set; }
+    public string? ErrorMessage { get; set; }
+    public int StatusCode { get; set; }
 }
 
 

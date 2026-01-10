@@ -1,4 +1,5 @@
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.Http;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Options;
@@ -6,6 +7,9 @@ using strAppersBackend.Data;
 using strAppersBackend.Models;
 using strAppersBackend.Services;
 // using strAppersBackend.Services; // SLACK TEMPORARILY DISABLED
+using System.Text.Json;
+using System.Net.Http;
+using Npgsql;
 
 namespace strAppersBackend.Controllers
 {
@@ -20,9 +24,18 @@ namespace strAppersBackend.Controllers
         private readonly ISmtpEmailService _smtpEmailService;
         private readonly IOptions<SystemDesignAIAgentConfig> _systemDesignConfig;
         private readonly IConfiguration _configuration;
+        private readonly IHttpClientFactory _httpClientFactory;
         // private readonly SlackService _slackService; // SLACK TEMPORARILY DISABLED
 
-        public TestController(ApplicationDbContext context, ILogger<TestController> logger, IKickoffService kickoffService, IAIService aiService, IOptions<SystemDesignAIAgentConfig> systemDesignConfig, ISmtpEmailService smtpEmailService, IConfiguration configuration) // SlackService slack service disabled
+        public TestController(
+            ApplicationDbContext context,
+            ILogger<TestController> logger,
+            IKickoffService kickoffService,
+            IAIService aiService,
+            IOptions<SystemDesignAIAgentConfig> systemDesignConfig,
+            ISmtpEmailService smtpEmailService,
+            IConfiguration configuration,
+            IHttpClientFactory httpClientFactory) // SlackService slack service disabled
         {
             _context = context;
             _logger = logger;
@@ -31,10 +44,64 @@ namespace strAppersBackend.Controllers
             _systemDesignConfig = systemDesignConfig;
             _smtpEmailService = smtpEmailService;
             _configuration = configuration;
+            _httpClientFactory = httpClientFactory;
             // _slackService = slackService; // SLACK TEMPORARILY DISABLED
         }
 
         #region Database Test Methods
+
+        /// <summary>
+        /// Test endpoint for student-generated backends - queries TestProjects table
+        /// This endpoint is included in generated student backends and should work with their Neon databases.
+        /// For the main application, this gracefully handles the missing TestProjects table.
+        /// </summary>
+        [HttpGet("")]
+        public async Task<ActionResult> GetAll()
+        {
+            try
+            {
+                // Try to query TestProjects table (exists in student Neon databases, may not exist in main app database)
+                using var connection = new NpgsqlConnection(_configuration.GetConnectionString("DefaultConnection") 
+                    ?? Environment.GetEnvironmentVariable("DATABASE_URL"));
+                
+                await connection.OpenAsync();
+                
+                var quote = Convert.ToChar(34).ToString(); // Double quote for PostgreSQL identifier quoting
+                var sql = $"SELECT {quote}Id{quote}, {quote}Name{quote} FROM {quote}TestProjects{quote} ORDER BY {quote}Id{quote}";
+                
+                var projects = new List<object>();
+                using var cmd = new NpgsqlCommand(sql, connection);
+                using var reader = await cmd.ExecuteReaderAsync();
+                
+                while (await reader.ReadAsync())
+                {
+                    projects.Add(new
+                    {
+                        Id = reader.GetInt32(0),
+                        Name = reader.GetString(1)
+                    });
+                }
+                
+                return Ok(projects);
+            }
+            catch (PostgresException ex) when (ex.SqlState == "42P01") // Table does not exist
+            {
+                // TestProjects table doesn't exist in this database (likely main app database)
+                // Return empty list gracefully - this is expected for the main application
+                _logger.LogInformation("TestProjects table not found in database - returning empty list (this is expected for main application database)");
+                return Ok(new List<object>());
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error querying TestProjects table");
+                return StatusCode(500, new
+                {
+                    success = false,
+                    error = ex.Message,
+                    message = "Failed to query TestProjects table"
+                });
+            }
+        }
 
         /// <summary>
         /// Test database connection and basic queries
@@ -1464,6 +1531,2753 @@ Return ONLY valid JSON with exactly {totalSprints} sprints (NO EPICS):
         }
 
         #endregion
+
+        #region Neon Test Methods
+
+        /// <summary>
+        /// Test Neon branch CREATION - simulates what happens during board creation
+        /// POST /api/Test/Neon-create-branch
+        /// Optional query param: parentBranchId (uses config default if not provided)
+        /// </summary>
+        [HttpPost("Neon-create-branch")]
+        public async Task<ActionResult> TestNeonCreateBranch([FromQuery] string? parentBranchId = null)
+        {
+            try
+            {
+                var neonApiKey = _configuration["Neon:ApiKey"];
+                var neonBaseUrl = _configuration["Neon:BaseUrl"];
+                var neonProjectId = _configuration["Neon:ProjectId"];
+                var neonParentBranchId = _configuration["Neon:BranchId"]; // Default parent branch from config
+
+                if (string.IsNullOrWhiteSpace(neonApiKey) || neonApiKey == "your-neon-api-key-here" ||
+                    string.IsNullOrWhiteSpace(neonBaseUrl) ||
+                    string.IsNullOrWhiteSpace(neonProjectId))
+                {
+                    return BadRequest(new
+                    {
+                        success = false,
+                        message = "Neon configuration is missing or invalid",
+                        configured = new
+                        {
+                            hasApiKey = !string.IsNullOrWhiteSpace(neonApiKey) && neonApiKey != "your-neon-api-key-here",
+                            hasBaseUrl = !string.IsNullOrWhiteSpace(neonBaseUrl),
+                            hasProjectId = !string.IsNullOrWhiteSpace(neonProjectId)
+                        }
+                    });
+                }
+
+                // Use provided parentBranchId or fall back to config
+                var actualParentBranchId = parentBranchId ?? neonParentBranchId;
+
+                var branchApiUrl = $"{neonBaseUrl}/projects/{neonProjectId}/branches";
+                
+                _logger.LogInformation("🔍 [NEON TEST] Creating branch via POST: {Url}", branchApiUrl);
+
+                // Create branch request body (same as in CreateNeonBranchAsync)
+                var createBranchRequest = new
+                {
+                    endpoints = new[]
+                    {
+                        new { type = "read_write" }
+                    },
+                    branch = actualParentBranchId != null ? new { parent_id = actualParentBranchId } : null
+                };
+
+                var requestBody = JsonSerializer.Serialize(createBranchRequest);
+                var content = new StringContent(requestBody, System.Text.Encoding.UTF8, "application/json");
+
+                using var httpClient = _httpClientFactory.CreateClient();
+                httpClient.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", neonApiKey);
+                httpClient.DefaultRequestHeaders.Accept.Add(new System.Net.Http.Headers.MediaTypeWithQualityHeaderValue("application/json"));
+
+                var startTime = DateTime.UtcNow;
+                var response = await httpClient.PostAsync(branchApiUrl, content);
+                var elapsed = DateTime.UtcNow - startTime;
+
+                var responseContent = await response.Content.ReadAsStringAsync();
+
+                // Try to parse as JSON to see structure
+                JsonDocument? jsonDoc = null;
+                string? branchId = null;
+                string? endpointHost = null;
+                string? endpointId = null;
+                
+                try
+                {
+                    jsonDoc = JsonDocument.Parse(responseContent);
+                    
+                    // Extract branch ID (same logic as CreateNeonBranchAsync)
+                    if (jsonDoc.RootElement.TryGetProperty("branch", out var branchObj))
+                    {
+                        if (branchObj.TryGetProperty("id", out var branchIdProp))
+                        {
+                            branchId = branchIdProp.GetString();
+                        }
+                    }
+                    
+                    // Extract endpoint information from ROOT level endpoints array
+                    if (jsonDoc.RootElement.TryGetProperty("endpoints", out var endpointsProp) && endpointsProp.ValueKind == JsonValueKind.Array)
+                    {
+                        foreach (var endpoint in endpointsProp.EnumerateArray())
+                        {
+                            if (endpoint.TryGetProperty("branch_id", out var endpointBranchIdProp))
+                            {
+                                var endpointBranchId = endpointBranchIdProp.GetString();
+                                if (endpointBranchId == branchId)
+                                {
+                                    if (endpoint.TryGetProperty("id", out var endpointIdProp))
+                                    {
+                                        endpointId = endpointIdProp.GetString();
+                                    }
+                                    if (endpoint.TryGetProperty("host", out var hostProp))
+                                    {
+                                        endpointHost = hostProp.GetString();
+                                    }
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+                catch
+                {
+                    // Not JSON or parse failed
+                }
+
+                return Ok(new
+                {
+                    success = response.IsSuccessStatusCode,
+                    request = new
+                    {
+                        method = "POST",
+                        url = branchApiUrl,
+                        parentBranchId = actualParentBranchId,
+                        requestBody = createBranchRequest,
+                        headers = new
+                        {
+                            authorization = "Bearer ***",
+                            accept = "application/json"
+                        }
+                    },
+                    response = new
+                    {
+                        statusCode = (int)response.StatusCode,
+                        statusReason = response.ReasonPhrase,
+                        isSuccess = response.IsSuccessStatusCode,
+                        elapsedMs = elapsed.TotalMilliseconds,
+                        headers = response.Headers.ToDictionary(h => h.Key, h => string.Join(", ", h.Value)),
+                        rawContent = responseContent,
+                        parsedJson = jsonDoc != null ? JsonSerializer.Serialize(jsonDoc, new JsonSerializerOptions { WriteIndented = true }) : null,
+                        extracted = new
+                        {
+                            branchId = branchId,
+                            endpointId = endpointId,
+                            endpointHost = endpointHost
+                        },
+                        analysis = jsonDoc != null ? AnalyzeBranchResponse(jsonDoc.RootElement) : null,
+                        nextSteps = branchId != null ? new
+                        {
+                            message = "Branch created successfully! Use this branchId in other test endpoints:",
+                            testBranchQuery = $"/api/Test/Neon-branch?branchId={Uri.EscapeDataString(branchId)}",
+                            testConnectionString = $"/api/Test/Neon-connection-string?branchId={Uri.EscapeDataString(branchId)}&databaseName=AppDB_test&roleName=neondb_owner"
+                        } : null
+                    }
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error testing Neon branch creation");
+                return StatusCode(500, new
+                {
+                    success = false,
+                    message = "Error calling Neon branch creation API",
+                    error = ex.Message,
+                    stackTrace = ex.StackTrace
+                });
+            }
+        }
+
+        /// <summary>
+        /// Test Neon branch API - returns raw response from Neon API
+        /// GET /api/Test/Neon-branch?branchId=br-empty-salad-a9jybc9u
+        /// </summary>
+        [HttpGet("Neon-branch")]
+        public async Task<ActionResult> TestNeonBranch([FromQuery] string branchId)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(branchId))
+                {
+                    return BadRequest(new
+                    {
+                        success = false,
+                        message = "branchId query parameter is required",
+                        example = "/api/Test/Neon-branch?branchId=br-empty-salad-a9jybc9u"
+                    });
+                }
+
+                var neonApiKey = _configuration["Neon:ApiKey"];
+                var neonBaseUrl = _configuration["Neon:BaseUrl"];
+                var neonProjectId = _configuration["Neon:ProjectId"];
+
+                if (string.IsNullOrWhiteSpace(neonApiKey) || neonApiKey == "your-neon-api-key-here" ||
+                    string.IsNullOrWhiteSpace(neonBaseUrl) ||
+                    string.IsNullOrWhiteSpace(neonProjectId))
+                {
+                    return BadRequest(new
+                    {
+                        success = false,
+                        message = "Neon configuration is missing or invalid",
+                        configured = new
+                        {
+                            hasApiKey = !string.IsNullOrWhiteSpace(neonApiKey) && neonApiKey != "your-neon-api-key-here",
+                            hasBaseUrl = !string.IsNullOrWhiteSpace(neonBaseUrl),
+                            hasProjectId = !string.IsNullOrWhiteSpace(neonProjectId)
+                        }
+                    });
+                }
+
+                var branchApiUrl = $"{neonBaseUrl}/projects/{neonProjectId}/branches/{Uri.EscapeDataString(branchId)}";
+                
+                _logger.LogInformation("🔍 [NEON TEST] Querying branch API: {Url}", branchApiUrl);
+
+                using var httpClient = _httpClientFactory.CreateClient();
+                httpClient.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", neonApiKey);
+                httpClient.DefaultRequestHeaders.Accept.Add(new System.Net.Http.Headers.MediaTypeWithQualityHeaderValue("application/json"));
+
+                var startTime = DateTime.UtcNow;
+                var response = await httpClient.GetAsync(branchApiUrl);
+                var elapsed = DateTime.UtcNow - startTime;
+
+                var responseContent = await response.Content.ReadAsStringAsync();
+
+                // Try to parse as JSON to see structure
+                JsonDocument? jsonDoc = null;
+                try
+                {
+                    jsonDoc = JsonDocument.Parse(responseContent);
+                }
+                catch
+                {
+                    // Not JSON, that's okay
+                }
+
+                return Ok(new
+                {
+                    success = response.IsSuccessStatusCode,
+                    request = new
+                    {
+                        method = "GET",
+                        url = branchApiUrl,
+                        branchId = branchId,
+                        headers = new
+                        {
+                            authorization = "Bearer ***",
+                            accept = "application/json"
+                        }
+                    },
+                    response = new
+                    {
+                        statusCode = (int)response.StatusCode,
+                        statusReason = response.ReasonPhrase,
+                        isSuccess = response.IsSuccessStatusCode,
+                        elapsedMs = elapsed.TotalMilliseconds,
+                        headers = response.Headers.ToDictionary(h => h.Key, h => string.Join(", ", h.Value)),
+                        rawContent = responseContent,
+                        parsedJson = jsonDoc != null ? JsonSerializer.Serialize(jsonDoc, new JsonSerializerOptions { WriteIndented = true }) : null,
+                        analysis = jsonDoc != null ? AnalyzeBranchResponse(jsonDoc.RootElement) : null
+                    }
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error testing Neon branch API for branch {BranchId}", branchId);
+                return StatusCode(500, new
+                {
+                    success = false,
+                    message = "Error calling Neon branch API",
+                    error = ex.Message,
+                    stackTrace = ex.StackTrace
+                });
+            }
+        }
+
+        /// <summary>
+        /// Test Neon connection string API - returns raw response from Neon API
+        /// GET /api/Test/Neon-connection-string?branchId=br-empty-salad-a9jybc9u&databaseName=AppDB_test&roleName=neondb_owner
+        /// </summary>
+        [HttpGet("Neon-connection-string")]
+        public async Task<ActionResult> TestNeonConnectionString(
+            [FromQuery] string branchId,
+            [FromQuery] string? databaseName = null,
+            [FromQuery] string? roleName = null)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(branchId))
+                {
+                    return BadRequest(new
+                    {
+                        success = false,
+                        message = "branchId query parameter is required",
+                        example = "/api/Test/Neon-connection-string?branchId=br-empty-salad-a9jybc9u&databaseName=AppDB_test&roleName=neondb_owner"
+                    });
+                }
+
+                var neonApiKey = _configuration["Neon:ApiKey"];
+                var neonBaseUrl = _configuration["Neon:BaseUrl"];
+                var neonProjectId = _configuration["Neon:ProjectId"];
+                var neonDefaultOwnerName = _configuration["Neon:DefaultOwnerName"] ?? "neondb_owner";
+
+                if (string.IsNullOrWhiteSpace(neonApiKey) || neonApiKey == "your-neon-api-key-here" ||
+                    string.IsNullOrWhiteSpace(neonBaseUrl) ||
+                    string.IsNullOrWhiteSpace(neonProjectId))
+                {
+                    return BadRequest(new
+                    {
+                        success = false,
+                        message = "Neon configuration is missing or invalid",
+                        configured = new
+                        {
+                            hasApiKey = !string.IsNullOrWhiteSpace(neonApiKey) && neonApiKey != "your-neon-api-key-here",
+                            hasBaseUrl = !string.IsNullOrWhiteSpace(neonBaseUrl),
+                            hasProjectId = !string.IsNullOrWhiteSpace(neonProjectId)
+                        }
+                    });
+                }
+
+                var dbName = databaseName ?? "AppDB_test";
+                var role = roleName ?? neonDefaultOwnerName;
+
+                var connectionUrl = $"{neonBaseUrl}/projects/{neonProjectId}/connection_uri?database_name={Uri.EscapeDataString(dbName)}&role_name={Uri.EscapeDataString(role)}&branch_id={Uri.EscapeDataString(branchId)}&pooled=false";
+                
+                _logger.LogInformation("🔍 [NEON TEST] Querying connection_uri API: {Url}", connectionUrl);
+
+                using var httpClient = _httpClientFactory.CreateClient();
+                httpClient.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", neonApiKey);
+                httpClient.DefaultRequestHeaders.Accept.Add(new System.Net.Http.Headers.MediaTypeWithQualityHeaderValue("application/json"));
+
+                var startTime = DateTime.UtcNow;
+                var response = await httpClient.GetAsync(connectionUrl);
+                var elapsed = DateTime.UtcNow - startTime;
+
+                var responseContent = await response.Content.ReadAsStringAsync();
+
+                // Try to parse as JSON to see structure
+                JsonDocument? jsonDoc = null;
+                string? connectionString = null;
+                string? extractedEndpointId = null;
+                try
+                {
+                    jsonDoc = JsonDocument.Parse(responseContent);
+                    if (jsonDoc.RootElement.TryGetProperty("uri", out var uriProp))
+                    {
+                        connectionString = uriProp.GetString();
+                        if (!string.IsNullOrEmpty(connectionString))
+                        {
+                            try
+                            {
+                                var uri = new Uri(connectionString);
+                                // Extract endpoint ID from host (format: ep-xxx-yyy-ID.gwc.azure.neon.tech)
+                                var endpointIdMatch = System.Text.RegularExpressions.Regex.Match(uri.Host, @"ep-[^-]+-[^-]+-([^.]+)\.(gwc\.azure|us-east-2\.aws)\.neon\.tech");
+                                extractedEndpointId = endpointIdMatch.Success ? endpointIdMatch.Groups[1].Value : null;
+                            }
+                            catch
+                            {
+                                // Failed to parse URI
+                            }
+                        }
+                    }
+                }
+                catch
+                {
+                    // Not JSON, that's okay
+                }
+
+                // Extract expected endpoint ID from branch ID
+                var branchIdParts = branchId.Split('-');
+                var expectedEndpointId = branchIdParts.Length >= 3 ? branchIdParts[branchIdParts.Length - 1] : null;
+
+                return Ok(new
+                {
+                    success = response.IsSuccessStatusCode,
+                    request = new
+                    {
+                        method = "GET",
+                        url = connectionUrl,
+                        parameters = new
+                        {
+                            branchId = branchId,
+                            databaseName = dbName,
+                            roleName = role,
+                            pooled = false
+                        },
+                        headers = new
+                        {
+                            authorization = "Bearer ***",
+                            accept = "application/json"
+                        }
+                    },
+                    response = new
+                    {
+                        statusCode = (int)response.StatusCode,
+                        statusReason = response.ReasonPhrase,
+                        isSuccess = response.IsSuccessStatusCode,
+                        elapsedMs = elapsed.TotalMilliseconds,
+                        headers = response.Headers.ToDictionary(h => h.Key, h => string.Join(", ", h.Value)),
+                        rawContent = responseContent,
+                        parsedJson = jsonDoc != null ? JsonSerializer.Serialize(jsonDoc, new JsonSerializerOptions { WriteIndented = true }) : null,
+                        connectionString = connectionString,
+                        analysis = new
+                        {
+                            hasConnectionString = !string.IsNullOrEmpty(connectionString),
+                            extractedEndpointId = extractedEndpointId,
+                            expectedEndpointId = expectedEndpointId,
+                            endpointIdMatches = !string.IsNullOrEmpty(extractedEndpointId) && 
+                                                !string.IsNullOrEmpty(expectedEndpointId) &&
+                                                extractedEndpointId.Equals(expectedEndpointId, StringComparison.OrdinalIgnoreCase)
+                        }
+                    }
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error testing Neon connection string API for branch {BranchId}", branchId);
+                return StatusCode(500, new
+                {
+                    success = false,
+                    message = "Error calling Neon connection_uri API",
+                    error = ex.Message,
+                    stackTrace = ex.StackTrace
+                });
+            }
+        }
+
+        /// <summary>
+        /// Test Neon project endpoints API - list all endpoints and filter by branch
+        /// GET /api/Test/Neon-project-endpoints?branchId=br-divine-pond-a9lr3yfm
+        /// </summary>
+        [HttpGet("Neon-project-endpoints")]
+        public async Task<ActionResult> TestNeonProjectEndpoints([FromQuery] string? branchId = null)
+        {
+            try
+            {
+                var neonApiKey = _configuration["Neon:ApiKey"];
+                var neonBaseUrl = _configuration["Neon:BaseUrl"];
+                var neonProjectId = _configuration["Neon:ProjectId"];
+
+                if (string.IsNullOrWhiteSpace(neonApiKey) || neonApiKey == "your-neon-api-key-here" ||
+                    string.IsNullOrWhiteSpace(neonBaseUrl) ||
+                    string.IsNullOrWhiteSpace(neonProjectId))
+                {
+                    return BadRequest(new
+                    {
+                        success = false,
+                        message = "Neon configuration is missing or invalid",
+                        configured = new
+                        {
+                            hasApiKey = !string.IsNullOrWhiteSpace(neonApiKey) && neonApiKey != "your-neon-api-key-here",
+                            hasBaseUrl = !string.IsNullOrWhiteSpace(neonBaseUrl),
+                            hasProjectId = !string.IsNullOrWhiteSpace(neonProjectId)
+                        }
+                    });
+                }
+
+                var endpointsApiUrl = $"{neonBaseUrl}/projects/{neonProjectId}/endpoints";
+                
+                _logger.LogInformation("🔍 [NEON TEST] Querying project endpoints API: {Url}", endpointsApiUrl);
+
+                using var httpClient = _httpClientFactory.CreateClient();
+                httpClient.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", neonApiKey);
+                httpClient.DefaultRequestHeaders.Accept.Add(new System.Net.Http.Headers.MediaTypeWithQualityHeaderValue("application/json"));
+
+                var startTime = DateTime.UtcNow;
+                var response = await httpClient.GetAsync(endpointsApiUrl);
+                var elapsed = DateTime.UtcNow - startTime;
+
+                var responseContent = await response.Content.ReadAsStringAsync();
+
+                // Try to parse as JSON
+                JsonDocument? jsonDoc = null;
+                var allEndpoints = new List<object>();
+                var filteredEndpoints = new List<object>();
+                
+                try
+                {
+                    jsonDoc = JsonDocument.Parse(responseContent);
+                    
+                    // Check if endpoints is an array at root level
+                    if (jsonDoc.RootElement.TryGetProperty("endpoints", out var endpointsProp) && endpointsProp.ValueKind == JsonValueKind.Array)
+                    {
+                        foreach (var endpoint in endpointsProp.EnumerateArray())
+                        {
+                            var endpointObj = new Dictionary<string, object?>();
+                            
+                            if (endpoint.TryGetProperty("id", out var idProp))
+                                endpointObj["id"] = idProp.GetString();
+                            if (endpoint.TryGetProperty("host", out var hostProp))
+                                endpointObj["host"] = hostProp.GetString();
+                            if (endpoint.TryGetProperty("branch_id", out var branchIdProp))
+                                endpointObj["branch_id"] = branchIdProp.GetString();
+                            if (endpoint.TryGetProperty("current_state", out var stateProp))
+                                endpointObj["current_state"] = stateProp.GetString();
+                            if (endpoint.TryGetProperty("pending_state", out var pendingStateProp))
+                                endpointObj["pending_state"] = pendingStateProp.GetString();
+                            if (endpoint.TryGetProperty("port", out var portProp))
+                                endpointObj["port"] = portProp.GetInt32();
+                            
+                            allEndpoints.Add(endpointObj);
+                            
+                            // Filter by branch_id if provided
+                            if (!string.IsNullOrEmpty(branchId))
+                            {
+                                var epBranchId = endpointObj.ContainsKey("branch_id") ? endpointObj["branch_id"]?.ToString() : null;
+                                if (epBranchId == branchId)
+                                {
+                                    filteredEndpoints.Add(endpointObj);
+                                }
+                            }
+                        }
+                    }
+                }
+                catch
+                {
+                    // Parse failed
+                }
+
+                return Ok(new
+                {
+                    success = response.IsSuccessStatusCode,
+                    request = new
+                    {
+                        method = "GET",
+                        url = endpointsApiUrl,
+                        filterBranchId = branchId,
+                        headers = new
+                        {
+                            authorization = "Bearer ***",
+                            accept = "application/json"
+                        }
+                    },
+                    response = new
+                    {
+                        statusCode = (int)response.StatusCode,
+                        statusReason = response.ReasonPhrase,
+                        isSuccess = response.IsSuccessStatusCode,
+                        elapsedMs = elapsed.TotalMilliseconds,
+                        headers = response.Headers.ToDictionary(h => h.Key, h => string.Join(", ", h.Value)),
+                        rawContent = responseContent,
+                        parsedJson = jsonDoc != null ? JsonSerializer.Serialize(jsonDoc, new JsonSerializerOptions { WriteIndented = true }) : null,
+                        summary = new
+                        {
+                            totalEndpoints = allEndpoints.Count,
+                            filteredEndpoints = filteredEndpoints.Count,
+                            allEndpoints = allEndpoints,
+                            filteredByBranch = !string.IsNullOrEmpty(branchId) ? filteredEndpoints : null
+                        },
+                        analysis = !string.IsNullOrEmpty(branchId) ? (object)new
+                        {
+                            branchId = branchId,
+                            foundEndpoints = filteredEndpoints.Count > 0,
+                            endpointDetails = filteredEndpoints.Count > 0 ? (object)filteredEndpoints : (object)new[] { new { message = "No endpoints found for this branch" } }
+                        } : (object)new { message = "No branchId filter provided - showing all endpoints" }
+                    }
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error testing Neon project endpoints API");
+                return StatusCode(500, new
+                {
+                    success = false,
+                    message = "Error calling Neon project endpoints API",
+                    error = ex.Message,
+                    stackTrace = ex.StackTrace
+                });
+            }
+        }
+
+        /// <summary>
+        /// Test Neon connection string API with detailed endpoint extraction
+        /// GET /api/Test/Neon-connection-string-detailed?branchId=br-divine-pond-a9lr3yfm&databaseName=AppDB_test&roleName=neondb_owner
+        /// This version extracts and analyzes the endpoint from the connection string
+        /// </summary>
+        [HttpGet("Neon-connection-string-detailed")]
+        public async Task<ActionResult> TestNeonConnectionStringDetailed(
+            [FromQuery] string branchId,
+            [FromQuery] string? databaseName = null,
+            [FromQuery] string? roleName = null)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(branchId))
+                {
+                    return BadRequest(new
+                    {
+                        success = false,
+                        message = "branchId query parameter is required",
+                        example = "/api/Test/Neon-connection-string-detailed?branchId=br-divine-pond-a9lr3yfm&databaseName=AppDB_test&roleName=neondb_owner"
+                    });
+                }
+
+                var neonApiKey = _configuration["Neon:ApiKey"];
+                var neonBaseUrl = _configuration["Neon:BaseUrl"];
+                var neonProjectId = _configuration["Neon:ProjectId"];
+                var neonDefaultOwnerName = _configuration["Neon:DefaultOwnerName"] ?? "neondb_owner";
+
+                if (string.IsNullOrWhiteSpace(neonApiKey) || neonApiKey == "your-neon-api-key-here" ||
+                    string.IsNullOrWhiteSpace(neonBaseUrl) ||
+                    string.IsNullOrWhiteSpace(neonProjectId))
+                {
+                    return BadRequest(new
+                    {
+                        success = false,
+                        message = "Neon configuration is missing or invalid"
+                    });
+                }
+
+                var dbName = databaseName ?? "AppDB_test";
+                var role = roleName ?? neonDefaultOwnerName;
+
+                var connectionUrl = $"{neonBaseUrl}/projects/{neonProjectId}/connection_uri?database_name={Uri.EscapeDataString(dbName)}&role_name={Uri.EscapeDataString(role)}&branch_id={Uri.EscapeDataString(branchId)}&pooled=false";
+                
+                _logger.LogInformation("🔍 [NEON TEST] Querying connection_uri API (detailed): {Url}", connectionUrl);
+
+                using var httpClient = _httpClientFactory.CreateClient();
+                httpClient.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", neonApiKey);
+                httpClient.DefaultRequestHeaders.Accept.Add(new System.Net.Http.Headers.MediaTypeWithQualityHeaderValue("application/json"));
+
+                var startTime = DateTime.UtcNow;
+                var response = await httpClient.GetAsync(connectionUrl);
+                var elapsed = DateTime.UtcNow - startTime;
+
+                var responseContent = await response.Content.ReadAsStringAsync();
+
+                // Detailed parsing
+                JsonDocument? jsonDoc = null;
+                string? connectionString = null;
+                string? extractedEndpointId = null;
+                string? extractedHost = null;
+                int? extractedPort = null;
+                string? extractedUsername = null;
+                string? extractedPassword = null;
+                string? extractedDatabase = null;
+                
+                try
+                {
+                    jsonDoc = JsonDocument.Parse(responseContent);
+                    if (jsonDoc.RootElement.TryGetProperty("uri", out var uriProp))
+                    {
+                        connectionString = uriProp.GetString();
+                        if (!string.IsNullOrEmpty(connectionString))
+                        {
+                            try
+                            {
+                                var uri = new Uri(connectionString);
+                                extractedHost = uri.Host;
+                                extractedPort = uri.Port == -1 ? 5432 : uri.Port;
+                                extractedDatabase = uri.AbsolutePath.TrimStart('/');
+                                
+                                // Extract user info
+                                var userInfo = uri.UserInfo.Split(':');
+                                extractedUsername = userInfo.Length > 0 ? userInfo[0] : null;
+                                extractedPassword = userInfo.Length > 1 ? Uri.UnescapeDataString(userInfo[1]) : null;
+                                
+                                // Extract endpoint ID from host (format: ep-xxx-yyy-ID.gwc.azure.neon.tech)
+                                var endpointIdMatch = System.Text.RegularExpressions.Regex.Match(uri.Host, @"ep-[^-]+-[^-]+-([^.]+)\.(gwc\.azure|us-east-2\.aws)\.neon\.tech");
+                                extractedEndpointId = endpointIdMatch.Success ? endpointIdMatch.Groups[1].Value : null;
+                            }
+                            catch (Exception ex)
+                            {
+                                // Failed to parse URI
+                            }
+                        }
+                    }
+                }
+                catch
+                {
+                    // Not JSON or parse failed
+                }
+
+                // Extract expected endpoint ID from branch ID
+                var branchIdParts = branchId.Split('-');
+                var expectedEndpointId = branchIdParts.Length >= 3 ? branchIdParts[branchIdParts.Length - 1] : null;
+
+                return Ok(new
+                {
+                    success = response.IsSuccessStatusCode,
+                    request = new
+                    {
+                        method = "GET",
+                        url = connectionUrl,
+                        parameters = new
+                        {
+                            branchId = branchId,
+                            databaseName = dbName,
+                            roleName = role,
+                            pooled = false
+                        }
+                    },
+                    response = new
+                    {
+                        statusCode = (int)response.StatusCode,
+                        statusReason = response.ReasonPhrase,
+                        isSuccess = response.IsSuccessStatusCode,
+                        elapsedMs = elapsed.TotalMilliseconds,
+                        rawContent = responseContent,
+                        parsedJson = jsonDoc != null ? JsonSerializer.Serialize(jsonDoc, new JsonSerializerOptions { WriteIndented = true }) : null
+                    },
+                    connectionStringAnalysis = new
+                    {
+                        fullConnectionString = connectionString,
+                        extracted = new
+                        {
+                            host = extractedHost,
+                            port = extractedPort,
+                            database = extractedDatabase,
+                            username = extractedUsername,
+                            password = extractedPassword != null ? "***" + extractedPassword.Substring(Math.Max(0, extractedPassword.Length - 4)) : null,
+                            endpointId = extractedEndpointId
+                        },
+                        validation = new
+                        {
+                            expectedEndpointId = expectedEndpointId,
+                            actualEndpointId = extractedEndpointId,
+                            endpointIdMatches = !string.IsNullOrEmpty(extractedEndpointId) && 
+                                                !string.IsNullOrEmpty(expectedEndpointId) &&
+                                                extractedEndpointId.Equals(expectedEndpointId, StringComparison.OrdinalIgnoreCase),
+                            hasConnectionString = !string.IsNullOrEmpty(connectionString),
+                            hasHost = !string.IsNullOrEmpty(extractedHost),
+                            hasPassword = !string.IsNullOrEmpty(extractedPassword)
+                        },
+                        recommendation = !string.IsNullOrEmpty(extractedHost) && !string.IsNullOrEmpty(extractedPassword) 
+                            ? "✅ Connection string can be used - extract host and password from connection_uri API"
+                            : "❌ Connection string incomplete or invalid"
+                    }
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error testing Neon connection string API (detailed)");
+                return StatusCode(500, new
+                {
+                    success = false,
+                    message = "Error calling Neon connection_uri API",
+                    error = ex.Message
+                });
+            }
+        }
+
+        /// <summary>
+        /// Test Neon branch creation V2 - Proper workflow using operations API and endpoint from branch creation
+        /// POST /api/Test/Neon-branch-creation-v2
+        /// This implements the correct Neon workflow:
+        /// 1. Create branch (POST) - get endpoint info from response
+        /// 2. Poll operations API until branch is ready
+        /// 3. Create database in branch
+        /// 4. Construct connection string from endpoint info + database + role/password
+        /// </summary>
+        [HttpPost("Neon-branch-creation-v2")]
+        public async Task<ActionResult> TestNeonBranchCreationVersion2([FromQuery] string? parentBranchId = null)
+        {
+            try
+            {
+                var neonApiKey = _configuration["Neon:ApiKey"];
+                var neonBaseUrl = _configuration["Neon:BaseUrl"];
+                var neonProjectId = _configuration["Neon:ProjectId"];
+                var neonParentBranchId = _configuration["Neon:BranchId"];
+                var neonDefaultOwnerName = _configuration["Neon:DefaultOwnerName"] ?? "neondb_owner";
+
+                if (string.IsNullOrWhiteSpace(neonApiKey) || neonApiKey == "your-neon-api-key-here" ||
+                    string.IsNullOrWhiteSpace(neonBaseUrl) ||
+                    string.IsNullOrWhiteSpace(neonProjectId))
+                {
+                    return BadRequest(new
+                    {
+                        success = false,
+                        message = "Neon configuration is missing or invalid"
+                    });
+                }
+
+                var actualParentBranchId = parentBranchId ?? neonParentBranchId;
+                var testDbName = $"AppDB_test_{DateTime.UtcNow:yyyyMMddHHmmss}";
+                var steps = new List<object>();
+                var operationIds = new List<string>(); // Declare at method scope
+
+                using var httpClient = _httpClientFactory.CreateClient();
+                httpClient.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", neonApiKey);
+                httpClient.DefaultRequestHeaders.Accept.Add(new System.Net.Http.Headers.MediaTypeWithQualityHeaderValue("application/json"));
+
+                // ============================================================================
+                // STEP 1: Create Branch
+                // ============================================================================
+                var step1Start = DateTime.UtcNow;
+                var createBranchRequest = new
+                {
+                    endpoints = new[]
+                    {
+                        new { type = "read_write" }
+                    },
+                    branch = actualParentBranchId != null ? new { parent_id = actualParentBranchId } : null
+                };
+
+                var branchApiUrl = $"{neonBaseUrl}/projects/{neonProjectId}/branches";
+                var branchRequestBody = JsonSerializer.Serialize(createBranchRequest);
+                var branchContent = new StringContent(branchRequestBody, System.Text.Encoding.UTF8, "application/json");
+
+                _logger.LogInformation("🔍 [NEON V2] Step 1: Creating branch via POST: {Url}", branchApiUrl);
+                var branchResponse = await httpClient.PostAsync(branchApiUrl, branchContent);
+                var branchResponseContent = await branchResponse.Content.ReadAsStringAsync();
+                var step1Elapsed = DateTime.UtcNow - step1Start;
+
+                string? createdBranchId = null;
+                string? endpointHost = null;
+                string? endpointId = null;
+                string? endpointPort = null;
+                string? operationId = null;
+
+                if (branchResponse.IsSuccessStatusCode)
+                {
+                    var branchDoc = JsonDocument.Parse(branchResponseContent);
+                    
+                    // Extract branch ID
+                    if (branchDoc.RootElement.TryGetProperty("branch", out var branchObj))
+                    {
+                        if (branchObj.TryGetProperty("id", out var branchIdProp))
+                        {
+                            createdBranchId = branchIdProp.GetString();
+                        }
+                    }
+
+                    // Extract endpoint info from ROOT level endpoints array (from branch creation response)
+                    if (branchDoc.RootElement.TryGetProperty("endpoints", out var endpointsProp) && endpointsProp.ValueKind == JsonValueKind.Array)
+                    {
+                        foreach (var endpoint in endpointsProp.EnumerateArray())
+                        {
+                            if (endpoint.TryGetProperty("branch_id", out var epBranchIdProp))
+                            {
+                                var epBranchId = epBranchIdProp.GetString();
+                                if (epBranchId == createdBranchId)
+                                {
+                                    if (endpoint.TryGetProperty("id", out var epIdProp))
+                                        endpointId = epIdProp.GetString();
+                                    if (endpoint.TryGetProperty("host", out var hostProp))
+                                        endpointHost = hostProp.GetString();
+                                    if (endpoint.TryGetProperty("port", out var portProp) && portProp.ValueKind == JsonValueKind.Number)
+                                        endpointPort = portProp.GetInt32().ToString();
+                                    break;
+                                }
+                            }
+                        }
+                    }
+
+                    // Extract ALL operation IDs from branch creation response
+                    operationIds.Clear(); // Clear and populate
+                    if (branchDoc.RootElement.TryGetProperty("operations", out var operationsProp) && operationsProp.ValueKind == JsonValueKind.Array)
+                    {
+                        foreach (var op in operationsProp.EnumerateArray())
+                        {
+                            if (op.TryGetProperty("id", out var opIdProp))
+                            {
+                                var opId = opIdProp.GetString();
+                                if (!string.IsNullOrEmpty(opId))
+                                {
+                                    operationIds.Add(opId);
+                                }
+                            }
+                        }
+                    }
+                    if (operationIds.Count > 0)
+                    {
+                        operationId = operationIds[0]; // Keep first one for backward compatibility
+                    }
+                    
+                    // Log extracted information from Step 1
+                    _logger.LogInformation("✅ [NEON V2] Step 1: Branch created successfully");
+                    _logger.LogInformation("🔍 [NEON V2] Step 1: Branch ID: {BranchId}", createdBranchId);
+                    _logger.LogInformation("🔍 [NEON V2] Step 1: Initial endpoint host: {EndpointHost}", endpointHost);
+                    _logger.LogInformation("🔍 [NEON V2] Step 1: Initial endpoint ID: {EndpointId}", endpointId);
+                    _logger.LogInformation("🔍 [NEON V2] Step 1: Endpoint port: {EndpointPort}", endpointPort ?? "5432 (default)");
+                    _logger.LogInformation("🔍 [NEON V2] Step 1: Found {Count} operation IDs: {OperationIds}", 
+                        operationIds.Count, string.Join(", ", operationIds));
+                }
+
+                steps.Add(new
+                {
+                    step = 1,
+                    name = "Create Branch",
+                    success = branchResponse.IsSuccessStatusCode,
+                    elapsedMs = step1Elapsed.TotalMilliseconds,
+                    branchId = createdBranchId,
+                    endpointHost = endpointHost,
+                    endpointId = endpointId,
+                    endpointPort = endpointPort,
+                    operationIds = operationIds,
+                    operationId = operationId, // First operation for backward compatibility
+                    rawResponse = branchResponseContent
+                });
+
+                if (!branchResponse.IsSuccessStatusCode || string.IsNullOrEmpty(createdBranchId))
+                {
+                    return Ok(new
+                    {
+                        success = false,
+                        message = "Failed to create branch",
+                        steps = steps
+                    });
+                }
+
+                // ============================================================================
+                // STEP 2: Poll Operations API until SPECIFIC operations from Step 1 are ready
+                // ============================================================================
+                var step2Start = DateTime.UtcNow;
+                var operationsApiUrl = $"{neonBaseUrl}/projects/{neonProjectId}/operations";
+                var maxOperationPolls = 60; // 60 retries × 2 seconds = 2 minutes max
+                var operationPollDelay = 2000; // 2 seconds
+                var operationPollCount = 0;
+                var branchReady = false;
+                var operationStatuses = new List<string>();
+                var operationDetails = new List<object>();
+
+                _logger.LogInformation("🔍 [NEON V2] Step 2: Polling operations API for {Count} operations until branch '{BranchId}' is ready", 
+                    operationIds.Count, createdBranchId);
+
+                // Track status of each operation from Step 1
+                var trackedOperations = new Dictionary<string, string>(); // operationId -> status
+
+                while (operationPollCount < maxOperationPolls && !branchReady)
+                {
+                    try
+                    {
+                        var opsResponse = await httpClient.GetAsync(operationsApiUrl);
+                        if (opsResponse.IsSuccessStatusCode)
+                        {
+                            var opsContent = await opsResponse.Content.ReadAsStringAsync();
+                            var opsDoc = JsonDocument.Parse(opsContent);
+
+                            // Look for the SPECIFIC operations we got from Step 1 (by ID)
+                            var foundOperations = new List<object>();
+                            trackedOperations.Clear();
+                            
+                            if (opsDoc.RootElement.TryGetProperty("operations", out var opsArray) && opsArray.ValueKind == JsonValueKind.Array)
+                            {
+                                foreach (var op in opsArray.EnumerateArray())
+                                {
+                                    if (op.TryGetProperty("id", out var idProp))
+                                    {
+                                        var opId = idProp.GetString();
+                                        // Only track operations we got from Step 1
+                                        if (operationIds.Contains(opId))
+                                        {
+                                            var opAction = op.TryGetProperty("action", out var actionProp) ? actionProp.GetString() : "unknown";
+                                            var opStatus = op.TryGetProperty("status", out var statusProp) ? statusProp.GetString() : "unknown";
+                                            
+                                            trackedOperations[opId] = opStatus;
+                                            
+                                            foundOperations.Add(new
+                                            {
+                                                id = opId,
+                                                action = opAction,
+                                                status = opStatus
+                                            });
+
+                                            operationStatuses.Add($"{opAction}:{opStatus}");
+                                        }
+                                    }
+                                }
+                            }
+
+                            operationDetails = foundOperations;
+
+                            // Check if ALL tracked operations from Step 1 are finished
+                            if (operationIds.Count > 0)
+                            {
+                                var allTracked = operationIds.All(id => trackedOperations.ContainsKey(id));
+                                var allFinished = allTracked && trackedOperations.Values.All(status => 
+                                    status == "finished" || status == "completed");
+
+                                if (allFinished && allTracked)
+                                {
+                                    branchReady = true;
+                                    break;
+                                }
+                            }
+                        }
+
+                        if (!branchReady)
+                        {
+                            operationPollCount++;
+                            if (operationPollCount < maxOperationPolls)
+                            {
+                                await Task.Delay(operationPollDelay);
+                            }
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning(ex, "⚠️ [NEON V2] Error polling operations (attempt {Attempt})", operationPollCount + 1);
+                        operationPollCount++;
+                        if (operationPollCount < maxOperationPolls)
+                        {
+                            await Task.Delay(operationPollDelay);
+                        }
+                    }
+                }
+
+                var step2Elapsed = DateTime.UtcNow - step2Start;
+                steps.Add(new
+                {
+                    step = 2,
+                    name = "Poll Operations API",
+                    success = branchReady,
+                    elapsedMs = step2Elapsed.TotalMilliseconds,
+                    polls = operationPollCount,
+                    trackedOperationIds = operationIds,
+                    operationStatuses = operationStatuses,
+                    operationDetails = operationDetails,
+                    message = branchReady 
+                        ? $"Branch is ready - all {operationIds.Count} operations finished" 
+                        : $"Still waiting after {operationPollCount} polls. Found {operationDetails.Count}/{operationIds.Count} operations. Statuses: {string.Join(", ", operationStatuses)}"
+                });
+
+                // ============================================================================
+                // STEP 2.5: Verify endpoint after operations finish (endpoint may have changed)
+                // ============================================================================
+                var step2_5Start = DateTime.UtcNow;
+                string? verifiedEndpointHost = endpointHost;
+                string? verifiedEndpointId = endpointId;
+                
+                if (branchReady && !string.IsNullOrEmpty(createdBranchId))
+                {
+                    _logger.LogInformation("🔍 [NEON V2] Step 2.5: Verifying endpoint after operations finished for branch '{BranchId}'", createdBranchId);
+                    _logger.LogInformation("🔍 [NEON V2] Step 2.5: Original endpoint from Step 1: {EndpointHost}", endpointHost);
+                    
+                    try
+                    {
+                        // Query branch API to get the final/verified endpoint
+                        var verifyBranchApiUrl = $"{neonBaseUrl}/projects/{neonProjectId}/branches/{Uri.EscapeDataString(createdBranchId)}";
+                        var branchApiResponse = await httpClient.GetAsync(verifyBranchApiUrl);
+                        
+                        if (branchApiResponse.IsSuccessStatusCode)
+                        {
+                            var branchApiContent = await branchApiResponse.Content.ReadAsStringAsync();
+                            _logger.LogInformation("🔍 [NEON V2] Step 2.5: Branch API response received (length: {Length})", branchApiContent.Length);
+                            
+                            var branchApiDoc = JsonDocument.Parse(branchApiContent);
+                            
+                            // Log the root element properties for debugging
+                            var rootProps = new List<string>();
+                            foreach (var prop in branchApiDoc.RootElement.EnumerateObject())
+                            {
+                                rootProps.Add($"{prop.Name} ({prop.Value.ValueKind})");
+                            }
+                            _logger.LogInformation("🔍 [NEON V2] Step 2.5: Root element properties: {Properties}", string.Join(", ", rootProps));
+                            
+                            // Try to get endpoint from branch API response
+                            var endpointsArray = default(JsonElement);
+                            var endpointsFound = false;
+                            
+                            if (branchApiDoc.RootElement.TryGetProperty("endpoints", out var rootEndpointsProp) && 
+                                rootEndpointsProp.ValueKind == JsonValueKind.Array)
+                            {
+                                endpointsArray = rootEndpointsProp;
+                                endpointsFound = true;
+                                _logger.LogInformation("🔍 [NEON V2] Step 2.5: Found 'endpoints' array at root level with {Count} items", rootEndpointsProp.GetArrayLength());
+                            }
+                            else if (branchApiDoc.RootElement.TryGetProperty("branch", out var branchObj) &&
+                                     branchObj.TryGetProperty("endpoints", out var branchEndpointsProp) && 
+                                     branchEndpointsProp.ValueKind == JsonValueKind.Array)
+                            {
+                                endpointsArray = branchEndpointsProp;
+                                endpointsFound = true;
+                                _logger.LogInformation("🔍 [NEON V2] Step 2.5: Found 'endpoints' array under 'branch' with {Count} items", branchEndpointsProp.GetArrayLength());
+                            }
+                            else
+                            {
+                                // Check what's inside the branch object
+                                if (branchApiDoc.RootElement.TryGetProperty("branch", out var branchObjForInspection))
+                                {
+                                    var branchProps = new List<string>();
+                                    foreach (var prop in branchObjForInspection.EnumerateObject())
+                                    {
+                                        branchProps.Add($"{prop.Name} ({prop.Value.ValueKind})");
+                                    }
+                                    _logger.LogInformation("🔍 [NEON V2] Step 2.5: Branch object properties: {Properties}", string.Join(", ", branchProps));
+                                }
+                                
+                                _logger.LogWarning("⚠️ [NEON V2] Step 2.5: No 'endpoints' array found in branch API response. Will try project endpoints API instead.");
+                                
+                                // Fallback: Query project endpoints API and filter by branch_id
+                                try
+                                {
+                                    var projectEndpointsUrl = $"{neonBaseUrl}/projects/{neonProjectId}/endpoints";
+                                    _logger.LogInformation("🔍 [NEON V2] Step 2.5: Querying project endpoints API: {Url}", projectEndpointsUrl);
+                                    var endpointsResponse = await httpClient.GetAsync(projectEndpointsUrl);
+                                    
+                                    if (endpointsResponse.IsSuccessStatusCode)
+                                    {
+                                        var endpointsContent = await endpointsResponse.Content.ReadAsStringAsync();
+                                        var endpointsDoc = JsonDocument.Parse(endpointsContent);
+                                        
+                                        if (endpointsDoc.RootElement.TryGetProperty("endpoints", out var projectEndpointsProp) && 
+                                            projectEndpointsProp.ValueKind == JsonValueKind.Array)
+                                        {
+                                            endpointsArray = projectEndpointsProp;
+                                            endpointsFound = true;
+                                            _logger.LogInformation("🔍 [NEON V2] Step 2.5: Found {Count} endpoints in project endpoints API", projectEndpointsProp.GetArrayLength());
+                                        }
+                                        else
+                                        {
+                                            _logger.LogWarning("⚠️ [NEON V2] Step 2.5: Project endpoints API response does not contain 'endpoints' array");
+                                        }
+                                    }
+                                    else
+                                    {
+                                        var errorContent = await endpointsResponse.Content.ReadAsStringAsync();
+                                        _logger.LogWarning("⚠️ [NEON V2] Step 2.5: Project endpoints API returned {StatusCode}: {Error}", 
+                                            endpointsResponse.StatusCode, errorContent);
+                                    }
+                                }
+                                catch (Exception endpointsEx)
+                                {
+                                    _logger.LogWarning(endpointsEx, "⚠️ [NEON V2] Step 2.5: Exception querying project endpoints API");
+                                }
+                            }
+                            
+                            if (endpointsFound && endpointsArray.ValueKind == JsonValueKind.Array)
+                            {
+                                var endpointCount = 0;
+                                var matchingEndpointCount = 0;
+                                
+                                foreach (var ep in endpointsArray.EnumerateArray())
+                                {
+                                    endpointCount++;
+                                    
+                                    // Log endpoint structure for debugging
+                                    var epProps = new List<string>();
+                                    foreach (var epProp in ep.EnumerateObject())
+                                    {
+                                        epProps.Add($"{epProp.Name}={epProp.Value}");
+                                    }
+                                    _logger.LogInformation("🔍 [NEON V2] Step 2.5: Endpoint {Index} properties: {Properties}", endpointCount, string.Join(", ", epProps));
+                                    
+                                    if (ep.TryGetProperty("branch_id", out var epBranchIdProp))
+                                    {
+                                        var epBranchId = epBranchIdProp.GetString();
+                                        _logger.LogInformation("🔍 [NEON V2] Step 2.5: Endpoint {Index} branch_id: {BranchId} (looking for: {TargetBranchId})", 
+                                            endpointCount, epBranchId, createdBranchId);
+                                        
+                                        if (epBranchId == createdBranchId)
+                                        {
+                                            matchingEndpointCount++;
+                                            _logger.LogInformation("✅ [NEON V2] Step 2.5: Endpoint {Index} matches target branch ID!", endpointCount);
+                                            
+                                            if (ep.TryGetProperty("host", out var epHostProp))
+                                            {
+                                                var verifiedHost = epHostProp.GetString();
+                                                if (!string.IsNullOrEmpty(verifiedHost))
+                                                {
+                                                    verifiedEndpointHost = verifiedHost;
+                                                    _logger.LogInformation("✅ [NEON V2] Step 2.5: Verified endpoint host from branch API: {EndpointHost}", verifiedEndpointHost);
+                                                    
+                                                    if (ep.TryGetProperty("id", out var epIdProp))
+                                                    {
+                                                        verifiedEndpointId = epIdProp.GetString();
+                                                        _logger.LogInformation("✅ [NEON V2] Step 2.5: Verified endpoint ID: {EndpointId}", verifiedEndpointId);
+                                                    }
+                                                    break;
+                                                }
+                                                else
+                                                {
+                                                    _logger.LogWarning("⚠️ [NEON V2] Step 2.5: Endpoint {Index} has empty/null host property", endpointCount);
+                                                }
+                                            }
+                                            else
+                                            {
+                                                _logger.LogWarning("⚠️ [NEON V2] Step 2.5: Endpoint {Index} does not have 'host' property", endpointCount);
+                                            }
+                                        }
+                                    }
+                                    else
+                                    {
+                                        _logger.LogWarning("⚠️ [NEON V2] Step 2.5: Endpoint {Index} does not have 'branch_id' property", endpointCount);
+                                    }
+                                }
+                                
+                                _logger.LogInformation("🔍 [NEON V2] Step 2.5: Processed {Total} endpoints, {Matching} matched branch ID", endpointCount, matchingEndpointCount);
+                            }
+                            
+                            if (string.IsNullOrEmpty(verifiedEndpointHost))
+                            {
+                                _logger.LogWarning("⚠️ [NEON V2] Step 2.5: Could not find endpoint in branch API response, using original from Step 1: {OriginalEndpoint}", endpointHost);
+                            }
+                        }
+                        else
+                        {
+                            var errorContent = await branchApiResponse.Content.ReadAsStringAsync();
+                            _logger.LogWarning("⚠️ [NEON V2] Step 2.5: Failed to query branch API: {StatusCode} - {Error}. Using original endpoint from Step 1", 
+                                branchApiResponse.StatusCode, errorContent);
+                        }
+                    }
+                    catch (Exception verifyEx)
+                    {
+                        _logger.LogWarning(verifyEx, "⚠️ [NEON V2] Step 2.5: Exception verifying endpoint, using original from Step 1");
+                    }
+                }
+                
+                var step2_5Elapsed = DateTime.UtcNow - step2_5Start;
+                var endpointChanged = !string.IsNullOrEmpty(endpointHost) && 
+                                     !string.IsNullOrEmpty(verifiedEndpointHost) && 
+                                     !endpointHost.Equals(verifiedEndpointHost, StringComparison.OrdinalIgnoreCase);
+                
+                steps.Add(new
+                {
+                    step = 2.5,
+                    name = "Verify Endpoint After Operations",
+                    success = !string.IsNullOrEmpty(verifiedEndpointHost),
+                    elapsedMs = step2_5Elapsed.TotalMilliseconds,
+                    originalEndpointFromStep1 = endpointHost,
+                    verifiedEndpointFromBranchAPI = verifiedEndpointHost,
+                    endpointChanged = endpointChanged,
+                    message = endpointChanged 
+                        ? $"⚠️ Endpoint changed! Original: {endpointHost}, Verified: {verifiedEndpointHost}"
+                        : $"✅ Endpoint verified: {verifiedEndpointHost ?? endpointHost}"
+                });
+                
+                // Use verified endpoint if available, otherwise fall back to original
+                endpointHost = verifiedEndpointHost ?? endpointHost;
+                endpointId = verifiedEndpointId ?? endpointId;
+                
+                // Continue even if operations polling didn't confirm ready (endpoint might still work)
+
+                // ============================================================================
+                // STEP 3: Create Database in Branch
+                // ============================================================================
+                var step3Start = DateTime.UtcNow;
+                var createDbRequest = new
+                {
+                    database = new
+                    {
+                        name = testDbName,
+                        owner_name = neonDefaultOwnerName
+                    }
+                };
+
+                var dbApiUrl = $"{neonBaseUrl}/projects/{neonProjectId}/branches/{Uri.EscapeDataString(createdBranchId)}/databases";
+                var dbRequestBody = JsonSerializer.Serialize(createDbRequest);
+                var dbContent = new StringContent(dbRequestBody, System.Text.Encoding.UTF8, "application/json");
+
+                _logger.LogInformation("🔍 [NEON V2] Step 3: Creating database '{DbName}' in branch '{BranchId}'", testDbName, createdBranchId);
+                var dbResponse = await httpClient.PostAsync(dbApiUrl, dbContent);
+                var dbResponseContent = await dbResponse.Content.ReadAsStringAsync();
+                var step3Elapsed = DateTime.UtcNow - step3Start;
+
+                steps.Add(new
+                {
+                    step = 3,
+                    name = "Create Database",
+                    success = dbResponse.IsSuccessStatusCode,
+                    elapsedMs = step3Elapsed.TotalMilliseconds,
+                    databaseName = testDbName,
+                    rawResponse = dbResponseContent
+                });
+
+                if (!dbResponse.IsSuccessStatusCode)
+                {
+                    return Ok(new
+                    {
+                        success = false,
+                        message = "Failed to create database",
+                        steps = steps
+                    });
+                }
+
+                // ============================================================================
+                // STEP 4: Get Password and Construct Connection String
+                // ============================================================================
+                var step4Start = DateTime.UtcNow;
+                string? connectionString = null;
+                string? extractedPassword = null;
+                string? extractedUsername = null;
+                string? connectionUriEndpoint = null; // Endpoint from connection_uri API (for comparison only)
+
+                _logger.LogInformation("🔍 [NEON V2] Step 4: Starting connection string construction");
+                _logger.LogInformation("🔍 [NEON V2] Step 4: Using endpoint host: {EndpointHost} (from Step 2.5 verification)", endpointHost);
+                _logger.LogInformation("🔍 [NEON V2] Step 4: Using endpoint ID: {EndpointId}", endpointId);
+                _logger.LogInformation("🔍 [NEON V2] Step 4: Database name: {DbName}", testDbName);
+                _logger.LogInformation("🔍 [NEON V2] Step 4: Branch ID: {BranchId}", createdBranchId);
+
+                // Get password from connection_uri API (we only need the password, not the endpoint)
+                var connectionUrl = $"{neonBaseUrl}/projects/{neonProjectId}/connection_uri?database_name={Uri.EscapeDataString(testDbName)}&role_name={Uri.EscapeDataString(neonDefaultOwnerName)}&branch_id={Uri.EscapeDataString(createdBranchId)}&pooled=false";
+                
+                try
+                {
+                    _logger.LogInformation("🔍 [NEON V2] Step 4: Calling connection_uri API to extract password");
+                    var connResponse = await httpClient.GetAsync(connectionUrl);
+                    if (connResponse.IsSuccessStatusCode)
+                    {
+                        var connContent = await connResponse.Content.ReadAsStringAsync();
+                        var connDoc = JsonDocument.Parse(connContent);
+                        if (connDoc.RootElement.TryGetProperty("uri", out var uriProp))
+                        {
+                            var tempConnString = uriProp.GetString();
+                            if (!string.IsNullOrEmpty(tempConnString))
+                            {
+                                var uri = new Uri(tempConnString);
+                                connectionUriEndpoint = uri.Host; // Extract endpoint from connection_uri for comparison
+                                
+                                _logger.LogInformation("🔍 [NEON V2] Step 4: connection_uri API returned endpoint: {ConnectionUriEndpoint}", connectionUriEndpoint);
+                                
+                                var userInfo = uri.UserInfo.Split(':');
+                                extractedUsername = userInfo.Length > 0 ? userInfo[0] : neonDefaultOwnerName;
+                                extractedPassword = userInfo.Length > 1 ? Uri.UnescapeDataString(userInfo[1]) : "";
+                                
+                                _logger.LogInformation("✅ [NEON V2] Step 4: Extracted username: {Username}, password length: {PasswordLength}", 
+                                    extractedUsername, extractedPassword?.Length ?? 0);
+                                
+                                // Compare endpoints
+                                if (!string.IsNullOrEmpty(connectionUriEndpoint) && !string.IsNullOrEmpty(endpointHost))
+                                {
+                                    var endpointsMatch = connectionUriEndpoint.Equals(endpointHost, StringComparison.OrdinalIgnoreCase);
+                                    if (endpointsMatch)
+                                    {
+                                        _logger.LogInformation("✅ [NEON V2] Step 4: Endpoint from connection_uri matches verified endpoint: {Endpoint}", endpointHost);
+                                    }
+                                    else
+                                    {
+                                        _logger.LogWarning("⚠️ [NEON V2] Step 4: Endpoint mismatch! connection_uri: {ConnectionUriEndpoint}, verified: {VerifiedEndpoint}. Using verified endpoint.", 
+                                            connectionUriEndpoint, endpointHost);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    else
+                    {
+                        var errorContent = await connResponse.Content.ReadAsStringAsync();
+                        _logger.LogWarning("⚠️ [NEON V2] Step 4: connection_uri API returned {StatusCode}: {Error}", 
+                            connResponse.StatusCode, errorContent);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "⚠️ [NEON V2] Step 4: Failed to extract password from connection_uri API");
+                }
+
+                // Construct connection string using verified endpoint from Step 2.5 (or original from Step 1 if verification failed)
+                if (!string.IsNullOrEmpty(endpointHost) && !string.IsNullOrEmpty(extractedPassword))
+                {
+                    var port = !string.IsNullOrEmpty(endpointPort) ? int.Parse(endpointPort) : 5432;
+                    connectionString = $"postgresql://{extractedUsername}:{Uri.EscapeDataString(extractedPassword)}@{endpointHost}:{port}/{testDbName}?sslmode=require";
+                    
+                    _logger.LogInformation("✅ [NEON V2] Step 4: Connection string constructed successfully");
+                    _logger.LogInformation("🔍 [NEON V2] Step 4: Connection string details - Host: {Host}, Port: {Port}, Database: {Db}, Username: {User}", 
+                        endpointHost, port, testDbName, extractedUsername);
+                    _logger.LogInformation("🔍 [NEON V2] Step 4: Full connection string (first 80 chars): {ConnString}", 
+                        connectionString.Substring(0, Math.Min(80, connectionString.Length)) + "...");
+                }
+                else
+                {
+                    _logger.LogError("❌ [NEON V2] Step 4: Cannot construct connection string - missing endpointHost or password");
+                    if (string.IsNullOrEmpty(endpointHost))
+                    {
+                        _logger.LogError("❌ [NEON V2] Step 4: endpointHost is null or empty");
+                    }
+                    if (string.IsNullOrEmpty(extractedPassword))
+                    {
+                        _logger.LogError("❌ [NEON V2] Step 4: extractedPassword is null or empty");
+                    }
+                }
+
+                var step4Elapsed = DateTime.UtcNow - step4Start;
+                steps.Add(new
+                {
+                    step = 4,
+                    name = "Construct Connection String",
+                    success = !string.IsNullOrEmpty(connectionString),
+                    elapsedMs = step4Elapsed.TotalMilliseconds,
+                    connectionString = connectionString != null ? connectionString.Substring(0, Math.Min(100, connectionString.Length)) + "..." : null,
+                    endpointUsed = endpointHost,
+                    endpointFromConnectionUri = connectionUriEndpoint,
+                    endpointsMatch = !string.IsNullOrEmpty(connectionUriEndpoint) && !string.IsNullOrEmpty(endpointHost) 
+                        ? connectionUriEndpoint.Equals(endpointHost, StringComparison.OrdinalIgnoreCase) 
+                        : (bool?)null,
+                    extractedUsername = extractedUsername,
+                    extractedPassword = extractedPassword != null ? "***" + extractedPassword.Substring(Math.Max(0, extractedPassword.Length - 4)) : null,
+                    message = !string.IsNullOrEmpty(connectionString) 
+                        ? $"✅ Connection string constructed using endpoint: {endpointHost}" 
+                        : "❌ Failed to construct connection string"
+                });
+
+                var totalElapsed = DateTime.UtcNow - step1Start;
+
+                return Ok(new
+                {
+                    success = !string.IsNullOrEmpty(connectionString),
+                    message = !string.IsNullOrEmpty(connectionString) 
+                        ? "✅ Successfully created branch, database, and connection string using proper workflow"
+                        : "⚠️ Branch and database created, but connection string construction failed",
+                    totalElapsedMs = totalElapsed.TotalMilliseconds,
+                    summary = new
+                    {
+                        branchId = createdBranchId,
+                        databaseName = testDbName,
+                        endpointHost = endpointHost,
+                        endpointId = endpointId,
+                        connectionStringReady = !string.IsNullOrEmpty(connectionString),
+                        operationsPolled = operationPollCount,
+                        branchReadyFromOperations = branchReady
+                    },
+                    steps = steps,
+                    recommendation = !string.IsNullOrEmpty(connectionString) && !string.IsNullOrEmpty(endpointHost)
+                        ? $"✅ This workflow works! Use verified endpoint from Step 2.5 (endpoint: {endpointHost}) + password from connection_uri API. Check logs for endpoint verification details."
+                        : "❌ Need to investigate why connection string construction failed"
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error in Neon branch creation V2 test");
+                return StatusCode(500, new
+                {
+                    success = false,
+                    message = "Error in Neon branch creation V2 workflow",
+                    error = ex.Message,
+                    stackTrace = ex.StackTrace
+                });
+            }
+        }
+
+        /// <summary>
+        /// Test Neon project-per-tenant creation - Complete workflow with project creation
+        /// POST /api/Test/Neon-project-per-tenant
+        /// This implements the project-per-tenant model:
+        /// 0. Create Neon project (NEW - project-per-tenant isolation)
+        /// 1. Create branch in the new project
+        /// 2. Poll operations API until branch is ready
+        /// 2.5. Verify endpoint after operations finish
+        /// 3. Create database in branch
+        /// 4. Construct connection string from endpoint info + database + role/password
+        /// </summary>
+        [HttpPost("Neon-project-per-tenant")]
+        public async Task<ActionResult> TestNeonProjectPerTenant([FromQuery] string? projectName = null)
+        {
+            try
+            {
+                var step0Start = DateTime.UtcNow;
+                var steps = new List<object>();
+
+                var neonApiKey = _configuration["Neon:ApiKey"];
+                var neonBaseUrl = _configuration["Neon:BaseUrl"];
+                var neonDefaultOwnerName = _configuration["Neon:DefaultOwnerName"] ?? "neondb_owner";
+
+                if (string.IsNullOrWhiteSpace(neonApiKey) || neonApiKey == "your-neon-api-key-here")
+                {
+                    return BadRequest(new { success = false, message = "Neon API key not configured" });
+                }
+
+                if (string.IsNullOrWhiteSpace(neonBaseUrl))
+                {
+                    return BadRequest(new { success = false, message = "Neon base URL not configured" });
+                }
+
+                using var httpClient = _httpClientFactory.CreateClient();
+                httpClient.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", neonApiKey);
+                httpClient.DefaultRequestHeaders.Accept.Add(new System.Net.Http.Headers.MediaTypeWithQualityHeaderValue("application/json"));
+
+                // Generate test project name if not provided
+                if (string.IsNullOrWhiteSpace(projectName))
+                {
+                    projectName = $"TestProject_{DateTime.UtcNow:yyyyMMddHHmmss}";
+                }
+
+                // ============================================================================
+                // STEP 0: Create Neon Project (Project-Per-Tenant Model)
+                // ============================================================================
+                _logger.LogInformation("🏗️ [NEON PROJECT-PER-TENANT] Step 0: Creating Neon project: {ProjectName}", projectName);
+
+                var createProjectRequest = new
+                {
+                    project = new
+                    {
+                        name = projectName
+                    }
+                };
+
+                var projectRequestBody = JsonSerializer.Serialize(createProjectRequest);
+                var projectContent = new StringContent(projectRequestBody, System.Text.Encoding.UTF8, "application/json");
+                var projectApiUrl = $"{neonBaseUrl}/projects";
+                
+                _logger.LogInformation("🏗️ [NEON PROJECT-PER-TENANT] Step 0: Calling Neon API: POST {Url}", projectApiUrl);
+                var projectResponse = await httpClient.PostAsync(projectApiUrl, projectContent);
+                var projectResponseContent = await projectResponse.Content.ReadAsStringAsync();
+                var step0Elapsed = DateTime.UtcNow - step0Start;
+
+                string? createdProjectId = null;
+                string? createdProjectName = null;
+                string? defaultBranchId = null; // Extract default branch ID from project creation response
+                var projectOperationIds = new List<string>(); // Extract operation IDs from project creation
+
+                if (projectResponse.IsSuccessStatusCode)
+                {
+                    var projectDoc = JsonDocument.Parse(projectResponseContent);
+                    if (projectDoc.RootElement.TryGetProperty("project", out var projectObj))
+                    {
+                        if (projectObj.TryGetProperty("id", out var projectIdProp))
+                        {
+                            createdProjectId = projectIdProp.GetString();
+                        }
+                        if (projectObj.TryGetProperty("name", out var projectNameProp))
+                        {
+                            createdProjectName = projectNameProp.GetString();
+                        }
+                    }
+
+                    // Extract default branch ID from project creation response (new projects automatically create a main branch)
+                    if (projectDoc.RootElement.TryGetProperty("branch", out var branchObj))
+                    {
+                        if (branchObj.TryGetProperty("id", out var branchIdProp))
+                        {
+                            defaultBranchId = branchIdProp.GetString();
+                            _logger.LogInformation("🔍 [NEON PROJECT-PER-TENANT] Step 0: Found default branch ID in project creation response: {BranchId}", defaultBranchId);
+                        }
+                    }
+
+                    // Extract operation IDs from project creation (we need to wait for these to finish)
+                    if (projectDoc.RootElement.TryGetProperty("operations", out var operationsProp) && operationsProp.ValueKind == JsonValueKind.Array)
+                    {
+                        foreach (var op in operationsProp.EnumerateArray())
+                        {
+                            if (op.TryGetProperty("id", out var opIdProp))
+                            {
+                                var opId = opIdProp.GetString();
+                                if (!string.IsNullOrEmpty(opId))
+                                {
+                                    projectOperationIds.Add(opId);
+                                    _logger.LogInformation("🔍 [NEON PROJECT-PER-TENANT] Step 0: Found project creation operation ID: {OperationId}", opId);
+                                }
+                            }
+                        }
+                    }
+
+                    if (!string.IsNullOrEmpty(createdProjectId))
+                    {
+                        _logger.LogInformation("✅ [NEON PROJECT-PER-TENANT] Step 0: Created Neon project '{ProjectId}' ({ProjectName})", 
+                            createdProjectId, createdProjectName ?? projectName);
+                    }
+                }
+
+                steps.Add(new
+                {
+                    step = 0,
+                    name = "Create Neon Project",
+                    success = projectResponse.IsSuccessStatusCode && !string.IsNullOrEmpty(createdProjectId),
+                    elapsedMs = step0Elapsed.TotalMilliseconds,
+                    projectId = createdProjectId,
+                    projectName = createdProjectName ?? projectName,
+                    defaultBranchId = defaultBranchId,
+                    operationIds = projectOperationIds,
+                    rawResponse = projectResponseContent
+                });
+
+                if (!projectResponse.IsSuccessStatusCode || string.IsNullOrEmpty(createdProjectId))
+                {
+                    return Ok(new
+                    {
+                        success = false,
+                        message = "Failed to create Neon project",
+                        steps = steps
+                    });
+                }
+
+                // ============================================================================
+                // STEP 0.5: Wait for Project Creation Operations to Finish
+                // ============================================================================
+                var step0_5Start = DateTime.UtcNow;
+                var projectReady = false;
+                var projectOperationPollCount = 0;
+                var maxProjectOperationPolls = 60; // 60 retries × 2 seconds = 2 minutes max
+                var projectOperationPollDelay = 2000;
+                var trackedProjectOperations = new Dictionary<string, string>();
+
+                if (projectOperationIds.Count > 0)
+                {
+                    _logger.LogInformation("⏳ [NEON PROJECT-PER-TENANT] Step 0.5: Waiting for {Count} project creation operations to finish before creating branch", 
+                        projectOperationIds.Count);
+
+                    var projectOperationsApiUrl = $"{neonBaseUrl}/projects/{createdProjectId}/operations";
+
+                    while (projectOperationPollCount < maxProjectOperationPolls && !projectReady)
+                    {
+                        try
+                        {
+                            var opsResponse = await httpClient.GetAsync(projectOperationsApiUrl);
+                            if (opsResponse.IsSuccessStatusCode)
+                            {
+                                var opsContent = await opsResponse.Content.ReadAsStringAsync();
+                                var opsDoc = JsonDocument.Parse(opsContent);
+
+                                trackedProjectOperations.Clear();
+
+                                if (opsDoc.RootElement.TryGetProperty("operations", out var opsArray) && opsArray.ValueKind == JsonValueKind.Array)
+                                {
+                                    foreach (var op in opsArray.EnumerateArray())
+                                    {
+                                        if (op.TryGetProperty("id", out var idProp))
+                                        {
+                                            var opId = idProp.GetString();
+                                            if (projectOperationIds.Contains(opId))
+                                            {
+                                                var opStatus = op.TryGetProperty("status", out var statusProp) ? statusProp.GetString() : "unknown";
+                                                var opAction = op.TryGetProperty("action", out var actionProp) ? actionProp.GetString() : "unknown";
+                                                trackedProjectOperations[opId] = $"{opAction}:{opStatus}";
+                                            }
+                                        }
+                                    }
+                                }
+
+                                if (projectOperationIds.Count > 0)
+                                {
+                                    var allTracked = projectOperationIds.All(id => trackedProjectOperations.ContainsKey(id));
+                                    var allFinished = allTracked && trackedProjectOperations.Values.All(status => 
+                                        status.Contains(":finished") || status.Contains(":completed"));
+
+                                    if (allFinished && allTracked)
+                                    {
+                                        projectReady = true;
+                                        _logger.LogInformation("✅ [NEON PROJECT-PER-TENANT] Step 0.5 SUCCESS: All {Count} project creation operations finished after {Polls} polls", 
+                                            projectOperationIds.Count, projectOperationPollCount);
+                                        break;
+                                    }
+                                }
+                            }
+
+                            if (!projectReady)
+                            {
+                                projectOperationPollCount++;
+                                if (projectOperationPollCount < maxProjectOperationPolls)
+                                {
+                                    var statuses = string.Join(", ", trackedProjectOperations.Select(kvp => $"{kvp.Key}:{kvp.Value}"));
+                                    _logger.LogInformation("⏳ [NEON PROJECT-PER-TENANT] Step 0.5: Waiting for project operations (poll {Poll}/{MaxPolls}, found {Found}/{Total}). Statuses: {Statuses}", 
+                                        projectOperationPollCount, maxProjectOperationPolls, trackedProjectOperations.Count, projectOperationIds.Count, statuses);
+                                    await Task.Delay(projectOperationPollDelay);
+                                }
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            _logger.LogWarning(ex, "⚠️ [NEON PROJECT-PER-TENANT] Error polling project operations (attempt {Attempt})", projectOperationPollCount + 1);
+                            projectOperationPollCount++;
+                            if (projectOperationPollCount < maxProjectOperationPolls)
+                            {
+                                await Task.Delay(projectOperationPollDelay);
+                            }
+                        }
+                    }
+                }
+                else
+                {
+                    // No operations to wait for, proceed immediately
+                    projectReady = true;
+                    _logger.LogInformation("⏳ [NEON PROJECT-PER-TENANT] Step 0.5: No project creation operations found, proceeding immediately");
+                }
+
+                var step0_5Elapsed = DateTime.UtcNow - step0_5Start;
+                steps.Add(new
+                {
+                    step = 0.5,
+                    name = "Wait for Project Creation Operations",
+                    success = projectReady,
+                    elapsedMs = step0_5Elapsed.TotalMilliseconds,
+                    polls = projectOperationPollCount,
+                    trackedOperationIds = projectOperationIds,
+                    operationStatuses = trackedProjectOperations.Select(kvp => $"{kvp.Key}:{kvp.Value}").ToList(),
+                    message = projectReady 
+                        ? $"Project ready - all {projectOperationIds.Count} operations finished" 
+                        : $"Still waiting after {projectOperationPollCount} polls"
+                });
+
+                if (!projectReady)
+                {
+                    _logger.LogWarning("⚠️ [NEON PROJECT-PER-TENANT] Step 0.5: Project operations did not finish, but proceeding with branch creation anyway");
+                }
+
+                // ============================================================================
+                // STEP 1: Create Branch in the New Project
+                // ============================================================================
+                var step1Start = DateTime.UtcNow;
+                var testDbName = $"AppDB_test_{DateTime.UtcNow:yyyyMMddHHmmss}";
+
+                _logger.LogInformation("🌿 [NEON PROJECT-PER-TENANT] Step 1: Creating branch in project '{ProjectId}'", createdProjectId);
+
+                // For new projects, create a branch from the default/main branch that was auto-created
+                // Use JsonSerializerOptions to ignore null values
+                var jsonOptions = new JsonSerializerOptions
+                {
+                    DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull
+                };
+
+                object createBranchRequest;
+                if (!string.IsNullOrEmpty(defaultBranchId))
+                {
+                    // Create branch from the default branch (for isolation)
+                    _logger.LogInformation("🌿 [NEON PROJECT-PER-TENANT] Step 1: Creating branch from default branch '{DefaultBranchId}'", defaultBranchId);
+                    createBranchRequest = new
+                    {
+                        endpoints = new[]
+                        {
+                            new { type = "read_write" }
+                        },
+                        branch = new { parent_id = defaultBranchId }
+                    };
+                }
+                else
+                {
+                    // Fallback: Create branch without parent (will use project's default branch)
+                    _logger.LogInformation("🌿 [NEON PROJECT-PER-TENANT] Step 1: Creating branch without parent (default branch not found in response)");
+                    createBranchRequest = new
+                    {
+                        endpoints = new[]
+                        {
+                            new { type = "read_write" }
+                        }
+                    };
+                }
+
+                var branchRequestBody = JsonSerializer.Serialize(createBranchRequest, jsonOptions);
+                var branchContent = new StringContent(branchRequestBody, System.Text.Encoding.UTF8, "application/json");
+                var branchApiUrl = $"{neonBaseUrl}/projects/{createdProjectId}/branches";
+                
+                _logger.LogInformation("🌿 [NEON PROJECT-PER-TENANT] Step 1: Calling Neon API: POST {Url}", branchApiUrl);
+                var branchResponse = await httpClient.PostAsync(branchApiUrl, branchContent);
+                var branchResponseContent = await branchResponse.Content.ReadAsStringAsync();
+                var step1Elapsed = DateTime.UtcNow - step1Start;
+
+                string? createdBranchId = null;
+                string? endpointHost = null;
+                string? endpointId = null;
+                string? endpointPort = null;
+                var operationIds = new List<string>();
+
+                if (branchResponse.IsSuccessStatusCode)
+                {
+                    var branchDoc = JsonDocument.Parse(branchResponseContent);
+                    
+                    if (branchDoc.RootElement.TryGetProperty("branch", out var branchObj))
+                    {
+                        if (branchObj.TryGetProperty("id", out var branchIdProp))
+                        {
+                            createdBranchId = branchIdProp.GetString();
+                        }
+                    }
+
+                    if (branchDoc.RootElement.TryGetProperty("endpoints", out var endpointsProp) && endpointsProp.ValueKind == JsonValueKind.Array)
+                    {
+                        foreach (var endpoint in endpointsProp.EnumerateArray())
+                        {
+                            if (endpoint.TryGetProperty("branch_id", out var epBranchIdProp) && epBranchIdProp.GetString() == createdBranchId)
+                            {
+                                if (endpoint.TryGetProperty("id", out var epIdProp))
+                                    endpointId = epIdProp.GetString();
+                                if (endpoint.TryGetProperty("host", out var hostProp))
+                                    endpointHost = hostProp.GetString();
+                                if (endpoint.TryGetProperty("port", out var portProp) && portProp.ValueKind == JsonValueKind.Number)
+                                    endpointPort = portProp.GetInt32().ToString();
+                                break;
+                            }
+                        }
+                    }
+
+                    if (branchDoc.RootElement.TryGetProperty("operations", out var operationsProp) && operationsProp.ValueKind == JsonValueKind.Array)
+                    {
+                        foreach (var op in operationsProp.EnumerateArray())
+                        {
+                            if (op.TryGetProperty("id", out var opIdProp))
+                            {
+                                var opId = opIdProp.GetString();
+                                if (!string.IsNullOrEmpty(opId))
+                                {
+                                    operationIds.Add(opId);
+                                }
+                            }
+                        }
+                    }
+
+                    _logger.LogInformation("✅ [NEON PROJECT-PER-TENANT] Step 1: Branch created successfully");
+                    _logger.LogInformation("🔍 [NEON PROJECT-PER-TENANT] Step 1: Branch ID: {BranchId}", createdBranchId);
+                    _logger.LogInformation("🔍 [NEON PROJECT-PER-TENANT] Step 1: Initial endpoint host: {EndpointHost}", endpointHost);
+                    _logger.LogInformation("🔍 [NEON PROJECT-PER-TENANT] Step 1: Initial endpoint ID: {EndpointId}", endpointId);
+                    _logger.LogInformation("🔍 [NEON PROJECT-PER-TENANT] Step 1: Found {Count} operation IDs: {OperationIds}", 
+                        operationIds.Count, string.Join(", ", operationIds));
+                }
+
+                steps.Add(new
+                {
+                    step = 1,
+                    name = "Create Branch",
+                    success = branchResponse.IsSuccessStatusCode,
+                    elapsedMs = step1Elapsed.TotalMilliseconds,
+                    branchId = createdBranchId,
+                    endpointHost = endpointHost,
+                    endpointId = endpointId,
+                    endpointPort = endpointPort,
+                    operationIds = operationIds,
+                    rawResponse = branchResponseContent
+                });
+
+                if (!branchResponse.IsSuccessStatusCode || string.IsNullOrEmpty(createdBranchId))
+                {
+                    return Ok(new
+                    {
+                        success = false,
+                        message = "Failed to create branch",
+                        steps = steps
+                    });
+                }
+
+                // ============================================================================
+                // STEP 2: Poll Operations API until SPECIFIC operations from Step 1 are ready
+                // ============================================================================
+                var step2Start = DateTime.UtcNow;
+                var branchReady = false;
+                var operationPollCount = 0;
+                var maxOperationPolls = 60;
+                var operationPollDelay = 2000;
+                var trackedOperations = new Dictionary<string, string>();
+
+                if (operationIds.Count > 0)
+                {
+                    _logger.LogInformation("🔍 [NEON PROJECT-PER-TENANT] Step 2: Polling operations API for {Count} operations until branch '{BranchId}' is ready", 
+                        operationIds.Count, createdBranchId);
+
+                    var operationsApiUrl = $"{neonBaseUrl}/projects/{createdProjectId}/operations";
+
+                    while (operationPollCount < maxOperationPolls && !branchReady)
+                    {
+                        try
+                        {
+                            var opsResponse = await httpClient.GetAsync(operationsApiUrl);
+                            if (opsResponse.IsSuccessStatusCode)
+                            {
+                                var opsContent = await opsResponse.Content.ReadAsStringAsync();
+                                var opsDoc = JsonDocument.Parse(opsContent);
+
+                                trackedOperations.Clear();
+
+                                if (opsDoc.RootElement.TryGetProperty("operations", out var opsArray) && opsArray.ValueKind == JsonValueKind.Array)
+                                {
+                                    foreach (var op in opsArray.EnumerateArray())
+                                    {
+                                        if (op.TryGetProperty("id", out var idProp))
+                                        {
+                                            var opId = idProp.GetString();
+                                            if (operationIds.Contains(opId))
+                                            {
+                                                var opStatus = op.TryGetProperty("status", out var statusProp) ? statusProp.GetString() : "unknown";
+                                                trackedOperations[opId] = opStatus;
+                                            }
+                                        }
+                                    }
+                                }
+
+                                if (operationIds.Count > 0)
+                                {
+                                    var allTracked = operationIds.All(id => trackedOperations.ContainsKey(id));
+                                    var allFinished = allTracked && trackedOperations.Values.All(status => 
+                                        status == "finished" || status == "completed");
+
+                                    if (allFinished && allTracked)
+                                    {
+                                        branchReady = true;
+                                        _logger.LogInformation("✅ [NEON PROJECT-PER-TENANT] Step 2 SUCCESS: All {Count} operations finished for branch '{BranchId}' after {Polls} polls", 
+                                            operationIds.Count, createdBranchId, operationPollCount);
+                                        break;
+                                    }
+                                }
+                            }
+
+                            if (!branchReady)
+                            {
+                                operationPollCount++;
+                                if (operationPollCount < maxOperationPolls)
+                                {
+                                    var statuses = string.Join(", ", trackedOperations.Select(kvp => $"{kvp.Key}:{kvp.Value}"));
+                                    _logger.LogInformation("⏳ [NEON PROJECT-PER-TENANT] Step 2: Waiting for operations (poll {Poll}/{MaxPolls}, found {Found}/{Total}). Statuses: {Statuses}", 
+                                        operationPollCount, maxOperationPolls, trackedOperations.Count, operationIds.Count, statuses);
+                                    await Task.Delay(operationPollDelay);
+                                }
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            _logger.LogWarning(ex, "⚠️ [NEON PROJECT-PER-TENANT] Error polling operations (attempt {Attempt})", operationPollCount + 1);
+                            operationPollCount++;
+                            if (operationPollCount < maxOperationPolls)
+                            {
+                                await Task.Delay(operationPollDelay);
+                            }
+                        }
+                    }
+                }
+
+                var step2Elapsed = DateTime.UtcNow - step2Start;
+                steps.Add(new
+                {
+                    step = 2,
+                    name = "Poll Operations API",
+                    success = branchReady,
+                    elapsedMs = step2Elapsed.TotalMilliseconds,
+                    polls = operationPollCount,
+                    trackedOperationIds = operationIds,
+                    operationStatuses = trackedOperations.Select(kvp => $"{kvp.Key}:{kvp.Value}").ToList(),
+                    message = branchReady 
+                        ? $"Branch is ready - all {operationIds.Count} operations finished" 
+                        : $"Still waiting after {operationPollCount} polls"
+                });
+
+                // ============================================================================
+                // STEP 2.5: Verify endpoint after operations finish
+                // ============================================================================
+                var step2_5Start = DateTime.UtcNow;
+                string? verifiedEndpointHost = endpointHost;
+                string? verifiedEndpointId = endpointId;
+
+                if (branchReady && !string.IsNullOrEmpty(createdBranchId))
+                {
+                    _logger.LogInformation("🔍 [NEON PROJECT-PER-TENANT] Step 2.5: Verifying endpoint after operations finished for branch '{BranchId}'", createdBranchId);
+                    
+                    try
+                    {
+                        var verifyBranchApiUrl = $"{neonBaseUrl}/projects/{createdProjectId}/branches/{Uri.EscapeDataString(createdBranchId)}";
+                        var branchApiResponse = await httpClient.GetAsync(verifyBranchApiUrl);
+
+                        if (branchApiResponse.IsSuccessStatusCode)
+                        {
+                            var branchApiContent = await branchApiResponse.Content.ReadAsStringAsync();
+                            var branchApiDoc = JsonDocument.Parse(branchApiContent);
+
+                            var endpointsArray = default(JsonElement);
+                            var endpointsFound = false;
+
+                            if (branchApiDoc.RootElement.TryGetProperty("endpoints", out var rootEndpointsProp) && 
+                                rootEndpointsProp.ValueKind == JsonValueKind.Array)
+                            {
+                                endpointsArray = rootEndpointsProp;
+                                endpointsFound = true;
+                            }
+                            else if (branchApiDoc.RootElement.TryGetProperty("branch", out var branchObj) &&
+                                     branchObj.TryGetProperty("endpoints", out var branchEndpointsProp) && 
+                                     branchEndpointsProp.ValueKind == JsonValueKind.Array)
+                            {
+                                endpointsArray = branchEndpointsProp;
+                                endpointsFound = true;
+                            }
+
+                            if (!endpointsFound)
+                            {
+                                var projectEndpointsUrl = $"{neonBaseUrl}/projects/{createdProjectId}/endpoints";
+                                var endpointsResponse = await httpClient.GetAsync(projectEndpointsUrl);
+
+                                if (endpointsResponse.IsSuccessStatusCode)
+                                {
+                                    var endpointsContent = await endpointsResponse.Content.ReadAsStringAsync();
+                                    var endpointsDoc = JsonDocument.Parse(endpointsContent);
+
+                                    if (endpointsDoc.RootElement.TryGetProperty("endpoints", out var projectEndpointsProp) && 
+                                        projectEndpointsProp.ValueKind == JsonValueKind.Array)
+                                    {
+                                        foreach (var ep in projectEndpointsProp.EnumerateArray())
+                                        {
+                                            if (ep.TryGetProperty("branch_id", out var epBranchIdProp) &&
+                                                epBranchIdProp.GetString() == createdBranchId)
+                                            {
+                                                if (ep.TryGetProperty("host", out var epHostProp))
+                                                {
+                                                    var verifiedHost = epHostProp.GetString();
+                                                    if (!string.IsNullOrEmpty(verifiedHost))
+                                                    {
+                                                        verifiedEndpointHost = verifiedHost;
+                                                        _logger.LogInformation("✅ [NEON PROJECT-PER-TENANT] Step 2.5: Verified endpoint host: {EndpointHost}", verifiedEndpointHost);
+                                                        
+                                                        if (ep.TryGetProperty("id", out var epIdProp))
+                                                        {
+                                                            verifiedEndpointId = epIdProp.GetString();
+                                                        }
+                                                        break;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    catch (Exception verifyEx)
+                    {
+                        _logger.LogWarning(verifyEx, "⚠️ [NEON PROJECT-PER-TENANT] Step 2.5: Exception verifying endpoint");
+                    }
+                }
+
+                endpointHost = verifiedEndpointHost ?? endpointHost;
+                endpointId = verifiedEndpointId ?? endpointId;
+
+                var step2_5Elapsed = DateTime.UtcNow - step2_5Start;
+                steps.Add(new
+                {
+                    step = 2.5,
+                    name = "Verify Endpoint After Operations",
+                    success = !string.IsNullOrEmpty(verifiedEndpointHost),
+                    elapsedMs = step2_5Elapsed.TotalMilliseconds,
+                    originalEndpointFromStep1 = endpointHost,
+                    verifiedEndpointFromBranchAPI = verifiedEndpointHost,
+                    message = !string.IsNullOrEmpty(verifiedEndpointHost) 
+                        ? $"✅ Endpoint verified: {verifiedEndpointHost}" 
+                        : "⚠️ Using original endpoint from Step 1"
+                });
+
+                // ============================================================================
+                // STEP 3: Create Database in Branch
+                // ============================================================================
+                var step3Start = DateTime.UtcNow;
+                var createDbRequest = new
+                {
+                    database = new
+                    {
+                        name = testDbName,
+                        owner_name = neonDefaultOwnerName
+                    }
+                };
+
+                var dbApiUrl = $"{neonBaseUrl}/projects/{createdProjectId}/branches/{Uri.EscapeDataString(createdBranchId)}/databases";
+                var dbRequestBody = JsonSerializer.Serialize(createDbRequest);
+                var dbContent = new StringContent(dbRequestBody, System.Text.Encoding.UTF8, "application/json");
+
+                _logger.LogInformation("🔍 [NEON PROJECT-PER-TENANT] Step 3: Creating database '{DbName}' in branch '{BranchId}'", testDbName, createdBranchId);
+                var dbResponse = await httpClient.PostAsync(dbApiUrl, dbContent);
+                var dbResponseContent = await dbResponse.Content.ReadAsStringAsync();
+                var step3Elapsed = DateTime.UtcNow - step3Start;
+
+                steps.Add(new
+                {
+                    step = 3,
+                    name = "Create Database",
+                    success = dbResponse.IsSuccessStatusCode,
+                    elapsedMs = step3Elapsed.TotalMilliseconds,
+                    databaseName = testDbName,
+                    rawResponse = dbResponseContent
+                });
+
+                if (!dbResponse.IsSuccessStatusCode)
+                {
+                    return Ok(new
+                    {
+                        success = false,
+                        message = "Failed to create database",
+                        steps = steps
+                    });
+                }
+
+                // ============================================================================
+                // STEP 4: Get Password and Construct Connection String
+                // ============================================================================
+                var step4Start = DateTime.UtcNow;
+                string? connectionString = null;
+                string? extractedPassword = null;
+                string? extractedUsername = null;
+                string? connectionUriEndpoint = null;
+
+                _logger.LogInformation("🔍 [NEON PROJECT-PER-TENANT] Step 4: Starting connection string construction");
+                _logger.LogInformation("🔍 [NEON PROJECT-PER-TENANT] Step 4: Using endpoint host: {EndpointHost}", endpointHost);
+
+                var connectionUrl = $"{neonBaseUrl}/projects/{createdProjectId}/connection_uri?database_name={Uri.EscapeDataString(testDbName)}&role_name={Uri.EscapeDataString(neonDefaultOwnerName)}&branch_id={Uri.EscapeDataString(createdBranchId)}&pooled=false";
+
+                try
+                {
+                    _logger.LogInformation("🔍 [NEON PROJECT-PER-TENANT] Step 4: Calling connection_uri API to extract password");
+                    var connResponse = await httpClient.GetAsync(connectionUrl);
+                    if (connResponse.IsSuccessStatusCode)
+                    {
+                        var connContent = await connResponse.Content.ReadAsStringAsync();
+                        var connDoc = JsonDocument.Parse(connContent);
+                        if (connDoc.RootElement.TryGetProperty("uri", out var uriProp))
+                        {
+                            var tempConnString = uriProp.GetString();
+                            if (!string.IsNullOrEmpty(tempConnString))
+                            {
+                                var uri = new Uri(tempConnString);
+                                connectionUriEndpoint = uri.Host;
+
+                                _logger.LogInformation("🔍 [NEON PROJECT-PER-TENANT] Step 4: connection_uri API returned endpoint: {ConnectionUriEndpoint}", connectionUriEndpoint);
+
+                                var userInfo = uri.UserInfo.Split(':');
+                                extractedUsername = userInfo.Length > 0 ? userInfo[0] : neonDefaultOwnerName;
+                                extractedPassword = userInfo.Length > 1 ? Uri.UnescapeDataString(userInfo[1]) : "";
+
+                                _logger.LogInformation("✅ [NEON PROJECT-PER-TENANT] Step 4: Extracted username: {Username}, password length: {PasswordLength}", 
+                                    extractedUsername, extractedPassword?.Length ?? 0);
+
+                                if (!string.IsNullOrEmpty(connectionUriEndpoint) && !string.IsNullOrEmpty(endpointHost))
+                                {
+                                    var endpointsMatch = connectionUriEndpoint.Equals(endpointHost, StringComparison.OrdinalIgnoreCase);
+                                    if (endpointsMatch)
+                                    {
+                                        _logger.LogInformation("✅ [NEON PROJECT-PER-TENANT] Step 4: Endpoint from connection_uri matches verified endpoint: {Endpoint}", endpointHost);
+                                    }
+                                    else
+                                    {
+                                        _logger.LogWarning("⚠️ [NEON PROJECT-PER-TENANT] Step 4: Endpoint mismatch! connection_uri: {ConnectionUriEndpoint}, verified: {VerifiedEndpoint}. Using verified endpoint.", 
+                                            connectionUriEndpoint, endpointHost);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "⚠️ [NEON PROJECT-PER-TENANT] Step 4: Failed to extract password from connection_uri API");
+                }
+
+                if (!string.IsNullOrEmpty(endpointHost) && !string.IsNullOrEmpty(extractedPassword))
+                {
+                    var port = !string.IsNullOrEmpty(endpointPort) ? int.Parse(endpointPort) : 5432;
+                    connectionString = $"postgresql://{extractedUsername}:{Uri.EscapeDataString(extractedPassword)}@{endpointHost}:{port}/{testDbName}?sslmode=require";
+
+                    _logger.LogInformation("✅ [NEON PROJECT-PER-TENANT] Step 4: Connection string constructed successfully");
+                    _logger.LogInformation("🔍 [NEON PROJECT-PER-TENANT] Step 4: Connection string details - Host: {Host}, Port: {Port}, Database: {Db}, Username: {User}", 
+                        endpointHost, port, testDbName, extractedUsername);
+                }
+
+                var step4Elapsed = DateTime.UtcNow - step4Start;
+                steps.Add(new
+                {
+                    step = 4,
+                    name = "Construct Connection String",
+                    success = !string.IsNullOrEmpty(connectionString),
+                    elapsedMs = step4Elapsed.TotalMilliseconds,
+                    connectionString = connectionString != null ? connectionString.Substring(0, Math.Min(100, connectionString.Length)) + "..." : null,
+                    endpointUsed = endpointHost,
+                    endpointFromConnectionUri = connectionUriEndpoint,
+                    endpointsMatch = !string.IsNullOrEmpty(connectionUriEndpoint) && !string.IsNullOrEmpty(endpointHost) 
+                        ? connectionUriEndpoint.Equals(endpointHost, StringComparison.OrdinalIgnoreCase) 
+                        : (bool?)null,
+                    extractedUsername = extractedUsername,
+                    extractedPassword = extractedPassword != null ? "***" + extractedPassword.Substring(Math.Max(0, extractedPassword.Length - 4)) : null,
+                    message = !string.IsNullOrEmpty(connectionString) 
+                        ? $"✅ Connection string constructed using endpoint: {endpointHost}" 
+                        : "❌ Failed to construct connection string"
+                });
+
+                var totalElapsed = DateTime.UtcNow - step0Start;
+
+                return Ok(new
+                {
+                    success = !string.IsNullOrEmpty(connectionString),
+                    message = !string.IsNullOrEmpty(connectionString) 
+                        ? "✅ Successfully created Neon project, branch, database, and connection string using project-per-tenant model"
+                        : "⚠️ Project, branch, and database created, but connection string construction failed",
+                    totalElapsedMs = totalElapsed.TotalMilliseconds,
+                    summary = new
+                    {
+                        projectId = createdProjectId,
+                        projectName = createdProjectName ?? projectName,
+                        branchId = createdBranchId,
+                        databaseName = testDbName,
+                        endpointHost = endpointHost,
+                        endpointId = endpointId,
+                        connectionStringReady = !string.IsNullOrEmpty(connectionString),
+                        operationsPolled = operationPollCount,
+                        branchReadyFromOperations = branchReady
+                    },
+                    steps = steps,
+                    recommendation = !string.IsNullOrEmpty(connectionString) && !string.IsNullOrEmpty(endpointHost)
+                        ? $"✅ Project-per-tenant model works! Each board now has its own isolated Neon project. Project: {createdProjectId}, Endpoint: {endpointHost}"
+                        : "❌ Need to investigate why connection string construction failed"
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error in Neon project-per-tenant test");
+                return StatusCode(500, new
+                {
+                    success = false,
+                    message = "Error in Neon project-per-tenant workflow",
+                    error = ex.Message,
+                    stackTrace = ex.StackTrace
+                });
+            }
+        }
+
+        /// <summary>
+        /// Helper method to analyze branch API response structure
+        /// </summary>
+        private object AnalyzeBranchResponse(JsonElement root)
+        {
+            var analysis = new Dictionary<string, object>();
+
+            // Check for endpoints array at root level
+            if (root.TryGetProperty("endpoints", out var rootEndpoints) && rootEndpoints.ValueKind == JsonValueKind.Array)
+            {
+                analysis["endpointsLocation"] = "root";
+                analysis["endpointsCount"] = rootEndpoints.GetArrayLength();
+                
+                var endpointIds = new List<string>();
+                var endpointHosts = new List<string>();
+                foreach (var endpoint in rootEndpoints.EnumerateArray())
+                {
+                    if (endpoint.TryGetProperty("id", out var epId))
+                        endpointIds.Add(epId.GetString() ?? "unknown");
+                    if (endpoint.TryGetProperty("host", out var epHost))
+                        endpointHosts.Add(epHost.GetString() ?? "unknown");
+                }
+                analysis["endpointIds"] = endpointIds;
+                analysis["endpointHosts"] = endpointHosts;
+            }
+            // Check for endpoints array inside branch object
+            else if (root.TryGetProperty("branch", out var branchObj) &&
+                     branchObj.TryGetProperty("endpoints", out var branchEndpoints) &&
+                     branchEndpoints.ValueKind == JsonValueKind.Array)
+            {
+                analysis["endpointsLocation"] = "branch.endpoints";
+                analysis["endpointsCount"] = branchEndpoints.GetArrayLength();
+                
+                var endpointIds = new List<string>();
+                var endpointHosts = new List<string>();
+                foreach (var endpoint in branchEndpoints.EnumerateArray())
+                {
+                    if (endpoint.TryGetProperty("id", out var epId))
+                        endpointIds.Add(epId.GetString() ?? "unknown");
+                    if (endpoint.TryGetProperty("host", out var epHost))
+                        endpointHosts.Add(epHost.GetString() ?? "unknown");
+                }
+                analysis["endpointIds"] = endpointIds;
+                analysis["endpointHosts"] = endpointHosts;
+            }
+            else
+            {
+                analysis["endpointsLocation"] = "not found";
+                analysis["endpointsCount"] = 0;
+            }
+
+            // Check for branch ID
+            if (root.TryGetProperty("id", out var rootId))
+                analysis["branchId"] = rootId.GetString();
+            else if (root.TryGetProperty("branch", out var branch) && branch.TryGetProperty("id", out var branchId))
+                analysis["branchId"] = branchId.GetString();
+
+            // List all top-level properties
+            var topLevelProperties = new List<string>();
+            foreach (var prop in root.EnumerateObject())
+            {
+                topLevelProperties.Add($"{prop.Name} ({prop.Value.ValueKind})");
+            }
+            analysis["topLevelProperties"] = topLevelProperties;
+
+            return analysis;
+        }
+
+        #endregion
+
+        #region Language-Specific Database Test Methods
+
+        /// <summary>
+        /// Test C# backend database operations (simulates Railway deployment after board creation)
+        /// Tests the exact operations that happen in the generated C# backend
+        /// </summary>
+        [HttpGet("test-csharp/{boardId}")]
+        [ProducesResponseType(typeof(LanguageBackendTestResponse), StatusCodes.Status200OK)]
+        [ProducesResponseType(StatusCodes.Status404NotFound)]
+        [ProducesResponseType(StatusCodes.Status500InternalServerError)]
+        public async Task<ActionResult<LanguageBackendTestResponse>> TestCSharpBackend(string boardId)
+        {
+            try
+            {
+                _logger.LogInformation("🧪 Testing C# backend database operations for board {BoardId}", boardId);
+
+                // Get board and connection info
+                var connectionInfo = await GetBoardConnectionInfo(boardId);
+                if (connectionInfo == null)
+                {
+                    return NotFound(new { success = false, message = $"Board {boardId} not found or missing database configuration" });
+                }
+
+                var (connectionString, databaseName) = connectionInfo.Value;
+                var results = new List<object>();
+                var errors = new List<string>();
+
+                // Simulate C# backend operations
+                try
+                {
+                    // Parse connection string URI and use NpgsqlConnectionStringBuilder for proper parsing
+                    var uri = new Uri(connectionString);
+                    var userInfo = uri.UserInfo.Split(':');
+                    var username = userInfo[0];
+                    var password = userInfo.Length > 1 ? Uri.UnescapeDataString(userInfo[1]) : "";
+                    
+                    var builder = new NpgsqlConnectionStringBuilder
+                    {
+                        Host = uri.Host,
+                        Port = uri.Port > 0 ? uri.Port : 5432,
+                        Database = uri.AbsolutePath.TrimStart('/'),
+                        Username = username,
+                        Password = password,
+                        SslMode = SslMode.Require
+                    };
+                    
+                    using var conn = new NpgsqlConnection(builder.ConnectionString);
+                    await conn.OpenAsync();
+
+                    // Set search_path to public schema (required because isolated role has restricted search_path)
+                    // Note: Using string concatenation to avoid $ interpolation issues
+                    using var setPathCmd = new NpgsqlCommand("SET search_path = public, \"" + "$" + "user\";", conn);
+                    await setPathCmd.ExecuteNonQueryAsync();
+
+                    var quote = Convert.ToChar(34).ToString(); // Double quote for PostgreSQL identifier quoting
+                    var sql = $"SELECT {quote}Id{quote}, {quote}Name{quote} FROM {quote}TestProjects{quote} ORDER BY {quote}Id{quote}";
+                    using var cmd = new NpgsqlCommand(sql, conn);
+                    using var reader = await cmd.ExecuteReaderAsync();
+
+                    while (await reader.ReadAsync())
+                    {
+                        results.Add(new
+                        {
+                            Id = reader.GetInt32(0),
+                            Name = reader.GetString(1)
+                        });
+                    }
+
+                    _logger.LogInformation("✅ C# test successful: Retrieved {Count} rows", results.Count);
+                }
+                catch (PostgresException ex) when (ex.SqlState == "42P01")
+                {
+                    errors.Add($"Table does not exist: {ex.Message}");
+                }
+                catch (Exception ex)
+                {
+                    errors.Add($"C# test failed: {ex.Message}");
+                    _logger.LogError(ex, "C# backend test error");
+                }
+
+                return Ok(new LanguageBackendTestResponse
+                {
+                    Success = errors.Count == 0,
+                    Language = "C#",
+                    BoardId = boardId,
+                    Database = databaseName,
+                    RowsRetrieved = results.Count,
+                    Results = results,
+                    Errors = errors,
+                    ConnectionStringUsed = connectionString.Substring(0, Math.Min(50, connectionString.Length)) + "..."
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error testing C# backend for board {BoardId}", boardId);
+                return StatusCode(500, new { success = false, error = ex.Message });
+            }
+        }
+
+        /// <summary>
+        /// Test Python backend database operations (simulates Railway deployment after board creation)
+        /// Tests the exact operations that happen in the generated Python backend
+        /// </summary>
+        [HttpGet("test-python/{boardId}")]
+        [ProducesResponseType(typeof(LanguageBackendTestResponse), StatusCodes.Status200OK)]
+        [ProducesResponseType(StatusCodes.Status404NotFound)]
+        [ProducesResponseType(StatusCodes.Status500InternalServerError)]
+        public async Task<ActionResult<LanguageBackendTestResponse>> TestPythonBackend(string boardId)
+        {
+            try
+            {
+                _logger.LogInformation("🧪 Testing Python backend database operations for board {BoardId}", boardId);
+
+                // Get board and connection info
+                var connectionInfo = await GetBoardConnectionInfo(boardId);
+                if (connectionInfo == null)
+                {
+                    return NotFound(new { success = false, message = $"Board {boardId} not found or missing database configuration" });
+                }
+
+                var (connectionString, databaseName) = connectionInfo.Value;
+                var results = new List<object>();
+                var errors = new List<string>();
+
+                // Simulate Python backend operations (using asyncpg-style approach)
+                try
+                {
+                    // Parse connection string URI and use NpgsqlConnectionStringBuilder for proper parsing
+                    var uri = new Uri(connectionString);
+                    var userInfo = uri.UserInfo.Split(':');
+                    var username = userInfo[0];
+                    var password = userInfo.Length > 1 ? Uri.UnescapeDataString(userInfo[1]) : "";
+                    
+                    var builder = new NpgsqlConnectionStringBuilder
+                    {
+                        Host = uri.Host,
+                        Port = uri.Port > 0 ? uri.Port : 5432,
+                        Database = uri.AbsolutePath.TrimStart('/'),
+                        Username = username,
+                        Password = password,
+                        SslMode = SslMode.Require
+                    };
+                    
+                    using var conn = new NpgsqlConnection(builder.ConnectionString);
+                    await conn.OpenAsync();
+
+                    // Set search_path to public schema (required because isolated role has restricted search_path)
+                    using var setPathCmd = new NpgsqlCommand("SET search_path = public, \"$user\";", conn);
+                    await setPathCmd.ExecuteNonQueryAsync();
+
+                    // Python uses parameterized queries with %s placeholder
+                    var sql = "SELECT \"Id\", \"Name\" FROM \"TestProjects\" ORDER BY \"Id\"";
+                    using var cmd = new NpgsqlCommand(sql, conn);
+                    using var reader = await cmd.ExecuteReaderAsync();
+
+                    while (await reader.ReadAsync())
+                    {
+                        results.Add(new
+                        {
+                            Id = reader.GetInt32(0),
+                            Name = reader.GetString(1)
+                        });
+                    }
+
+                    _logger.LogInformation("✅ Python test successful: Retrieved {Count} rows", results.Count);
+                }
+                catch (PostgresException ex) when (ex.SqlState == "42P01")
+                {
+                    errors.Add($"Table does not exist: {ex.Message}");
+                }
+                catch (Exception ex)
+                {
+                    errors.Add($"Python test failed: {ex.Message}");
+                    _logger.LogError(ex, "Python backend test error");
+                }
+
+                return Ok(new LanguageBackendTestResponse
+                {
+                    Success = errors.Count == 0,
+                    Language = "Python",
+                    BoardId = boardId,
+                    Database = databaseName,
+                    RowsRetrieved = results.Count,
+                    Results = results,
+                    Errors = errors
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error testing Python backend for board {BoardId}", boardId);
+                return StatusCode(500, new { success = false, error = ex.Message });
+            }
+        }
+
+        /// <summary>
+        /// Test Node.js backend database operations (simulates Railway deployment after board creation)
+        /// Tests the exact operations that happen in the generated Node.js backend
+        /// </summary>
+        [HttpGet("test-nodejs/{boardId}")]
+        [ProducesResponseType(typeof(LanguageBackendTestResponse), StatusCodes.Status200OK)]
+        [ProducesResponseType(StatusCodes.Status404NotFound)]
+        [ProducesResponseType(StatusCodes.Status500InternalServerError)]
+        public async Task<ActionResult<LanguageBackendTestResponse>> TestNodeJSBackend(string boardId)
+        {
+            try
+            {
+                _logger.LogInformation("🧪 Testing Node.js backend database operations for board {BoardId}", boardId);
+
+                // Get board and connection info
+                var connectionInfo = await GetBoardConnectionInfo(boardId);
+                if (connectionInfo == null)
+                {
+                    return NotFound(new { success = false, message = $"Board {boardId} not found or missing database configuration" });
+                }
+
+                var (connectionString, databaseName) = connectionInfo.Value;
+                var results = new List<object>();
+                var errors = new List<string>();
+
+                // Simulate Node.js backend operations (using pg pool-style approach)
+                try
+                {
+                    // Parse connection string URI and use NpgsqlConnectionStringBuilder for proper parsing
+                    var uri = new Uri(connectionString);
+                    var userInfo = uri.UserInfo.Split(':');
+                    var username = userInfo[0];
+                    var password = userInfo.Length > 1 ? Uri.UnescapeDataString(userInfo[1]) : "";
+                    
+                    var builder = new NpgsqlConnectionStringBuilder
+                    {
+                        Host = uri.Host,
+                        Port = uri.Port > 0 ? uri.Port : 5432,
+                        Database = uri.AbsolutePath.TrimStart('/'),
+                        Username = username,
+                        Password = password,
+                        SslMode = SslMode.Require
+                    };
+                    
+                    using var conn = new NpgsqlConnection(builder.ConnectionString);
+                    await conn.OpenAsync();
+
+                    // Set search_path to public schema (required because isolated role has restricted search_path)
+                    using var setPathCmd = new NpgsqlCommand("SET search_path = public, \"$user\";", conn);
+                    await setPathCmd.ExecuteNonQueryAsync();
+
+                    // Node.js uses $1, $2, etc. for parameterized queries
+                    var sql = "SELECT \"Id\", \"Name\" FROM \"TestProjects\" ORDER BY \"Id\"";
+                    using var cmd = new NpgsqlCommand(sql, conn);
+                    using var reader = await cmd.ExecuteReaderAsync();
+
+                    while (await reader.ReadAsync())
+                    {
+                        results.Add(new
+                        {
+                            Id = reader.GetInt32(0),
+                            Name = reader.GetString(1)
+                        });
+                    }
+
+                    _logger.LogInformation("✅ Node.js test successful: Retrieved {Count} rows", results.Count);
+                }
+                catch (PostgresException ex) when (ex.SqlState == "42P01")
+                {
+                    errors.Add($"Table does not exist: {ex.Message}");
+                }
+                catch (Exception ex)
+                {
+                    errors.Add($"Node.js test failed: {ex.Message}");
+                    _logger.LogError(ex, "Node.js backend test error");
+                }
+
+                return Ok(new LanguageBackendTestResponse
+                {
+                    Success = errors.Count == 0,
+                    Language = "Node.js",
+                    BoardId = boardId,
+                    Database = databaseName,
+                    RowsRetrieved = results.Count,
+                    Results = results,
+                    Errors = errors
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error testing Node.js backend for board {BoardId}", boardId);
+                return StatusCode(500, new { success = false, error = ex.Message });
+            }
+        }
+
+        /// <summary>
+        /// Test Java backend database operations (simulates Railway deployment after board creation)
+        /// Tests the exact operations that happen in the generated Java backend
+        /// </summary>
+        [HttpGet("test-java/{boardId}")]
+        [ProducesResponseType(typeof(LanguageBackendTestResponse), StatusCodes.Status200OK)]
+        [ProducesResponseType(StatusCodes.Status404NotFound)]
+        [ProducesResponseType(StatusCodes.Status500InternalServerError)]
+        public async Task<ActionResult<LanguageBackendTestResponse>> TestJavaBackend(string boardId)
+        {
+            try
+            {
+                _logger.LogInformation("🧪 Testing Java backend database operations for board {BoardId}", boardId);
+
+                // Get board and connection info
+                var connectionInfo = await GetBoardConnectionInfo(boardId);
+                if (connectionInfo == null)
+                {
+                    return NotFound(new { success = false, message = $"Board {boardId} not found or missing database configuration" });
+                }
+
+                var (connectionString, databaseName) = connectionInfo.Value;
+                var results = new List<object>();
+                var errors = new List<string>();
+
+                // Simulate Java backend operations (using JPA EntityManager-style approach)
+                try
+                {
+                    // Parse connection string URI and use NpgsqlConnectionStringBuilder for proper parsing
+                    var uri = new Uri(connectionString);
+                    var userInfo = uri.UserInfo.Split(':');
+                    var username = userInfo[0];
+                    var password = userInfo.Length > 1 ? Uri.UnescapeDataString(userInfo[1]) : "";
+                    
+                    var builder = new NpgsqlConnectionStringBuilder
+                    {
+                        Host = uri.Host,
+                        Port = uri.Port > 0 ? uri.Port : 5432,
+                        Database = uri.AbsolutePath.TrimStart('/'),
+                        Username = username,
+                        Password = password,
+                        SslMode = SslMode.Require
+                    };
+                    
+                    using var conn = new NpgsqlConnection(builder.ConnectionString);
+                    await conn.OpenAsync();
+
+                    // Set search_path to public schema (required because isolated role has restricted search_path)
+                    using var setPathCmd = new NpgsqlCommand("SET search_path = public, \"$user\";", conn);
+                    await setPathCmd.ExecuteNonQueryAsync();
+
+                    // Java uses :paramName for named parameters in native queries
+                    var sql = "SELECT \"Id\", \"Name\" FROM \"TestProjects\" ORDER BY \"Id\"";
+                    using var cmd = new NpgsqlCommand(sql, conn);
+                    using var reader = await cmd.ExecuteReaderAsync();
+
+                    while (await reader.ReadAsync())
+                    {
+                        results.Add(new
+                        {
+                            Id = reader.GetInt32(0),
+                            Name = reader.GetString(1)
+                        });
+                    }
+
+                    _logger.LogInformation("✅ Java test successful: Retrieved {Count} rows", results.Count);
+                }
+                catch (PostgresException ex) when (ex.SqlState == "42P01")
+                {
+                    errors.Add($"Table does not exist: {ex.Message}");
+                }
+                catch (Exception ex)
+                {
+                    errors.Add($"Java test failed: {ex.Message}");
+                    _logger.LogError(ex, "Java backend test error");
+                }
+
+                return Ok(new LanguageBackendTestResponse
+                {
+                    Success = errors.Count == 0,
+                    Language = "Java",
+                    BoardId = boardId,
+                    Database = databaseName,
+                    RowsRetrieved = results.Count,
+                    Results = results,
+                    Errors = errors
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error testing Java backend for board {BoardId}", boardId);
+                return StatusCode(500, new { success = false, error = ex.Message });
+            }
+        }
+
+        /// <summary>
+        /// Helper method to get board connection information and construct connection string
+        /// </summary>
+        private async Task<(string ConnectionString, string DatabaseName)?> GetBoardConnectionInfo(string boardId)
+        {
+            try
+            {
+                var board = await _context.ProjectBoards
+                    .FirstOrDefaultAsync(pb => pb.Id == boardId);
+
+                if (board == null)
+                {
+                    _logger.LogWarning("Board {BoardId} not found", boardId);
+                    return null;
+                }
+
+                var dbName = $"AppDB_{boardId}";
+                var dbPassword = board.DBPassword;
+                var neonProjectId = board.NeonProjectId;
+                var neonBranchId = board.NeonBranchId;
+
+                if (string.IsNullOrEmpty(dbPassword))
+                {
+                    _logger.LogWarning("Board {BoardId} missing DBPassword", boardId);
+                    return null;
+                }
+
+                // Construct username (sanitized board ID)
+                var sanitizedDbName = dbName.ToLowerInvariant().Replace("-", "_").Replace(".", "_");
+                var username = $"db_{sanitizedDbName}_user".Substring(0, Math.Min(63, $"db_{sanitizedDbName}_user".Length));
+
+                // Try to get endpoint from Neon API
+                string? endpointHost = null;
+                int endpointPort = 5432;
+
+                if (!string.IsNullOrEmpty(neonProjectId) && !string.IsNullOrEmpty(neonBranchId))
+                {
+                    try
+                    {
+                        var neonApiKey = _configuration["Neon:ApiKey"];
+                        var neonBaseUrl = _configuration["Neon:BaseUrl"];
+
+                        if (!string.IsNullOrEmpty(neonApiKey) && !string.IsNullOrEmpty(neonBaseUrl))
+                        {
+                            // Get endpoints for the project
+                            var endpointsUrl = $"{neonBaseUrl}/projects/{neonProjectId}/endpoints";
+                            using var httpClient = _httpClientFactory.CreateClient();
+                            httpClient.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", neonApiKey);
+
+                            var endpointsResponse = await httpClient.GetAsync(endpointsUrl);
+                            if (endpointsResponse.IsSuccessStatusCode)
+                            {
+                                var endpointsContent = await endpointsResponse.Content.ReadAsStringAsync();
+                                var endpointsDoc = JsonDocument.Parse(endpointsContent);
+
+                                if (endpointsDoc.RootElement.TryGetProperty("endpoints", out var endpointsArray) && endpointsArray.ValueKind == JsonValueKind.Array)
+                                {
+                                    foreach (var endpoint in endpointsArray.EnumerateArray())
+                                    {
+                                        if (endpoint.TryGetProperty("branch_id", out var branchIdProp) &&
+                                            branchIdProp.GetString() == neonBranchId &&
+                                            endpoint.TryGetProperty("host", out var hostProp))
+                                        {
+                                            endpointHost = hostProp.GetString();
+                                            if (endpoint.TryGetProperty("port", out var portProp) && portProp.ValueKind == JsonValueKind.Number)
+                                            {
+                                                endpointPort = portProp.GetInt32();
+                                            }
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning(ex, "Failed to retrieve endpoint from Neon API for board {BoardId}", boardId);
+                    }
+                }
+
+                if (string.IsNullOrEmpty(endpointHost))
+                {
+                    _logger.LogWarning("Could not determine endpoint host for board {BoardId}. Using default.", boardId);
+                    // Fallback: try to extract from connection string if available, or use a default
+                    return null;
+                }
+
+                // Construct connection string
+                var connectionString = $"postgresql://{username}:{Uri.EscapeDataString(dbPassword)}@{endpointHost}:{endpointPort}/{dbName}?sslmode=require";
+
+                return (connectionString, dbName);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error getting connection info for board {BoardId}", boardId);
+                return null;
+            }
+        }
+
+        #endregion
+    }
+
+    /// <summary>
+    /// Response model for language-specific backend tests
+    /// </summary>
+    public class LanguageBackendTestResponse
+    {
+        public bool Success { get; set; }
+        public string Language { get; set; } = string.Empty;
+        public string BoardId { get; set; } = string.Empty;
+        public string Database { get; set; } = string.Empty;
+        public int RowsRetrieved { get; set; }
+        public List<object> Results { get; set; } = new List<object>();
+        public List<string> Errors { get; set; } = new List<string>();
+        public string? ConnectionStringUsed { get; set; }
     }
 }
 

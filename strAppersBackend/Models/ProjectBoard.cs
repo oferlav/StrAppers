@@ -175,6 +175,27 @@ namespace strAppersBackend.Models
         [Column("Observed")]
         public int Observed { get; set; } = 0;
 
+        /// <summary>
+        /// Database password for the isolated database role (for manual connections)
+        /// </summary>
+        [MaxLength(200)]
+        [Column("DBPassword")]
+        public string? DBPassword { get; set; }
+
+        /// <summary>
+        /// Neon project ID for this database (project-per-tenant isolation - each database in its own Neon project)
+        /// </summary>
+        [MaxLength(100)]
+        [Column("NeonProjectId")]
+        public string? NeonProjectId { get; set; }
+
+        /// <summary>
+        /// Neon branch ID for this database (ensures isolation - each database on its own branch)
+        /// </summary>
+        [MaxLength(100)]
+        [Column("NeonBranchId")]
+        public string? NeonBranchId { get; set; }
+
         // Navigation properties
         /// <summary>
         /// Navigation property to the associated project

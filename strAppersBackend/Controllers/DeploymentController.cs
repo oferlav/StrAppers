@@ -365,7 +365,7 @@ namespace strAppersBackend.Controllers
         {
             try
             {
-                using var httpClient = _httpClientFactory.CreateClient();
+                using var httpClient = _httpClientFactory.CreateClient("DeploymentController");
                 httpClient.DefaultRequestHeaders.Authorization = 
                     new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", accessToken);
                 httpClient.DefaultRequestHeaders.Add("User-Agent", "StrAppersBackend/1.0");
@@ -403,7 +403,7 @@ namespace strAppersBackend.Controllers
         {
             try
             {
-                using var httpClient = _httpClientFactory.CreateClient();
+                using var httpClient = _httpClientFactory.CreateClient("DeploymentController");
                 httpClient.DefaultRequestHeaders.Authorization = 
                     new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", accessToken);
                 httpClient.DefaultRequestHeaders.Add("User-Agent", "StrAppersBackend/1.0");

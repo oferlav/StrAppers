@@ -7,6 +7,7 @@ using strAppersBackend.Services;
 using System.Text;
 using System.Text.Json;
 using System.IO;
+using System.Net.Http;
 
 namespace strAppersBackend.Controllers
 {
@@ -23,6 +24,7 @@ namespace strAppersBackend.Controllers
         private readonly PromptConfig _promptConfig;
         private readonly TrelloConfig _trelloConfig;
         private readonly IConfiguration _configuration;
+        private readonly IHttpClientFactory _httpClientFactory;
 
         public MentorController(
             ApplicationDbContext context,
@@ -33,7 +35,8 @@ namespace strAppersBackend.Controllers
             ICodeReviewAgent codeReviewAgent,
             IOptions<PromptConfig> promptConfig,
             IOptions<TrelloConfig> trelloConfig,
-            IConfiguration configuration)
+            IConfiguration configuration,
+            IHttpClientFactory httpClientFactory)
         {
             _context = context;
             _logger = logger;
@@ -44,6 +47,7 @@ namespace strAppersBackend.Controllers
             _promptConfig = promptConfig.Value;
             _trelloConfig = trelloConfig.Value;
             _configuration = configuration;
+            _httpClientFactory = httpClientFactory;
         }
 
         /// <summary>
@@ -91,21 +95,21 @@ namespace strAppersBackend.Controllers
 
                 // Get Trello board lists to find the sprint list
                 var listsResult = await GetBoardListsAsync(student.BoardId);
-                
+
                 string? sprintListId = null;
                 string? sprintListName = null;
-                
+
                 // Find the sprint list by matching sprint number
                 foreach (var listObj in listsResult)
                 {
                     var listJson = JsonSerializer.Serialize(listObj);
                     var listElement = JsonSerializer.Deserialize<JsonElement>(listJson);
-                    
+
                     var name = listElement.TryGetProperty("Name", out var nameProp) ? nameProp.GetString() : "";
                     var id = listElement.TryGetProperty("Id", out var idProp) ? idProp.GetString() : "";
-                    
+
                     // Sprint lists are typically named "Sprint 1", "Sprint 2", etc.
-                    if (!string.IsNullOrEmpty(name) && 
+                    if (!string.IsNullOrEmpty(name) &&
                         (name.Equals($"Sprint {sprintId}", StringComparison.OrdinalIgnoreCase) ||
                          name.Equals($"Sprint{sprintId}", StringComparison.OrdinalIgnoreCase) ||
                          name.Contains($"Sprint {sprintId}", StringComparison.OrdinalIgnoreCase)))
@@ -137,10 +141,10 @@ namespace strAppersBackend.Controllers
                         if (cardListId == sprintListId)
                         {
                             var cardId = card.TryGetProperty("Id", out var idProp) ? idProp.GetString() : "";
-                            
+
                             // C. Fetch Trello card custom fields
                             var customFields = await GetTrelloCardCustomFieldsAsync(cardId, student.BoardId);
-                            
+
                             // Get checklist items
                             var checklistItems = new List<string>();
                             if (card.TryGetProperty("Checklists", out var checklistsProp) && checklistsProp.ValueKind == JsonValueKind.Array)
@@ -186,7 +190,7 @@ namespace strAppersBackend.Controllers
                         if (cfProp.TryGetProperty("ModuleId", out var moduleIdProp))
                         {
                             var moduleIdStr = "";
-                            
+
                             // Handle different JSON value types
                             if (moduleIdProp.ValueKind == JsonValueKind.String)
                             {
@@ -196,27 +200,27 @@ namespace strAppersBackend.Controllers
                             {
                                 moduleIdStr = moduleIdProp.GetRawText();
                             }
-                            
+
                             // Clean up the string - remove quotes and whitespace
                             if (!string.IsNullOrEmpty(moduleIdStr))
                             {
                                 // Remove surrounding quotes if present (handles "\"12345\"" case)
                                 moduleIdStr = moduleIdStr.Trim().Trim('"').Trim('\'').Trim();
-                                
+
                                 // Try to parse as integer
                                 if (int.TryParse(moduleIdStr, out int moduleId))
                                 {
                                     _logger.LogDebug("Looking up module with ID {ModuleId} for project {ProjectId}", moduleId, project.Id);
-                                    
+
                                     var module = await _context.ProjectModules
                                         .FirstOrDefaultAsync(pm => pm.Id == moduleId && pm.ProjectId == project.Id);
-                                    
+
                                     if (module != null)
                                     {
                                         if (!string.IsNullOrEmpty(module.Description))
                                         {
                                             moduleDescriptions[moduleIdStr] = module.Description;
-                                            _logger.LogDebug("Found module description for ModuleId {ModuleId}: {Description}", 
+                                            _logger.LogDebug("Found module description for ModuleId {ModuleId}: {Description}",
                                                 moduleId, module.Description.Substring(0, Math.Min(50, module.Description.Length)));
                                         }
                                         else
@@ -245,10 +249,10 @@ namespace strAppersBackend.Controllers
                 // E. Fetch GitHub Repository Files - using role-based repository selection
                 var githubFiles = new List<string>();
                 object? githubCommitSummary = null;
-                
+
                 // Get appropriate repository URL(s) based on role
                 var (frontendRepoUrl, backendRepoUrl, isFullstack) = GetRepositoryUrlsByRole(student);
-                
+
                 // Determine which repos to fetch based on role
                 var reposToFetch = new List<(string Url, string Type)>();
                 if (!string.IsNullOrEmpty(frontendRepoUrl))
@@ -259,21 +263,21 @@ namespace strAppersBackend.Controllers
                 {
                     reposToFetch.Add((backendRepoUrl, "backend"));
                 }
-                
+
                 if (reposToFetch.Any())
                 {
                     try
                     {
                         var allFiles = new List<string>();
                         var allCommitSummaries = new List<object>();
-                        
+
                         // Fetch files and commits from each repository
                         foreach (var (repoUrl, repoType) in reposToFetch)
                         {
                             // Extract repo name from GitHub URL (format: https://github.com/owner/repo)
                             var repoName = repoUrl.Replace("https://github.com/", "").Replace("http://github.com/", "").TrimEnd('/');
                             var repoFiles = await GetGitHubRepositoryFilesAsync(repoName);
-                            
+
                             // Prefix files with repo type for clarity
                             if (isFullstack)
                             {
@@ -283,13 +287,13 @@ namespace strAppersBackend.Controllers
                             {
                                 allFiles.AddRange(repoFiles);
                             }
-                            
+
                             // Fetch GitHub commit summary for developer roles only
-                            var isDeveloperRole = !string.IsNullOrEmpty(roleName) && 
-                                (roleName.Contains("Developer", StringComparison.OrdinalIgnoreCase) || 
+                            var isDeveloperRole = !string.IsNullOrEmpty(roleName) &&
+                                (roleName.Contains("Developer", StringComparison.OrdinalIgnoreCase) ||
                                  roleName.Contains("Programmer", StringComparison.OrdinalIgnoreCase) ||
                                  roleName.Contains("Engineer", StringComparison.OrdinalIgnoreCase));
-                            
+
                             if (isDeveloperRole)
                             {
                                 var commitSummary = await GetGitHubCommitSummaryAsync(repoUrl, student.GithubUser);
@@ -299,9 +303,9 @@ namespace strAppersBackend.Controllers
                                 }
                             }
                         }
-                        
+
                         githubFiles = allFiles;
-                        
+
                         // Combine commit summaries for fullstack developers
                         if (isFullstack && allCommitSummaries.Any())
                         {
@@ -353,7 +357,7 @@ namespace strAppersBackend.Controllers
                     var memberObj = JsonSerializer.Serialize(teamMember);
                     var memberElement = JsonSerializer.Deserialize<JsonElement>(memberObj);
                     var memberRoleName = memberElement.TryGetProperty("RoleName", out var roleProp) ? roleProp.GetString() : "";
-                    
+
                     if (!string.IsNullOrEmpty(memberRoleName))
                     {
                         var memberTasksResult = await _trelloService.GetCardsAndListsByLabelAsync(student.BoardId, memberRoleName);
@@ -390,7 +394,7 @@ namespace strAppersBackend.Controllers
                     var firstTaskElement = JsonSerializer.Deserialize<JsonElement>(firstTaskJson);
                     moduleDescription = GetModuleDescriptionForFirstTask(firstTaskElement, moduleDescriptions);
                 }
-                
+
                 var teamMembersList = FormatTeamMembers(teamMembers);
                 var teamMemberTasksList = FormatTeamMemberTasks(teamMemberTasks);
                 var githubFilesList = string.Join("\n", githubFiles);
@@ -434,7 +438,8 @@ namespace strAppersBackend.Controllers
                         {
                             Time = student.ProjectBoard?.NextMeetingTime,
                             Url = student.ProjectBoard?.NextMeetingUrl
-                        }
+                        },
+                        DatabasePassword = student.ProjectBoard?.DBPassword
                     },
                     SystemPrompt = _promptConfig.Mentor.SystemPrompt,
                     UserPrompt = formattedPrompt
@@ -624,7 +629,7 @@ namespace strAppersBackend.Controllers
                 {
                     if (summary is System.Text.Json.JsonElement jsonElement)
                     {
-                        if (jsonElement.TryGetProperty("RecentCommits", out var commitsProp) && 
+                        if (jsonElement.TryGetProperty("RecentCommits", out var commitsProp) &&
                             commitsProp.ValueKind == System.Text.Json.JsonValueKind.Array)
                         {
                             foreach (var commit in commitsProp.EnumerateArray())
@@ -633,7 +638,7 @@ namespace strAppersBackend.Controllers
                             }
                         }
 
-                        if (jsonElement.TryGetProperty("AllFilesChanged", out var filesProp) && 
+                        if (jsonElement.TryGetProperty("AllFilesChanged", out var filesProp) &&
                             filesProp.ValueKind == System.Text.Json.JsonValueKind.Array)
                         {
                             foreach (var file in filesProp.EnumerateArray())
@@ -678,56 +683,56 @@ namespace strAppersBackend.Controllers
         private async Task<Dictionary<string, string>> GetTrelloCardCustomFieldsAsync(string cardId, string boardId)
         {
             var customFields = new Dictionary<string, string>();
-            
+
             try
             {
                 using var httpClient = new HttpClient();
-                
+
                 // Step 1: Get board custom field definitions to map idCustomField to name
                 var boardCustomFieldsUrl = $"https://api.trello.com/1/boards/{boardId}/customFields?key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
                 var boardFieldsResponse = await httpClient.GetAsync(boardCustomFieldsUrl);
-                
+
                 var customFieldNameMap = new Dictionary<string, string>();
-                
+
                 if (boardFieldsResponse.IsSuccessStatusCode)
                 {
                     var boardFieldsContent = await boardFieldsResponse.Content.ReadAsStringAsync();
                     var boardFieldsData = JsonSerializer.Deserialize<JsonElement[]>(boardFieldsContent);
-                    
+
                     foreach (var fieldDef in boardFieldsData ?? Array.Empty<JsonElement>())
                     {
                         var fieldId = fieldDef.TryGetProperty("id", out var idProp) ? idProp.GetString() : "";
                         var fieldName = fieldDef.TryGetProperty("name", out var nameProp) ? nameProp.GetString() : "";
-                        
+
                         if (!string.IsNullOrEmpty(fieldId) && !string.IsNullOrEmpty(fieldName))
                         {
                             customFieldNameMap[fieldId] = fieldName;
                         }
                     }
                 }
-                
+
                 // Step 2: Get card custom field items
                 var customFieldsUrl = $"https://api.trello.com/1/cards/{cardId}/customFieldItems?key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
                 var response = await httpClient.GetAsync(customFieldsUrl);
-                
+
                 if (response.IsSuccessStatusCode)
                 {
                     var content = await response.Content.ReadAsStringAsync();
                     _logger.LogDebug("Custom field items response for card {CardId}: {Content}", cardId, content);
-                    
+
                     var customFieldsData = JsonSerializer.Deserialize<JsonElement[]>(content);
-                    
+
                     foreach (var field in customFieldsData ?? Array.Empty<JsonElement>())
                     {
                         var idCustomField = field.TryGetProperty("idCustomField", out var idProp) ? idProp.GetString() : "";
-                        
+
                         // Get field name from the mapping we created
-                        var fieldName = !string.IsNullOrEmpty(idCustomField) && customFieldNameMap.TryGetValue(idCustomField, out var name) 
-                            ? name 
+                        var fieldName = !string.IsNullOrEmpty(idCustomField) && customFieldNameMap.TryGetValue(idCustomField, out var name)
+                            ? name
                             : idCustomField ?? "Unknown";
-                        
+
                         var fieldValue = "";
-                        
+
                         // Handle different custom field types
                         if (field.TryGetProperty("value", out var valueProp))
                         {
@@ -781,7 +786,7 @@ namespace strAppersBackend.Controllers
                                 fieldValue = valueProp.GetBoolean().ToString();
                             }
                         }
-                        
+
                         if (!string.IsNullOrEmpty(fieldName) && !string.IsNullOrEmpty(fieldValue))
                         {
                             customFields[fieldName] = fieldValue;
@@ -792,7 +797,7 @@ namespace strAppersBackend.Controllers
                 else
                 {
                     var errorContent = await response.Content.ReadAsStringAsync();
-                    _logger.LogWarning("Failed to fetch custom fields for card {CardId}. Status: {Status}, Response: {Error}", 
+                    _logger.LogWarning("Failed to fetch custom fields for card {CardId}. Status: {Status}, Response: {Error}",
                         cardId, response.StatusCode, errorContent);
                 }
             }
@@ -800,7 +805,7 @@ namespace strAppersBackend.Controllers
             {
                 _logger.LogWarning(ex, "Failed to fetch custom fields for card {CardId}", cardId);
             }
-            
+
             return customFields;
         }
 
@@ -810,13 +815,13 @@ namespace strAppersBackend.Controllers
         private async Task<List<string>> GetGitHubRepositoryFilesAsync(string repoName)
         {
             var files = new List<string>();
-            
+
             try
             {
                 // Extract owner and repo name from repo string (format: "owner/repo" or just "repo")
                 string owner = "skill-in"; // Default owner, adjust if needed
                 string repo = repoName;
-                
+
                 if (repoName.Contains('/'))
                 {
                     var parts = repoName.Split('/');
@@ -836,28 +841,28 @@ namespace strAppersBackend.Controllers
                 using var httpClient = new HttpClient();
                 httpClient.DefaultRequestHeaders.Add("User-Agent", "StrAppers-Backend");
                 httpClient.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", accessToken);
-                
+
                 var response = await httpClient.GetAsync(treeUrl);
-                
+
                 if (!response.IsSuccessStatusCode)
                 {
                     // Try master branch
                     treeUrl = $"https://api.github.com/repos/{owner}/{repo}/git/trees/master?recursive=1";
                     response = await httpClient.GetAsync(treeUrl);
                 }
-                
+
                 if (response.IsSuccessStatusCode)
                 {
                     var content = await response.Content.ReadAsStringAsync();
                     var treeData = JsonSerializer.Deserialize<JsonElement>(content);
-                    
+
                     if (treeData.TryGetProperty("tree", out var treeProp) && treeProp.ValueKind == JsonValueKind.Array)
                     {
                         foreach (var item in treeProp.EnumerateArray())
                         {
                             var path = item.TryGetProperty("path", out var pathProp) ? pathProp.GetString() : "";
                             var type = item.TryGetProperty("type", out var typeProp) ? typeProp.GetString() : "";
-                            
+
                             // Only include files, not directories
                             if (type == "blob" && !string.IsNullOrEmpty(path))
                             {
@@ -871,7 +876,7 @@ namespace strAppersBackend.Controllers
             {
                 _logger.LogWarning(ex, "Failed to fetch GitHub files for repo {RepoName}", repoName);
             }
-            
+
             return files;
         }
 
@@ -885,12 +890,12 @@ namespace strAppersBackend.Controllers
                 var listsUrl = $"https://api.trello.com/1/boards/{boardId}/lists?key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
                 using var httpClient = new HttpClient();
                 var response = await httpClient.GetAsync(listsUrl);
-                
+
                 if (response.IsSuccessStatusCode)
                 {
                     var content = await response.Content.ReadAsStringAsync();
                     var listsData = JsonSerializer.Deserialize<JsonElement[]>(content);
-                    
+
                     return listsData?.Select(l => new
                     {
                         Id = l.TryGetProperty("id", out var idProp) ? idProp.GetString() : "",
@@ -903,25 +908,25 @@ namespace strAppersBackend.Controllers
             {
                 _logger.LogWarning(ex, "Failed to fetch board lists for board {BoardId}", boardId);
             }
-            
+
             return new List<object>();
         }
 
         private string FormatTaskDetails(List<object> tasks)
         {
             if (tasks.Count == 0) return "No tasks assigned";
-            
+
             var details = new List<string>();
             foreach (var task in tasks)
             {
                 var taskJson = JsonSerializer.Serialize(task);
                 var taskElement = JsonSerializer.Deserialize<JsonElement>(taskJson);
-                
+
                 var name = taskElement.TryGetProperty("Name", out var nameProp) ? nameProp.GetString() : "";
                 var description = taskElement.TryGetProperty("Description", out var descProp) ? descProp.GetString() : "";
                 var closed = taskElement.TryGetProperty("Closed", out var closedProp) ? closedProp.GetBoolean() : false;
                 var dueDate = taskElement.TryGetProperty("DueDate", out var dueProp) ? dueProp.GetString() : null;
-                
+
                 // Format due date to be human-readable and check if overdue
                 string? formattedDueDate = null;
                 bool isOverdue = false;
@@ -943,10 +948,10 @@ namespace strAppersBackend.Controllers
                         formattedDueDate = dueDate; // Fallback to raw string if parsing fails
                     }
                 }
-                
+
                 var customFieldsJson = taskElement.TryGetProperty("CustomFields", out var cfProp) ? cfProp.ToString() : "{}";
                 var customFields = JsonSerializer.Deserialize<Dictionary<string, string>>(customFieldsJson) ?? new Dictionary<string, string>();
-                
+
                 var checklistItems = new List<string>();
                 if (taskElement.TryGetProperty("ChecklistItems", out var checklistProp) && checklistProp.ValueKind == JsonValueKind.Array)
                 {
@@ -955,27 +960,27 @@ namespace strAppersBackend.Controllers
                         .Where(s => !string.IsNullOrEmpty(s))
                         .ToList();
                 }
-                
+
                 var taskDetail = $"- Task: {name}\n  Status: {(closed ? "Completed" : "In Progress")}\n  Description: {description ?? "No description"}";
-                
+
                 if (!string.IsNullOrEmpty(formattedDueDate))
                 {
                     taskDetail += $"\n  Due Date: {formattedDueDate}";
                 }
-                
+
                 if (customFields.Any())
                 {
                     taskDetail += $"\n  Custom Fields: {string.Join(", ", customFields.Select(kv => $"{kv.Key}={kv.Value}"))}";
                 }
-                
+
                 if (checklistItems.Any())
                 {
                     taskDetail += $"\n  Task Breakdown:\n{string.Join("\n", checklistItems.Select(item => $"    - {item}"))}";
                 }
-                
+
                 details.Add(taskDetail);
             }
-            
+
             return string.Join("\n\n", details);
         }
 
@@ -985,7 +990,7 @@ namespace strAppersBackend.Controllers
             {
                 return "No module description available";
             }
-            
+
             if (firstTask.TryGetProperty("CustomFields", out var cfProp) && cfProp.ValueKind == JsonValueKind.Object)
             {
                 if (cfProp.TryGetProperty("ModuleId", out var moduleIdProp))
@@ -999,7 +1004,7 @@ namespace strAppersBackend.Controllers
                     {
                         moduleIdStr = moduleIdProp.GetRawText();
                     }
-                    
+
                     if (!string.IsNullOrEmpty(moduleIdStr))
                     {
                         moduleIdStr = moduleIdStr.Trim().Trim('"').Trim('\'').Trim();
@@ -1010,48 +1015,48 @@ namespace strAppersBackend.Controllers
                     }
                 }
             }
-            
+
             return "No module description available for current task";
         }
 
         private string FormatTeamMembers(List<object> teamMembers)
         {
             if (teamMembers.Count == 0) return "No other team members";
-            
+
             var members = new List<string>();
             foreach (var member in teamMembers)
             {
                 var memberJson = JsonSerializer.Serialize(member);
                 var memberElement = JsonSerializer.Deserialize<JsonElement>(memberJson);
-                
+
                 var firstName = memberElement.TryGetProperty("FirstName", out var fnProp) ? fnProp.GetString() : "";
                 var lastName = memberElement.TryGetProperty("LastName", out var lnProp) ? lnProp.GetString() : "";
                 var roleName = memberElement.TryGetProperty("RoleName", out var roleProp) ? roleProp.GetString() : "";
-                
+
                 members.Add($"- {firstName} {lastName} ({roleName})");
             }
-            
+
             return string.Join("\n", members);
         }
 
         private string FormatTeamMemberTasks(List<object> teamMemberTasks)
         {
             if (teamMemberTasks.Count == 0) return "No other team member tasks in current sprint";
-            
+
             var tasks = new List<string>();
             foreach (var task in teamMemberTasks)
             {
                 var taskJson = JsonSerializer.Serialize(task);
                 var taskElement = JsonSerializer.Deserialize<JsonElement>(taskJson);
-                
+
                 var firstName = taskElement.TryGetProperty("TeamMemberFirstName", out var fnProp) ? fnProp.GetString() : "";
                 var roleName = taskElement.TryGetProperty("TeamMemberRoleName", out var roleProp) ? roleProp.GetString() : "";
                 var taskName = taskElement.TryGetProperty("TaskName", out var tnProp) ? tnProp.GetString() : "";
                 var isClosed = taskElement.TryGetProperty("IsClosed", out var closedProp) ? closedProp.GetBoolean() : false;
-                
+
                 tasks.Add($"- {firstName} ({roleName}): {taskName} [{(isClosed ? "Completed" : "In Progress")}]");
             }
-            
+
             return string.Join("\n", tasks);
         }
 
@@ -1104,8 +1109,8 @@ Your intelligence is strictly tethered to the Current Project Context and the us
 
             // Extract GitHub commit summary from context (if available)
             string? githubContextInfo = null;
-            if (contextData.TryGetProperty("GitHubCommitSummary", out var githubSummaryProp) && 
-                githubSummaryProp.ValueKind != JsonValueKind.Null && 
+            if (contextData.TryGetProperty("GitHubCommitSummary", out var githubSummaryProp) &&
+                githubSummaryProp.ValueKind != JsonValueKind.Null &&
                 githubSummaryProp.ValueKind != JsonValueKind.Undefined)
             {
                 githubContextInfo = FormatGitHubCommitSummary(githubSummaryProp);
@@ -1124,9 +1129,9 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                 if (!string.IsNullOrEmpty(roleName))
                 {
                     var roleLower = roleName.ToLowerInvariant();
-                    isDeveloperRole = roleLower.Contains("developer") || 
-                                     roleLower.Contains("full stack") || 
-                                     roleLower.Contains("frontend") || 
+                    isDeveloperRole = roleLower.Contains("developer") ||
+                                     roleLower.Contains("full stack") ||
+                                     roleLower.Contains("frontend") ||
                                      roleLower.Contains("backend");
                 }
 
@@ -1149,13 +1154,13 @@ Your intelligence is strictly tethered to the Current Project Context and the us
             {
                 var taskCount = tasksProp.GetArrayLength();
                 var taskDetails = new List<string>();
-                
+
                 foreach (var task in tasksProp.EnumerateArray())
                 {
                     var taskName = task.TryGetProperty("Name", out var nameProp) ? nameProp.GetString() : "";
                     var taskDesc = task.TryGetProperty("Description", out var descProp) ? descProp.GetString() : "";
                     var dueDate = task.TryGetProperty("DueDate", out var dueProp) ? dueProp.GetString() : null;
-                    
+
                     // Format due date to be human-readable and check if overdue
                     string? formattedDueDate = null;
                     bool isOverdue = false;
@@ -1178,7 +1183,7 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                             formattedDueDate = dueDate; // Fallback to raw string if parsing fails
                         }
                     }
-                    
+
                     if (!string.IsNullOrEmpty(taskName))
                     {
                         var taskInfo = $"Task: {taskName}";
@@ -1195,7 +1200,7 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                         taskDetails.Add(taskInfo);
                     }
                 }
-                
+
                 if (taskDetails.Any())
                 {
                     contextParts.Add($"Currently working on {taskCount} task{(taskCount > 1 ? "s" : "")} in this sprint:");
@@ -1216,7 +1221,7 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                 {
                     teamMembersList.Add(member);
                 }
-                
+
                 var formattedTeamMembers = FormatTeamMembers(teamMembersList);
                 var teamCount = teamProp.GetArrayLength();
                 contextParts.Add($"Working with {teamCount} team member{(teamCount > 1 ? "s" : "")}");
@@ -1232,29 +1237,29 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                 {
                     teamMemberTasksList.Add(task);
                 }
-                
+
                 var formattedTeamMemberTasks = FormatTeamMemberTasks(teamMemberTasksList);
                 teamMemberTasksInfo = formattedTeamMemberTasks;
             }
 
             var contextInfo = contextParts.Any() ? string.Join(". ", contextParts) + "." : "";
-            
+
             // Add current date context for deadline calculations
             var currentDate = DateTime.UtcNow;
             contextInfo += $"\n\nCURRENT DATE: {currentDate:MMMM d, yyyy} (Use this as the reference point for calculating future dates)";
-            
+
             // Add team members list separately with proper formatting
             if (!string.IsNullOrEmpty(teamMembersInfo))
             {
                 contextInfo += $"\n\nTEAM MEMBERS:\n{teamMembersInfo}";
             }
-            
+
             // Add team member tasks separately with proper formatting
             if (!string.IsNullOrEmpty(teamMemberTasksInfo))
             {
                 contextInfo += $"\n\nTEAM MEMBER TASKS (Current Sprint):\n{teamMemberTasksInfo}";
             }
-            
+
             // Extract next team meeting information
             if (contextData.TryGetProperty("NextTeamMeeting", out var meetingProp) && meetingProp.ValueKind == JsonValueKind.Object)
             {
@@ -1271,18 +1276,18 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                         }
                     }
                 }
-                
-                var meetingUrl = meetingProp.TryGetProperty("Url", out var urlProp) && urlProp.ValueKind != JsonValueKind.Null 
-                    ? urlProp.GetString() 
+
+                var meetingUrl = meetingProp.TryGetProperty("Url", out var urlProp) && urlProp.ValueKind != JsonValueKind.Null
+                    ? urlProp.GetString()
                     : null;
-                
+
                 var currentTime = DateTime.UtcNow;
-                
+
                 if (meetingTime.HasValue)
                 {
                     // Check if the meeting time is in the past
                     bool isMeetingInPast = meetingTime.Value < currentTime;
-                    
+
                     if (isMeetingInPast)
                     {
                         // Meeting time is in the past - inform mentor that it has passed and no new meeting is scheduled
@@ -1313,16 +1318,41 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                     contextInfo += $"\n\nNEXT TEAM MEETING:\nNo team meeting is currently scheduled. The Product Manager is responsible for scheduling team meetings.";
                 }
             }
-            
+
+            // Extract database password from context (if available)
+            string? databasePassword = null;
+            if (contextData.TryGetProperty("DatabasePassword", out var dbPasswordProp) &&
+                dbPasswordProp.ValueKind != JsonValueKind.Null &&
+                dbPasswordProp.ValueKind != JsonValueKind.Undefined)
+            {
+                databasePassword = dbPasswordProp.GetString();
+            }
+
             // Build GitHub context info from commit summary (if available and developer role)
             string githubContextSection = "";
             if (isDeveloperRole && !string.IsNullOrEmpty(githubContextInfo))
             {
-                var githubTemplate = _promptConfig.Mentor.EnhancedPrompt.GitHubContextTemplate ?? 
+                var githubTemplate = _promptConfig.Mentor.EnhancedPrompt.GitHubContextTemplate ??
                     "GITHUB REPOSITORY STATUS:\n{0}\n\nUse this information to provide accurate, context-aware responses about the student's code and repository activity.";
                 githubContextSection = $"\n\n{string.Format(githubTemplate, githubContextInfo)}";
             }
-            
+
+            // Add database connection information if password is available
+            string databaseInfoSection = "";
+            if (!string.IsNullOrEmpty(databasePassword))
+            {
+                databaseInfoSection = $"\n\nDATABASE CONNECTION INFORMATION:\n" +
+                    $"The project has a Neon PostgreSQL database. " +
+                    $"⚠️ CRITICAL: If the user asks for database connection details, you MUST extract the EXACT connection string from the README content (if available in the context above). " +
+                    $"The README contains the complete connection string with the isolated database role. " +
+                    $"Parse the connection string and provide EXACT values - DO NOT use placeholders or generic formats. " +
+                    $"ONLY if the README is not available, use the following information:\n" +
+                    $"- Database Password: {databasePassword}\n" +
+                    $"- Note: This password is for the isolated database role. " +
+                    $"The full connection string with exact database name (starts with 'AppDB_'), username, host, and port is in the README. " +
+                    $"ALWAYS prioritize and extract EXACT values from the README connection string.";
+            }
+
             // Only add GitHub capabilities for developer roles (from configuration)
             string capabilitiesInfo = "";
             if (isDeveloperRole)
@@ -1337,7 +1367,7 @@ Your intelligence is strictly tethered to the Current Project Context and the us
             if (!string.IsNullOrEmpty(contextInfo))
             {
                 var capabilitiesSection = !string.IsNullOrEmpty(capabilitiesInfo) ? $"\n\n{capabilitiesInfo}" : "";
-                return $"{enhancedBasePrompt}\n\nCURRENT CONTEXT:\n{contextInfo}{githubContextSection}{capabilitiesSection}\n\n{_promptConfig.Mentor.EnhancedPrompt.ContextReminder}";
+                return $"{enhancedBasePrompt}\n\nCURRENT CONTEXT:\n{contextInfo}{githubContextSection}{databaseInfoSection}{capabilitiesSection}\n\n{_promptConfig.Mentor.EnhancedPrompt.ContextReminder}";
             }
 
             // Even without context, add capability information if available
@@ -1345,7 +1375,7 @@ Your intelligence is strictly tethered to the Current Project Context and the us
             {
                 return $"{enhancedBasePrompt}\n\n{capabilitiesInfo}";
             }
-            
+
             return enhancedBasePrompt;
         }
 
@@ -1356,24 +1386,24 @@ Your intelligence is strictly tethered to the Current Project Context and the us
         {
             try
             {
-                var hasCommits = githubSummary.TryGetProperty("HasCommits", out var hasCommitsProp) && 
+                var hasCommits = githubSummary.TryGetProperty("HasCommits", out var hasCommitsProp) &&
                                 hasCommitsProp.GetBoolean();
-                
+
                 if (!hasCommits)
                 {
                     return "No commits found in repository yet. The student needs to commit and push their code.";
                 }
 
-                var commitCount = githubSummary.TryGetProperty("CommitCount", out var countProp) ? 
+                var commitCount = githubSummary.TryGetProperty("CommitCount", out var countProp) ?
                                  countProp.GetInt32() : 0;
-                var repoUrl = githubSummary.TryGetProperty("RepositoryUrl", out var urlProp) ? 
+                var repoUrl = githubSummary.TryGetProperty("RepositoryUrl", out var urlProp) ?
                              urlProp.GetString() : "repository";
 
                 var sb = new StringBuilder();
                 sb.AppendLine($"Repository: {repoUrl}");
                 sb.AppendLine($"Total commits: {commitCount}");
 
-                if (githubSummary.TryGetProperty("RecentCommits", out var commitsProp) && 
+                if (githubSummary.TryGetProperty("RecentCommits", out var commitsProp) &&
                     commitsProp.ValueKind == JsonValueKind.Array)
                 {
                     var commits = commitsProp.EnumerateArray().Take(3).ToList(); // Limit to 3 most recent for token efficiency
@@ -1388,7 +1418,7 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                             var additions = commit.TryGetProperty("TotalAdditions", out var addProp) ? addProp.GetInt32() : 0;
                             var deletions = commit.TryGetProperty("TotalDeletions", out var delProp) ? delProp.GetInt32() : 0;
 
-                            if (commit.TryGetProperty("FilesChanged", out var filesProp) && 
+                            if (commit.TryGetProperty("FilesChanged", out var filesProp) &&
                                 filesProp.ValueKind == JsonValueKind.Array)
                             {
                                 var files = filesProp.EnumerateArray()
@@ -1396,13 +1426,13 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                                     .Where(f => !string.IsNullOrEmpty(f))
                                     .Take(3) // Limit files per commit
                                     .ToList();
-                                
+
                                 var filesText = files.Any() ? string.Join(", ", files) : "no files";
                                 if (filesProp.GetArrayLength() > 3)
                                 {
                                     filesText += $" (+{filesProp.GetArrayLength() - 3} more)";
                                 }
-                                
+
                                 sb.AppendLine($"- {sha}: {message} ({date}) - Files: {filesText} (+{additions}/-{deletions})");
                             }
                             else
@@ -1413,7 +1443,7 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                     }
                 }
 
-                if (githubSummary.TryGetProperty("AllFilesChanged", out var allFilesProp) && 
+                if (githubSummary.TryGetProperty("AllFilesChanged", out var allFilesProp) &&
                     allFilesProp.ValueKind == JsonValueKind.Array)
                 {
                     var allFiles = allFilesProp.EnumerateArray()
@@ -1421,7 +1451,7 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                         .Where(f => !string.IsNullOrEmpty(f))
                         .Take(10) // Limit to 10 files for token efficiency
                         .ToList();
-                    
+
                     if (allFiles.Any())
                     {
                         sb.AppendLine($"\nFiles with recent changes: {string.Join(", ", allFiles)}");
@@ -1493,7 +1523,7 @@ Your intelligence is strictly tethered to the Current Project Context and the us
         {
             try
             {
-                _logger.LogInformation("Getting mentor response for StudentId: {StudentId}, SprintId: {SprintId}, Model: {Model}", 
+                _logger.LogInformation("Getting mentor response for StudentId: {StudentId}, SprintId: {SprintId}, Model: {Model}",
                     request.StudentId, request.SprintId, aiModelName);
 
                 // Get the AI model from database
@@ -1511,7 +1541,7 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                 _logger.LogInformation("Detected intent: {IntentType} with confidence {Confidence}", intent.Type, intent.Confidence);
 
                 var userQuestion = request.UserQuestion ?? "";
-                
+
                 // Check if user is responding to a file selection question (from chat history)
                 var isFileSelectionResponse = false;
                 List<string>? previouslyShownFiles = null;
@@ -1521,13 +1551,13 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                         .Where(h => h.StudentId == request.StudentId && h.SprintId == request.SprintId && h.Role == "assistant")
                         .OrderByDescending(h => h.CreatedAt)
                         .FirstOrDefaultAsync();
-                    
-                    if (lastAssistantMessage != null && 
+
+                    if (lastAssistantMessage != null &&
                         lastAssistantMessage.Message.Contains("Which file would you like me to review", StringComparison.OrdinalIgnoreCase))
                     {
                         isFileSelectionResponse = true;
                         _logger.LogInformation("Detected file selection response: {UserQuestion}", userQuestion);
-                        
+
                         // Extract file list from the previous message
                         // Format: "I found X files...\n\n1. file1\n2. file2\n\nWhich file..."
                         var messageLines = lastAssistantMessage.Message.Split('\n');
@@ -1546,10 +1576,10 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                                 }
                             }
                         }
-                        
+
                         if (previouslyShownFiles != null && previouslyShownFiles.Any())
                         {
-                            _logger.LogInformation("Extracted {Count} files from previous message: {Files}", 
+                            _logger.LogInformation("Extracted {Count} files from previous message: {Files}",
                                 previouslyShownFiles.Count, string.Join(", ", previouslyShownFiles));
                         }
                     }
@@ -1563,13 +1593,13 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                 // OR if user is selecting a file from a previous file list, force code_review intent
                 // OR if user mentions a file name (likely selecting a file), force code_review intent
                 var lowerQuestion = userQuestion.ToLowerInvariant();
-                var isMentioningFileName = lowerQuestion.Contains(".cs") || lowerQuestion.Contains(".js") || 
+                var isMentioningFileName = lowerQuestion.Contains(".cs") || lowerQuestion.Contains(".js") ||
                                           lowerQuestion.Contains(".ts") || lowerQuestion.Contains(".py") ||
                                           lowerQuestion.Contains(".java") || lowerQuestion.Contains(".cpp") ||
                                           lowerQuestion.Contains(".c") || lowerQuestion.Contains(".html") ||
                                           lowerQuestion.Contains(".css") || lowerQuestion.Contains(".tsx") ||
                                           lowerQuestion.Contains(".jsx");
-                
+
                 if (isFileSelectionResponse || isMentioningFileName)
                 {
                     _logger.LogInformation("Forcing code_review intent based on file selection response or file name mention: {UserQuestion}", userQuestion);
@@ -1599,7 +1629,7 @@ Your intelligence is strictly tethered to the Current Project Context and the us
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Error getting mentor response for StudentId: {StudentId}, SprintId: {SprintId}, Model: {Model}", 
+                _logger.LogError(ex, "Error getting mentor response for StudentId: {StudentId}, SprintId: {SprintId}, Model: {Model}",
                     request.StudentId, request.SprintId, aiModelName);
                 return StatusCode(500, new { Success = false, Message = $"An error occurred: {ex.Message}" });
             }
@@ -1626,7 +1656,7 @@ Your intelligence is strictly tethered to the Current Project Context and the us
 
                 // Get appropriate repository URL(s) based on role
                 var (frontendRepoUrl, backendRepoUrl, isFullstack) = GetRepositoryUrlsByRole(student);
-                
+
                 // For code review, use the primary repo based on role (or backend as default)
                 var githubRepoUrl = !string.IsNullOrEmpty(backendRepoUrl) ? backendRepoUrl : frontendRepoUrl;
                 if (string.IsNullOrEmpty(githubRepoUrl))
@@ -1643,7 +1673,7 @@ Your intelligence is strictly tethered to the Current Project Context and the us
 
                 var owner = repoParts[0];
                 var repo = repoParts[1];
-                
+
                 // Log which repo is being used for code review
                 if (isFullstack)
                 {
@@ -1667,7 +1697,7 @@ Your intelligence is strictly tethered to the Current Project Context and the us
 
                 // Check if user asked specifically about diffs
                 var userQuestion = request.UserQuestion ?? "";
-                var isAskingAboutDiffs = userQuestion.Contains("diff", StringComparison.OrdinalIgnoreCase) || 
+                var isAskingAboutDiffs = userQuestion.Contains("diff", StringComparison.OrdinalIgnoreCase) ||
                                         userQuestion.Contains("diffs", StringComparison.OrdinalIgnoreCase) ||
                                         userQuestion.Contains("changes", StringComparison.OrdinalIgnoreCase);
 
@@ -1680,13 +1710,13 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                         .Where(h => h.StudentId == request.StudentId && h.SprintId == request.SprintId && h.Role == "assistant")
                         .OrderByDescending(h => h.CreatedAt)
                         .FirstOrDefaultAsync();
-                    
-                    if (lastAssistantMessage != null && 
+
+                    if (lastAssistantMessage != null &&
                         lastAssistantMessage.Message.Contains("Which file would you like me to review", StringComparison.OrdinalIgnoreCase))
                     {
                         isFileSelectionResponse = true;
                         _logger.LogInformation("Detected file selection response in HandleCodeReviewIntent: {UserQuestion}", userQuestion);
-                        
+
                         // Extract file list from the previous message
                         // Format: "I found X files...\n\n1. file1\n2. file2\n\nWhich file..."
                         var messageLines = lastAssistantMessage.Message.Split('\n');
@@ -1705,10 +1735,10 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                                 }
                             }
                         }
-                        
+
                         if (previouslyShownFiles != null && previouslyShownFiles.Any())
                         {
-                            _logger.LogInformation("Extracted {Count} files from previous message: {Files}", 
+                            _logger.LogInformation("Extracted {Count} files from previous message: {Files}",
                                 previouslyShownFiles.Count, string.Join(", ", previouslyShownFiles));
                         }
                     }
@@ -1722,7 +1752,7 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                 _logger.LogInformation("Fetching commits for repo {Owner}/{Repo} with author filter: {Username}", owner, repo, student.GithubUser);
                 var recentCommits = await _githubService.GetRecentCommitsAsync(owner, repo, student.GithubUser, 10, accessToken); // Get more commits to find one with actual changes
                 _logger.LogInformation("Found {Count} commits with author filter '{Username}'", recentCommits.Count, student.GithubUser);
-                
+
                 // If no commits found, try fetching without author filter to see if commits exist at all
                 if (!recentCommits.Any())
                 {
@@ -1737,43 +1767,43 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                         }
                         var allCommitsUrl = $"https://api.github.com/repos/{owner}/{repo}/commits?per_page=5";
                         var allCommitsResponse = await httpClient.GetAsync(allCommitsUrl);
-                        
+
                         if (allCommitsResponse.IsSuccessStatusCode)
                         {
                             var allCommitsContent = await allCommitsResponse.Content.ReadAsStringAsync();
-                            var allCommitsData = JsonSerializer.Deserialize<List<JsonElement>>(allCommitsContent, new JsonSerializerOptions 
-                            { 
-                                PropertyNameCaseInsensitive = true 
+                            var allCommitsData = JsonSerializer.Deserialize<List<JsonElement>>(allCommitsContent, new JsonSerializerOptions
+                            {
+                                PropertyNameCaseInsensitive = true
                             });
-                            
+
                             if (allCommitsData != null && allCommitsData.Any())
                             {
                                 _logger.LogInformation("Found {Count} total commits in repository (without author filter). Checking authors...", allCommitsData.Count);
-                                
+
                                 // Log commit authors to help diagnose
                                 foreach (var commitJson in allCommitsData.Take(5))
                                 {
                                     string commitAuthor = "";
                                     string commitAuthorLogin = "";
                                     string commitSha = commitJson.TryGetProperty("sha", out var shaProp) ? shaProp.GetString() ?? "" : "";
-                                    
+
                                     if (commitJson.TryGetProperty("commit", out var commitProp))
                                     {
                                         if (commitProp.TryGetProperty("author", out var authorProp))
                                         {
                                             commitAuthor = authorProp.TryGetProperty("name", out var nameProp) ? nameProp.GetString() ?? "" : "";
-                                            commitAuthor = authorProp.TryGetProperty("email", out var emailProp) 
-                                                ? commitAuthor + " <" + emailProp.GetString() + ">" 
+                                            commitAuthor = authorProp.TryGetProperty("email", out var emailProp)
+                                                ? commitAuthor + " <" + emailProp.GetString() + ">"
                                                 : commitAuthor;
                                         }
                                     }
-                                    
+
                                     if (commitJson.TryGetProperty("author", out var authorJson))
                                     {
                                         commitAuthorLogin = authorJson.TryGetProperty("login", out var loginProp) ? loginProp.GetString() ?? "" : "";
                                     }
-                                    
-                                    _logger.LogInformation("Commit {Sha}: Author='{Author}', AuthorLogin='{AuthorLogin}', Expected='{Expected}'", 
+
+                                    _logger.LogInformation("Commit {Sha}: Author='{Author}', AuthorLogin='{AuthorLogin}', Expected='{Expected}'",
                                         commitSha.Substring(0, Math.Min(7, commitSha.Length)), commitAuthor, commitAuthorLogin, student.GithubUser);
                                 }
                             }
@@ -1792,7 +1822,7 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                         _logger.LogError(ex, "Error fetching commits without author filter for diagnosis");
                     }
                 }
-                
+
                 // If no commits found with author filter, try fetching without filter as fallback
                 // This handles cases where commits exist but author doesn't match the stored username
                 if (!recentCommits.Any())
@@ -1808,43 +1838,43 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                         }
                         var allCommitsUrl = $"https://api.github.com/repos/{owner}/{repo}/commits?per_page=10";
                         var allCommitsResponse = await httpClient.GetAsync(allCommitsUrl);
-                        
+
                         if (allCommitsResponse.IsSuccessStatusCode)
                         {
                             var allCommitsContent = await allCommitsResponse.Content.ReadAsStringAsync();
-                            var allCommitsData = JsonSerializer.Deserialize<List<JsonElement>>(allCommitsContent, new JsonSerializerOptions 
-                            { 
-                                PropertyNameCaseInsensitive = true 
+                            var allCommitsData = JsonSerializer.Deserialize<List<JsonElement>>(allCommitsContent, new JsonSerializerOptions
+                            {
+                                PropertyNameCaseInsensitive = true
                             });
-                            
+
                             if (allCommitsData != null && allCommitsData.Any())
                             {
                                 _logger.LogInformation("Fallback successful: Found {Count} commits without author filter. Converting to GitHubCommit objects...", allCommitsData.Count);
-                                
+
                                 // Convert all commits to GitHubCommit objects
                                 var fallbackCommits = new List<GitHubCommit>();
                                 foreach (var commitJson in allCommitsData)
                                 {
                                     var sha = commitJson.TryGetProperty("sha", out var shaProp) ? shaProp.GetString() ?? "" : "";
                                     if (string.IsNullOrEmpty(sha)) continue;
-                                    
+
                                     var htmlUrl = commitJson.TryGetProperty("html_url", out var urlProp) ? urlProp.GetString() ?? "" : "";
                                     string message = "";
                                     DateTime commitDate = DateTime.UtcNow;
                                     string author = "";
-                                    
+
                                     if (commitJson.TryGetProperty("commit", out var commitProp))
                                     {
                                         message = commitProp.TryGetProperty("message", out var msgProp) ? msgProp.GetString() ?? "" : "";
                                         if (commitProp.TryGetProperty("author", out var authorProp))
                                         {
                                             author = authorProp.TryGetProperty("name", out var nameProp) ? nameProp.GetString() ?? "" : "";
-                                            commitDate = authorProp.TryGetProperty("date", out var dateProp) 
-                                                ? DateTime.Parse(dateProp.GetString() ?? "").ToUniversalTime() 
+                                            commitDate = authorProp.TryGetProperty("date", out var dateProp)
+                                                ? DateTime.Parse(dateProp.GetString() ?? "").ToUniversalTime()
                                                 : DateTime.UtcNow;
                                         }
                                     }
-                                    
+
                                     if (commitJson.TryGetProperty("author", out var authorJson))
                                     {
                                         var authorLogin = authorJson.TryGetProperty("login", out var loginProp) ? loginProp.GetString() ?? "" : "";
@@ -1853,7 +1883,7 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                                             author = authorLogin; // Prefer login over name
                                         }
                                     }
-                                    
+
                                     fallbackCommits.Add(new GitHubCommit
                                     {
                                         Sha = sha,
@@ -1863,11 +1893,11 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                                         Url = htmlUrl
                                     });
                                 }
-                                
+
                                 if (fallbackCommits.Any())
                                 {
                                     recentCommits = fallbackCommits;
-                                    _logger.LogInformation("Using {Count} commits from fallback (without author filter). This indicates author mismatch: expected '{Expected}', found commits by various authors.", 
+                                    _logger.LogInformation("Using {Count} commits from fallback (without author filter). This indicates author mismatch: expected '{Expected}', found commits by various authors.",
                                         recentCommits.Count, student.GithubUser);
                                 }
                             }
@@ -1886,14 +1916,14 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                         _logger.LogError(ex, "Error in fallback commit fetching");
                     }
                 }
-                
+
                 // If still no commits found after fallback, return error message
                 if (!recentCommits.Any() && !isFileSelectionResponse)
                 {
                     var responseMessage = isAskingAboutDiffs
                         ? $"I checked your GitHub repository ({githubRepoUrl}) and I don't see any diffs or commits yet. To see diffs, you'll need to:\n\n1. Make sure your code is committed and pushed to GitHub\n2. The commits should be made by your GitHub username: {student.GithubUser}\n\nWould you like help setting up Git and making your first commit? Just ask me \"How do I commit my code?\" or \"Help me with GitHub\" and I'll guide you through the process!"
                         : $"I don't see any commits in your GitHub repository ({githubRepoUrl}) yet. To review your code, you'll need to:\n\n1. Make sure your code is committed and pushed to GitHub\n2. The commits should be made by your GitHub username: {student.GithubUser}\n\nWould you like help setting up Git and making your first commit? Just ask me \"How do I commit my code?\" or \"Help me with GitHub\" and I'll guide you through the process!";
-                    
+
                     return Ok(new
                     {
                         Success = true,
@@ -1903,13 +1933,13 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                         HasCommits = false
                     });
                 }
-                
+
                 // If file selection but no commits, try fetching ALL commits (without author filter) as fallback
                 // This handles cases where the username doesn't match the commit author
                 if (!recentCommits.Any() && isFileSelectionResponse && previouslyShownFiles != null && previouslyShownFiles.Any())
                 {
                     _logger.LogWarning("No commits found with author filter '{Username}' but file selection detected. Attempting to fetch all commits without author filter.", student.GithubUser);
-                    
+
                     try
                     {
                         // Fetch all recent commits without author filter
@@ -1917,15 +1947,15 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                         httpClient.DefaultRequestHeaders.Add("User-Agent", "StrAppers-Backend");
                         var allCommitsUrl = $"https://api.github.com/repos/{owner}/{repo}/commits?per_page=10";
                         var allCommitsResponse = await httpClient.GetAsync(allCommitsUrl);
-                        
+
                         if (allCommitsResponse.IsSuccessStatusCode)
                         {
                             var allCommitsContent = await allCommitsResponse.Content.ReadAsStringAsync();
-                            var allCommitsData = JsonSerializer.Deserialize<List<JsonElement>>(allCommitsContent, new JsonSerializerOptions 
-                            { 
-                                PropertyNameCaseInsensitive = true 
+                            var allCommitsData = JsonSerializer.Deserialize<List<JsonElement>>(allCommitsContent, new JsonSerializerOptions
+                            {
+                                PropertyNameCaseInsensitive = true
                             });
-                            
+
                             if (allCommitsData != null && allCommitsData.Any())
                             {
                                 // Convert to GitHubCommit objects and filter by files we're looking for
@@ -1934,17 +1964,17 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                                 {
                                     var sha = commitJson.TryGetProperty("sha", out var shaProp) ? shaProp.GetString() ?? "" : "";
                                     if (string.IsNullOrEmpty(sha)) continue;
-                                    
+
                                     // Check if this commit contains any of the files we're looking for
                                     var diff = await _githubService.GetCommitDiffAsync(owner, repo, sha, accessToken);
                                     if (diff?.FileChanges != null)
                                     {
-                                        var hasMatchingFile = diff.FileChanges.Any(f => 
-                                            previouslyShownFiles.Any(pf => 
+                                        var hasMatchingFile = diff.FileChanges.Any(f =>
+                                            previouslyShownFiles.Any(pf =>
                                                 f.FilePath.Contains(pf, StringComparison.OrdinalIgnoreCase) ||
                                                 Path.GetFileName(f.FilePath).Equals(pf, StringComparison.OrdinalIgnoreCase) ||
                                                 Path.GetFileNameWithoutExtension(f.FilePath).Equals(pf, StringComparison.OrdinalIgnoreCase)));
-                                        
+
                                         if (hasMatchingFile)
                                         {
                                             // Parse commit details
@@ -1952,23 +1982,23 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                                             string message = "";
                                             DateTime commitDate = DateTime.UtcNow;
                                             string author = "";
-                                            
+
                                             if (commitJson.TryGetProperty("commit", out var commitProp))
                                             {
                                                 message = commitProp.TryGetProperty("message", out var msgProp) ? msgProp.GetString() ?? "" : "";
                                                 if (commitProp.TryGetProperty("author", out var authorProp))
                                                 {
-                                                    commitDate = authorProp.TryGetProperty("date", out var dateProp) 
-                                                        ? DateTime.Parse(dateProp.GetString() ?? "").ToUniversalTime() 
+                                                    commitDate = authorProp.TryGetProperty("date", out var dateProp)
+                                                        ? DateTime.Parse(dateProp.GetString() ?? "").ToUniversalTime()
                                                         : DateTime.UtcNow;
                                                 }
                                             }
-                                            
+
                                             if (commitJson.TryGetProperty("author", out var authorJson))
                                             {
                                                 author = authorJson.TryGetProperty("login", out var loginProp) ? loginProp.GetString() ?? "" : "";
                                             }
-                                            
+
                                             tempCommits.Add(new GitHubCommit
                                             {
                                                 Sha = sha,
@@ -1980,7 +2010,7 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                                         }
                                     }
                                 }
-                                
+
                                 if (tempCommits.Any())
                                 {
                                     recentCommits = tempCommits;
@@ -1998,9 +2028,9 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                 // Check if user wants to review a specific commit (e.g., "one commit before", "previous commit")
                 var orderedCommits = recentCommits.OrderByDescending(c => c.CommitDate).ToList();
                 int commitIndex = 0;
-                
+
                 var lowerQuestion = userQuestion.ToLowerInvariant();
-                if (lowerQuestion.Contains("one commit before") || lowerQuestion.Contains("commit before") || 
+                if (lowerQuestion.Contains("one commit before") || lowerQuestion.Contains("commit before") ||
                     lowerQuestion.Contains("previous commit") || lowerQuestion.Contains("earlier commit") ||
                     lowerQuestion.Contains("before that") || lowerQuestion.Contains("earlier"))
                 {
@@ -2011,23 +2041,23 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                 // Find the first commit with actual code changes (skip rename-only commits)
                 GitHubCommit? commitToReview = null;
                 GitHubCommitDiff? commitDiff = null;
-                
+
                 for (int i = commitIndex; i < orderedCommits.Count; i++)
                 {
                     var candidateCommit = orderedCommits[i];
                     var candidateDiff = await _githubService.GetCommitDiffAsync(owner, repo, candidateCommit.Sha, accessToken);
-                    
+
                     if (candidateDiff == null)
                         continue;
-                    
+
                     // Check if this commit has actual code changes (not just renames)
-                    var hasActualChanges = candidateDiff.FileChanges != null && 
-                                          candidateDiff.FileChanges.Any(f => 
+                    var hasActualChanges = candidateDiff.FileChanges != null &&
+                                          candidateDiff.FileChanges.Any(f =>
                                               f.Status != "renamed" || (f.Additions > 0 || f.Deletions > 0));
-                    
+
                     // Also check if total additions/deletions indicate actual code changes
                     var hasCodeChanges = candidateDiff.TotalAdditions > 0 || candidateDiff.TotalDeletions > 0;
-                    
+
                     if (hasActualChanges && hasCodeChanges)
                     {
                         commitToReview = candidateCommit;
@@ -2036,14 +2066,14 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                         break;
                     }
                 }
-                
+
                 // If no commit with code changes found, use the most recent one
                 if (commitToReview == null || commitDiff == null)
                 {
                     commitToReview = orderedCommits[commitIndex];
                     commitDiff = await _githubService.GetCommitDiffAsync(owner, repo, commitToReview.Sha, accessToken);
                 }
-                
+
                 var mostRecentCommit = commitToReview;
 
                 if (commitDiff == null)
@@ -2068,7 +2098,7 @@ Your intelligence is strictly tethered to the Current Project Context and the us
 
                 // Get all unique files from recent commits to show user if multiple files exist
                 var allFilesInCommits = new HashSet<string>();
-                
+
                 // If we have previously shown files from chat history, add them to the set for matching
                 if (previouslyShownFiles != null && previouslyShownFiles.Any())
                 {
@@ -2078,7 +2108,7 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                     }
                     _logger.LogInformation("Added {Count} previously shown files to matching set", previouslyShownFiles.Count);
                 }
-                
+
                 foreach (var commit in orderedCommits.Take(5))
                 {
                     var diff = await _githubService.GetCommitDiffAsync(owner, repo, commit.Sha, accessToken);
@@ -2086,7 +2116,7 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                     {
                         foreach (var fileChange in diff.FileChanges)
                         {
-                            if (!string.IsNullOrEmpty(fileChange.FilePath) && 
+                            if (!string.IsNullOrEmpty(fileChange.FilePath) &&
                                 fileChange.Status != "removed" &&
                                 (fileChange.Additions > 0 || fileChange.Deletions > 0))
                             {
@@ -2101,7 +2131,7 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                 {
                     // Check if user specified a file in their question (by name or number)
                     string? specifiedFilePath = null;
-                    
+
                     // First check by number (e.g., "1", "2")
                     if (int.TryParse(userQuestion.Trim(), out int fileNumber) && fileNumber > 0 && fileNumber <= allFilesInCommits.Count)
                     {
@@ -2112,62 +2142,62 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                     {
                         // Check by file name (full path, filename, or filename without extension)
                         var userInput = userQuestion.Trim();
-                        
+
                         // First, try matching against previously shown files (these are likely just filenames)
                         if (previouslyShownFiles != null && previouslyShownFiles.Any())
                         {
-                            var matchedFile = previouslyShownFiles.FirstOrDefault(f => 
+                            var matchedFile = previouslyShownFiles.FirstOrDefault(f =>
                                 f.Equals(userInput, StringComparison.OrdinalIgnoreCase) ||
                                 Path.GetFileName(f).Equals(userInput, StringComparison.OrdinalIgnoreCase) ||
                                 Path.GetFileNameWithoutExtension(f).Equals(userInput, StringComparison.OrdinalIgnoreCase) ||
                                 f.Contains(userInput, StringComparison.OrdinalIgnoreCase) ||
                                 userInput.Contains(f, StringComparison.OrdinalIgnoreCase));
-                            
+
                             if (!string.IsNullOrEmpty(matchedFile))
                             {
                                 // Now find the actual file path in allFilesInCommits that matches this filename
-                                specifiedFilePath = allFilesInCommits.FirstOrDefault(f => 
+                                specifiedFilePath = allFilesInCommits.FirstOrDefault(f =>
                                     Path.GetFileName(f).Equals(Path.GetFileName(matchedFile), StringComparison.OrdinalIgnoreCase) ||
                                     Path.GetFileNameWithoutExtension(f).Equals(Path.GetFileNameWithoutExtension(matchedFile), StringComparison.OrdinalIgnoreCase) ||
                                     f.Contains(Path.GetFileName(matchedFile), StringComparison.OrdinalIgnoreCase));
-                                
+
                                 // If still not found, use the matched file itself (it might be the full path)
                                 if (string.IsNullOrEmpty(specifiedFilePath))
                                 {
                                     specifiedFilePath = matchedFile;
                                 }
-                                
-                                _logger.LogInformation("Matched user input '{UserInput}' to previously shown file '{MatchedFile}', resolved to '{FilePath}'", 
+
+                                _logger.LogInformation("Matched user input '{UserInput}' to previously shown file '{MatchedFile}', resolved to '{FilePath}'",
                                     userInput, matchedFile, specifiedFilePath);
                             }
                         }
-                        
+
                         // If not matched via previously shown files, try direct matching against allFilesInCommits
                         if (string.IsNullOrEmpty(specifiedFilePath))
                         {
                             // Try exact matches first
-                            specifiedFilePath = allFilesInCommits.FirstOrDefault(f => 
+                            specifiedFilePath = allFilesInCommits.FirstOrDefault(f =>
                                 f.Equals(userInput, StringComparison.OrdinalIgnoreCase) ||
                                 Path.GetFileName(f).Equals(userInput, StringComparison.OrdinalIgnoreCase) ||
                                 Path.GetFileNameWithoutExtension(f).Equals(userInput, StringComparison.OrdinalIgnoreCase));
-                            
+
                             // If no exact match, try partial matches
                             if (string.IsNullOrEmpty(specifiedFilePath))
                             {
-                                specifiedFilePath = allFilesInCommits.FirstOrDefault(f => 
+                                specifiedFilePath = allFilesInCommits.FirstOrDefault(f =>
                                     userInput.Contains(Path.GetFileName(f), StringComparison.OrdinalIgnoreCase) ||
                                     userInput.Contains(Path.GetFileNameWithoutExtension(f), StringComparison.OrdinalIgnoreCase) ||
                                     Path.GetFileName(f).Contains(userInput, StringComparison.OrdinalIgnoreCase) ||
                                     Path.GetFileNameWithoutExtension(f).Contains(userInput, StringComparison.OrdinalIgnoreCase));
                             }
-                            
+
                             if (!string.IsNullOrEmpty(specifiedFilePath))
                             {
                                 _logger.LogInformation("User selected file by name '{UserInput}': {FilePath}", userInput, specifiedFilePath);
                             }
                         }
                     }
-                    
+
                     if (string.IsNullOrEmpty(specifiedFilePath))
                     {
                         // User didn't specify, show list and ask
@@ -2187,17 +2217,17 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                         // User specified a file - find the commit that contains this file and filter
                         GitHubCommitDiff? fileCommitDiff = null;
                         GitHubCommit? fileCommit = null;
-                        
+
                         foreach (var commit in orderedCommits)
                         {
                             var diff = await _githubService.GetCommitDiffAsync(owner, repo, commit.Sha, accessToken);
                             if (diff?.FileChanges != null)
                             {
-                                var matchingFile = diff.FileChanges.FirstOrDefault(f => 
+                                var matchingFile = diff.FileChanges.FirstOrDefault(f =>
                                     f.FilePath.Equals(specifiedFilePath, StringComparison.OrdinalIgnoreCase) ||
                                     Path.GetFileName(f.FilePath).Equals(Path.GetFileName(specifiedFilePath), StringComparison.OrdinalIgnoreCase) ||
                                     Path.GetFileNameWithoutExtension(f.FilePath).Equals(Path.GetFileNameWithoutExtension(specifiedFilePath), StringComparison.OrdinalIgnoreCase));
-                                
+
                                 if (matchingFile != null && (matchingFile.Additions > 0 || matchingFile.Deletions > 0))
                                 {
                                     // Found the file in this commit - use this commit for review
@@ -2214,7 +2244,7 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                                 }
                             }
                         }
-                        
+
                         // Use the found commit diff, or fall back to filtering the current commitDiff
                         if (fileCommitDiff != null && fileCommit != null)
                         {
@@ -2231,7 +2261,7 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                                            Path.GetFileNameWithoutExtension(f.FilePath).Equals(Path.GetFileNameWithoutExtension(specifiedFilePath), StringComparison.OrdinalIgnoreCase) ||
                                            f.FilePath.Contains(Path.GetFileName(specifiedFilePath), StringComparison.OrdinalIgnoreCase))
                                 .ToList();
-                            
+
                             if (filteredChanges.Any())
                             {
                                 commitDiff.FileChanges = filteredChanges;
@@ -2331,7 +2361,7 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                 // Final validation: ensure we have actual code to review before calling AI
                 if (commitDiff == null || commitDiff.FileChanges == null || !commitDiff.FileChanges.Any() || commitDiff.TotalFilesChanged == 0)
                 {
-                    _logger.LogWarning("Attempted code review with no file changes for StudentId {StudentId}, Commit {Sha}", 
+                    _logger.LogWarning("Attempted code review with no file changes for StudentId {StudentId}, Commit {Sha}",
                         request.StudentId, mostRecentCommit?.Sha ?? "unknown");
                     return Ok(new
                     {
@@ -2444,7 +2474,7 @@ Your intelligence is strictly tethered to the Current Project Context and the us
 
                 // Get appropriate repository URL(s) based on role
                 var (frontendRepoUrl, backendRepoUrl, isFullstack) = GetRepositoryUrlsByRole(student);
-                
+
                 // Use the primary repo for help text (backend for backend/fullstack, frontend for frontend)
                 var githubRepoUrl = !string.IsNullOrEmpty(backendRepoUrl) ? backendRepoUrl : frontendRepoUrl ?? "";
                 var githubUser = student.GithubUser ?? "";
@@ -2504,11 +2534,11 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                 var contextJson = JsonSerializer.Serialize(contextResult);
                 var contextElement = JsonSerializer.Deserialize<JsonElement>(contextJson);
 
-                var baseSystemPrompt = contextElement.TryGetProperty("SystemPrompt", out var sysProp) 
-                    ? sysProp.GetString() ?? "" 
+                var baseSystemPrompt = contextElement.TryGetProperty("SystemPrompt", out var sysProp)
+                    ? sysProp.GetString() ?? ""
                     : "";
-                var contextData = contextElement.TryGetProperty("Context", out var ctxProp) 
-                    ? ctxProp 
+                var contextData = contextElement.TryGetProperty("Context", out var ctxProp)
+                    ? ctxProp
                     : default(JsonElement);
 
                 // Get user question early for use in sprint detection
@@ -2517,14 +2547,14 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                 // Check if user is explicitly asking to view/switch to a different sprint (not just mentioning it)
                 // Skip sprint detection entirely if user is asking for suggestions, advice, or feedback
                 var lowerQuestion = userQuestion.ToLowerInvariant();
-                
+
                 // Check if user is asking for suggestions/advice - if so, skip sprint switch detection entirely
                 var suggestionKeywords = new[] { "suggestion", "advice", "recommend", "suggest", "what should", "how to", "what do you think", "overcome", "issue", "problem", "what is your" };
                 bool isAskingForSuggestion = suggestionKeywords.Any(keyword => lowerQuestion.Contains(keyword));
-                
+
                 int? mentionedSprint = null;
                 bool isExplicitSprintRequest = false;
-                
+
                 // Only check for sprint switch if user is NOT asking for suggestions/advice
                 if (!isAskingForSuggestion)
                 {
@@ -2536,7 +2566,7 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                         @"sprint\s*(\d+)\s+(?:information|details|tasks|context|show|view|see)",
                         @"(?:tell\s+me|what\s+is|what\s+are)\s+(?:the\s+)?(?:tasks|information|details)\s+(?:in|for|about)\s+sprint\s*(\d+)"
                     };
-                    
+
                     foreach (var pattern in explicitSprintRequestPatterns)
                     {
                         var match = System.Text.RegularExpressions.Regex.Match(lowerQuestion, pattern, System.Text.RegularExpressions.RegexOptions.IgnoreCase);
@@ -2552,11 +2582,11 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                         }
                     }
                 }
-                
+
                 // Only redirect if it's an explicit request to view/switch sprints, not just a mention
                 if (isExplicitSprintRequest && mentionedSprint.HasValue && mentionedSprint.Value != request.SprintId)
                 {
-                    _logger.LogInformation("User explicitly requested Sprint {MentionedSprint} but context is Sprint {CurrentSprint}. Informing user to switch context.", 
+                    _logger.LogInformation("User explicitly requested Sprint {MentionedSprint} but context is Sprint {CurrentSprint}. Informing user to switch context.",
                         mentionedSprint.Value, request.SprintId);
                     return Ok(new
                     {
@@ -2572,7 +2602,7 @@ Your intelligence is strictly tethered to the Current Project Context and the us
 
                 // Get chat history for this student/sprint combination (BEFORE saving current message)
                 var chatHistoryLength = _promptConfig.Mentor.ChatHistoryLength;
-                var chatHistory = await _context.MentorChatHistory
+                var rawChatHistory = await _context.MentorChatHistory
                     .Where(h => h.StudentId == request.StudentId && h.SprintId == request.SprintId)
                     .OrderByDescending(h => h.CreatedAt)
                     .Take(chatHistoryLength * 2) // Get last N pairs (user + assistant)
@@ -2584,6 +2614,14 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                     })
                     .ToListAsync();
                 
+                // Filter out database connection information from chat history to prevent using outdated credentials
+                // This is critical because boards can be deleted and recreated with new connection strings
+                var chatHistory = rawChatHistory.Select(h => new ChatHistoryItem
+                {
+                    Role = h.Role,
+                    Message = FilterDatabaseConnectionInfo(h.Message)
+                }).ToList();
+
                 // Check if this is a new conversation (no chat history) to determine if greeting is appropriate
                 var hasChatHistory = chatHistory.Any();
 
@@ -2593,10 +2631,10 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                     .Include(s => s.StudentRoles)
                         .ThenInclude(sr => sr.Role)
                     .FirstOrDefaultAsync(s => s.Id == request.StudentId);
-                
+
                 // Get GitHub access token for API calls
                 var accessToken = _configuration["GitHub:AccessToken"];
-                
+
                 // Check if student has a developer role (Type 1: Full-stack Developer, Type 2: Frontend/Backend Developer)
                 var isDeveloperRole = student?.StudentRoles?
                     .Any(sr => sr.IsActive && (sr.Role?.Type == 1 || sr.Role?.Type == 2)) ?? false;
@@ -2606,23 +2644,23 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                                         userQuestion.Contains("diffs", StringComparison.OrdinalIgnoreCase) ||
                                         userQuestion.Contains("repository", StringComparison.OrdinalIgnoreCase) ||
                                         userQuestion.Contains("repo", StringComparison.OrdinalIgnoreCase) ||
-                                        userQuestion.Contains("see", StringComparison.OrdinalIgnoreCase) && 
-                                        (userQuestion.Contains("code", StringComparison.OrdinalIgnoreCase) || 
+                                        userQuestion.Contains("see", StringComparison.OrdinalIgnoreCase) &&
+                                        (userQuestion.Contains("code", StringComparison.OrdinalIgnoreCase) ||
                                          userQuestion.Contains("changes", StringComparison.OrdinalIgnoreCase)) ||
-                                        userQuestion.Contains("access", StringComparison.OrdinalIgnoreCase) && 
+                                        userQuestion.Contains("access", StringComparison.OrdinalIgnoreCase) &&
                                         userQuestion.Contains("repository", StringComparison.OrdinalIgnoreCase);
 
                 // Check if developer is asking about connection strings, README, API, web, or parsing from GitHub
                 var isAskingAboutConnectionString = isDeveloperRole && (
                                         userQuestion.Contains("connection string", StringComparison.OrdinalIgnoreCase) ||
                                         userQuestion.Contains("connectionstring", StringComparison.OrdinalIgnoreCase) ||
-                                        userQuestion.Contains("parse", StringComparison.OrdinalIgnoreCase) && 
-                                        (userQuestion.Contains("connection", StringComparison.OrdinalIgnoreCase) || 
+                                        userQuestion.Contains("parse", StringComparison.OrdinalIgnoreCase) &&
+                                        (userQuestion.Contains("connection", StringComparison.OrdinalIgnoreCase) ||
                                          userQuestion.Contains("readme", StringComparison.OrdinalIgnoreCase) ||
                                          userQuestion.Contains("README", StringComparison.OrdinalIgnoreCase)) ||
                                         userQuestion.Contains("readme", StringComparison.OrdinalIgnoreCase) ||
                                         userQuestion.Contains("README", StringComparison.OrdinalIgnoreCase) ||
-                                        userQuestion.Contains("read", StringComparison.OrdinalIgnoreCase) && 
+                                        userQuestion.Contains("read", StringComparison.OrdinalIgnoreCase) &&
                                         (userQuestion.Contains("file", StringComparison.OrdinalIgnoreCase) ||
                                          userQuestion.Contains("readme", StringComparison.OrdinalIgnoreCase)) ||
                                         userQuestion.Contains("api", StringComparison.OrdinalIgnoreCase) ||
@@ -2631,12 +2669,12 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                                         userQuestion.Contains("swagger", StringComparison.OrdinalIgnoreCase) ||
                                         userQuestion.Contains("endpoint", StringComparison.OrdinalIgnoreCase) ||
                                         userQuestion.Contains("railway", StringComparison.OrdinalIgnoreCase));
-                
+
                 // Check if user is asking to review code (even if intent wasn't detected)
                 // This catches cases where intent detection failed but user clearly wants code review
                 // Note: lowerQuestion is already declared earlier in the method
-                var isAskingToReviewCode = (lowerQuestion.Contains("review") && 
-                                          (lowerQuestion.Contains("code") || 
+                var isAskingToReviewCode = (lowerQuestion.Contains("review") &&
+                                          (lowerQuestion.Contains("code") ||
                                            lowerQuestion.Contains("my code") ||
                                            lowerQuestion.Contains("this file") ||
                                            lowerQuestion.Contains("the file") ||
@@ -2648,7 +2686,7 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                                           lowerQuestion.Contains("feedback on") ||
                                           (lowerQuestion.Contains("please") && lowerQuestion.Contains("review")) ||
                                           (lowerQuestion.Contains("can you") && lowerQuestion.Contains("review"));
-                
+
                 // If asking to review code and is developer role, route to code review handler
                 if (isAskingToReviewCode && isDeveloperRole)
                 {
@@ -2658,7 +2696,7 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                     intent.Confidence = 0.9;
                     return await HandleCodeReviewIntent(request, intent, aiModel);
                 }
-                
+
                 // If asking to review code, check for commits and add explicit instruction
                 string? codeReviewWarning = null;
                 if (isAskingToReviewCode && student != null && isDeveloperRole)
@@ -2668,19 +2706,19 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                         // Get appropriate repository URL based on role
                         var (frontendRepoUrl, backendRepoUrl, _) = GetRepositoryUrlsByRole(student);
                         var githubRepoUrl = !string.IsNullOrEmpty(backendRepoUrl) ? backendRepoUrl : frontendRepoUrl;
-                        
+
                         if (!string.IsNullOrEmpty(student.GithubUser) && !string.IsNullOrEmpty(githubRepoUrl))
                         {
                             var repoParts = githubRepoUrl.Replace("https://github.com/", "").Replace("http://github.com/", "").TrimEnd('/').Split('/');
-                            
+
                             if (repoParts.Length >= 2)
                             {
                                 var owner = repoParts[0];
                                 var repo = repoParts[1];
-                                
+
                                 // Check for commits
                                 var recentCommits = await _githubService.GetRecentCommitsAsync(owner, repo, student.GithubUser, 5, accessToken);
-                                
+
                                 if (!recentCommits.Any())
                                 {
                                     // No commits found - add explicit instruction to be honest
@@ -2694,13 +2732,13 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                         _logger.LogError(ex, "Error checking commits for code review warning");
                     }
                 }
-                
+
                 // Check if user is asking to repeat instructions (likely GitHub-related)
                 var isAskingToRepeat = userQuestion.Contains("instruct again", StringComparison.OrdinalIgnoreCase) ||
                                       userQuestion.Contains("tell me again", StringComparison.OrdinalIgnoreCase) ||
                                       userQuestion.Contains("repeat", StringComparison.OrdinalIgnoreCase) ||
                                       userQuestion.Contains("show me again", StringComparison.OrdinalIgnoreCase);
-                
+
                 // If asking to repeat and is developer role, assume it's about GitHub/Git
                 if (isAskingToRepeat && isDeveloperRole)
                 {
@@ -2717,29 +2755,29 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                         // Get appropriate repository URL based on role
                         var (frontendRepoUrl, backendRepoUrl, _) = GetRepositoryUrlsByRole(student);
                         var githubRepoUrl = !string.IsNullOrEmpty(backendRepoUrl) ? backendRepoUrl : frontendRepoUrl;
-                        
+
                         if (!string.IsNullOrEmpty(student.GithubUser) && !string.IsNullOrEmpty(githubRepoUrl))
                         {
                             var repoParts = githubRepoUrl.Replace("https://github.com/", "").Replace("http://github.com/", "").TrimEnd('/').Split('/');
-                            
+
                             if (repoParts.Length >= 2)
                             {
                                 var owner = repoParts[0];
                                 var repo = repoParts[1];
-                                
+
                                 // If asking about connection strings, README, API, or web-related topics, fetch README content
                                 if (isAskingAboutConnectionString)
                                 {
                                     _logger.LogInformation("Developer asking about connection string/README/API/web. Fetching README content from {Owner}/{Repo}", owner, repo);
                                     readmeContent = await _githubService.GetFileContentAsync(owner, repo, "README.md", accessToken);
-                                    
+
                                     if (string.IsNullOrEmpty(readmeContent))
                                     {
                                         // Try README.txt or README
                                         readmeContent = await _githubService.GetFileContentAsync(owner, repo, "README.txt", accessToken) ??
                                                        await _githubService.GetFileContentAsync(owner, repo, "README", accessToken);
                                     }
-                                    
+
                                     if (!string.IsNullOrEmpty(readmeContent))
                                     {
                                         _logger.LogInformation("Successfully fetched README content ({Length} characters)", readmeContent.Length);
@@ -2749,11 +2787,11 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                                         _logger.LogWarning("README file not found in repository {Owner}/{Repo}", owner, repo);
                                     }
                                 }
-                                
+
                                 // Check for recent commits
                                 var hasRecentCommits = await _githubService.HasRecentCommitsAsync(owner, repo, student.GithubUser, 168, accessToken);
                                 var recentCommits = await _githubService.GetRecentCommitsAsync(owner, repo, student.GithubUser, 5, accessToken);
-                                
+
                                 if (hasRecentCommits && recentCommits.Any())
                                 {
                                     var mostRecentCommit = recentCommits.OrderByDescending(c => c.CommitDate).First();
@@ -2768,7 +2806,7 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                                     repositoryStatusInfo = $"IMPORTANT: You DO have access to the GitHub repository ({githubRepoUrl}), " +
                                         $"but there are currently no recent commits by {student.GithubUser} to review. " +
                                         $"You can still access the repository to check for files and structure.";
-                                    
+
                                     // If we have README content but no commits, still inform about repository access
                                     if (!string.IsNullOrEmpty(readmeContent))
                                     {
@@ -2784,7 +2822,7 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                         // Continue without repository info if check fails
                     }
                 }
-                
+
                 var githubAccountInfo = "";
                 // Only add GitHub information for developer roles
                 if (student != null && isDeveloperRole)
@@ -2792,7 +2830,7 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                     var githubUser = student.GithubUser ?? "";
                     var (frontendRepoUrl, backendRepoUrl, _) = GetRepositoryUrlsByRole(student);
                     var githubRepoUrl = !string.IsNullOrEmpty(backendRepoUrl) ? backendRepoUrl : frontendRepoUrl ?? "";
-                    
+
                     // Always add GitHub info for developer roles, especially if asking about GitHub or repeating instructions
                     if (isAskingAboutRepo || isAskingToRepeat || !string.IsNullOrEmpty(githubUser) || !string.IsNullOrEmpty(githubRepoUrl))
                     {
@@ -2826,7 +2864,7 @@ Your intelligence is strictly tethered to the Current Project Context and the us
 
                 // Build enhanced system prompt with context (but NOT the user question)
                 var enhancedSystemPrompt = BuildEnhancedSystemPrompt(baseSystemPrompt, contextData);
-                
+
                 // Add instruction to skip greeting if there's existing chat history
                 if (!hasChatHistory)
                 {
@@ -2834,15 +2872,18 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                 }
                 else
                 {
-                    enhancedSystemPrompt = $"{enhancedSystemPrompt}\n\n⚠️ IMPORTANT: This is NOT a new conversation - there is existing chat history. Do NOT greet the user with phrases like \"Hi [name]! How can I help you today?\" or similar greetings. Go straight to answering their question based on the conversation context.";
+                    enhancedSystemPrompt = $"{enhancedSystemPrompt}\n\n⚠️ IMPORTANT: This is NOT a new conversation - there is existing chat history. Do NOT greet the user with phrases like \"Hi [name]! How can I help you today?\" or similar greetings. Go straight to answering their question based on the conversation context.\n\n" +
+                        $"⚠️ CRITICAL: If the user asks about database connection details, IGNORE any database connection information from the chat history below. " +
+                        $"Chat history may contain outdated information from deleted boards or old projects. " +
+                        $"ALWAYS use the CURRENT connection information from the PROJECT INFORMATION (README) section above or from the current context, NOT from chat history.";
                 }
-                
+
                 // Add GitHub account information
                 if (!string.IsNullOrEmpty(githubAccountInfo))
                 {
                     enhancedSystemPrompt = $"{enhancedSystemPrompt}{githubAccountInfo}";
                 }
-                
+
                 // Add repository access information to system prompt if relevant
                 if (!string.IsNullOrEmpty(repositoryStatusInfo))
                 {
@@ -2852,7 +2893,7 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                 // Extract WebApi URL and Swagger URL from README if available (for developer roles)
                 string? webApiUrl = null;
                 string? swaggerUrl = null;
-                
+
                 if (!string.IsNullOrEmpty(readmeContent))
                 {
                     // Extract WebApi URL from README (format: **WebApi URL:** https://railway.app/project/...)
@@ -2861,7 +2902,7 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                     {
                         webApiUrl = webApiMatch.Groups[1].Value.Trim();
                     }
-                    
+
                     // Extract Swagger URL from README (format: **Swagger API Tester URL:** https://...)
                     var swaggerMatch = System.Text.RegularExpressions.Regex.Match(readmeContent, @"\*\*Swagger API Tester URL:\*\*\s*(https?://[^\s\n]+)", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
                     if (swaggerMatch.Success)
@@ -2869,39 +2910,165 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                         swaggerUrl = swaggerMatch.Groups[1].Value.Trim();
                     }
                 }
-                
+
                 // Add README content if fetched (for connection string parsing, etc.)
-                if (!string.IsNullOrEmpty(readmeContent) && isDeveloperRole)
+                if (isDeveloperRole)
                 {
-                    enhancedSystemPrompt = $"{enhancedSystemPrompt}\n\n=== PROJECT INFORMATION ===\n" +
-                        $"{readmeContent}\n\n" +
-                        $"=== END OF PROJECT INFORMATION ===\n\n" +
-                        $"⚠️ IMPORTANT: Use the project information provided above to answer the user's question naturally. " +
-                        $"If the user asked about connection strings or other project details, extract and provide the relevant information from the content above. " +
-                        $"Do NOT mention that this information comes from README or any specific file - simply provide the answer as if you naturally have access to this project information. " +
-                        $"For example, if a connection string is present in the project information above, provide it directly without mentioning its source.";
+                    // Check if README contains connection string
+                    var hasConnectionStringInReadme = !string.IsNullOrEmpty(readmeContent) && 
+                        (readmeContent.Contains("postgresql://", StringComparison.OrdinalIgnoreCase) || 
+                         readmeContent.Contains("postgres://", StringComparison.OrdinalIgnoreCase) ||
+                         readmeContent.Contains("Application DB Connection String", StringComparison.OrdinalIgnoreCase));
+                    
+                    if (!string.IsNullOrEmpty(readmeContent))
+                    {
+                        enhancedSystemPrompt = $"{enhancedSystemPrompt}\n\n=== PROJECT INFORMATION (FROM README) ===\n" +
+                            $"{readmeContent}\n\n" +
+                            $"=== END OF PROJECT INFORMATION ===\n\n";
+                    }
+                    
+                    // Add connection string fallback if README doesn't have it
+                    string? connectionStringFallback = null;
+                    if (!hasConnectionStringInReadme && student.ProjectBoard != null)
+                    {
+                        var boardId = student.ProjectBoard.Id;
+                        var dbPassword = student.ProjectBoard.DBPassword;
+                        var neonProjectId = student.ProjectBoard.NeonProjectId; // Get the saved NeonProjectId (project-per-tenant)
+                        var neonBranchId = student.ProjectBoard.NeonBranchId; // Get the saved NeonBranchId
+                        
+                        if (!string.IsNullOrEmpty(boardId) && !string.IsNullOrEmpty(dbPassword))
+                        {
+                            var dbName = $"AppDB_{boardId}";
+                            var username = $"db_appdb_{boardId}_user";
+                            
+                            // Try to extract host from README first
+                            string? hostInfo = null;
+                            if (!string.IsNullOrEmpty(readmeContent))
+                            {
+                                var hostMatch = System.Text.RegularExpressions.Regex.Match(readmeContent, 
+                                    @"@([a-zA-Z0-9\-\.]+\.neon\.tech|ep-[a-zA-Z0-9\-]+\.gwc\.azure\.neon\.tech):(\d+)", 
+                                    System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                                if (hostMatch.Success)
+                                {
+                                    hostInfo = $"{hostMatch.Groups[1].Value}:{hostMatch.Groups[2].Value}";
+                                }
+                            }
+                            
+                            // If host not found in README, try to retrieve it dynamically using NeonBranchId and NeonProjectId
+                            if (string.IsNullOrEmpty(hostInfo) && !string.IsNullOrEmpty(neonBranchId) && !string.IsNullOrEmpty(neonProjectId))
+                            {
+                                try
+                                {
+                                    var neonApiKey = _configuration["Neon:ApiKey"];
+                                    var neonBaseUrl = _configuration["Neon:BaseUrl"];
+                                    var neonDefaultOwnerName = _configuration["Neon:DefaultOwnerName"] ?? "neondb_owner";
+                                    
+                                    if (!string.IsNullOrEmpty(neonApiKey) && !string.IsNullOrEmpty(neonBaseUrl))
+                                    {
+                                        // Use the Neon API to get the connection string for this specific branch in the tenant's project
+                                        var connectionUrl = $"{neonBaseUrl}/projects/{neonProjectId}/connection_uri?database_name={Uri.EscapeDataString(dbName)}&role_name={Uri.EscapeDataString(neonDefaultOwnerName)}&branch_id={Uri.EscapeDataString(neonBranchId)}&pooled=false";
+                                        
+                                        using var httpClient = _httpClientFactory.CreateClient();
+                                        httpClient.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", neonApiKey);
+                                        
+                                        var connResponse = await httpClient.GetAsync(connectionUrl);
+                                        if (connResponse.IsSuccessStatusCode)
+                                        {
+                                            var connContent = await connResponse.Content.ReadAsStringAsync();
+                                            var connDoc = JsonDocument.Parse(connContent);
+                                            if (connDoc.RootElement.TryGetProperty("uri", out var uriProp))
+                                            {
+                                                var fullConnectionString = uriProp.GetString();
+                                                if (!string.IsNullOrEmpty(fullConnectionString))
+                                                {
+                                                    // Extract host and port from the connection string
+                                                    var uri = new Uri(fullConnectionString);
+                                                    hostInfo = $"{uri.Host}:{uri.Port}";
+                                                    _logger.LogInformation("✅ [MENTOR] Successfully retrieved host from Neon API for branch '{BranchId}': {Host}", neonBranchId, hostInfo);
+                                                }
+                                            }
+                                        }
+                                        else
+                                        {
+                                            _logger.LogWarning("⚠️ [MENTOR] Failed to retrieve connection string from Neon API for project '{ProjectId}', branch '{BranchId}': {StatusCode}", 
+                                                neonProjectId, neonBranchId, connResponse.StatusCode);
+                                        }
+                                    }
+                                    else
+                                    {
+                                        _logger.LogWarning("⚠️ [MENTOR] Neon API key or base URL not configured. Cannot retrieve host dynamically.");
+                                    }
+                                }
+                                catch (Exception ex)
+                                {
+                                    _logger.LogWarning(ex, "⚠️ [MENTOR] Failed to dynamically retrieve host for project '{ProjectId}', branch '{BranchId}' from Neon API", neonProjectId, neonBranchId);
+                                }
+                            }
+                            else if (string.IsNullOrEmpty(neonProjectId))
+                            {
+                                _logger.LogWarning("⚠️ [MENTOR] NeonProjectId not found in ProjectBoard. Cannot retrieve host dynamically. This may be an older board created before project-per-tenant model.");
+                            }
+                            
+                            enhancedSystemPrompt = $"{enhancedSystemPrompt}\n\n=== DATABASE CONNECTION INFORMATION (FALLBACK - README MISSING/INCOMPLETE) ===\n" +
+                                $"- Database Name: {dbName}\n" +
+                                $"- Username: {username}\n" +
+                                $"- Password: {dbPassword}\n";
+                            
+                            if (!string.IsNullOrEmpty(hostInfo))
+                            {
+                                var fullConnectionString = $"postgresql://{username}:{Uri.EscapeDataString(dbPassword)}@{hostInfo}/{dbName}?sslmode=require";
+                                enhancedSystemPrompt += $"- Complete Connection String: {fullConnectionString}\n";
+                            }
+                            else
+                            {
+                                enhancedSystemPrompt += $"- Host/Port: Could not retrieve dynamically. Please check Neon dashboard for the host and port (typically port 5432) for branch '{neonBranchId}'.\n";
+                            }
+                            
+                            enhancedSystemPrompt += $"=== END DATABASE CONNECTION INFORMATION ===\n\n";
+                        }
+                    }
+                    
+                    enhancedSystemPrompt = $"{enhancedSystemPrompt}" +
+                        $"🚨 ABSOLUTELY CRITICAL INSTRUCTIONS FOR DATABASE CONNECTION INFORMATION - READ CAREFULLY:\n" +
+                        $"1. If the user asks about database connection details, you MUST extract the EXACT connection string from the PROJECT INFORMATION section above (README).\n" +
+                        $"2. The connection string is in the format: postgresql://username:password@host:port/database?sslmode=require\n" +
+                        $"3. 🚨 FORBIDDEN: You MUST NEVER use placeholders like <boardid>, <BoardId>, db_appdb_<boardid>_user, AppDB_<boardid>, or ANY other placeholder format.\n" +
+                        $"4. 🚨 FORBIDDEN: You MUST NEVER say 'replace <boardid> with your board ID' or similar instructions.\n" +
+                        $"5. 🚨 FORBIDDEN: You MUST NEVER use angle brackets < > or square brackets [ ] as placeholders.\n" +
+                        $"6. ✅ REQUIRED: Extract and provide the COMPLETE, EXACT connection string from the README above.\n" +
+                        $"7. ✅ REQUIRED: If the README shows a connection string like 'postgresql://db_appdb_695e42b42ddace5d23fb1f0e_user:password@host:5432/AppDB_695e42b42ddace5d23fb1f0e?sslmode=require', you MUST provide it EXACTLY as shown.\n" +
+                        $"8. IMPORTANT: Database name starts with 'AppDB_' (capital A, capital D, capital B) followed by the actual board ID - it does NOT end with '_user'.\n" +
+                        $"9. IMPORTANT: Username is 'db_appdb_' (lowercase) followed by the actual board ID and '_user' (lowercase).\n" +
+                        $"10. IMPORTANT: PostgreSQL is CASE-SENSITIVE - preserve exact case for database names, usernames, and all values.\n" +
+                        $"11. URL-decode the password if it contains encoded characters (e.g., %24 becomes $, %40 becomes @, %25 becomes %).\n" +
+                        $"12. 🚨 EXAMPLE OF WHAT NOT TO DO: 'Database Name: AppDB_<boardid>' or 'Username: db_appdb_<boardid>_user' - THIS IS WRONG!\n" +
+                        $"13. ✅ EXAMPLE OF WHAT TO DO: If README shows 'AppDB_695e42b42ddace5d23fb1f0e', provide 'AppDB_695e42b42ddace5d23fb1f0e' - EXACTLY as shown.\n" +
+                        $"14. DO NOT use generic or default connection information (like neondb_owner) - ALWAYS use what's in the README.\n" +
+                        $"15. IGNORE any database connection information from previous chat history - it may be from deleted boards or old projects.\n" +
+                        $"16. If the README connection string is missing or incomplete, use the DATABASE CONNECTION INFORMATION (FALLBACK) section above if available.\n" +
+                        $"For all other project information, use the content above to answer naturally.";
                 }
-                
+
                 // Add Web API information for developer roles
                 if (isDeveloperRole && (!string.IsNullOrEmpty(webApiUrl) || !string.IsNullOrEmpty(swaggerUrl)))
                 {
                     var webApiInfo = "\n\n=== WEB API INFORMATION (Developer Role) ===\n";
                     webApiInfo += "This project has a Web API hosted on Railway:\n";
-                    
+
                     if (!string.IsNullOrEmpty(webApiUrl))
                     {
                         webApiInfo += $"- WebApi URL: {webApiUrl}\n";
                     }
-                    
+
                     if (!string.IsNullOrEmpty(swaggerUrl))
                     {
                         webApiInfo += $"- Swagger API Tester URL: {swaggerUrl}\n";
                         webApiInfo += "The Swagger URL provides an interactive interface to test and explore the API endpoints.\n";
                     }
-                    
+
                     webApiInfo += "\nYou can reference these URLs when helping the developer with API-related questions, testing, or integration tasks.\n";
                     webApiInfo += "=== END WEB API INFORMATION ===\n";
-                    
+
                     enhancedSystemPrompt = $"{enhancedSystemPrompt}{webApiInfo}";
                 }
                 else if (isAskingAboutConnectionString && string.IsNullOrEmpty(readmeContent) && isDeveloperRole)
@@ -2910,7 +3077,7 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                         $"but this information is not currently available in their project repository. " +
                         $"You should inform them that the requested information could not be found.";
                 }
-                
+
                 // Add code review warning if user asked to review code but there are no commits
                 if (!string.IsNullOrEmpty(codeReviewWarning))
                 {
@@ -2989,7 +3156,7 @@ Your intelligence is strictly tethered to the Current Project Context and the us
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Error getting mentor response for StudentId: {StudentId}, SprintId: {SprintId}, Model: {Model}", 
+                _logger.LogError(ex, "Error getting mentor response for StudentId: {StudentId}, SprintId: {SprintId}, Model: {Model}",
                     request.StudentId, request.SprintId, aiModel?.Name ?? "Unknown");
                 return StatusCode(500, new { Success = false, Message = $"An error occurred: {ex.Message}" });
             }
@@ -3145,9 +3312,9 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                 // Get GitHub files - use role-based repository selection
                 var githubFiles = new List<string>();
                 object? githubCommitSummary = null;
-                
+
                 var (frontendRepoUrl, backendRepoUrl, isFullstack) = GetRepositoryUrlsByRole(student);
-                
+
                 // Determine which repos to fetch based on role
                 var reposToFetch = new List<(string Url, string Type)>();
                 if (!string.IsNullOrEmpty(frontendRepoUrl))
@@ -3158,19 +3325,19 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                 {
                     reposToFetch.Add((backendRepoUrl, "backend"));
                 }
-                
+
                 if (reposToFetch.Any())
                 {
                     try
                     {
                         var allFiles = new List<string>();
                         var allCommitSummaries = new List<object>();
-                        
+
                         foreach (var (repoUrl, repoType) in reposToFetch)
                         {
                             var repoName = repoUrl.Replace("https://github.com/", "").Replace("http://github.com/", "").TrimEnd('/');
                             var repoFiles = await GetGitHubRepositoryFilesAsync(repoName);
-                            
+
                             if (isFullstack)
                             {
                                 allFiles.AddRange(repoFiles.Select(f => $"[{repoType.ToUpper()}] {f}"));
@@ -3179,16 +3346,16 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                             {
                                 allFiles.AddRange(repoFiles);
                             }
-                            
+
                             var summary = await GetGitHubCommitSummaryAsync(repoUrl, student.GithubUser);
                             if (summary != null)
                             {
                                 allCommitSummaries.Add(summary);
                             }
                         }
-                        
+
                         githubFiles = allFiles;
-                        
+
                         if (isFullstack && allCommitSummaries.Any())
                         {
                             githubCommitSummary = CombineCommitSummaries(allCommitSummaries);
@@ -3271,7 +3438,7 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                     var firstTaskElement = JsonSerializer.Deserialize<JsonElement>(firstTaskJson);
                     moduleDescription = GetModuleDescriptionForFirstTask(firstTaskElement, moduleDescriptions);
                 }
-                
+
                 var teamMembersList = FormatTeamMembers(teamMembers);
                 var teamMemberTasksList = FormatTeamMemberTasks(teamMemberTasks);
                 var githubFilesList = string.Join("\n", githubFiles);
@@ -3316,7 +3483,8 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                         {
                             Time = student.ProjectBoard?.NextMeetingTime,
                             Url = student.ProjectBoard?.NextMeetingUrl
-                        }
+                        },
+                        DatabasePassword = student.ProjectBoard?.DBPassword
                     }
                 };
             }
@@ -3647,9 +3815,9 @@ Your intelligence is strictly tethered to the Current Project Context and the us
 
             if (operation == "commit" || string.IsNullOrEmpty(operation))
             {
-                var stepNum = hasGitHubAccount && hasRepository ? 3 : 
+                var stepNum = hasGitHubAccount && hasRepository ? 3 :
                              (hasGitHubAccount || hasRepository ? 3 : 4);
-                
+
                 sb.AppendLine($"**{stepNum}. Create your first commit:**");
                 sb.AppendLine("```bash");
                 sb.AppendLine("git commit -m \"Initial commit: Add project files\"");
@@ -3660,9 +3828,9 @@ Your intelligence is strictly tethered to the Current Project Context and the us
 
             if (!string.IsNullOrEmpty(repoUrl))
             {
-                var stepNum = hasGitHubAccount && hasRepository ? 4 : 
+                var stepNum = hasGitHubAccount && hasRepository ? 4 :
                              (hasGitHubAccount || hasRepository ? 4 : 5);
-                
+
                 sb.AppendLine($"**{stepNum}. Connect to your GitHub repository:**");
                 sb.AppendLine("```bash");
                 // Check if repoUrl already ends with .git
@@ -3730,25 +3898,183 @@ Your intelligence is strictly tethered to the Current Project Context and the us
 
             return sb.ToString();
         }
-    }
 
-    /// <summary>
-    /// Request model for mentor response endpoint
-    /// </summary>
-    public class MentorRequest
-    {
-        public int StudentId { get; set; }
-        public int SprintId { get; set; }
-        public string UserQuestion { get; set; } = string.Empty;
-    }
+        /// <summary>
+        /// Creates a GitHub branch for a sprint following the branch naming convention
+        /// </summary>
+        [HttpPost("use/github-branch")]
+        public async Task<ActionResult<CreateGitHubBranchResponse>> CreateGitHubBranch([FromBody] CreateGitHubBranchRequest request)
+        {
+            try
+            {
+                if (request == null)
+                {
+                    return BadRequest("Request body is required");
+                }
 
-    /// <summary>
-    /// Chat history item for API calls
-    /// </summary>
-    public class ChatHistoryItem
-    {
-        public string Role { get; set; } = string.Empty;
-        public string Message { get; set; } = string.Empty;
+                if (request.SprintNumber < 1 || request.SprintNumber > 20)
+                {
+                    return BadRequest("Sprint number must be between 1 and 20");
+                }
+
+                var board = await _context.ProjectBoards
+                    .FirstOrDefaultAsync(b => b.Id == request.BoardId);
+
+                if (board == null)
+                {
+                    return NotFound($"Project board with BoardId {request.BoardId} not found");
+                }
+
+                var githubUrl = request.IsBackend ? board.GithubBackendUrl : board.GithubFrontendUrl;
+
+                if (string.IsNullOrEmpty(githubUrl))
+                {
+                    return BadRequest($"GitHub {(request.IsBackend ? "backend" : "frontend")} URL not found for board {request.BoardId}");
+                }
+
+                var uri = new Uri(githubUrl);
+                var pathParts = uri.AbsolutePath.TrimStart('/').Split('/');
+                if (pathParts.Length < 2)
+                {
+                    return BadRequest($"Invalid GitHub URL format: {githubUrl}");
+                }
+
+                var owner = pathParts[0];
+                var repo = pathParts[1];
+
+                var patternKey = request.IsBackend ? "GitHub:BranchNamingPatterns:Backend" : "GitHub:BranchNamingPatterns:Frontend";
+                var pattern = _configuration[patternKey] ?? (request.IsBackend ? "^([1-9]|1[0-9]|20)-B$" : "^([1-9]|1[0-9]|20)-F$");
+
+                var repoTypeLetter = request.IsBackend ? "B" : "F";
+                var branchName = $"{request.SprintNumber}-{repoTypeLetter}";
+
+                var accessToken = _configuration["GitHub:AccessToken"];
+                if (string.IsNullOrEmpty(accessToken))
+                {
+                    return StatusCode(500, "GitHub access token is not configured");
+                }
+
+                _logger.LogInformation("🌿 [GITHUB BRANCH] Creating branch '{BranchName}' in {Owner}/{Repo} for sprint {SprintNumber}",
+                    branchName, owner, repo, request.SprintNumber);
+
+                var branchResponse = await _githubService.CreateBranchAsync(owner, repo, branchName, "main", accessToken);
+
+                if (branchResponse.Success)
+                {
+                    return Ok(new CreateGitHubBranchResponse
+                    {
+                        Success = true,
+                        BranchUrl = branchResponse.BranchUrl,
+                        BranchName = branchName,
+                        GitHubResponse = branchResponse.GitHubResponse,
+                        StatusCode = branchResponse.StatusCode
+                    });
+                }
+                else
+                {
+                    _logger.LogError("❌ [GITHUB BRANCH] Failed to create branch: {Error}", branchResponse.ErrorMessage);
+                    return StatusCode(branchResponse.StatusCode > 0 ? branchResponse.StatusCode : 500, new CreateGitHubBranchResponse
+                    {
+                        Success = false,
+                        ErrorMessage = branchResponse.ErrorMessage,
+                        StatusCode = branchResponse.StatusCode
+                    });
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "❌ [GITHUB BRANCH] Error creating GitHub branch: {Message}", ex.Message);
+                return StatusCode(500, new CreateGitHubBranchResponse
+                {
+                    Success = false,
+                    ErrorMessage = ex.Message
+                });
+            }
+        }
+
+        /// <summary>
+        /// Request model for mentor response endpoint
+        /// </summary>
+        public class MentorRequest
+        {
+            public int StudentId { get; set; }
+            public int SprintId { get; set; }
+            public string UserQuestion { get; set; } = string.Empty;
+        }
+
+        /// <summary>
+        /// Filters out database connection information from messages to prevent using outdated credentials
+        /// </summary>
+        private string FilterDatabaseConnectionInfo(string message)
+        {
+            if (string.IsNullOrEmpty(message))
+                return message;
+            
+            // Remove common database connection patterns
+            var filtered = message;
+            
+            // Remove connection strings (postgresql:// or postgres://)
+            filtered = System.Text.RegularExpressions.Regex.Replace(
+                filtered, 
+                @"postgresql://[^\s\n]+|postgres://[^\s\n]+", 
+                "[DATABASE_CONNECTION_STRING_REMOVED_FROM_HISTORY]", 
+                System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+            
+            // Remove database credentials patterns
+            filtered = System.Text.RegularExpressions.Regex.Replace(
+                filtered,
+                @"(?:Host|Username|Password|Database|Port|Connection String)[:\s]+[^\n]+",
+                "[DATABASE_CREDENTIAL_REMOVED_FROM_HISTORY]",
+                System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.Multiline);
+            
+            // Remove neondb_owner references (old default role)
+            filtered = System.Text.RegularExpressions.Regex.Replace(
+                filtered,
+                @"neondb_owner",
+                "[OLD_DATABASE_ROLE_REMOVED]",
+                System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+            
+            // Remove AppDB_ patterns that might be from old boards
+            filtered = System.Text.RegularExpressions.Regex.Replace(
+                filtered,
+                @"AppDB_[a-f0-9]{24,}",
+                "[OLD_DATABASE_NAME_REMOVED]",
+                System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+            
+            return filtered;
+        }
+        
+        /// <summary>
+        /// Chat history item for API calls
+        /// </summary>
+        public class ChatHistoryItem
+        {
+            public string Role { get; set; } = string.Empty;
+            public string Message { get; set; } = string.Empty;
+        }
+
+        /// <summary>
+        /// Request model for creating a GitHub branch
+        /// </summary>
+        public class CreateGitHubBranchRequest
+        {
+            public int SprintNumber { get; set; }
+            public bool IsBackend { get; set; }
+            public string BoardId { get; set; } = string.Empty;
+        }
+
+        /// <summary>
+        /// Response model for creating a GitHub branch
+        /// </summary>
+        public class CreateGitHubBranchResponse
+        {
+            public bool Success { get; set; }
+            public string? BranchUrl { get; set; }
+            public string? BranchName { get; set; }
+            public string? GitHubResponse { get; set; }
+            public string? ErrorMessage { get; set; }
+            public int StatusCode { get; set; }
+        }
     }
 }
 
