@@ -1,6 +1,19 @@
+using Google.Apis.Gmail.v1.Data;
+using Humanizer;
+using Microsoft.AspNetCore.Http.HttpResults;
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
+using Microsoft.VisualBasic;
+using System;
+using System.Diagnostics.Metrics;
+using System.Net.NetworkInformation;
+using System.Runtime.Intrinsics.X86;
 using System.Text.Json;
 using System.Text.Json.Serialization;
-using Microsoft.Extensions.Logging;
+using static System.Net.Mime.MediaTypeNames;
+using static System.Net.WebRequestMethods;
 
 namespace strAppersBackend.Services;
 
@@ -3052,6 +3065,16 @@ INSERT INTO ""TestProjects"" (""Name"") VALUES
             case "java":
                 files = GenerateJavaBackend(webApiUrl);
                 break;
+            case "php":
+                files = GeneratePhpBackend(webApiUrl);
+                break;
+            case "ruby":
+                files = GenerateRubyBackend(webApiUrl);
+                break;
+            case "go":
+            case "golang":
+                files = GenerateGoBackend(webApiUrl);
+                break;
             default:
                 // Default to C# if language not recognized
                 _logger.LogWarning("Unknown programming language '{Language}', defaulting to C#", programmingLanguage);
@@ -3625,6 +3648,82 @@ cmd = ""cd backend && java -jar target/*.jar""
 ";
                 break;
                 
+            case "php":
+                // PHP backend - backend files are in backend/ folder
+                files["nixpacks.toml"] = @"# Nixpacks configuration for Railway - PHP Backend
+# Backend files are in backend/ folder
+
+[phases.setup]
+nixPkgs = { php = ""8.2"" }
+
+[phases.install]
+cmds = [
+  ""cd backend && composer install --no-dev --optimize-autoloader""
+]
+
+[phases.build]
+cmds = [
+  ""echo 'Build complete'""
+]
+
+[start]
+cmd = ""cd backend && php -S 0.0.0.0:$PORT -t . index.php""
+";
+                break;
+                
+            case "ruby":
+                // Ruby/Sinatra backend - backend files are in backend/ folder
+                // Note: Railway's Railpack auto-detects Ruby and uses its default version (3.4.6)
+                // We let Railpack handle Ruby version detection - no need to specify in nixpacks.toml
+                // Use bundle update to fix any dependency issues in Gemfile.lock
+                files["nixpacks.toml"] = @"# Nixpacks configuration for Railway - Ruby/Sinatra Backend
+# Backend files are in backend/ folder
+# Note: Railway's Railpack will auto-detect Ruby version (3.4.6)
+
+[phases.install]
+cmds = [
+  ""cd backend && rm -f Gemfile.lock && bundle install""
+]
+
+[phases.build]
+cmds = [
+  ""echo 'Build complete'""
+]
+
+[start]
+cmd = ""cd backend && bundle exec puma -b tcp://0.0.0.0:$PORT config.ru""
+";
+                break;
+                
+            case "go":
+            case "golang":
+                // Go backend - backend files are in backend/ folder
+                // Building to root level for Railway compatibility (Railway expects binaries at root)
+                // Disable auto-detection by providing explicit phases and providers
+                files["nixpacks.toml"] = @"# Nixpacks configuration for Railway - Go Backend
+# Backend files are in backend/ folder
+
+[variables]
+GO_VERSION = ""1.21""
+
+[phases.setup]
+nixPkgs = { go = ""1.21"" }
+
+[phases.install]
+cmds = [
+  ""cd backend && go mod download && go mod tidy""
+]
+
+[phases.build]
+cmds = [
+  ""cd backend && go build -o ../backend main.go""
+]
+
+[start]
+cmd = ""./backend""
+";
+                break;
+                
             default:
                 // Default to .NET if language not recognized - backend files are in backend/ folder
                 // Railway expects nixpacks.toml at REPO ROOT
@@ -3783,6 +3882,81 @@ cmds = [
 
 [start]
 cmd = ""java -jar target/*.jar""
+";
+                break;
+                
+            case "php":
+                // PHP backend - files are at root
+                files["nixpacks.toml"] = @"# Nixpacks configuration for Railway - PHP Backend
+# Backend files are at root level
+
+[phases.setup]
+nixPkgs = { php = ""8.2"" }
+
+[phases.install]
+cmds = [
+  ""composer install --no-dev --optimize-autoloader""
+]
+
+[phases.build]
+cmds = [
+  ""echo 'Build complete'""
+]
+
+[start]
+cmd = ""php -S 0.0.0.0:$PORT -t . index.php""
+";
+                break;
+                
+            case "ruby":
+                // Ruby/Sinatra backend - files are at root
+                // Note: Railway's Railpack auto-detects Ruby and uses its default version (3.4.6)
+                // Use bundle update to fix any dependency issues in Gemfile.lock
+                files["nixpacks.toml"] = @"# Nixpacks configuration for Railway - Ruby/Sinatra Backend
+# Backend files are at root level
+# Note: Railway's Railpack will auto-detect Ruby version (3.4.6)
+
+[phases.install]
+cmds = [
+  ""rm -f Gemfile.lock && bundle install""
+]
+
+[phases.build]
+cmds = [
+  ""echo 'Build complete'""
+]
+
+[start]
+cmd = ""bundle exec puma -b tcp://0.0.0.0:$PORT config.ru""
+";
+                break;
+                
+            case "go":
+            case "golang":
+                // Go backend - files are at root
+                // Using relative paths for Railway compatibility
+                // Disable auto-detection by providing explicit phases
+                files["nixpacks.toml"] = @"# Nixpacks configuration for Railway - Go Backend
+# Backend files are at root level
+
+[variables]
+GO_VERSION = ""1.21""
+
+[phases.setup]
+nixPkgs = { go = ""1.21"" }
+
+[phases.install]
+cmds = [
+  ""go mod download && go mod tidy""
+]
+
+[phases.build]
+cmds = [
+  ""go build -o backend main.go""
+]
+
+[start]
+cmd = ""./backend""
 ";
                 break;
                 
@@ -4762,6 +4936,1611 @@ app.listen(PORT, '0.0.0.0', () => {
 "springdoc.swagger-ui.path=/swagger\n";
 
         // Note: README.md is created at root level, not here to avoid conflicts
+
+        return files;
+    }
+
+    private Dictionary<string, string> GeneratePhpBackend(string? webApiUrl)
+    {
+        var files = new Dictionary<string, string>();
+
+        // Models/TestProjects.php
+        files["backend/Models/TestProjects.php"] = @"<?php
+
+namespace App\Models;
+
+class TestProjects
+{
+    public ?int $id;
+    public string $name;
+
+    public function __construct(?int $id = null, string $name = '')
+    {
+        $this->id = $id;
+        $this->name = $name;
+    }
+
+    public function toArray(): array
+    {
+        return [
+            'id' => $this->id,
+            'name' => $this->name
+        ];
+    }
+}
+";
+
+        // Controllers/TestController.php
+        files["backend/Controllers/TestController.php"] = @"<?php
+
+namespace App\Controllers;
+
+use App\Models\TestProjects;
+use PDO;
+use PDOException;
+
+class TestController
+{
+    private PDO $db;
+
+    public function __construct(PDO $db)
+    {
+        $this->db = $db;
+    }
+
+    private function setSearchPath(): void
+    {
+        // Set search_path to public schema (required because isolated role has restricted search_path)
+        // Using string concatenation to avoid C# string interpolation issues with $user
+        $dollarSign = '$';
+        $query = 'SET search_path = public, ""' . $dollarSign . 'user""';
+        $this->db->exec($query);
+    }
+
+    public function getAll(): array
+    {
+        try {
+            $this->setSearchPath();
+            $stmt = $this->db->query('SELECT ""Id"", ""Name"" FROM ""TestProjects"" ORDER BY ""Id""');
+            $results = $stmt->fetchAll(PDO::FETCH_ASSOC);
+            
+            $projects = [];
+            foreach ($results as $row) {
+                $projects[] = [
+                    'Id' => (int)$row['Id'],
+                    'Name' => $row['Name']
+                ];
+            }
+            return $projects;
+        } catch (PDOException $e) {
+            http_response_code(500);
+            echo json_encode(['error' => 'Database error: ' . $e->getMessage()]);
+            exit;
+        }
+    }
+
+    public function getById(int $id): ?array
+    {
+        try {
+            $this->setSearchPath();
+            $stmt = $this->db->prepare('SELECT ""Id"", ""Name"" FROM ""TestProjects"" WHERE ""Id"" = :id');
+            $stmt->execute(['id' => $id]);
+            $row = $stmt->fetch(PDO::FETCH_ASSOC);
+            
+            if (!$row) {
+                return null;
+            }
+            
+            return [
+                'Id' => (int)$row['Id'],
+                'Name' => $row['Name']
+            ];
+        } catch (PDOException $e) {
+            http_response_code(500);
+            echo json_encode(['error' => 'Database error: ' . $e->getMessage()]);
+            exit;
+        }
+    }
+
+    public function create(array $data): array
+    {
+        try {
+            $this->setSearchPath();
+            $stmt = $this->db->prepare('INSERT INTO ""TestProjects"" (""Name"") VALUES (:name) RETURNING ""Id"", ""Name""');
+            $stmt->execute(['name' => $data['name']]);
+            $row = $stmt->fetch(PDO::FETCH_ASSOC);
+            
+            return [
+                'Id' => (int)$row['Id'],
+                'Name' => $row['Name']
+            ];
+        } catch (PDOException $e) {
+            http_response_code(500);
+            echo json_encode(['error' => 'Database error: ' . $e->getMessage()]);
+            exit;
+        }
+    }
+
+    public function update(int $id, array $data): ?array
+    {
+        try {
+            $this->setSearchPath();
+            $stmt = $this->db->prepare('UPDATE ""TestProjects"" SET ""Name"" = :name WHERE ""Id"" = :id RETURNING ""Id"", ""Name""');
+            $stmt->execute(['id' => $id, 'name' => $data['name']]);
+            $row = $stmt->fetch(PDO::FETCH_ASSOC);
+            
+            if (!$row) {
+                return null;
+            }
+            
+            return [
+                'Id' => (int)$row['Id'],
+                'Name' => $row['Name']
+            ];
+        } catch (PDOException $e) {
+            http_response_code(500);
+            echo json_encode(['error' => 'Database error: ' . $e->getMessage()]);
+            exit;
+        }
+    }
+
+    public function delete(int $id): bool
+    {
+        try {
+            $this->setSearchPath();
+            $stmt = $this->db->prepare('DELETE FROM ""TestProjects"" WHERE ""Id"" = :id');
+            $stmt->execute(['id' => $id]);
+            return $stmt->rowCount() > 0;
+        } catch (PDOException $e) {
+            http_response_code(500);
+            echo json_encode(['error' => 'Database error: ' . $e->getMessage()]);
+            exit;
+        }
+    }
+}
+";
+
+        // index.php - Main entry point
+        files["backend/index.php"] = @"<?php
+
+require_once __DIR__ . ""/vendor/autoload.php"";
+
+use App\Controllers\TestController;
+use PDO;
+
+// Get request method and path first (before database connection)
+$method = $_SERVER['REQUEST_METHOD'] ?? 'GET';
+$path = parse_url($_SERVER['REQUEST_URI'] ?? '/', PHP_URL_PATH);
+
+// CORS headers
+header('Access-Control-Allow-Origin: *');
+header('Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS');
+header('Access-Control-Allow-Headers: Content-Type');
+
+// Handle preflight
+if ($method === 'OPTIONS') {
+    http_response_code(200);
+    exit;
+}
+
+// Handle routes that don't require database connection first
+if ($path === '/swagger') {
+    // Swagger UI endpoint - serve interactive Swagger UI HTML page
+    header('Content-Type: text/html');
+    echo '<!DOCTYPE html>
+<html>
+<head>
+    <title>Backend API - Swagger UI</title>
+    <link rel=""stylesheet"" type=""text/css"" href=""https://unpkg.com/swagger-ui-dist@5.9.0/swagger-ui.css"" />
+    <style>
+        html { box-sizing: border-box; overflow: -moz-scrollbars-vertical; overflow-y: scroll; }
+        *, *:before, *:after { box-sizing: inherit; }
+        body { margin:0; background: #fafafa; }
+    </style>
+</head>
+<body>
+    <div id=""swagger-ui""></div>
+    <script src=""https://unpkg.com/swagger-ui-dist@5.9.0/swagger-ui-bundle.js""></script>
+    <script src=""https://unpkg.com/swagger-ui-dist@5.9.0/swagger-ui-standalone-preset.js""></script>
+    <script>
+        window.onload = function() {
+            const ui = SwaggerUIBundle({
+                url: ""/swagger.json"",
+                dom_id: ""#swagger-ui"",
+                deepLinking: true,
+                presets: [
+                    SwaggerUIBundle.presets.apis,
+                    SwaggerUIStandalonePreset
+                ],
+                plugins: [
+                    SwaggerUIBundle.plugins.DownloadUrl
+                ],
+                layout: ""StandaloneLayout""
+            });
+        };
+    </script>
+</body>
+</html>';
+    exit;
+} elseif ($path === '/swagger.json') {
+    // Swagger JSON endpoint - return OpenAPI spec as JSON
+    header('Content-Type: application/json');
+    echo json_encode([
+        'openapi' => '3.0.0',
+        'info' => [
+            'title' => 'Backend API',
+            'version' => '1.0.0',
+            'description' => 'PHP Backend API Documentation'
+        ],
+        'paths' => [
+            '/api/test' => [
+                'get' => [
+                    'summary' => 'Get all test projects',
+                    'responses' => [
+                        '200' => [
+                            'description' => 'List of test projects',
+                            'content' => [
+                                'application/json' => [
+                                    'schema' => [
+                                        'type' => 'array',
+                                        'items' => ['$ref' => '#/components/schemas/TestProjects']
+                                    ]
+                                ]
+                            ]
+                        ]
+                    ]
+                ],
+                'post' => [
+                    'summary' => 'Create a new test project',
+                    'requestBody' => [
+                        'required' => true,
+                        'content' => [
+                            'application/json' => [
+                                'schema' => ['$ref' => '#/components/schemas/TestProjectsInput']
+                            ]
+                        ]
+                    ],
+                    'responses' => [
+                        '201' => [
+                            'description' => 'Created test project',
+                            'content' => [
+                                'application/json' => [
+                                    'schema' => ['$ref' => '#/components/schemas/TestProjects']
+                                ]
+                            ]
+                        ]
+                    ]
+                ]
+            ],
+            '/api/test/{id}' => [
+                'get' => [
+                    'summary' => 'Get test project by ID',
+                    'parameters' => [
+                        [
+                            'name' => 'id',
+                            'in' => 'path',
+                            'required' => true,
+                            'schema' => ['type' => 'integer']
+                        ]
+                    ],
+                    'responses' => [
+                        '200' => [
+                            'description' => 'Test project found',
+                            'content' => [
+                                'application/json' => [
+                                    'schema' => ['$ref' => '#/components/schemas/TestProjects']
+                                ]
+                            ]
+                        ],
+                        '404' => ['description' => 'Project not found']
+                    ]
+                ],
+                'put' => [
+                    'summary' => 'Update test project',
+                    'parameters' => [
+                        [
+                            'name' => 'id',
+                            'in' => 'path',
+                            'required' => true,
+                            'schema' => ['type' => 'integer']
+                        ]
+                    ],
+                    'requestBody' => [
+                        'required' => true,
+                        'content' => [
+                            'application/json' => [
+                                'schema' => ['$ref' => '#/components/schemas/TestProjectsInput']
+                            ]
+                        ]
+                    ],
+                    'responses' => [
+                        '200' => ['description' => 'Updated test project'],
+                        '404' => ['description' => 'Project not found']
+                    ]
+                ],
+                'delete' => [
+                    'summary' => 'Delete test project',
+                    'parameters' => [
+                        [
+                            'name' => 'id',
+                            'in' => 'path',
+                            'required' => true,
+                            'schema' => ['type' => 'integer']
+                        ]
+                    ],
+                    'responses' => [
+                        '200' => ['description' => 'Deleted successfully'],
+                        '404' => ['description' => 'Project not found']
+                    ]
+                ]
+            ]
+        ],
+        'components' => [
+            'schemas' => [
+                'TestProjects' => [
+                    'type' => 'object',
+                    'properties' => [
+                        'Id' => ['type' => 'integer'],
+                        'Name' => ['type' => 'string']
+                    ]
+                ],
+                'TestProjectsInput' => [
+                    'type' => 'object',
+                    'required' => ['Name'],
+                    'properties' => [
+                        'Name' => ['type' => 'string']
+                    ]
+                ]
+            ]
+        ]
+    ], JSON_PRETTY_PRINT);
+    exit;
+} elseif ($path === '/' || $path === '') {
+    header('Content-Type: application/json');
+    echo json_encode([
+        'message' => 'Backend API is running',
+        'status' => 'ok',
+        'swagger' => '/swagger',
+        'api' => '/api/test'
+    ]);
+    exit;
+} elseif ($path === '/health') {
+    header('Content-Type: application/json');
+    echo json_encode([
+        'status' => 'healthy',
+        'service' => 'Backend API'
+    ]);
+    exit;
+}
+
+// Routes that require database connection
+try {
+    // Parse DATABASE_URL
+    $databaseUrl = getenv('DATABASE_URL');
+    if (!$databaseUrl) {
+        http_response_code(500);
+        header('Content-Type: application/json');
+        echo json_encode(['error' => 'DATABASE_URL environment variable not set']);
+        exit;
+    }
+
+    // Parse PostgreSQL connection string
+    // Use parse_url with PHP_URL_* components to ensure proper parsing
+    $url = parse_url($databaseUrl);
+    
+    if ($url === false) {
+        throw new Exception('Invalid DATABASE_URL format');
+    }
+    
+    $host = $url['host'] ?? 'localhost';
+    $port = isset($url['port']) ? (int)$url['port'] : 5432;
+    
+    // Extract database name from path - ensure full path is extracted
+    // Database name is in the path component (e.g., /AppDB_69626b9aa83a298b692f8150)
+    $dbPath = $url['path'] ?? '/postgres';
+    // Remove leading slash - database name should not have leading slash
+    $dbname = ltrim($dbPath, '/');
+    // URL decode in case database name has encoded characters (though it shouldn't normally)
+    $dbname = urldecode($dbname);
+    // If path is empty after trimming, use default
+    if (empty($dbname)) {
+        $dbname = 'postgres';
+    }
+    
+    // Extract and decode username and password
+    $username = isset($url['user']) ? urldecode($url['user']) : 'postgres';
+    $password = isset($url['pass']) ? urldecode($url['pass']) : '';
+    
+    // Build DSN string - PDO PostgreSQL DSN format uses semicolon-separated parameters, NOT query string
+    // Format: pgsql:host=...;port=...;dbname=...;sslmode=require
+    $dsn = ""pgsql:host="" . $host . "";port="" . $port . "";dbname="" . $dbname;
+    
+    // Parse query parameters from original URL to check for sslmode
+    $sslMode = 'require'; // Default to require for Neon
+    if (isset($url['query']) && !empty($url['query'])) {
+        parse_str($url['query'], $queryParams);
+        if (isset($queryParams['sslmode'])) {
+            $sslMode = $queryParams['sslmode'];
+        }
+    }
+    
+    // Add SSL mode as a semicolon-separated parameter (NOT as query string)
+    $dsn .= ';sslmode=' . $sslMode;
+    
+    // Create PDO connection with error handling
+    try {
+        $pdo = new PDO($dsn, $username, $password, [
+            PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
+            PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC
+        ]);
+    } catch (PDOException $e) {
+        // Log connection details for debugging (without exposing password)
+        error_log('Database connection failed. Host: ' . $host . ', Port: ' . $port . ', Database: ' . $dbname . ', User: ' . $username);
+        throw $e;
+    }
+    
+    // Create controller
+    $controller = new TestController($pdo);
+    header('Content-Type: application/json');
+    
+    // Route handling for API endpoints
+    if ($path === '/api/test' || $path === '/api/test/') {
+        if ($method === 'GET') {
+            echo json_encode($controller->getAll());
+            exit;
+        } elseif ($method === 'POST') {
+            $data = json_decode(file_get_contents('php://input'), true);
+            http_response_code(201);
+            echo json_encode($controller->create($data));
+            exit;
+        }
+    } elseif (preg_match('#^/api/test/(\d+)$#', $path, $matches)) {
+        $id = (int)$matches[1];
+        
+        if ($method === 'GET') {
+            $result = $controller->getById($id);
+            if ($result === null) {
+                http_response_code(404);
+                echo json_encode(['error' => 'Project not found']);
+            } else {
+                echo json_encode($result);
+            }
+            exit;
+        } elseif ($method === 'PUT') {
+            $data = json_decode(file_get_contents('php://input'), true);
+            $result = $controller->update($id, $data);
+            if ($result === null) {
+                http_response_code(404);
+                echo json_encode(['error' => 'Project not found']);
+            } else {
+                echo json_encode($result);
+            }
+            exit;
+        } elseif ($method === 'DELETE') {
+            if ($controller->delete($id)) {
+                echo json_encode(['message' => 'Deleted successfully']);
+            } else {
+                http_response_code(404);
+                echo json_encode(['error' => 'Project not found']);
+            }
+            exit;
+        }
+    }
+    
+    // 404 Not Found for API routes
+    http_response_code(404);
+    header('Content-Type: application/json');
+    echo json_encode(['error' => 'Not found']);
+    
+} catch (Exception $e) {
+    http_response_code(500);
+    echo json_encode(['error' => 'Internal server error: ' . $e->getMessage()]);
+}
+";
+
+        // composer.json
+        files["backend/composer.json"] = @"{
+    ""name"": ""backend/api"",
+    ""description"": ""Backend API"",
+    ""type"": ""project"",
+    ""require"": {
+        ""php"": "">=8.1"",
+        ""ext-pdo"": ""*"",
+        ""ext-pdo_pgsql"": ""*""
+    },
+    ""autoload"": {
+        ""psr-4"": {
+            ""App\\"": """"
+        }
+    }
+}";
+
+        // .htaccess for Apache
+        files["backend/.htaccess"] = @"RewriteEngine On
+RewriteCond %{REQUEST_FILENAME} !-f
+RewriteCond %{REQUEST_FILENAME} !-d
+RewriteRule ^(.*)$ index.php [QSA,L]
+";
+
+        return files;
+    }
+
+    private Dictionary<string, string> GenerateRubyBackend(string? webApiUrl)
+    {
+        var files = new Dictionary<string, string>();
+
+        // Models/test_projects.rb
+        files["backend/Models/test_projects.rb"] = @"class TestProjects
+    attr_accessor :id, :name
+
+    def initialize(id: nil, name: '')
+        @id = id
+        @name = name
+    end
+
+    def to_hash
+        {
+            id: @id,
+            name: @name
+        }
+    end
+end
+";
+
+        // Controllers/test_controller.rb
+        files["backend/Controllers/test_controller.rb"] = @"require_relative '../Models/test_projects'
+
+class TestController
+    def initialize(db)
+        @db = db
+    end
+
+    def set_search_path
+        # Set search_path to public schema (required because isolated role has restricted search_path)
+        # Using string concatenation to avoid C# string interpolation issues
+        @db.exec('SET search_path = public, ""' + '$' + 'user""')
+    end
+
+    def get_all
+        begin
+            set_search_path
+            result = @db.exec('SELECT ""Id"", ""Name"" FROM ""TestProjects"" ORDER BY ""Id""')
+            result.map do |row|
+                {
+                    'Id' => row['Id'].to_i,
+                    'Name' => row['Name']
+                }
+            end
+        rescue PG::Error => e
+            raise ""Database error: #{e.message}""
+        end
+    end
+
+    def get_by_id(id)
+        begin
+            set_search_path
+            result = @db.exec_params('SELECT ""Id"", ""Name"" FROM ""TestProjects"" WHERE ""Id"" = $1', [id])
+            return nil if result.ntuples == 0
+            
+            row = result[0]
+            {
+                'Id' => row['Id'].to_i,
+                'Name' => row['Name']
+            }
+        rescue PG::Error => e
+            raise ""Database error: #{e.message}""
+        end
+    end
+
+    def create(data)
+        begin
+            set_search_path
+            result = @db.exec_params('INSERT INTO ""TestProjects"" (""Name"") VALUES ($1) RETURNING ""Id"", ""Name""', [data['name']])
+            row = result[0]
+            {
+                'Id' => row['Id'].to_i,
+                'Name' => row['Name']
+            }
+        rescue PG::Error => e
+            raise ""Database error: #{e.message}""
+        end
+    end
+
+    def update(id, data)
+        begin
+            set_search_path
+            result = @db.exec_params('UPDATE ""TestProjects"" SET ""Name"" = $1 WHERE ""Id"" = $2 RETURNING ""Id"", ""Name""', [data['name'], id])
+            return nil if result.ntuples == 0
+            
+            row = result[0]
+            {
+                'Id' => row['Id'].to_i,
+                'Name' => row['Name']
+            }
+        rescue PG::Error => e
+            raise ""Database error: #{e.message}""
+        end
+    end
+
+    def delete(id)
+        begin
+            set_search_path
+            result = @db.exec_params('DELETE FROM ""TestProjects"" WHERE ""Id"" = $1', [id])
+            result.cmd_tuples > 0
+        rescue PG::Error => e
+            raise ""Database error: #{e.message}""
+        end
+    end
+end
+";
+
+        // app.rb - Main Sinatra application
+        files["backend/app.rb"] = @"require 'sinatra'
+require 'pg'
+require 'json'
+require_relative 'Controllers/test_controller'
+
+# Port and bind settings - Puma config file (puma.rb) will override these
+# But we set them here as fallback
+set :port, (ENV['PORT'] || 8080).to_i
+set :bind, '0.0.0.0'
+
+# CORS headers
+before do
+    headers 'Access-Control-Allow-Origin' => '*',
+            'Access-Control-Allow-Methods' => 'GET, POST, PUT, DELETE, OPTIONS',
+            'Access-Control-Allow-Headers' => 'Content-Type'
+end
+
+options '*' do
+    200
+end
+
+# Database connection
+def get_db
+    database_url = ENV['DATABASE_URL']
+    raise 'DATABASE_URL environment variable not set' unless database_url
+    
+    PG.connect(database_url)
+end
+
+# Helper to parse JSON body
+def parse_json_body
+    request.body.rewind
+    JSON.parse(request.body.read)
+rescue JSON::ParserError
+    {}
+end
+
+# Root endpoint
+get '/' do
+    content_type :json
+    {
+        message: 'Backend API is running',
+        status: 'ok',
+        swagger: '/swagger',
+        api: '/api/test'
+    }.to_json
+end
+
+# Health check
+get '/health' do
+    content_type :json
+    {
+        status: 'healthy',
+        service: 'Backend API'
+    }.to_json
+end
+
+# Swagger UI endpoint - serve interactive Swagger UI HTML page
+get '/swagger' do
+    content_type :html
+    <<-HTML
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Backend API - Swagger UI</title>
+    <link rel=""stylesheet"" type=""text/css"" href=""https://unpkg.com/swagger-ui-dist@5.9.0/swagger-ui.css"" />
+    <style>
+        html { box-sizing: border-box; overflow: -moz-scrollbars-vertical; overflow-y: scroll; }
+        *, *:before, *:after { box-sizing: inherit; }
+        body { margin:0; background: #fafafa; }
+    </style>
+</head>
+<body>
+    <div id=""swagger-ui""></div>
+    <script src=""https://unpkg.com/swagger-ui-dist@5.9.0/swagger-ui-bundle.js""></script>
+    <script src=""https://unpkg.com/swagger-ui-dist@5.9.0/swagger-ui-standalone-preset.js""></script>
+    <script>
+        window.onload = function() {
+            const ui = SwaggerUIBundle({
+                url: ""/swagger.json"",
+                dom_id: ""#swagger-ui"",
+                deepLinking: true,
+                presets: [
+                    SwaggerUIBundle.presets.apis,
+                    SwaggerUIStandalonePreset
+                ],
+                plugins: [
+                    SwaggerUIBundle.plugins.DownloadUrl
+                ],
+                layout: ""StandaloneLayout""
+            });
+        };
+    </script>
+</body>
+</html>
+    HTML
+end
+
+# Swagger JSON endpoint - return OpenAPI spec as JSON
+get '/swagger.json' do
+    content_type :json
+    {
+        openapi: '3.0.0',
+        info: {
+            title: 'Backend API',
+            version: '1.0.0',
+            description: 'Ruby Backend API Documentation'
+        },
+        paths: {
+            '/api/test' => {
+                get: {
+                    summary: 'Get all test projects',
+                    responses: {
+                        '200' => {
+                            description: 'List of test projects',
+                            content: {
+                                'application/json' => {
+                                    schema: {
+                                        type: 'array',
+                                        items: { '$ref' => '#/components/schemas/TestProjects' }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                },
+                post: {
+                    summary: 'Create a new test project',
+                    requestBody: {
+                        required: true,
+                        content: {
+                            'application/json' => {
+                                schema: { '$ref' => '#/components/schemas/TestProjectsInput' }
+                            }
+                        }
+                    },
+                    responses: {
+                        '201' => {
+                            description: 'Created test project',
+                            content: {
+                                'application/json' => {
+                                    schema: { '$ref' => '#/components/schemas/TestProjects' }
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            '/api/test/{id}' => {
+                get: {
+                    summary: 'Get test project by ID',
+                    parameters: [
+                        {
+                            name: 'id',
+                            'in' => 'path',
+                            required: true,
+                            schema: { type: 'integer' }
+                        }
+                    ],
+                    responses: {
+                        '200' => {
+                            description: 'Test project found',
+                            content: {
+                                'application/json' => {
+                                    schema: { '$ref' => '#/components/schemas/TestProjects' }
+                                }
+                            }
+                        },
+                        '404' => { description: 'Project not found' }
+                    }
+                },
+                put: {
+                    summary: 'Update test project',
+                    parameters: [
+                        {
+                            name: 'id',
+                            'in' => 'path',
+                            required: true,
+                            schema: { type: 'integer' }
+                        }
+                    ],
+                    requestBody: {
+                        required: true,
+                        content: {
+                            'application/json' => {
+                                schema: { '$ref' => '#/components/schemas/TestProjectsInput' }
+                            }
+                        }
+                    },
+                    responses: {
+                        '200' => { description: 'Updated test project' },
+                        '404' => { description: 'Project not found' }
+                    }
+                },
+                delete: {
+                    summary: 'Delete test project',
+                    parameters: [
+                        {
+                            name: 'id',
+                            'in' => 'path',
+                            required: true,
+                            schema: { type: 'integer' }
+                        }
+                    ],
+                    responses: {
+                        '200' => { description: 'Deleted successfully' },
+                        '404' => { description: 'Project not found' }
+                    }
+                }
+            }
+        },
+        components: {
+            schemas: {
+                TestProjects: {
+                    type: 'object',
+                    properties: {
+                        Id: { type: 'integer' },
+                        Name: { type: 'string' }
+                    }
+                },
+                TestProjectsInput: {
+                    type: 'object',
+                    required: ['Name'],
+                    properties: {
+                        Name: { type: 'string' }
+                    }
+                }
+            }
+        }
+    }.to_json
+end
+
+# GET /api/test - Get all projects
+get '/api/test' do
+    content_type :json
+    begin
+        db = get_db
+        controller = TestController.new(db)
+        controller.get_all.to_json
+    rescue => e
+        status 500
+        { error: e.message }.to_json
+    ensure
+        db&.close
+    end
+end
+
+get '/api/test/' do
+    content_type :json
+    begin
+        db = get_db
+        controller = TestController.new(db)
+        controller.get_all.to_json
+    rescue => e
+        status 500
+        { error: e.message }.to_json
+    ensure
+        db&.close
+    end
+end
+
+# GET /api/test/:id - Get project by ID
+get '/api/test/:id' do
+    content_type :json
+    begin
+        db = get_db
+        controller = TestController.new(db)
+        result = controller.get_by_id(params['id'].to_i)
+        
+        if result.nil?
+            status 404
+            { error: 'Project not found' }.to_json
+        else
+            result.to_json
+        end
+    rescue => e
+        status 500
+        { error: e.message }.to_json
+    ensure
+        db&.close
+    end
+end
+
+# POST /api/test - Create project
+post '/api/test' do
+    content_type :json
+    begin
+        db = get_db
+        controller = TestController.new(db)
+        data = parse_json_body
+        result = controller.create(data)
+        status 201
+        result.to_json
+    rescue => e
+        status 500
+        { error: e.message }.to_json
+    ensure
+        db&.close
+    end
+end
+
+post '/api/test/' do
+    content_type :json
+    begin
+        db = get_db
+        controller = TestController.new(db)
+        data = parse_json_body
+        result = controller.create(data)
+        status 201
+        result.to_json
+    rescue => e
+        status 500
+        { error: e.message }.to_json
+    ensure
+        db&.close
+    end
+end
+
+# PUT /api/test/:id - Update project
+put '/api/test/:id' do
+    content_type :json
+    begin
+        db = get_db
+        controller = TestController.new(db)
+        data = parse_json_body
+        result = controller.update(params['id'].to_i, data)
+        
+        if result.nil?
+            status 404
+            { error: 'Project not found' }.to_json
+        else
+            result.to_json
+        end
+    rescue => e
+        status 500
+        { error: e.message }.to_json
+    ensure
+        db&.close
+    end
+end
+
+# DELETE /api/test/:id - Delete project
+delete '/api/test/:id' do
+    content_type :json
+    begin
+        db = get_db
+        controller = TestController.new(db)
+        
+        if controller.delete(params['id'].to_i)
+            { message: 'Deleted successfully' }.to_json
+        else
+            status 404
+            { error: 'Project not found' }.to_json
+        end
+    rescue => e
+        status 500
+        { error: e.message }.to_json
+    ensure
+        db&.close
+    end
+end
+";
+
+        // Gemfile
+        files["backend/Gemfile"] = @"source 'https://rubygems.org'
+
+ruby '>=3.0'
+
+gem 'sinatra', '~> 3.0'
+gem 'pg', '>= 1.5'
+gem 'json'
+gem 'puma', '~> 6.0'
+";
+
+        // Procfile - Railway uses this if present
+        files["backend/Procfile"] = @"web: bundle exec puma -b tcp://0.0.0.0:${PORT:-8080} config.ru
+";
+
+        // Gemfile.lock - Minimal lockfile that bundler will update during install
+        // We create a minimal version with just direct dependencies to avoid conflicts
+        // Bundler will automatically resolve and update transitive dependencies during bundle install
+        // The install command removes any existing lockfile first to ensure clean resolution
+        // Note: Only x86_64-linux platform (not 'ruby') because pg is a native extension gem
+        // and Railway builds on Linux. Including 'ruby' causes bundler to fail resolution.
+        files["backend/Gemfile.lock"] = @"GEM
+  remote: https://rubygems.org/
+  specs:
+
+PLATFORMS
+  x86_64-linux
+
+DEPENDENCIES
+  json
+  pg (>= 1.5)
+  puma (~> 6.0)
+  sinatra (~> 3.0)
+
+BUNDLED WITH
+   2.5.23
+";
+
+        // config.ru
+        files["backend/config.ru"] = @"require_relative 'app'
+run Sinatra::Application
+";
+
+        // puma.rb - Puma configuration file to ensure correct binding
+        files["backend/puma.rb"] = @"# Puma configuration for Railway deployment
+# This ensures Puma binds to 0.0.0.0 (all interfaces) instead of localhost
+# Railway sets PORT environment variable - use it or default to 8080
+
+bind ""tcp://0.0.0.0:#{ENV.fetch('PORT', '8080')}""
+environment ENV['RAILS_ENV'] || ENV['RACK_ENV'] || 'production'
+workers 0  # Single worker mode for Railway
+threads 0, 5
+";
+
+        return files;
+    }
+
+    private Dictionary<string, string> GenerateGoBackend(string? webApiUrl)
+    {
+        var files = new Dictionary<string, string>();
+
+        // Models/test_projects.go
+        files["backend/Models/test_projects.go"] = @"package models
+
+type TestProjects struct {
+    Id   int    `json:""Id"" db:""Id""`
+    Name string `json:""Name"" db:""Name""`
+}
+";
+
+        // Controllers/test_controller.go
+        files["backend/Controllers/test_controller.go"] = @"package controllers
+
+import (
+    ""database/sql""
+    ""encoding/json""
+    ""net/http""
+    ""strconv""
+    
+    ""backend/Models""
+    _ ""github.com/lib/pq""
+)
+
+type TestController struct {
+    DB *sql.DB
+}
+
+func NewTestController(db *sql.DB) *TestController {
+    return &TestController{DB: db}
+}
+
+func (tc *TestController) setSearchPath() error {
+    // Set search_path to public schema (required because isolated role has restricted search_path)
+    // Using string concatenation to avoid C# string interpolation issues
+    _, err := tc.DB.Exec(`SET search_path = public, ""$` + `user""`)
+    return err
+}
+
+func (tc *TestController) GetAll(w http.ResponseWriter, r *http.Request) {
+    if err := tc.setSearchPath(); err != nil {
+        http.Error(w, ""Database error: ""+err.Error(), http.StatusInternalServerError)
+        return
+    }
+    
+    rows, err := tc.DB.Query(`SELECT ""Id"", ""Name"" FROM ""TestProjects"" ORDER BY ""Id""`)
+    if err != nil {
+        http.Error(w, ""Database error: ""+err.Error(), http.StatusInternalServerError)
+        return
+    }
+    defer rows.Close()
+    
+    var projects []models.TestProjects
+    for rows.Next() {
+        var project models.TestProjects
+        if err := rows.Scan(&project.Id, &project.Name); err != nil {
+            http.Error(w, ""Database error: ""+err.Error(), http.StatusInternalServerError)
+            return
+        }
+        projects = append(projects, project)
+    }
+    
+    w.Header().Set(""Content-Type"", ""application/json"")
+    json.NewEncoder(w).Encode(projects)
+}
+
+func (tc *TestController) GetById(w http.ResponseWriter, r *http.Request, id int) {
+    if err := tc.setSearchPath(); err != nil {
+        http.Error(w, ""Database error: ""+err.Error(), http.StatusInternalServerError)
+        return
+    }
+    
+    var project models.TestProjects
+    err := tc.DB.QueryRow(`SELECT ""Id"", ""Name"" FROM ""TestProjects"" WHERE ""Id"" = $1`, id).
+        Scan(&project.Id, &project.Name)
+
+    if err == sql.ErrNoRows {
+        http.Error(w, ""Project not found"", http.StatusNotFound)
+        return
+    }
+    if err != nil {
+        http.Error(w, ""Database error: ""+err.Error(), http.StatusInternalServerError)
+        return
+    }
+    
+    w.Header().Set(""Content-Type"", ""application/json"")
+    json.NewEncoder(w).Encode(project)
+}
+
+func (tc *TestController) Create(w http.ResponseWriter, r *http.Request) {
+    var project models.TestProjects
+    if err := json.NewDecoder(r.Body).Decode(&project); err != nil {
+        http.Error(w, ""Invalid JSON: ""+err.Error(), http.StatusBadRequest)
+        return
+    }
+    
+    if err := tc.setSearchPath(); err != nil {
+        http.Error(w, ""Database error: ""+err.Error(), http.StatusInternalServerError)
+        return
+    }
+    
+    err := tc.DB.QueryRow(
+        `INSERT INTO ""TestProjects"" (""Name"") VALUES ($1) RETURNING ""Id"", ""Name""`,
+        project.Name,
+    ).Scan(&project.Id, &project.Name)
+
+    if err != nil {
+        http.Error(w, ""Database error: ""+err.Error(), http.StatusInternalServerError)
+        return
+    }
+    
+    w.Header().Set(""Content-Type"", ""application/json"")
+    w.WriteHeader(http.StatusCreated)
+    json.NewEncoder(w).Encode(project)
+}
+
+func (tc *TestController) Update(w http.ResponseWriter, r *http.Request, id int) {
+    var project models.TestProjects
+    if err := json.NewDecoder(r.Body).Decode(&project); err != nil {
+        http.Error(w, ""Invalid JSON: ""+err.Error(), http.StatusBadRequest)
+        return
+    }
+    
+    if err := tc.setSearchPath(); err != nil {
+        http.Error(w, ""Database error: ""+err.Error(), http.StatusInternalServerError)
+        return
+    }
+    
+    result, err := tc.DB.Exec(
+        `UPDATE ""TestProjects"" SET ""Name"" = $1 WHERE ""Id"" = $2`,
+        project.Name, id,
+    )
+    if err != nil {
+        http.Error(w, ""Database error: ""+err.Error(), http.StatusInternalServerError)
+        return
+    }
+    
+    rowsAffected, err := result.RowsAffected()
+    if err != nil {
+        http.Error(w, ""Database error: ""+err.Error(), http.StatusInternalServerError)
+        return
+    }
+    
+    if rowsAffected == 0 {
+        http.Error(w, ""Project not found"", http.StatusNotFound)
+        return
+    }
+    
+    project.Id = id
+    w.Header().Set(""Content-Type"", ""application/json"")
+    json.NewEncoder(w).Encode(project)
+}
+
+func (tc *TestController) Delete(w http.ResponseWriter, r *http.Request, id int) {
+    if err := tc.setSearchPath(); err != nil {
+        http.Error(w, ""Database error: ""+err.Error(), http.StatusInternalServerError)
+        return
+    }
+    
+    result, err := tc.DB.Exec(`DELETE FROM ""TestProjects"" WHERE ""Id"" = $1`, id)
+    if err != nil {
+        http.Error(w, ""Database error: ""+err.Error(), http.StatusInternalServerError)
+        return
+    }
+    
+    rowsAffected, err := result.RowsAffected()
+    if err != nil {
+        http.Error(w, ""Database error: ""+err.Error(), http.StatusInternalServerError)
+        return
+    }
+    
+    if rowsAffected == 0 {
+        http.Error(w, ""Project not found"", http.StatusNotFound)
+        return
+    }
+    
+    w.Header().Set(""Content-Type"", ""application/json"")
+    json.NewEncoder(w).Encode(map[string]string{""message"": ""Deleted successfully""})
+}
+
+func ExtractId(path string) (int, error) {
+    // Extract ID from path like /api/test/123
+    idStr := path[len(""/api/test/""):]
+    return strconv.Atoi(idStr)
+}
+";
+
+        // main.go
+        files["backend/main.go"] = @"package main
+
+import (
+    ""database/sql""
+    ""fmt""
+    ""log""
+    ""net/http""
+    ""os""
+    ""strings""
+    ""strconv""
+
+    ""backend/Controllers""
+    _ ""github.com/lib/pq""
+)
+
+func corsMiddleware(next http.Handler) http.Handler {
+    return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        w.Header().Set(""Access-Control-Allow-Origin"", ""*"")
+        w.Header().Set(""Access-Control-Allow-Methods"", ""GET, POST, PUT, DELETE, OPTIONS"")
+        w.Header().Set(""Access-Control-Allow-Headers"", ""Content-Type"")
+
+        if r.Method == ""OPTIONS"" {
+            w.WriteHeader(http.StatusOK)
+            return
+        }
+
+        next.ServeHTTP(w, r)
+    })
+}
+
+func main() {
+    databaseUrl := os.Getenv(""DATABASE_URL"")
+    if databaseUrl == """" {
+        log.Fatal(""DATABASE_URL environment variable not set"")
+    }
+
+    db, err := sql.Open(""postgres"", databaseUrl)
+    if err != nil {
+        log.Fatal(""Failed to connect to database: "", err)
+    }
+    defer db.Close()
+
+    if err := db.Ping(); err != nil {
+        log.Fatal(""Failed to ping database: "", err)
+    }
+
+    controller := controllers.NewTestController(db)
+    mux := http.NewServeMux()
+
+    mux.HandleFunc(""/"", func(w http.ResponseWriter, r *http.Request) {
+        if r.URL.Path != ""/"" {
+            http.NotFound(w, r)
+            return
+        }
+        w.Header().Set(""Content-Type"", ""application/json"")
+        fmt.Fprintf(w, `{""message"":""Backend API is running"",""status"":""ok"",""swagger"":""/swagger"",""api"":""/api/test""}`)
+    })
+
+    mux.HandleFunc(""/health"", func(w http.ResponseWriter, r *http.Request) {
+        w.Header().Set(""Content-Type"", ""application/json"")
+        fmt.Fprintf(w, `{""status"":""healthy"",""service"":""Backend API""}`)
+    })
+
+    // Swagger UI endpoint - serve interactive Swagger UI HTML page
+    mux.HandleFunc(""/swagger"", func(w http.ResponseWriter, r *http.Request) {
+        w.Header().Set(""Content-Type"", ""text/html"")
+        fmt.Fprintf(w, `<!DOCTYPE html>
+<html>
+<head>
+    <title>Backend API - Swagger UI</title>
+    <link rel=""stylesheet"" type=""text/css"" href=""https://unpkg.com/swagger-ui-dist@5.9.0/swagger-ui.css"" />
+    <style>
+        html { box-sizing: border-box; overflow: -moz-scrollbars-vertical; overflow-y: scroll; }
+        *, *:before, *:after { box-sizing: inherit; }
+        body { margin:0; background: #fafafa; }
+    </style>
+</head>
+<body>
+    <div id=""swagger-ui""></div>
+    <script src=""https://unpkg.com/swagger-ui-dist@5.9.0/swagger-ui-bundle.js""></script>
+    <script src=""https://unpkg.com/swagger-ui-dist@5.9.0/swagger-ui-standalone-preset.js""></script>
+    <script>
+        window.onload = function() {
+            const ui = SwaggerUIBundle({
+                url: ""/swagger.json"",
+                dom_id: ""#swagger-ui"",
+                deepLinking: true,
+                presets: [
+                    SwaggerUIBundle.presets.apis,
+                    SwaggerUIStandalonePreset
+                ],
+                plugins: [
+                    SwaggerUIBundle.plugins.DownloadUrl
+                ],
+                layout: ""StandaloneLayout""
+            });
+        };
+    </script>
+</body>
+</html>`)
+    })
+
+    // Swagger JSON endpoint - return OpenAPI spec as JSON
+    mux.HandleFunc(""/swagger.json"", func(w http.ResponseWriter, r *http.Request) {
+        w.Header().Set(""Content-Type"", ""application/json"")
+        fmt.Fprintf(w, `{
+  ""openapi"": ""3.0.0"",
+  ""info"": {
+    ""title"": ""Backend API"",
+    ""version"": ""1.0.0"",
+    ""description"": ""Go Backend API Documentation""
+  },
+  ""paths"": {
+    ""/api/test"": {
+      ""get"": {
+        ""summary"": ""Get all test projects"",
+        ""responses"": {
+          ""200"": {
+            ""description"": ""List of test projects"",
+            ""content"": {
+              ""application/json"": {
+                ""schema"": {
+                  ""type"": ""array"",
+                  ""items"": {
+                    ""$ref"": ""#/components/schemas/TestProjects""
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      ""post"": {
+        ""summary"": ""Create a new test project"",
+        ""requestBody"": {
+          ""required"": true,
+          ""content"": {
+            ""application/json"": {
+              ""schema"": {
+                ""$ref"": ""#/components/schemas/TestProjectsInput""
+              }
+            }
+          }
+        },
+        ""responses"": {
+          ""201"": {
+            ""description"": ""Created test project"",
+            ""content"": {
+              ""application/json"": {
+                ""schema"": {
+                  ""$ref"": ""#/components/schemas/TestProjects""
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    ""/api/test/{id}"": {
+      ""get"": {
+        ""summary"": ""Get test project by ID"",
+        ""parameters"": [
+          {
+            ""name"": ""id"",
+            ""in"": ""path"",
+            ""required"": true,
+            ""schema"": {
+              ""type"": ""integer""
+            }
+          }
+        ],
+        ""responses"": {
+          ""200"": {
+            ""description"": ""Test project found"",
+            ""content"": {
+              ""application/json"": {
+                ""schema"": {
+                  ""$ref"": ""#/components/schemas/TestProjects""
+                }
+              }
+            }
+          },
+          ""404"": {
+            ""description"": ""Project not found""
+          }
+        }
+      },
+      ""put"": {
+        ""summary"": ""Update test project"",
+        ""parameters"": [
+          {
+            ""name"": ""id"",
+            ""in"": ""path"",
+            ""required"": true,
+            ""schema"": {
+              ""type"": ""integer""
+            }
+          }
+        ],
+        ""requestBody"": {
+          ""required"": true,
+          ""content"": {
+            ""application/json"": {
+              ""schema"": {
+                ""$ref"": ""#/components/schemas/TestProjectsInput""
+              }
+            }
+          }
+        },
+        ""responses"": {
+          ""200"": {
+            ""description"": ""Updated test project""
+          },
+          ""404"": {
+            ""description"": ""Project not found""
+          }
+        }
+      },
+      ""delete"": {
+        ""summary"": ""Delete test project"",
+        ""parameters"": [
+          {
+            ""name"": ""id"",
+            ""in"": ""path"",
+            ""required"": true,
+            ""schema"": {
+              ""type"": ""integer""
+            }
+          }
+        ],
+        ""responses"": {
+          ""200"": {
+            ""description"": ""Deleted successfully""
+          },
+          ""404"": {
+            ""description"": ""Project not found""
+          }
+        }
+      }
+    }
+  },
+  ""components"": {
+    ""schemas"": {
+      ""TestProjects"": {
+        ""type"": ""object"",
+        ""properties"": {
+          ""Id"": {
+            ""type"": ""integer""
+          },
+          ""Name"": {
+            ""type"": ""string""
+          }
+        }
+      },
+      ""TestProjectsInput"": {
+        ""type"": ""object"",
+        ""required"": [""Name""],
+        ""properties"": {
+          ""Name"": {
+            ""type"": ""string""
+          }
+        }
+      }
+    }
+  }
+}`)
+    })
+
+    // API routes handler function
+    apiTestHandler := func(w http.ResponseWriter, r *http.Request) {
+        path := r.URL.Path
+        
+        // Handle /api/test and /api/test/ (no ID) - normalize trailing slash
+        if path == ""/api/test"" || path == ""/api/test/"" {
+            switch r.Method {
+            case ""GET"":
+                controller.GetAll(w, r)
+            case ""POST"":
+                controller.Create(w, r)
+            default:
+                http.Error(w, ""Method not allowed"", http.StatusMethodNotAllowed)
+            }
+            return
+        }
+        
+        // Handle /api/test/:id
+        if strings.HasPrefix(path, ""/api/test/"") {
+            idStr := strings.TrimPrefix(path, ""/api/test/"")
+            if idStr == """" {
+                // Empty ID after /api/test/, treat as /api/test/
+                switch r.Method {
+                case ""GET"":
+                    controller.GetAll(w, r)
+                case ""POST"":
+                    controller.Create(w, r)
+                default:
+                    http.Error(w, ""Method not allowed"", http.StatusMethodNotAllowed)
+                }
+                return
+            }
+            
+            id, err := strconv.Atoi(idStr)
+            if err != nil {
+                http.Error(w, ""Invalid ID"", http.StatusBadRequest)
+                return
+            }
+            
+            switch r.Method {
+            case ""GET"":
+                controller.GetById(w, r, id)
+            case ""PUT"":
+                controller.Update(w, r, id)
+            case ""DELETE"":
+                controller.Delete(w, r, id)
+            default:
+                http.Error(w, ""Method not allowed"", http.StatusMethodNotAllowed)
+            }
+            return
+        }
+        
+        http.NotFound(w, r)
+    }
+
+    // Register both /api/test and /api/test/ to handle trailing slashes
+    mux.HandleFunc(""/api/test"", apiTestHandler)
+    mux.HandleFunc(""/api/test/"", apiTestHandler)
+
+    handler := corsMiddleware(mux)
+
+    port := os.Getenv(""PORT"")
+    if port == """" {
+        port = ""8080""
+    }
+
+    log.Printf(""Server starting on 0.0.0.0:%s"", port)
+    log.Fatal(http.ListenAndServe(""0.0.0.0:""+port, handler))
+}
+";
+
+        // go.mod
+        files["backend/go.mod"] = @"module backend
+
+go 1.21
+
+require (
+    github.com/lib/pq v1.10.9
+)
+";
+
+        // go.sum - Include valid checksums to allow Railway's auto-detection to build
+        // Railway may auto-detect Go and build before nixpacks.toml phases run
+        // These are the correct checksums for github.com/lib/pq v1.10.9
+        // If checksum mismatch occurs, Railway's `go mod tidy` in install phase will update them
+        files["backend/go.sum"] = @"github.com/lib/pq v1.10.9 h1:YXG7RB+JIjhP29X+OtkiDnYaXQwpS4JEWq7dtCCRUEw=
+github.com/lib/pq v1.10.9/go.mod h1:AlVN5x4E4T544tWzH6hKfbfQvm3HdbOxrmggDNAPY9o=
+";
 
         return files;
     }
