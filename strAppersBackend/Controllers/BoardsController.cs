@@ -1425,77 +1425,67 @@ public class BoardsController : ControllerBase
                     httpClient.DefaultRequestHeaders.Accept.Add(new System.Net.Http.Headers.MediaTypeWithQualityHeaderValue("application/json"));
                     httpClient.DefaultRequestHeaders.Add("User-Agent", "StrAppersBackend/1.0");
 
-                    // Sanitize name for Railway
+                    // Sanitize name for Railway service
                     var sanitizedName = System.Text.RegularExpressions.Regex.Replace(railwayHostName.ToLowerInvariant(), @"[^a-z0-9-_]", "-");
 
-                    // Create Railway project
-                    var createProjectMutation = new
-                    {
-                        query = @"
-                    mutation CreateProject($name: String!) {
-                        projectCreate(input: { name: $name }) {
-                            id
-                            name
-                        }
-                    }",
-                        variables = new
-                        {
-                            name = sanitizedName
-                        }
-                    };
-
-                    var requestBody = System.Text.Json.JsonSerializer.Serialize(createProjectMutation);
-                    var content = new StringContent(requestBody, System.Text.Encoding.UTF8, "application/json");
-
-                    // Retry logic for Railway project creation (handles transient 503 errors)
+                    // Retry logic configuration
                     var maxRailwayRetries = 5;
                     var railwayRetryDelay = 3000; // 3 seconds between retries
-                    HttpResponseMessage? response = null;
-                    string? responseContent = null;
-                    var railwayRetryCount = 0;
-                    
-                    while (railwayRetryCount < maxRailwayRetries)
+
+                    // Use shared Railway project instead of creating a new one
+                    projectId = _configuration["Railway:SharedProjectId"];
+
+                    if (string.IsNullOrWhiteSpace(projectId))
                     {
-                        response = await httpClient.PostAsync(railwayApiUrl, content);
-                        responseContent = await response.Content.ReadAsStringAsync();
-                        
-                        if (response.IsSuccessStatusCode)
+                        _logger.LogError("❌ [RAILWAY] Shared project ID not configured. Cannot create Railway service.");
+                        // Continue without Railway service - board creation can still proceed
+                    }
+                    else
+                    {
+                        // Verify shared project exists (optional check)
+                        var verifyProjectQuery = new
                         {
-                            break; // Success, exit retry loop
-                        }
-                        
-                        // Retry on 503 ServiceUnavailable or 502 Bad Gateway (transient errors)
-                        if ((response.StatusCode == System.Net.HttpStatusCode.ServiceUnavailable || 
-                             response.StatusCode == System.Net.HttpStatusCode.BadGateway) && 
-                            railwayRetryCount < maxRailwayRetries - 1)
+                            query = @"
+                                query GetProject($projectId: String!) {
+                                    project(id: $projectId) {
+                                        id
+                                        name
+                                    }
+                                }",
+                            variables = new { projectId = projectId }
+                        };
+
+                        var verifyBody = System.Text.Json.JsonSerializer.Serialize(verifyProjectQuery);
+                        var verifyContent = new StringContent(verifyBody, System.Text.Encoding.UTF8, "application/json");
+                        var verifyResponse = await httpClient.PostAsync(railwayApiUrl, verifyContent);
+
+                        if (verifyResponse.IsSuccessStatusCode)
                         {
-                            railwayRetryCount++;
-                            _logger.LogWarning("⚠️ [RAILWAY] Railway API returned {StatusCode} (attempt {Attempt}/{MaxRetries}). " +
-                                "Waiting {DelayMs}ms before retry...", response.StatusCode, railwayRetryCount, maxRailwayRetries, railwayRetryDelay);
-                            await Task.Delay(railwayRetryDelay);
+                            var verifyDoc = System.Text.Json.JsonDocument.Parse(await verifyResponse.Content.ReadAsStringAsync());
+                            if (verifyDoc.RootElement.TryGetProperty("data", out var verifyDataObj) &&
+                                verifyDataObj.TryGetProperty("project", out var verifyProjectObj) &&
+                                verifyProjectObj.TryGetProperty("id", out var verifyIdProp))
+                            {
+                                var verifiedProjectId = verifyIdProp.GetString();
+                                if (verifiedProjectId == projectId)
+                                {
+                                    _logger.LogInformation("✅ [RAILWAY] Verified shared project exists: {ProjectId}", projectId);
+                                }
+                                else
+                                {
+                                    _logger.LogWarning("⚠️ [RAILWAY] Project ID mismatch. Expected: {Expected}, Got: {Actual}", 
+                                        projectId, verifiedProjectId);
+                                }
+                            }
+                            else
+                            {
+                                _logger.LogWarning("⚠️ [RAILWAY] Could not verify shared project {ProjectId}. Proceeding anyway.", projectId);
+                            }
                         }
                         else
                         {
-                            // Non-retryable error or max retries reached
-                            break;
-                        }
-                    }
-
-                    if (response != null && response.IsSuccessStatusCode)
-                    {
-                        var jsonDoc = System.Text.Json.JsonDocument.Parse(responseContent);
-                        var root = jsonDoc.RootElement;
-
-                        // projectId already declared at higher scope
-                        if (root.TryGetProperty("data", out var dataObj) && dataObj.ValueKind == System.Text.Json.JsonValueKind.Object)
-                        {
-                            if (dataObj.TryGetProperty("projectCreate", out var projectObj) && projectObj.ValueKind == System.Text.Json.JsonValueKind.Object)
-                            {
-                                if (projectObj.TryGetProperty("id", out var idProp) && idProp.ValueKind == System.Text.Json.JsonValueKind.String)
-                                {
-                                    projectId = idProp.GetString();
-                                }
-                            }
+                            _logger.LogWarning("⚠️ [RAILWAY] Failed to verify shared project {ProjectId}. StatusCode: {StatusCode}. Proceeding anyway.", 
+                                projectId, verifyResponse.StatusCode);
                         }
 
                         if (!string.IsNullOrEmpty(projectId))
@@ -1774,22 +1764,8 @@ public class BoardsController : ControllerBase
                         }
                         else
                         {
-                            // CRITICAL: Railway project created but ProjectId not found - board creation cannot proceed
-                            _logger.LogError("❌ [RAILWAY] CRITICAL: Railway project created but ProjectId not found in response. Response: {Response}", responseContent ?? "No response");
-                            throw new InvalidOperationException(
-                                "Railway project was created but ProjectId was not found in the response. " +
-                                "This is a critical error - board creation cannot proceed without a valid Railway project.");
+                            _logger.LogWarning("⚠️ [RAILWAY] Service creation failed or service ID not found. Board creation will continue without Railway service.");
                         }
-                    }
-                    else
-                    {
-                        // CRITICAL: Railway project creation failed - board creation cannot proceed
-                        _logger.LogError("❌ [RAILWAY] CRITICAL: Failed to create Railway project after {Retries} attempts: {StatusCode} - {Error}", 
-                            railwayRetryCount + 1, response?.StatusCode ?? System.Net.HttpStatusCode.InternalServerError, responseContent ?? "No response");
-                        throw new InvalidOperationException(
-                            $"Failed to create Railway project after {railwayRetryCount + 1} attempts. " +
-                            $"Status: {response?.StatusCode}, Error: {responseContent}. " +
-                            "Railway deployment is required - board creation cannot proceed.");
                     }
                 }
                 else
@@ -5723,7 +5699,8 @@ INSERT INTO ""TestProjects"" (""Name"") VALUES
             
             // Build commands vary by programming language
             // NOTE: Backend files are at root level (not in backend/ subdirectory)
-            var buildVariables = programmingLanguage?.ToLowerInvariant() switch
+            // Maven environment variables are set for ALL languages to reduce log noise (only affects Java/Maven builds)
+            var languageSpecificVariables = programmingLanguage?.ToLowerInvariant() switch
             {
                 "c#" or "csharp" => new[]
                 {
@@ -5761,6 +5738,17 @@ INSERT INTO ""TestProjects"" (""Name"") VALUES
                     new { name = "PORT", value = "8080" }
                 }
             };
+            
+            // Maven environment variables - set for ALL languages to reduce log noise
+            // These only affect Java/Maven builds, but setting them for all languages is safe
+            var mavenVariables = new[]
+            {
+                new { name = "MAVEN_OPTS", value = "-Dorg.slf4j.simpleLogger.defaultLogLevel=warn -Dorg.slf4j.simpleLogger.showDateTime=false" },
+                new { name = "MAVEN_ARGS", value = "-ntp -q" }
+            };
+            
+            // Combine language-specific variables with Maven variables
+            var buildVariables = languageSpecificVariables.Concat(mavenVariables).ToArray();
             
             // Set each environment variable
             foreach (var variable in buildVariables)

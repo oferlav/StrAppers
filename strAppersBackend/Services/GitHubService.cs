@@ -511,10 +511,12 @@ public class GitHubService : IGitHubService
             }
 
             // Enable GitHub Pages (only for frontend repos)
+            // Don't enable GitHub Pages here for frontend repos - it will be enabled AFTER the workflow file is committed
+            // This ensures Pages uses workflow-based deployment instead of legacy mode
             if (isFrontendRepo)
             {
-                _logger.LogInformation("[GithubPages] Starting GitHub Pages setup for repository {Repository}", request.Name);
-                response.GitHubPagesEnabled = await EnableGitHubPagesAsync(repositoryOwner, request.Name, accessToken);
+                _logger.LogInformation("[GithubPages] Skipping GitHub Pages setup during repository creation. Pages will be enabled after workflow file is committed.");
+                response.GitHubPagesEnabled = false; // Will be enabled later in DeployFrontendRepositoryAsync
             }
             else if (isBackendRepo)
             {
@@ -946,6 +948,20 @@ public class GitHubService : IGitHubService
                 fileContents[".gitignore"] = gitignoreContent;
             }
 
+            // Create GitHub Actions workflow for deploying frontend to GitHub Pages
+            var frontendWorkflow = GenerateGitHubActionsWorkflow();
+            var frontendWorkflowSha = await CreateBlobAsync(owner, repositoryName, frontendWorkflow, accessToken);
+            if (!string.IsNullOrEmpty(frontendWorkflowSha))
+            {
+                treeItems.Add(new { path = ".github/workflows/deploy-frontend.yml", mode = "100644", type = "blob", sha = frontendWorkflowSha });
+                fileContents[".github/workflows/deploy-frontend.yml"] = frontendWorkflow;
+                _logger.LogInformation("[FRONTEND] ✅ Created workflow file: .github/workflows/deploy-frontend.yml");
+            }
+            else
+            {
+                _logger.LogWarning("[FRONTEND] ⚠️ Failed to create blob for workflow file");
+            }
+
             // Create a tree with all files
             var tree = await CreateTreeAsync(owner, repositoryName, branchInfo.TreeSha, treeItems.ToArray(), accessToken);
 
@@ -1095,6 +1111,8 @@ public class GitHubService : IGitHubService
 
     /// <summary>
     /// Enables GitHub Pages for a repository
+    /// Note: We check if the workflow file exists first. If it exists, we try to enable Pages
+    /// without source (workflow-based). If workflow doesn't exist, we enable with source (legacy mode).
     /// </summary>
     public async Task<bool> EnableGitHubPagesAsync(string owner, string repositoryName, string accessToken)
     {
@@ -1102,14 +1120,57 @@ public class GitHubService : IGitHubService
         {
             _logger.LogInformation("Enabling GitHub Pages for repository {Owner}/{Repository}", owner, repositoryName);
 
-            var pagesPayload = new
+            // Check if workflow file exists - if it does, we can try to enable Pages for workflow-based deployment
+            bool workflowExists = false;
+            try
             {
-                source = new
+                var workflowCheckRequest = new HttpRequestMessage(HttpMethod.Get, 
+                    $"{GitHubApiBaseUrl}/repos/{owner}/{repositoryName}/contents/.github/workflows/deploy-frontend.yml");
+                workflowCheckRequest.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", accessToken);
+                workflowCheckRequest.Headers.Accept.Add(new System.Net.Http.Headers.MediaTypeWithQualityHeaderValue("application/vnd.github.v3+json"));
+                
+                var workflowCheckResponse = await _httpClient.SendAsync(workflowCheckRequest);
+                workflowExists = workflowCheckResponse.IsSuccessStatusCode;
+                
+                if (workflowExists)
                 {
-                    branch = "main",
-                    path = "/"
+                    _logger.LogInformation("Workflow file exists for {Owner}/{Repository}. Attempting to enable Pages for workflow-based deployment.", 
+                        owner, repositoryName);
                 }
-            };
+                else
+                {
+                    _logger.LogInformation("Workflow file does not exist yet for {Owner}/{Repository}. Pages will be enabled in legacy mode.", 
+                        owner, repositoryName);
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Could not check for workflow file existence for {Owner}/{Repository}. Proceeding with legacy mode.", 
+                    owner, repositoryName);
+            }
+
+            // GitHub API requires a valid payload with source branch and path for initial setup
+            // However, if workflow exists, we can try enabling without source first (though API may still require it)
+            object pagesPayload;
+            
+            if (workflowExists)
+            {
+                // Try to enable Pages without source - GitHub should detect workflow automatically
+                // Note: GitHub API may still require source, so we'll fall back if this fails
+                pagesPayload = new { };
+            }
+            else
+            {
+                // No workflow yet - enable with source (legacy mode)
+                pagesPayload = new
+                {
+                    source = new
+                    {
+                        branch = "main",
+                        path = "/"
+                    }
+                };
+            }
 
             var jsonContent = JsonSerializer.Serialize(pagesPayload);
             var content = new StringContent(jsonContent, System.Text.Encoding.UTF8, "application/json");
@@ -1120,11 +1181,84 @@ public class GitHubService : IGitHubService
             request.Content = content;
 
             var response = await _httpClient.SendAsync(request);
+            
+            // If we tried without source (workflow exists) and got 422 (Unprocessable Entity), fall back to enabling with source
+            if (workflowExists && response.StatusCode == System.Net.HttpStatusCode.UnprocessableEntity)
+            {
+                _logger.LogInformation("Enabling Pages without source failed (422). Falling back to legacy mode with source branch/path.");
+                pagesPayload = new
+                {
+                    source = new
+                    {
+                        branch = "main",
+                        path = "/"
+                    }
+                };
+                
+                jsonContent = JsonSerializer.Serialize(pagesPayload);
+                content = new StringContent(jsonContent, System.Text.Encoding.UTF8, "application/json");
+                
+                // Create a NEW request message - cannot reuse the same HttpRequestMessage
+                var fallbackRequest = new HttpRequestMessage(HttpMethod.Post, 
+                    $"{GitHubApiBaseUrl}/repos/{owner}/{repositoryName}/pages");
+                fallbackRequest.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", accessToken);
+                fallbackRequest.Content = content;
+                response = await _httpClient.SendAsync(fallbackRequest);
+            }
 
             if (response.IsSuccessStatusCode || response.StatusCode == System.Net.HttpStatusCode.Conflict)
             {
                 // 201 Created means success, 409 Conflict means pages already enabled
-                _logger.LogInformation("GitHub Pages enabled successfully for {Owner}/{Repository}", owner, repositoryName);
+                _logger.LogInformation("GitHub Pages enabled successfully for {Owner}/{Repository}. " +
+                    "If a workflow file exists, GitHub will use workflow-based deployment.", 
+                    owner, repositoryName);
+                
+                // If we got 409, Pages is already enabled - try to update it to workflow-based deployment
+                if (response.StatusCode == System.Net.HttpStatusCode.Conflict)
+                {
+                    _logger.LogInformation("GitHub Pages was already enabled (409 Conflict) for {Owner}/{Repository}. " +
+                        "Attempting to update to workflow-based deployment if workflow file exists.", 
+                        owner, repositoryName);
+                    
+                    // Try to update Pages configuration to remove source (this allows workflow-based deployment)
+                    // GitHub will automatically detect and use the workflow if source is not set
+                    try
+                    {
+                        var updatePayload = new
+                        {
+                            // Empty payload - GitHub will detect workflow and use workflow-based deployment
+                            // Note: GitHub API may not support this, but we try
+                        };
+                        
+                        var updateJson = JsonSerializer.Serialize(updatePayload);
+                        var updateContent = new StringContent(updateJson, System.Text.Encoding.UTF8, "application/json");
+                        
+                        var updateRequest = new HttpRequestMessage(HttpMethod.Put, 
+                            $"{GitHubApiBaseUrl}/repos/{owner}/{repositoryName}/pages");
+                        updateRequest.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", accessToken);
+                        updateRequest.Content = updateContent;
+                        
+                        var updateResponse = await _httpClient.SendAsync(updateRequest);
+                        if (updateResponse.IsSuccessStatusCode)
+                        {
+                            _logger.LogInformation("Successfully updated GitHub Pages configuration for {Owner}/{Repository} to workflow-based deployment.", 
+                                owner, repositoryName);
+                        }
+                        else
+                        {
+                            _logger.LogWarning("Could not update GitHub Pages configuration (Status: {StatusCode}). " +
+                                "Pages may remain in legacy mode. GitHub should auto-detect workflow on next deployment.", 
+                                updateResponse.StatusCode);
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning(ex, "Failed to update GitHub Pages configuration for {Owner}/{Repository}. " +
+                            "Pages may remain in legacy mode, but GitHub should auto-detect workflow on next deployment.", 
+                            owner, repositoryName);
+                    }
+                }
+                
                 return true;
             }
 
@@ -3504,8 +3638,9 @@ app.Run();
         files["backend/appsettings.json"] = @"{
   ""Logging"": {
     ""LogLevel"": {
-      ""Default"": ""Information"",
-      ""Microsoft.AspNetCore"": ""Warning""
+      ""Default"": ""Warning"",
+      ""Microsoft.AspNetCore"": ""Warning"",
+      ""Microsoft.EntityFrameworkCore"": ""Warning""
     }
   },
   ""AllowedHosts"": ""*""
@@ -3583,12 +3718,13 @@ nixPkgs = { python = ""3.12"" }
 
 [phases.install]
 cmds = [
+  ""cd backend && python -m py_compile $(find . -name '*.py')"",
   ""cd backend && pip install -r requirements.txt""
 ]
 
 [phases.build]
 cmds = [
-  ""echo 'Build complete'""
+  ""cd backend && python validate_imports.py""
 ]
 
 [start]
@@ -3610,12 +3746,13 @@ nixPkgs = { node = ""18"" }
 
 [phases.install]
 cmds = [
+  ""cd backend && find . -name '*.js' -type f ! -path './node_modules/*' -exec node --check {} \; || (echo 'Syntax errors found in JavaScript files!' && exit 1)"",
   ""cd backend && npm install""
 ]
 
 [phases.build]
 cmds = [
-  ""echo 'Build complete'""
+  ""echo 'Node.js syntax validation passed'""
 ]
 
 [start]
@@ -3663,22 +3800,23 @@ cmds = [
 
 [phases.build]
 cmds = [
-  ""echo 'Build complete'""
+  ""set -e"",
+  ""cd backend"",
+  ""find . -name '*.php' -print0 | xargs -0 php -l""
 ]
 
 [start]
-cmd = ""cd backend && php -S 0.0.0.0:$PORT -t . index.php""
+cmd = ""cd backend && php -d display_errors=1 -S 0.0.0.0:$PORT index.php""
 ";
                 break;
                 
             case "ruby":
                 // Ruby/Sinatra backend - backend files are in backend/ folder
-                // Note: Railway's Railpack auto-detects Ruby and uses its default version (3.4.6)
-                // We let Railpack handle Ruby version detection - no need to specify in nixpacks.toml
-                // Use bundle update to fix any dependency issues in Gemfile.lock
                 files["nixpacks.toml"] = @"# Nixpacks configuration for Railway - Ruby/Sinatra Backend
 # Backend files are in backend/ folder
-# Note: Railway's Railpack will auto-detect Ruby version (3.4.6)
+
+[phases.setup]
+nixPkgs = { ruby = ""3.3"" }
 
 [phases.install]
 cmds = [
@@ -3687,11 +3825,11 @@ cmds = [
 
 [phases.build]
 cmds = [
-  ""echo 'Build complete'""
+  ""cd backend && ruby build_check.rb""
 ]
 
 [start]
-cmd = ""cd backend && bundle exec puma -b tcp://0.0.0.0:$PORT config.ru""
+cmd = ""cd backend && ruby app.rb""
 ";
                 break;
                 
@@ -3824,12 +3962,13 @@ nixPkgs = { python = ""3.12"" }
 
 [phases.install]
 cmds = [
+  ""python -m py_compile $(find . -name '*.py')"",
   ""pip install -r requirements.txt""
 ]
 
 [phases.build]
 cmds = [
-  ""echo 'Build complete'""
+  ""python validate_imports.py""
 ]
 
 [start]
@@ -3849,12 +3988,13 @@ nixPkgs = { node = ""18"" }
 
 [phases.install]
 cmds = [
+  ""find . -name '*.js' -type f ! -path './node_modules/*' -exec node --check {} \; || (echo 'Syntax errors found in JavaScript files!' && exit 1)"",
   ""npm install""
 ]
 
 [phases.build]
 cmds = [
-  ""echo 'Build complete'""
+  ""echo 'Node.js syntax validation passed'""
 ]
 
 [start]
@@ -3900,21 +4040,22 @@ cmds = [
 
 [phases.build]
 cmds = [
-  ""echo 'Build complete'""
+  ""set -e"",
+  ""find . -name '*.php' -print0 | xargs -0 php -l""
 ]
 
 [start]
-cmd = ""php -S 0.0.0.0:$PORT -t . index.php""
+cmd = ""php -d display_errors=1 -S 0.0.0.0:$PORT index.php""
 ";
                 break;
                 
             case "ruby":
                 // Ruby/Sinatra backend - files are at root
-                // Note: Railway's Railpack auto-detects Ruby and uses its default version (3.4.6)
-                // Use bundle update to fix any dependency issues in Gemfile.lock
                 files["nixpacks.toml"] = @"# Nixpacks configuration for Railway - Ruby/Sinatra Backend
 # Backend files are at root level
-# Note: Railway's Railpack will auto-detect Ruby version (3.4.6)
+
+[phases.setup]
+nixPkgs = { ruby = ""3.3"" }
 
 [phases.install]
 cmds = [
@@ -3923,11 +4064,12 @@ cmds = [
 
 [phases.build]
 cmds = [
-  ""echo 'Build complete'""
+  ""bundle install"",
+  ""ruby build_check.rb""
 ]
 
 [start]
-cmd = ""bundle exec puma -b tcp://0.0.0.0:$PORT config.ru""
+cmd = ""ruby app.rb""
 ";
                 break;
                 
@@ -4146,14 +4288,37 @@ async def delete(id: int):
             await conn.close()
 ";
 
+        // logging_config.py - Logging configuration
+        files["backend/logging_config.py"] = @"import logging
+import sys
+
+# Configure logging - Warning and Error only
+logging.basicConfig(
+    level=logging.WARNING,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(sys.stdout)
+    ]
+)
+
+# Set specific loggers to WARNING
+logging.getLogger('uvicorn').setLevel(logging.WARNING)
+logging.getLogger('uvicorn.access').setLevel(logging.WARNING)
+logging.getLogger('fastapi').setLevel(logging.WARNING)
+";
+
         // main.py
         files["backend/main.py"] = @"import os
 import sys
 import asyncio
 import traceback
+import logging
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+
+# Import logging configuration
+import logging_config
 
 # Add current directory to path for imports (where main.py is located)
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -4163,21 +4328,24 @@ if current_dir not in sys.path:
 # Note: Models and Controllers are subdirectories of current_dir (root level),
 # so they can be imported directly when current_dir is in sys.path
 
+# Get logger
+logger = logging.getLogger(__name__)
+
 # Lifespan context manager to handle startup/shutdown gracefully
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """"""Handle application lifespan events - startup and shutdown""""""
     # Startup
-    print(""Starting Backend API..."")
+    logger.warning(""Starting Backend API..."")
     try:
         yield
     except asyncio.CancelledError:
         # Gracefully handle cancellation during shutdown
-        print(""Application shutdown requested"")
+        logger.warning(""Application shutdown requested"")
         raise
     finally:
         # Shutdown
-        print(""Shutting down Backend API..."")
+        logger.warning(""Shutting down Backend API..."")
 
 app = FastAPI(title=""Backend API"", version=""1.0.0"", lifespan=lifespan)
 
@@ -4190,24 +4358,9 @@ app.add_middleware(
     allow_headers=[""*""],  # Allow all headers (for CORS preflight)
 )
 
-# Try to import and register router
-try:
-    from Controllers.TestController import router as test_router
-    app.include_router(test_router)
-except Exception as e:
-    print(f""Error importing TestController: {e}"")
-    print(f""Traceback: {traceback.format_exc()}"")
-    # Create a dummy router for error reporting
-    from fastapi import APIRouter
-    test_router = APIRouter(prefix=""/api/test"", tags=[""test""])
-    @test_router.get(""/"")
-    async def error_endpoint():
-        return {
-            ""error"": ""Failed to load TestController"",
-            ""details"": str(e),
-            ""traceback"": traceback.format_exc()
-        }
-    app.include_router(test_router)
+# Import and register router - let it crash if imports fail (this is a build-time error, not runtime)
+from Controllers.TestController import router as test_router
+app.include_router(test_router)
 
 @app.get(""/"")
 async def root():
@@ -4236,9 +4389,10 @@ if __name__ == ""__main__"":
     import uvicorn
     import asyncio
     port = int(os.getenv(""PORT"", 8000))
-    print(f""Starting server on 0.0.0.0:{port}"")
+    logger.warning(f""Starting server on 0.0.0.0:{port}"")
     # Use lifespan='on' to explicitly enable lifespan handling
-    uvicorn.run(app, host=""0.0.0.0"", port=port, lifespan=""on"")
+    # Configure uvicorn to use WARNING log level
+    uvicorn.run(app, host=""0.0.0.0"", port=port, lifespan=""on"", log_level=""warning"")
 ";
 
         // requirements.txt
@@ -4246,6 +4400,34 @@ if __name__ == ""__main__"":
 uvicorn==0.32.0
 psycopg[binary]==3.2.2
 pydantic==2.9.0
+";
+
+        // validate_imports.py - Import validation script for build phase
+        files["backend/validate_imports.py"] = @"#!/usr/bin/env python3
+""""""Import validation script for Python backend
+This script validates that all controllers can be imported without errors.
+Run during build phase to catch import-time errors before deployment.
+""""""
+import sys
+import os
+
+# Add current directory to path for imports
+current_dir = os.path.dirname(os.path.abspath(__file__))
+if current_dir not in sys.path:
+    sys.path.insert(0, current_dir)
+
+# Import all controllers that should be available
+try:
+    from Controllers.TestController import router as test_router
+    print(""✓ Successfully imported Controllers.TestController"")
+except Exception as e:
+    print(f""✗ Failed to import Controllers.TestController: {e}"")
+    import traceback
+    traceback.print_exc()
+    sys.exit(1)
+
+print(""✓ All imports validated successfully"")
+sys.exit(0)
 ";
 
         // Note: README.md is created at root level, not here to avoid conflicts
@@ -4483,7 +4665,25 @@ module.exports = {
 const cors = require('cors');
 const swaggerUi = require('swagger-ui-express');
 const swaggerJsdoc = require('swagger-jsdoc');
+const winston = require('winston');
 const testController = require('./Controllers/TestController');
+
+// Configure logging - Warning and Error only
+const logger = winston.createLogger({
+  level: 'warn',
+  format: winston.format.combine(
+    winston.format.timestamp(),
+    winston.format.json()
+  ),
+  transports: [
+    new winston.transports.Console({
+      format: winston.format.combine(
+        winston.format.colorize(),
+        winston.format.simple()
+      )
+    })
+  ]
+});
 
 const app = express();
 const PORT = process.env.PORT || 8080;
@@ -4538,7 +4738,7 @@ app.get('/health', (req, res) => {
 });
 
 app.listen(PORT, '0.0.0.0', () => {
-    console.log(`Server is running on 0.0.0.0:${PORT}`);
+    logger.warn(`Server is running on 0.0.0.0:${PORT}`);
 });
 ";
 
@@ -4557,7 +4757,8 @@ app.listen(PORT, '0.0.0.0', () => {
     ""cors"": ""^2.8.5"",
     ""pg"": ""^8.11.3"",
     ""swagger-ui-express"": ""^5.0.0"",
-    ""swagger-jsdoc"": ""^6.2.8""
+    ""swagger-jsdoc"": ""^6.2.8"",
+    ""winston"": ""^3.11.0""
   },
   ""devDependencies"": {
     ""nodemon"": ""^3.0.2""
@@ -4931,6 +5132,11 @@ app.listen(PORT, '0.0.0.0', () => {
 "spring.jpa.hibernate.ddl-auto=none\n" +
 "spring.jpa.show-sql=false\n" +
 "spring.jpa.properties.hibernate.dialect=org.hibernate.dialect.PostgreSQLDialect\n\n" +
+"# Logging configuration - Warning and Error only\n" +
+"logging.level.root=WARN\n" +
+"logging.level.com.backend=WARN\n" +
+"logging.level.org.springframework=WARN\n" +
+"logging.level.org.hibernate=WARN\n\n" +
 "# Swagger/OpenAPI configuration\n" +
 "springdoc.api-docs.path=/api-docs\n" +
 "springdoc.swagger-ui.path=/swagger\n";
@@ -5107,6 +5313,18 @@ require_once __DIR__ . ""/vendor/autoload.php"";
 
 use App\Controllers\TestController;
 use PDO;
+
+// Configure logging - Warning and Error only
+ini_set('log_errors', 1);
+ini_set('error_log', __DIR__ . '/logs/php_errors.log');
+ini_set('error_reporting', E_WARNING | E_ERROR | E_PARSE | E_CORE_ERROR | E_COMPILE_ERROR | E_RECOVERABLE_ERROR);
+ini_set('display_errors', 0); // Don't display errors, only log them
+
+// Create logs directory if it doesn't exist
+$logsDir = __DIR__ . '/logs';
+if (!is_dir($logsDir)) {
+    mkdir($logsDir, 0755, true);
+}
 
 // Get request method and path first (before database connection)
 $method = $_SERVER['REQUEST_METHOD'] ?? 'GET';
@@ -5462,6 +5680,27 @@ RewriteCond %{REQUEST_FILENAME} !-d
 RewriteRule ^(.*)$ index.php [QSA,L]
 ";
 
+        // build_check.php - Full application build validation for PHP
+        files["backend/build_check.php"] = @"<?php
+error_reporting(E_ALL);
+ini_set('display_errors', '1');
+ini_set('display_startup_errors', '1');
+
+set_error_handler(function ($severity, $message, $file, $line) {
+    throw new ErrorException($message, 0, $severity, $file, $line);
+});
+
+set_exception_handler(function ($e) {
+    fwrite(STDERR, ""BUILD FAILED: "" . $e->getMessage() . PHP_EOL);
+    exit(1);
+});
+
+require __DIR__ . '/vendor/autoload.php';
+require __DIR__ . '/index.php';
+
+echo ""BUILD OK\n"";
+";
+
         return files;
     }
 
@@ -5578,7 +5817,19 @@ end
         files["backend/app.rb"] = @"require 'sinatra'
 require 'pg'
 require 'json'
+require 'logger'
 require_relative 'Controllers/test_controller'
+
+# Configure logging - Warning and Error only
+LOG_LEVEL = ENV['LOG_LEVEL'] || 'WARN'
+logger = Logger.new(STDOUT)
+logger.level = Logger.const_get(LOG_LEVEL)
+logger.formatter = proc do |severity, datetime, progname, msg|
+  ""[#{severity}] #{datetime}: #{msg}\n""
+end
+
+# Use logger in Sinatra
+set :logger, logger
 
 # Port and bind settings - Puma config file (puma.rb) will override these
 # But we set them here as fallback
@@ -5987,9 +6238,22 @@ run Sinatra::Application
 # Railway sets PORT environment variable - use it or default to 8080
 
 bind ""tcp://0.0.0.0:#{ENV.fetch('PORT', '8080')}""
-environment ENV['RAILS_ENV'] || ENV['RACK_ENV'] || 'production'
 workers 0  # Single worker mode for Railway
 threads 0, 5
+";
+
+        // build_check.rb - Full application build validation for Ruby
+        files["backend/build_check.rb"] = @"$stdout.sync = true
+$stderr.sync = true
+
+begin
+  require_relative './app'
+  puts ""BUILD OK""
+rescue Exception => e
+  STDERR.puts ""BUILD FAILED: #{e.class} - #{e.message}""
+  STDERR.puts e.backtrace.join(""\n"")
+  exit(1)
+end
 ";
 
         return files;
@@ -6199,6 +6463,16 @@ import (
     ""backend/Controllers""
     _ ""github.com/lib/pq""
 )
+
+// Configure logging - Warning and Error only
+// Create a custom logger that only shows warnings and errors
+func init() {
+    // Set log flags to include timestamp
+    log.SetFlags(log.Ldate | log.Ltime | log.Lshortfile)
+    // Note: Go's standard log package doesn't have severity levels,
+    // but we can use log.Printf for warnings and log.Fatal/panic for errors
+    // For production, consider using logrus or zap for proper log levels
+}
 
 func corsMiddleware(next http.Handler) http.Handler {
     return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -6554,7 +6828,11 @@ on:
     branches:
       - main
     paths:
+      - 'index.html'
+      - 'config.js'
+      - 'style.css'
       - 'frontend/**'
+      - '.github/workflows/deploy-frontend.yml'
   workflow_dispatch:
 
 permissions:
@@ -6582,7 +6860,8 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: './frontend'
+          # Upload root-level frontend files (index.html, config.js, style.css are at root)
+          path: '.'
       
       - name: Deploy to GitHub Pages
         id: deployment

@@ -32,8 +32,9 @@ public class ApplicationDbContext : DbContext
         public DbSet<EmployerBoard> EmployerBoards { get; set; }
         public DbSet<EmployerAdd> EmployerAdds { get; set; }
         public DbSet<EmployerCandidate> EmployerCandidates { get; set; }
-        public DbSet<AIModel> AIModels { get; set; }
-        public DbSet<MentorChatHistory> MentorChatHistory { get; set; }
+    public DbSet<AIModel> AIModels { get; set; }
+    public DbSet<MentorChatHistory> MentorChatHistory { get; set; }
+    public DbSet<BoardState> BoardStates { get; set; }
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -740,6 +741,60 @@ public class ApplicationDbContext : DbContext
                     CreatedAt = DateTime.UtcNow
                 }
             );
+        });
+
+        // Configure BoardState entity
+        modelBuilder.Entity<BoardState>(entity =>
+        {
+            entity.HasKey(e => e.Id);
+            entity.ToTable("BoardStates");
+            
+            entity.Property(e => e.BoardId).IsRequired().HasMaxLength(50);
+            entity.Property(e => e.Source).IsRequired().HasMaxLength(50);
+            entity.Property(e => e.Webhook);
+            entity.Property(e => e.ServiceName).HasMaxLength(255);
+            entity.Property(e => e.ErrorMessage).HasColumnType("text");
+            entity.Property(e => e.File).HasMaxLength(500);
+            entity.Property(e => e.Line);
+            entity.Property(e => e.StackTrace).HasColumnType("text");
+            entity.Property(e => e.RequestUrl).HasMaxLength(500);
+            entity.Property(e => e.RequestMethod).HasMaxLength(10);
+            entity.Property(e => e.Timestamp).HasColumnType("timestamp with time zone");
+            entity.Property(e => e.LastBuildStatus).HasMaxLength(50);
+            entity.Property(e => e.LastBuildOutput).HasColumnType("text");
+            entity.Property(e => e.LatestErrorSummary).HasColumnType("text");
+            entity.Property(e => e.SprintNumber);
+            entity.Property(e => e.BranchName).HasMaxLength(255);
+            entity.Property(e => e.BranchUrl).HasMaxLength(500);
+            entity.Property(e => e.LatestCommitId).HasMaxLength(100);
+            entity.Property(e => e.LatestCommitDescription).HasColumnType("text");
+            entity.Property(e => e.LatestCommitDate).HasColumnType("timestamp with time zone");
+            entity.Property(e => e.LastMergeDate).HasColumnType("timestamp with time zone");
+            entity.Property(e => e.LatestEvent).HasMaxLength(100);
+            entity.Property(e => e.PRStatus).HasMaxLength(50);
+            entity.Property(e => e.BranchStatus).HasMaxLength(50);
+            entity.Property(e => e.CreatedAt).IsRequired().HasColumnType("timestamp with time zone").HasDefaultValueSql("CURRENT_TIMESTAMP");
+            entity.Property(e => e.UpdatedAt).IsRequired().HasColumnType("timestamp with time zone").HasDefaultValueSql("CURRENT_TIMESTAMP");
+
+            // Foreign key relationship to ProjectBoard
+            entity.HasOne(e => e.ProjectBoard)
+                  .WithMany()
+                  .HasForeignKey(e => e.BoardId)
+                  .HasPrincipalKey(pb => pb.Id)
+                  .OnDelete(DeleteBehavior.Cascade);
+
+            // Indexes for better performance
+            entity.HasIndex(e => e.BoardId);
+            entity.HasIndex(e => e.Source);
+            // Unique constraint to prevent duplicates (BoardId + Source must be unique)
+            entity.HasIndex(e => new { e.BoardId, e.Source }).IsUnique();
+            entity.HasIndex(e => e.CreatedAt);
+            entity.HasIndex(e => e.UpdatedAt);
+            entity.HasIndex(e => e.LastBuildStatus);
+            entity.HasIndex(e => e.LatestCommitId);
+            entity.HasIndex(e => e.BranchName);
+            entity.HasIndex(e => e.PRStatus);
+            entity.HasIndex(e => e.BranchStatus);
         });
     }
 }

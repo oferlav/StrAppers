@@ -21,6 +21,7 @@ public interface IAIService
     Task<TranslateModuleResponse> TranslateModuleToEnglishAsync(string title, string description);
     Task<TranslateTextResponse> TranslateTextToEnglishAsync(string text);
     Task<ProjectCriteriaClassificationResponse> ClassifyProjectCriteriaAsync(string projectTitle, string projectDescription, string? extendedDescription, List<ProjectCriteria> availableCriteria);
+    Task<ParsedBuildOutput?> ParseBuildOutputAsync(string buildOutput);
 }
 
 public class AIService : IAIService
@@ -131,6 +132,9 @@ public class AIService : IAIService
             var sprintPlanJson = ExtractJsonFromResponse(aiResponse.Content);
             _logger.LogInformation("Extracted JSON for sprint plan: {Json}", sprintPlanJson);
             
+            // Fix invalid dates (e.g., Feb 29 in non-leap years) before deserialization
+            sprintPlanJson = FixInvalidDatesInJson(sprintPlanJson);
+            
             // Try to deserialize with more flexible options
             var options = new JsonSerializerOptions
             {
@@ -139,7 +143,25 @@ public class AIService : IAIService
                 ReadCommentHandling = JsonCommentHandling.Skip
             };
             
-            var sprintPlan = JsonSerializer.Deserialize<SprintPlan>(sprintPlanJson, options);
+            SprintPlan? sprintPlan = null;
+            try
+            {
+                sprintPlan = JsonSerializer.Deserialize<SprintPlan>(sprintPlanJson, options);
+            }
+            catch (JsonException jsonEx)
+            {
+                // If deserialization fails, try to fix the specific date mentioned in the error
+                if (jsonEx.Path?.Contains("startDate") == true || jsonEx.Path?.Contains("endDate") == true)
+                {
+                    _logger.LogWarning("Date parsing error detected at {Path}, attempting to fix and retry", jsonEx.Path);
+                    sprintPlanJson = FixInvalidDatesInJson(sprintPlanJson, jsonEx.Path);
+                    sprintPlan = JsonSerializer.Deserialize<SprintPlan>(sprintPlanJson, options);
+                }
+                else
+                {
+                    throw; // Re-throw if it's not a date-related error
+                }
+            }
             
             if (sprintPlan == null)
             {
@@ -175,6 +197,55 @@ public class AIService : IAIService
         }
         catch (JsonException jsonEx)
         {
+            // Last resort: try to fix dates and retry if we haven't already
+            if (aiResponse.Success && !string.IsNullOrEmpty(aiResponse.Content))
+            {
+                try
+                {
+                    _logger.LogWarning("JSON parsing error in outer catch, attempting final date fix and retry. Path: {Path}", jsonEx.Path);
+                    var sprintPlanJson = ExtractJsonFromResponse(aiResponse.Content);
+                    sprintPlanJson = FixInvalidDatesInJson(sprintPlanJson, jsonEx.Path);
+                    
+                    var options = new JsonSerializerOptions
+                    {
+                        PropertyNameCaseInsensitive = true,
+                        AllowTrailingCommas = true,
+                        ReadCommentHandling = JsonCommentHandling.Skip
+                    };
+                    
+                    var sprintPlan = JsonSerializer.Deserialize<SprintPlan>(sprintPlanJson, options);
+                    
+                    if (sprintPlan != null)
+                    {
+                        _logger.LogInformation("Successfully deserialized SprintPlan after final date fix attempt");
+                        
+                        // Validate the sprint plan
+                        var validationResult = ValidateSprintPlan(sprintPlan, request);
+                        if (!validationResult.IsValid)
+                        {
+                            _logger.LogWarning("Sprint plan validation failed after date fix: {Errors}", string.Join(", ", validationResult.Errors));
+                            return new SprintPlanningResponse
+                            {
+                                Success = false,
+                                Message = $"Sprint plan validation failed: {string.Join(", ", validationResult.Errors)}",
+                                SprintPlan = sprintPlan
+                            };
+                        }
+                        
+                        return new SprintPlanningResponse
+                        {
+                            Success = true,
+                            Message = "Sprint plan generated successfully (after fixing invalid dates)",
+                            SprintPlan = sprintPlan
+                        };
+                    }
+                }
+                catch (Exception retryEx)
+                {
+                    _logger.LogError(retryEx, "Failed to fix and retry JSON parsing after final date fix attempt");
+                }
+            }
+            
             _logger.LogError(jsonEx, "JSON parsing error for Project {ProjectId}. Path: {Path}, Line: {Line}, Position: {Position}. Raw response: {RawResponse}", 
                 request.ProjectId, jsonEx.Path, jsonEx.LineNumber, jsonEx.BytePositionInLine, aiResponse.Content ?? "No response available");
             return new SprintPlanningResponse
@@ -631,6 +702,64 @@ REMEMBER:
 
         // If no JSON found, throw an exception
         throw new InvalidOperationException($"No valid JSON found in AI response. Response starts with: {response.Substring(0, Math.Min(50, response.Length))}...");
+    }
+
+    /// <summary>
+    /// Fixes invalid dates in JSON (e.g., Feb 29 in non-leap years) by converting them to valid dates
+    /// </summary>
+    private string FixInvalidDatesInJson(string json, string? specificPath = null)
+    {
+        if (string.IsNullOrWhiteSpace(json))
+        {
+            return json;
+        }
+
+        // Use regex to find all date strings in format "YYYY-MM-DD"
+        var datePattern = @"(\d{4})-(\d{2})-(\d{2})";
+        var fixedJson = System.Text.RegularExpressions.Regex.Replace(json, datePattern, match =>
+        {
+            var dateStr = match.Value;
+            var year = int.Parse(match.Groups[1].Value);
+            var month = int.Parse(match.Groups[2].Value);
+            var day = int.Parse(match.Groups[3].Value);
+
+            // Check if the date is valid
+            try
+            {
+                var testDate = new DateTime(year, month, day);
+                // Date is valid, return as-is
+                return dateStr;
+            }
+            catch (ArgumentOutOfRangeException)
+            {
+                // Invalid date - fix it
+                _logger.LogWarning("Found invalid date {DateStr} in JSON, fixing to valid date", dateStr);
+                
+                // If it's Feb 29 in a non-leap year, convert to Feb 28
+                if (month == 2 && day == 29)
+                {
+                    var fixedDate = new DateTime(year, 2, 28);
+                    return fixedDate.ToString("yyyy-MM-dd");
+                }
+                
+                // For other invalid dates, try to adjust to the last valid day of the month
+                try
+                {
+                    // Try the last day of the month
+                    var lastDayOfMonth = DateTime.DaysInMonth(year, month);
+                    var fixedDate = new DateTime(year, month, Math.Min(day, lastDayOfMonth));
+                    return fixedDate.ToString("yyyy-MM-dd");
+                }
+                catch
+                {
+                    // If month is invalid too, default to the last day of the previous valid month
+                    var fixedDate = new DateTime(year, 12, 31);
+                    return fixedDate.ToString("yyyy-MM-dd");
+                }
+            }
+        });
+
+        return fixedJson;
     }
 
     private async Task<(bool Success, string Content, string? ErrorMessage)> CallOpenAIAsync(string prompt, string model)
@@ -2309,6 +2438,112 @@ Example responses:
             };
         }
     }
+
+    /// <summary>
+    /// Parses build output logs using AI to extract error information
+    /// </summary>
+    public async Task<ParsedBuildOutput?> ParseBuildOutputAsync(string buildOutput)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(buildOutput))
+            {
+                _logger.LogWarning("Build output is empty, cannot parse");
+                return null;
+            }
+
+            // Get the cheap model from configuration (defaults to gpt-4o-mini)
+            var cheapModel = _configuration["OpenAI:CheapModel"] ?? "gpt-4o-mini";
+
+            _logger.LogInformation("Parsing build output using AI model {Model}", cheapModel);
+
+            // Create a system prompt that instructs the AI to parse build logs and extract error information
+            var systemPrompt = @"You are an expert at analyzing build and deployment logs from various programming languages (C#, Java, Python, PHP, Ruby, Node.js, Go).
+
+Your task is to analyze the provided build/deployment logs and extract the following information in JSON format:
+1. File: The file path where the error occurred (if available)
+2. Line: The line number where the error occurred (if available, as an integer)
+3. StackTrace: The full stack trace if available
+4. LatestErrorSummary: A concise, human-readable summary of the error (2-3 sentences maximum)
+
+IMPORTANT RULES:
+- Return ONLY valid JSON, no markdown, no code blocks, no additional text
+- If a field is not available, use null (not empty string)
+- The JSON structure must be: {""File"": ""path/to/file"", ""Line"": 123, ""StackTrace"": ""..."", ""LatestErrorSummary"": ""...""}
+- LatestErrorSummary should be clear and actionable, explaining what went wrong and why
+- Look for error patterns common to the programming language (compile errors, syntax errors, import errors, runtime exceptions, etc.)
+- If multiple errors exist, focus on the FIRST/PRIMARY error that caused the build to fail
+- Extract file paths and line numbers from error messages, stack traces, or compiler output
+- For stack traces, include the full trace if available, otherwise include what's available
+
+Return the JSON response now:";
+
+            // Truncate build output if too long (keep last 8000 characters to preserve recent errors)
+            var truncatedOutput = buildOutput.Length > 8000
+                ? "..." + buildOutput.Substring(buildOutput.Length - 8000)
+                : buildOutput;
+
+            var userPrompt = $"Analyze the following build/deployment logs and extract error information:\n\n{truncatedOutput}";
+
+            // Call OpenAI with the cheap model
+            var aiResponse = await CallOpenAIAsync($"{systemPrompt}\n\n{userPrompt}", cheapModel);
+
+            if (!aiResponse.Success)
+            {
+                _logger.LogError("Failed to parse build output: {Error}", aiResponse.ErrorMessage);
+                return null;
+            }
+
+            // Parse the JSON response
+            try
+            {
+                // Extract JSON from response (handle markdown code blocks if present)
+                var jsonContent = aiResponse.Content.Trim();
+                if (jsonContent.StartsWith("```json"))
+                {
+                    jsonContent = jsonContent.Substring(7);
+                }
+                if (jsonContent.StartsWith("```"))
+                {
+                    jsonContent = jsonContent.Substring(3);
+                }
+                if (jsonContent.EndsWith("```"))
+                {
+                    jsonContent = jsonContent.Substring(0, jsonContent.Length - 3);
+                }
+                jsonContent = jsonContent.Trim();
+
+                var parsed = JsonSerializer.Deserialize<ParsedBuildOutput>(jsonContent, new JsonSerializerOptions
+                {
+                    PropertyNameCaseInsensitive = true
+                });
+
+                if (parsed != null)
+                {
+                    _logger.LogInformation("Successfully parsed build output: File={File}, Line={Line}, HasSummary={HasSummary}",
+                        parsed.File, parsed.Line, !string.IsNullOrEmpty(parsed.LatestErrorSummary));
+                }
+
+                return parsed;
+            }
+            catch (JsonException ex)
+            {
+                _logger.LogError(ex, "Failed to deserialize AI response as JSON. Response: {Response}", aiResponse.Content);
+                // Return a fallback summary if JSON parsing fails
+                return new ParsedBuildOutput
+                {
+                    LatestErrorSummary = aiResponse.Content.Length > 500
+                        ? aiResponse.Content.Substring(0, 500) + "..."
+                        : aiResponse.Content
+                };
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Exception while parsing build output");
+            return null;
+        }
+    }
 }
 
 // Helper class for parsing modules response
@@ -2436,5 +2671,9 @@ file sealed class TextTranslationResult
 {
     [JsonPropertyName("text")]
     public string? Text { get; set; }
+
+
+    
+
 }
 

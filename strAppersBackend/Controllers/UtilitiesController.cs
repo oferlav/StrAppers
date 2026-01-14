@@ -767,7 +767,8 @@ public class UtilitiesController : ControllerBase
 
             // Step 7: Set Railway build settings
             var targetPort = GetDefaultPortForLanguage(programmingLanguage);
-            var buildVariables = programmingLanguage?.ToLowerInvariant() switch
+            // Language-specific build variables
+            var languageSpecificVariables = programmingLanguage?.ToLowerInvariant() switch
             {
                 "c#" or "csharp" => new[]
                 {
@@ -797,6 +798,17 @@ public class UtilitiesController : ControllerBase
                     new { name = "PORT", value = "8080" }
                 }
             };
+            
+            // Maven environment variables - set for ALL languages to reduce log noise
+            // These only affect Java/Maven builds, but setting them for all languages is safe
+            var mavenVariables = new[]
+            {
+                new { name = "MAVEN_OPTS", value = "-Dorg.slf4j.simpleLogger.defaultLogLevel=warn -Dorg.slf4j.simpleLogger.showDateTime=false" },
+                new { name = "MAVEN_ARGS", value = "-ntp -q" }
+            };
+            
+            // Combine language-specific variables with Maven variables
+            var buildVariables = languageSpecificVariables.Concat(mavenVariables).ToArray();
 
             foreach (var variable in buildVariables)
             {
