@@ -26,6 +26,7 @@ namespace strAppersBackend.Controllers
         private readonly IConfiguration _configuration;
         private readonly IHttpClientFactory _httpClientFactory;
         private readonly IAIService _aiService;
+        private readonly DeploymentsConfig _deploymentsConfig;
 
         public MentorController(
             ApplicationDbContext context,
@@ -38,7 +39,8 @@ namespace strAppersBackend.Controllers
             IOptions<TrelloConfig> trelloConfig,
             IConfiguration configuration,
             IHttpClientFactory httpClientFactory,
-            IAIService aiService)
+            IAIService aiService,
+            IOptions<DeploymentsConfig> deploymentsConfig)
         {
             _context = context;
             _logger = logger;
@@ -51,6 +53,7 @@ namespace strAppersBackend.Controllers
             _configuration = configuration;
             _httpClientFactory = httpClientFactory;
             _aiService = aiService;
+            _deploymentsConfig = deploymentsConfig.Value;
         }
 
         /// <summary>
@@ -1516,438 +1519,6 @@ Your intelligence is strictly tethered to the Current Project Context and the us
             }
         }
 
-        /// <summary>
-        /// Health check endpoint for Railway to monitor application status
-        /// Railway will call this endpoint periodically to verify the application is healthy
-        /// Returns 200 OK if healthy, 503 Service Unavailable if unhealthy
-        /// </summary>
-        [HttpGet("railway-healthcheck")]
-        public async Task<ActionResult> RailwayHealthCheck()
-        {
-            try
-            {
-                var healthStatus = new
-                {
-                    status = "healthy",
-                    timestamp = DateTime.UtcNow,
-                    service = "StrAppers Backend API",
-                    environment = Environment.GetEnvironmentVariable("ASPNETCORE_ENVIRONMENT") ?? "Unknown"
-                };
-
-                // Quick database connectivity check (non-blocking)
-                bool dbHealthy = true;
-                try
-                {
-                    dbHealthy = await _context.Database.CanConnectAsync();
-                }
-                catch (Exception dbEx)
-                {
-                    _logger.LogWarning(dbEx, "Database health check failed");
-                    dbHealthy = false;
-                }
-
-                // If database is not healthy, return 503
-                if (!dbHealthy)
-                {
-                    _logger.LogWarning("Health check failed: Database connection unavailable");
-                    return StatusCode(503, new
-                    {
-                        status = "unhealthy",
-                        timestamp = DateTime.UtcNow,
-                        service = "StrAppers Backend API",
-                        checks = new
-                        {
-                            database = "unhealthy"
-                        },
-                        message = "Database connection check failed"
-                    });
-                }
-
-                // All checks passed
-                _logger.LogDebug("Health check passed: Application is healthy");
-                return Ok(healthStatus);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Health check endpoint error");
-                // Return 503 if health check itself fails
-                return StatusCode(503, new
-                {
-                    status = "unhealthy",
-                    timestamp = DateTime.UtcNow,
-                    service = "StrAppers Backend API",
-                    error = "Health check failed",
-                    message = ex.Message
-                });
-            }
-        }
-
-        /// <summary>
-        /// Get latest logs for a Railway service by board ID
-        /// Queries Railway API to find service "webapi_{boardId}" and retrieves the latest logs
-        /// </summary>
-        [HttpGet("railway-logs/{boardId}")]
-        public async Task<ActionResult> GetRailwayServiceLogs(string boardId, [FromQuery] int? lines = 500)
-        {
-            try
-            {
-                if (string.IsNullOrWhiteSpace(boardId))
-                {
-                    return BadRequest(new { Success = false, Message = "BoardId is required" });
-                }
-
-                var railwayApiToken = _configuration["Railway:ApiToken"];
-                var railwayApiUrl = _configuration["Railway:ApiUrl"] ?? "https://backboard.railway.com/graphql/v2";
-
-                if (string.IsNullOrWhiteSpace(railwayApiToken) || railwayApiToken == "your-railway-api-token-here")
-                {
-                    return BadRequest(new { Success = false, Message = "Railway API token is not configured" });
-                }
-
-                // Construct service name (lowercase, with hyphens)
-                var serviceName = $"webapi-{boardId.ToLowerInvariant()}";
-                _logger.LogInformation("Querying Railway logs for service: {ServiceName}, BoardId: {BoardId}", serviceName, boardId);
-
-                using var httpClient = _httpClientFactory.CreateClient();
-                httpClient.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", railwayApiToken);
-                httpClient.DefaultRequestHeaders.Accept.Add(new System.Net.Http.Headers.MediaTypeWithQualityHeaderValue("application/json"));
-                httpClient.DefaultRequestHeaders.Add("User-Agent", "StrAppersBackend/1.0");
-
-                // Step 1: Find project by service name pattern
-                // Railway services are in projects, so we need to search projects first
-                // Since Railway doesn't have direct service search, we'll query all projects and search for the service
-                var projectsQuery = new
-                {
-                    query = @"
-                        query GetProjects {
-                            projects {
-                                edges {
-                                    node {
-                                        id
-                                        name
-                                        services {
-                                            edges {
-                                                node {
-                                                    id
-                                                    name
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }"
-                };
-
-                var projectsBody = System.Text.Json.JsonSerializer.Serialize(projectsQuery);
-                var projectsContent = new StringContent(projectsBody, System.Text.Encoding.UTF8, "application/json");
-                var projectsResponse = await httpClient.PostAsync(railwayApiUrl, projectsContent);
-                var projectsResponseContent = await projectsResponse.Content.ReadAsStringAsync();
-
-                string? serviceId = null;
-                string? projectId = null;
-                string? foundServiceName = null;
-
-                if (projectsResponse.IsSuccessStatusCode)
-                {
-                    var projectsDoc = System.Text.Json.JsonDocument.Parse(projectsResponseContent);
-                    if (projectsDoc.RootElement.TryGetProperty("data", out var dataObj) &&
-                        dataObj.TryGetProperty("projects", out var projectsObj) &&
-                        projectsObj.TryGetProperty("edges", out var edgesProp))
-                    {
-                        foreach (var edge in edgesProp.EnumerateArray())
-                        {
-                            if (edge.TryGetProperty("node", out var projectNode))
-                            {
-                                var currentProjectId = projectNode.TryGetProperty("id", out var idProp) ? idProp.GetString() : null;
-                                
-                                if (projectNode.TryGetProperty("services", out var servicesProp) &&
-                                    servicesProp.TryGetProperty("edges", out var serviceEdgesProp))
-                                {
-                                    foreach (var serviceEdge in serviceEdgesProp.EnumerateArray())
-                                    {
-                                        if (serviceEdge.TryGetProperty("node", out var serviceNode))
-                                        {
-                                            var currentServiceName = serviceNode.TryGetProperty("name", out var nameProp) 
-                                                ? nameProp.GetString()?.ToLowerInvariant() : null;
-                                            var currentServiceId = serviceNode.TryGetProperty("id", out var sidProp) 
-                                                ? sidProp.GetString() : null;
-
-                                            // Match service name (case-insensitive, handle variations)
-                                            if (!string.IsNullOrEmpty(currentServiceName) &&
-                                                (currentServiceName == serviceName || 
-                                                 currentServiceName == $"webapi_{boardId.ToLowerInvariant()}" ||
-                                                 currentServiceName.Contains(serviceName)))
-                                            {
-                                                serviceId = currentServiceId;
-                                                projectId = currentProjectId;
-                                                foundServiceName = serviceNode.TryGetProperty("name", out var fnProp) ? fnProp.GetString() : currentServiceName;
-                                                break;
-                                            }
-                                        }
-                                    }
-                                }
-                                if (!string.IsNullOrEmpty(serviceId)) break;
-                            }
-                        }
-                    }
-                }
-
-                if (string.IsNullOrEmpty(serviceId))
-                {
-                    _logger.LogWarning("Railway service not found: {ServiceName}", serviceName);
-                    return NotFound(new 
-                    { 
-                        Success = false, 
-                        Message = $"Railway service '{serviceName}' not found",
-                        BoardId = boardId,
-                        SearchedServiceName = serviceName
-                    });
-                }
-
-                _logger.LogInformation("Found Railway service: ID={ServiceId}, Name={ServiceName}, Project={ProjectId}", 
-                    serviceId, foundServiceName, projectId);
-
-                // Step 2: Get latest deployment for the service (try simpler query first, then logs)
-                // First, check if deployments exist with a basic query
-                var basicDeploymentQuery = new
-                {
-                    query = @"
-                        query GetServiceDeployments($serviceId: String!) {
-                            service(id: $serviceId) {
-                                id
-                                name
-                                deployments(first: 5) {
-                                    edges {
-                                        node {
-                                            id
-                                            status
-                                            createdAt
-                                        }
-                                    }
-                                }
-                            }
-                        }",
-                    variables = new
-                    {
-                        serviceId = serviceId
-                    }
-                };
-
-                var basicDeploymentBody = System.Text.Json.JsonSerializer.Serialize(basicDeploymentQuery);
-                var basicDeploymentContent = new StringContent(basicDeploymentBody, System.Text.Encoding.UTF8, "application/json");
-                var basicDeploymentResponse = await httpClient.PostAsync(railwayApiUrl, basicDeploymentContent);
-                var basicDeploymentResponseContent = await basicDeploymentResponse.Content.ReadAsStringAsync();
-
-                string? deploymentId = null;
-                string? deploymentStatus = null;
-                string? deploymentCreatedAt = null;
-                string? buildLogs = null;
-                string? output = null;
-                string? logs = null;
-                string? buildLogsUrl = null;
-
-                if (basicDeploymentResponse.IsSuccessStatusCode)
-                {
-                    var deploymentDoc = System.Text.Json.JsonDocument.Parse(basicDeploymentResponseContent);
-                    _logger.LogDebug("Deployment query response: {Response}", basicDeploymentResponseContent);
-                    
-                    // Check for GraphQL errors first
-                    if (deploymentDoc.RootElement.TryGetProperty("errors", out var errorsProp))
-                    {
-                        var errors = errorsProp.EnumerateArray().ToList();
-                        foreach (var error in errors)
-                        {
-                            var errorMsg = error.TryGetProperty("message", out var msgProp) ? msgProp.GetString() : "Unknown error";
-                            _logger.LogWarning("GraphQL error in deployment query: {Error}", errorMsg);
-                        }
-                    }
-                    
-                    if (deploymentDoc.RootElement.TryGetProperty("data", out var depDataObj) &&
-                        depDataObj.TryGetProperty("service", out var depServiceObj) &&
-                        depServiceObj.TryGetProperty("deployments", out var depDeploymentsProp) &&
-                        depDeploymentsProp.TryGetProperty("edges", out var depEdgesProp))
-                    {
-                        var depEdges = depEdgesProp.EnumerateArray().ToList();
-                        _logger.LogInformation("Found {Count} deployment(s) for service {ServiceId}", depEdges.Count, serviceId);
-                        
-                        if (depEdges.Count > 0 && depEdges[0].TryGetProperty("node", out var depNode))
-                        {
-                            deploymentId = depNode.TryGetProperty("id", out var didProp) ? didProp.GetString() : null;
-                            deploymentStatus = depNode.TryGetProperty("status", out var dstatusProp) ? dstatusProp.GetString() : null;
-                            deploymentCreatedAt = depNode.TryGetProperty("createdAt", out var dcreatedProp) ? dcreatedProp.GetString() : null;
-                            
-                            _logger.LogInformation("Retrieved basic deployment info: ID={DeploymentId}, Status={Status}", 
-                                deploymentId, deploymentStatus);
-                            
-                            // Now try to get logs if we have a deployment ID
-                            if (!string.IsNullOrEmpty(deploymentId))
-                            {
-                                // Try querying deployment directly for logs
-                                var deploymentLogsQuery = new
-                                {
-                                    query = @"
-                                        query GetDeploymentLogs($deploymentId: String!) {
-                                            deployment(id: $deploymentId) {
-                                                id
-                                                buildLogs
-                                                output
-                                                logs
-                                                buildLogsUrl
-                                            }
-                                        }",
-                                    variables = new
-                                    {
-                                        deploymentId = deploymentId
-                                    }
-                                };
-                                
-                                var logsQueryBody = System.Text.Json.JsonSerializer.Serialize(deploymentLogsQuery);
-                                var logsQueryContent = new StringContent(logsQueryBody, System.Text.Encoding.UTF8, "application/json");
-                                var logsQueryResponse = await httpClient.PostAsync(railwayApiUrl, logsQueryContent);
-                                var logsQueryResponseContent = await logsQueryResponse.Content.ReadAsStringAsync();
-                                
-                                if (logsQueryResponse.IsSuccessStatusCode)
-                                {
-                                    var logsDoc = System.Text.Json.JsonDocument.Parse(logsQueryResponseContent);
-                                    _logger.LogDebug("Deployment logs query response: {Response}", logsQueryResponseContent);
-                                    
-                                    if (logsDoc.RootElement.TryGetProperty("errors", out var logsErrorsProp))
-                                    {
-                                        var logsErrors = logsErrorsProp.EnumerateArray().ToList();
-                                        foreach (var error in logsErrors)
-                                        {
-                                            var errorMsg = error.TryGetProperty("message", out var msgProp) ? msgProp.GetString() : "Unknown error";
-                                            _logger.LogWarning("GraphQL error querying logs (fields may not exist): {Error}", errorMsg);
-                                        }
-                                    }
-                                    
-                                    if (logsDoc.RootElement.TryGetProperty("data", out var logsDataObj) &&
-                                        logsDataObj.TryGetProperty("deployment", out var logsDeploymentObj))
-                                    {
-                                        if (logsDeploymentObj.TryGetProperty("buildLogs", out var buildLogsProp) && buildLogsProp.ValueKind != System.Text.Json.JsonValueKind.Null)
-                                        {
-                                            buildLogs = buildLogsProp.ValueKind == System.Text.Json.JsonValueKind.String 
-                                                ? buildLogsProp.GetString() 
-                                                : buildLogsProp.GetRawText();
-                                        }
-                                        if (logsDeploymentObj.TryGetProperty("output", out var outputProp) && outputProp.ValueKind != System.Text.Json.JsonValueKind.Null)
-                                        {
-                                            output = outputProp.ValueKind == System.Text.Json.JsonValueKind.String 
-                                                ? outputProp.GetString() 
-                                                : outputProp.GetRawText();
-                                        }
-                                        if (logsDeploymentObj.TryGetProperty("logs", out var logsProp) && logsProp.ValueKind != System.Text.Json.JsonValueKind.Null)
-                                        {
-                                            logs = logsProp.ValueKind == System.Text.Json.JsonValueKind.String 
-                                                ? logsProp.GetString() 
-                                                : logsProp.GetRawText();
-                                        }
-                                        if (logsDeploymentObj.TryGetProperty("buildLogsUrl", out var buildLogsUrlProp) && buildLogsUrlProp.ValueKind != System.Text.Json.JsonValueKind.Null)
-                                        {
-                                            buildLogsUrl = buildLogsUrlProp.GetString();
-                                        }
-                                        
-                                        _logger.LogInformation("Retrieved logs: HasBuildLogs={HasBuildLogs}, HasOutput={HasOutput}, HasLogs={HasLogs}, HasBuildLogsUrl={HasBuildLogsUrl}", 
-                                            !string.IsNullOrEmpty(buildLogs), !string.IsNullOrEmpty(output), !string.IsNullOrEmpty(logs), !string.IsNullOrEmpty(buildLogsUrl));
-                                    }
-                                }
-                                else
-                                {
-                                    _logger.LogWarning("Failed to query deployment logs: StatusCode={StatusCode}", logsQueryResponse.StatusCode);
-                                }
-                            }
-                        }
-                        else
-                        {
-                            _logger.LogWarning("No deployments found for service {ServiceId}", serviceId);
-                        }
-                    }
-                    else
-                    {
-                        _logger.LogWarning("Unexpected response structure from deployment query");
-                    }
-                }
-                else
-                {
-                    _logger.LogWarning("Failed to query deployments: StatusCode={StatusCode}, Response={Response}", 
-                        basicDeploymentResponse.StatusCode, basicDeploymentResponseContent);
-                }
-
-                // Step 3: Prepare response with logs if available
-                var hasLogs = !string.IsNullOrEmpty(buildLogs) || !string.IsNullOrEmpty(output) || !string.IsNullOrEmpty(logs);
-                var railwayDashboardUrl = $"https://railway.app/project/{projectId}/service/{serviceId}";
-
-                if (hasLogs)
-                {
-                    _logger.LogInformation("Successfully retrieved logs for service {ServiceId}, deployment {DeploymentId}", serviceId, deploymentId);
-                    return Ok(new
-                    {
-                        Success = true,
-                        BoardId = boardId,
-                        ServiceName = foundServiceName,
-                        ServiceId = serviceId,
-                        ProjectId = projectId,
-                        LatestDeployment = new
-                        {
-                            Id = deploymentId,
-                            Status = deploymentStatus,
-                            CreatedAt = deploymentCreatedAt,
-                            BuildLogsUrl = buildLogsUrl
-                        },
-                        Logs = new
-                        {
-                            BuildLogs = buildLogs,
-                            Output = output,
-                            Logs = logs,
-                            HasLogs = true
-                        },
-                        RailwayDashboardUrl = railwayDashboardUrl
-                    });
-                }
-                else
-                {
-                    // No logs available via GraphQL API - this is expected
-                    _logger.LogInformation("No logs available via GraphQL API for service {ServiceId}. Railway logs must be accessed via dashboard or CLI.", serviceId);
-                    return Ok(new
-                    {
-                        Success = true,
-                        BoardId = boardId,
-                        ServiceName = foundServiceName,
-                        ServiceId = serviceId,
-                        ProjectId = projectId,
-                        LatestDeployment = new
-                        {
-                            Id = deploymentId,
-                            Status = deploymentStatus,
-                            CreatedAt = deploymentCreatedAt,
-                            BuildLogsUrl = buildLogsUrl
-                        },
-                        Logs = new
-                        {
-                            BuildLogs = (string?)null,
-                            Output = (string?)null,
-                            Logs = (string?)null,
-                            HasLogs = false
-                        },
-                        Message = "Service found, but logs are not available via Railway GraphQL API.",
-                        Note = "Railway logs can be viewed in the Railway dashboard or via Railway CLI: railway logs --service {ServiceId}",
-                        RailwayDashboardUrl = railwayDashboardUrl,
-                        RailwayLogsCommand = $"railway logs --service {serviceId}"
-                    });
-                }
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Error querying Railway logs for BoardId: {BoardId}", boardId);
-                return StatusCode(500, new 
-                { 
-                    Success = false, 
-                    Message = $"Error querying Railway logs: {ex.Message}",
-                    BoardId = boardId
-                });
-            }
-        }
 
         /// <summary>
         /// Webhook endpoint for Railway build failure notifications
@@ -2071,10 +1642,12 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                             _logger.LogInformation("Last 500 chars of buildOutput: {LastChars}", 
                                 buildOutput.Length > 500 ? buildOutput.Substring(buildOutput.Length - 500) : buildOutput);
                             
-                            // Parse build output using AI service to extract error details
-                            try
+                            // Parse build output using AI service to extract error details (only if configured)
+                            if (_deploymentsConfig.BuildErrors.SendToAISummary)
                             {
-                                var parsedOutput = await _aiService.ParseBuildOutputAsync(buildOutput);
+                                try
+                                {
+                                    var parsedOutput = await _aiService.ParseBuildOutputAsync(buildOutput);
                                 if (parsedOutput != null)
                                 {
                                     // Populate error fields from AI parsing
@@ -2103,10 +1676,15 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                                     _logger.LogWarning("AI parsing returned null for deployment {DeploymentId}", deploymentId);
                                 }
                             }
-                            catch (Exception aiEx)
+                                catch (Exception aiEx)
+                                {
+                                    _logger.LogError(aiEx, "Failed to parse build output with AI for deployment {DeploymentId}", deploymentId);
+                                    // Continue without AI parsing - we still have the raw logs
+                                }
+                            }
+                            else
                             {
-                                _logger.LogError(aiEx, "Failed to parse build output with AI for deployment {DeploymentId}", deploymentId);
-                                // Continue without AI parsing - we still have the raw logs
+                                _logger.LogInformation("AI summarization skipped for build errors (DeploymentsConfig.BuildErrors.SendToAISummary = false)");
                             }
                         }
                     }
@@ -2207,9 +1785,9 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                 var createdAt = DateTime.UtcNow;
                 var updatedAt = DateTime.UtcNow;
                 
-                // Parse build output with AI if we have it and status is FAILED
+                // Parse build output with AI if we have it and status is FAILED (only if configured)
                 string? latestErrorSummary = null;
-                if (buildStatus == "FAILED" && !string.IsNullOrEmpty(buildOutput))
+                if (buildStatus == "FAILED" && !string.IsNullOrEmpty(buildOutput) && _deploymentsConfig.BuildErrors.SendToAISummary)
                 {
                     try
                     {
@@ -2246,6 +1824,10 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                 var errorStackTraceValue = buildStatus == "FAILED" ? stackTrace : null;
                 var latestErrorSummaryValue = buildStatus == "FAILED" ? latestErrorSummary : null;
                 
+                // Extract commit information from webhook payload
+                var latestCommitId = payload.Details?.CommitHash; // Full commit hash (SHA)
+                var latestCommitDescription = payload.Details?.CommitMessage; // Commit message
+                
                 // Log what we're about to save
                 if (!string.IsNullOrEmpty(buildOutput))
                 {
@@ -2260,20 +1842,23 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                         ""BoardId"", ""Source"", ""Webhook"", ""ServiceName"", 
                         ""LastBuildStatus"", ""LastBuildOutput"", ""ErrorMessage"", 
                         ""File"", ""Line"", ""StackTrace"", ""LatestErrorSummary"", ""Timestamp"", 
+                        ""LatestCommitId"", ""LatestCommitDescription"",
                         ""CreatedAt"", ""UpdatedAt""
                     ) VALUES (
                         {boardId}, {"Railway"}, {true}, {serviceName}, 
                         {buildStatus}, {buildOutput}, {errorMsgValue}, 
                         {errorFileValue}, {errorLineValue}, {errorStackTraceValue}, {latestErrorSummaryValue}, 
-                        {timestamp}, {createdAt}, {updatedAt}
+                        {timestamp}, {latestCommitId}, {latestCommitDescription},
+                        {createdAt}, {updatedAt}
                     )
-                    ON CONFLICT (""BoardId"", ""Source"") 
+                    ON CONFLICT (""BoardId"", ""Source"", ""Webhook"") 
                     DO UPDATE SET
-                        ""Webhook"" = EXCLUDED.""Webhook"",
                         ""ServiceName"" = EXCLUDED.""ServiceName"",
                         ""LastBuildStatus"" = EXCLUDED.""LastBuildStatus"",
                         ""LastBuildOutput"" = EXCLUDED.""LastBuildOutput"",
                         ""Timestamp"" = EXCLUDED.""Timestamp"",
+                        ""LatestCommitId"" = EXCLUDED.""LatestCommitId"",
+                        ""LatestCommitDescription"" = EXCLUDED.""LatestCommitDescription"",
                         ""UpdatedAt"" = EXCLUDED.""UpdatedAt"",
                         ""ErrorMessage"" = CASE 
                             WHEN EXCLUDED.""LastBuildStatus"" = 'FAILED' THEN EXCLUDED.""ErrorMessage""
@@ -2299,7 +1884,7 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                 
                 // Log before upsert to help diagnose duplicate issues
                 var existingState = await _context.BoardStates
-                    .FirstOrDefaultAsync(bs => bs.BoardId == boardId && bs.Source == "Railway");
+                    .FirstOrDefaultAsync(bs => bs.BoardId == boardId && bs.Source == "Railway" && bs.Webhook == true);
                 
                 if (existingState != null)
                 {
@@ -2316,7 +1901,7 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                 
                 // Retrieve the updated record for logging
                 var boardState = await _context.BoardStates
-                    .FirstOrDefaultAsync(bs => bs.BoardId == boardId && bs.Source == "Railway");
+                    .FirstOrDefaultAsync(bs => bs.BoardId == boardId && bs.Source == "Railway" && bs.Webhook == true);
                 
                 _logger.LogInformation("BoardState upsert completed for BoardId: {BoardId}, Status: {Status}, Deployment: {DeploymentId}", 
                     boardId, buildStatus, deploymentId);
@@ -2381,6 +1966,322 @@ Your intelligence is strictly tethered to the Current Project Context and the us
             public string? File { get; set; }
             public int? Line { get; set; }
             public string? StackTrace { get; set; }
+        }
+
+        /// <summary>
+        /// Endpoint to receive runtime errors from generated backend services
+        /// Populates BoardStates table with File, Line, StackTrace, LatestErrorSummary
+        /// </summary>
+        [HttpPost("runtime-error")]
+        public async Task<ActionResult> LogRuntimeError([FromBody] RuntimeErrorRequest request)
+        {
+            try
+            {
+                if (request == null)
+                {
+                    return BadRequest(new { Success = false, Message = "Request body is required" });
+                }
+
+                // Log error even if BoardId is missing (for debugging)
+                if (string.IsNullOrWhiteSpace(request.BoardId))
+                {
+                    _logger.LogWarning("Received runtime error with missing BoardId. File: {File}, Line: {Line}, Message: {Message}, RequestPath: {RequestPath}, RequestMethod: {RequestMethod}", 
+                        request.File, request.Line, request.Message, request.RequestPath, request.RequestMethod);
+                    _logger.LogWarning("Full request payload: BoardId='{BoardId}', Message='{Message}', ExceptionType='{ExceptionType}'", 
+                        request.BoardId ?? "NULL", request.Message ?? "NULL", request.ExceptionType ?? "NULL");
+                    return BadRequest(new { Success = false, Message = "BoardId is required to store error in BoardStates table" });
+                }
+
+                // Validate that BoardId exists in ProjectBoards table (foreign key constraint)
+                var boardExists = await _context.ProjectBoards
+                    .AnyAsync(pb => pb.Id == request.BoardId);
+                
+                if (!boardExists)
+                {
+                    _logger.LogWarning("Runtime error received for non-existent BoardId: {BoardId}. Skipping log entry.", request.BoardId);
+                    return BadRequest(new { Success = false, Message = $"BoardId {request.BoardId} does not exist in ProjectBoards table" });
+                }
+
+                _logger.LogInformation("Received runtime error for BoardId: {BoardId}, File: {File}, Line: {Line}", 
+                    request.BoardId, request.File, request.Line);
+
+                // If file or line is missing, try to parse from stack trace using AI
+                var file = request.File;
+                var line = request.Line;
+                
+                if ((string.IsNullOrWhiteSpace(file) || line == null) && !string.IsNullOrWhiteSpace(request.StackTrace))
+                {
+                    _logger.LogInformation("File or line missing, attempting AI parsing of stack trace for BoardId: {BoardId}", request.BoardId);
+                    
+                    try
+                    {
+                        var parsedOutput = await _aiService.ParseBuildOutputAsync(request.StackTrace);
+                        if (parsedOutput != null)
+                        {
+                            if (string.IsNullOrWhiteSpace(file) && !string.IsNullOrWhiteSpace(parsedOutput.File))
+                            {
+                                file = parsedOutput.File;
+                                _logger.LogInformation("AI parsed file from stack trace: {File}", file);
+                            }
+                            
+                            if (line == null && parsedOutput.Line.HasValue)
+                            {
+                                line = parsedOutput.Line.Value;
+                                _logger.LogInformation("AI parsed line from stack trace: {Line}", line);
+                            }
+                        }
+                        else
+                        {
+                            _logger.LogWarning("AI parsing returned null for BoardId: {BoardId}", request.BoardId);
+                        }
+                    }
+                    catch (Exception aiEx)
+                    {
+                        _logger.LogError(aiEx, "Error calling AI service to parse stack trace for BoardId: {BoardId}", request.BoardId);
+                        // Continue with original values (null/empty)
+                    }
+                }
+
+                // Prepare error output
+                var errorOutput = !string.IsNullOrEmpty(request.StackTrace)
+                    ? $"[RUNTIME ERROR] {request.Timestamp:yyyy-MM-dd HH:mm:ss} UTC\n" +
+                      $"File: {file ?? "Unknown"}\n" +
+                      $"Line: {line?.ToString() ?? "Unknown"}\n" +
+                      $"Message: {request.Message}\n" +
+                      $"Exception Type: {request.ExceptionType ?? "Unknown"}\n" +
+                      $"Request Path: {request.RequestPath ?? "Unknown"}\n" +
+                      $"Request Method: {request.RequestMethod ?? "Unknown"}\n" +
+                      $"StackTrace:\n{request.StackTrace}"
+                    : null;
+
+                // Use PostgreSQL upsert (INSERT ... ON CONFLICT DO UPDATE) to handle race conditions
+                // Unique constraint is on (BoardId, Source, Webhook)
+                // Runtime errors use: BoardId, Source="RuntimeError", Webhook=false
+                // Ensure timestamp is UTC (PostgreSQL requires UTC for timestamp with time zone)
+                var timestamp = request.Timestamp != default 
+                    ? (request.Timestamp.Kind == DateTimeKind.Utc 
+                        ? request.Timestamp 
+                        : request.Timestamp.ToUniversalTime()) 
+                    : DateTime.UtcNow;
+                var createdAt = DateTime.UtcNow;
+                var updatedAt = DateTime.UtcNow;
+                var source = "RuntimeError";
+                var webhook = false; // Runtime errors are NOT from webhooks
+                var buildStatus = "FAILED";
+
+                // Check if record exists for logging
+                var existingState = await _context.BoardStates
+                    .FirstOrDefaultAsync(bs => bs.BoardId == request.BoardId && 
+                                               bs.Source == source && 
+                                               bs.Webhook == webhook);
+
+                if (existingState != null)
+                {
+                    _logger.LogInformation("Updating existing runtime error BoardState: BoardId={BoardId}, Source={Source}, Webhook={Webhook}", 
+                        request.BoardId, source, webhook);
+                }
+                else
+                {
+                    _logger.LogInformation("Creating new runtime error BoardState: BoardId={BoardId}, Source={Source}, Webhook={Webhook}", 
+                        request.BoardId, source, webhook);
+                }
+
+                // Use FormattableString for safe parameterization
+                FormattableString sql = $@"
+                    INSERT INTO ""BoardStates"" (
+                        ""BoardId"", ""Source"", ""Webhook"", 
+                        ""LastBuildStatus"", ""LastBuildOutput"", ""ErrorMessage"", 
+                        ""File"", ""Line"", ""StackTrace"", ""LatestErrorSummary"", ""Timestamp"", 
+                        ""RequestUrl"", ""RequestMethod"",
+                        ""CreatedAt"", ""UpdatedAt""
+                    ) VALUES (
+                        {request.BoardId}, {source}, {webhook}, 
+                        {buildStatus}, {errorOutput}, {request.Message}, 
+                        {file}, {line}, {request.StackTrace}, {request.Message}, {timestamp}, 
+                        {request.RequestPath}, {request.RequestMethod},
+                        {createdAt}, {updatedAt}
+                    )
+                    ON CONFLICT (""BoardId"", ""Source"", ""Webhook"") 
+                    DO UPDATE SET
+                        ""LastBuildStatus"" = EXCLUDED.""LastBuildStatus"",
+                        ""LastBuildOutput"" = EXCLUDED.""LastBuildOutput"",
+                        ""ErrorMessage"" = EXCLUDED.""ErrorMessage"",
+                        ""File"" = EXCLUDED.""File"",
+                        ""Line"" = EXCLUDED.""Line"",
+                        ""StackTrace"" = EXCLUDED.""StackTrace"",
+                        ""LatestErrorSummary"" = EXCLUDED.""LatestErrorSummary"",
+                        ""Timestamp"" = EXCLUDED.""Timestamp"",
+                        ""RequestUrl"" = EXCLUDED.""RequestUrl"",
+                        ""RequestMethod"" = EXCLUDED.""RequestMethod"",
+                        ""UpdatedAt"" = EXCLUDED.""UpdatedAt""
+                    ";
+
+                await _context.Database.ExecuteSqlInterpolatedAsync(sql);
+
+                _logger.LogInformation("Successfully logged runtime error for BoardId: {BoardId}", request.BoardId);
+                return Ok(new { Success = true, Message = "Runtime error logged successfully" });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error logging runtime error for BoardId: {BoardId}", request?.BoardId);
+                return StatusCode(500, new { Success = false, Message = $"Error logging runtime error: {ex.Message}" });
+            }
+        }
+
+        public class RuntimeErrorRequest
+        {
+            public string BoardId { get; set; } = string.Empty;
+            public DateTime Timestamp { get; set; }
+            public string? File { get; set; }
+            public int? Line { get; set; }
+            public string? StackTrace { get; set; }
+            public string Message { get; set; } = string.Empty;
+            public string? ExceptionType { get; set; }
+            public string? RequestPath { get; set; }
+            public string? RequestMethod { get; set; }
+            public string? UserAgent { get; set; }
+            public RuntimeErrorInnerException? InnerException { get; set; }
+        }
+
+        public class RuntimeErrorInnerException
+        {
+            public string? Message { get; set; }
+            public string? Type { get; set; }
+            public string? StackTrace { get; set; }
+        }
+
+        /// <summary>
+        /// Endpoint to receive frontend runtime errors and success logs from GitHub Pages
+        /// Populates BoardStates table with Source="GithubPages" and Webhook=false
+        /// </summary>
+        [HttpPost("runtime-error-frontend")]
+        public async Task<ActionResult> LogFrontendRuntimeError([FromBody] FrontendLogRequest request)
+        {
+            try
+            {
+                if (request == null || string.IsNullOrWhiteSpace(request.BoardId))
+                {
+                    return BadRequest(new { Success = false, Message = "BoardId is required" });
+                }
+
+                // Validate that BoardId exists in ProjectBoards table (foreign key constraint)
+                var boardExists = await _context.ProjectBoards
+                    .AnyAsync(pb => pb.Id == request.BoardId);
+                
+                if (!boardExists)
+                {
+                    _logger.LogWarning("Frontend log received for non-existent BoardId: {BoardId}. Skipping log entry.", request.BoardId);
+                    return BadRequest(new { Success = false, Message = $"BoardId {request.BoardId} does not exist in ProjectBoards table" });
+                }
+
+                _logger.LogInformation("Received frontend log for BoardId: {BoardId}, Type: {Type}, File: {File}, Line: {Line}", 
+                    request.BoardId, request.Type, request.File, request.Line);
+
+                var timestamp = request.Timestamp != default ? request.Timestamp : DateTime.UtcNow;
+                var createdAt = DateTime.UtcNow;
+                var updatedAt = DateTime.UtcNow;
+                var source = "GithubPages";
+                var webhook = false; // Frontend logs are NOT from webhooks
+
+                string? buildStatus = null;
+                string? errorOutput = null;
+                string? errorMessage = null;
+                string? latestErrorSummary = null;
+
+                // Handle different log types
+                if (request.Type == "FRONTEND_SUCCESS")
+                {
+                    buildStatus = "SUCCESS";
+                    _logger.LogInformation("Frontend success log for BoardId: {BoardId}", request.BoardId);
+                }
+                else if (request.Type == "FRONTEND_RUNTIME" || request.Type == "FRONTEND_PROMISE_REJECTION")
+                {
+                    buildStatus = "FAILED";
+                    errorMessage = request.Message;
+                    
+                    // Prepare error output
+                    errorOutput = $"[FRONTEND {request.Type}] {timestamp:yyyy-MM-dd HH:mm:ss} UTC\n" +
+                                  $"File: {request.File ?? "Unknown"}\n" +
+                                  $"Line: {request.Line?.ToString() ?? "Unknown"}\n" +
+                                  $"Column: {request.Column?.ToString() ?? "Unknown"}\n" +
+                                  $"Message: {request.Message}\n" +
+                                  $"StackTrace:\n{request.Stack ?? "N/A"}";
+                    
+                    latestErrorSummary = request.Message;
+                    
+                    _logger.LogWarning("Frontend error log for BoardId: {BoardId}, Type: {Type}, Message: {Message}", 
+                        request.BoardId, request.Type, request.Message);
+                }
+                else
+                {
+                    return BadRequest(new { Success = false, Message = $"Unknown log type: {request.Type}" });
+                }
+
+                // Check if record exists for logging
+                var existingState = await _context.BoardStates
+                    .FirstOrDefaultAsync(bs => bs.BoardId == request.BoardId && 
+                                               bs.Source == source && 
+                                               bs.Webhook == webhook);
+
+                if (existingState != null)
+                {
+                    _logger.LogInformation("Updating existing frontend log BoardState: BoardId={BoardId}, Source={Source}, Webhook={Webhook}, Type={Type}", 
+                        request.BoardId, source, webhook, request.Type);
+                }
+                else
+                {
+                    _logger.LogInformation("Creating new frontend log BoardState: BoardId={BoardId}, Source={Source}, Webhook={Webhook}, Type={Type}", 
+                        request.BoardId, source, webhook, request.Type);
+                }
+
+                // Use FormattableString for safe parameterization
+                FormattableString sql = $@"
+                    INSERT INTO ""BoardStates"" (
+                        ""BoardId"", ""Source"", ""Webhook"", 
+                        ""LastBuildStatus"", ""LastBuildOutput"", ""ErrorMessage"", 
+                        ""File"", ""Line"", ""StackTrace"", ""LatestErrorSummary"", ""Timestamp"", 
+                        ""CreatedAt"", ""UpdatedAt""
+                    ) VALUES (
+                        {request.BoardId}, {source}, {webhook}, 
+                        {buildStatus}, {errorOutput}, {errorMessage}, 
+                        {request.File}, {request.Line}, {request.Stack}, {latestErrorSummary}, {timestamp}, 
+                        {createdAt}, {updatedAt}
+                    )
+                    ON CONFLICT (""BoardId"", ""Source"", ""Webhook"") 
+                    DO UPDATE SET
+                        ""LastBuildStatus"" = EXCLUDED.""LastBuildStatus"",
+                        ""LastBuildOutput"" = EXCLUDED.""LastBuildOutput"",
+                        ""ErrorMessage"" = EXCLUDED.""ErrorMessage"",
+                        ""File"" = EXCLUDED.""File"",
+                        ""Line"" = EXCLUDED.""Line"",
+                        ""StackTrace"" = EXCLUDED.""StackTrace"",
+                        ""LatestErrorSummary"" = EXCLUDED.""LatestErrorSummary"",
+                        ""Timestamp"" = EXCLUDED.""Timestamp"",
+                        ""UpdatedAt"" = EXCLUDED.""UpdatedAt""
+                    ";
+
+                await _context.Database.ExecuteSqlInterpolatedAsync(sql);
+
+                _logger.LogInformation("Successfully logged frontend log for BoardId: {BoardId}, Type: {Type}", request.BoardId, request.Type);
+                return Ok(new { Success = true, Message = "Frontend log recorded successfully" });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error logging frontend log for BoardId: {BoardId}", request?.BoardId);
+                return StatusCode(500, new { Success = false, Message = $"Error logging frontend log: {ex.Message}" });
+            }
+        }
+
+        public class FrontendLogRequest
+        {
+            public string BoardId { get; set; } = string.Empty;
+            public string Type { get; set; } = string.Empty; // FRONTEND_SUCCESS, FRONTEND_RUNTIME, FRONTEND_PROMISE_REJECTION
+            public DateTime Timestamp { get; set; }
+            public string? File { get; set; }
+            public int? Line { get; set; }
+            public int? Column { get; set; }
+            public string? Stack { get; set; }
+            public string Message { get; set; } = string.Empty;
         }
         
         /// <summary>
@@ -3093,7 +2994,7 @@ Your intelligence is strictly tethered to the Current Project Context and the us
             
             return null;
         }
-        
+
         /// <summary>
         /// Get mentor response using a specific AI model
         /// </summary>
@@ -3104,7 +3005,7 @@ Your intelligence is strictly tethered to the Current Project Context and the us
         {
             try
             {
-                _logger.LogInformation("Getting mentor response for StudentId: {StudentId}, SprintId: {SprintId}, Model: {Model}",
+                _logger.LogInformation("Getting mentor response for StudentId: {StudentId}, SprintId: {SprintId}, Model: {Model}", 
                     request.StudentId, request.SprintId, aiModelName);
 
                 // Get the AI model from database
@@ -3156,8 +3057,8 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                 
                 // Look for common error patterns
                 foreach (var line in lines)
-                {
-                    var trimmedLine = line.Trim();
+                        {
+                            var trimmedLine = line.Trim();
                     
                     // PHP errors: "Parse error: syntax error, unexpected 'X' in /path/to/file.php on line Y"
                     var phpErrorMatch = System.Text.RegularExpressions.Regex.Match(trimmedLine, 
@@ -5777,6 +5678,205 @@ Your intelligence is strictly tethered to the Current Project Context and the us
     }
 
     /// <summary>
+    /// Validate backend configuration for a board
+    /// Validates GitHub repository, Railway service, database connection, and code structure
+    /// </summary>
+    [HttpGet("use/validate-backend")]
+    public async Task<ActionResult<object>> ValidateBackend([FromQuery] string boardId, [FromQuery] string? branch = null)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(boardId))
+            {
+                return BadRequest(new { Success = false, Message = "boardId query parameter is required" });
+            }
+
+            var branchName = branch ?? "main";
+            _logger.LogInformation("🔍 [VALIDATION] Starting backend validation for BoardId: {BoardId}, Branch: {Branch}", boardId, branchName);
+
+            // Get board from database
+            var board = await _context.ProjectBoards
+                .FirstOrDefaultAsync(pb => pb.Id == boardId);
+
+            if (board == null)
+            {
+                return NotFound(new { Success = false, Message = $"Board with ID {boardId} not found" });
+            }
+
+            var validationResult = new
+            {
+                boardId = boardId,
+                timestamp = DateTime.UtcNow,
+                github = new { },
+                railway = new { },
+                database = new { },
+                codeStructure = new { },
+                overall = new { valid = false, issues = new List<string>() }
+            };
+
+            var issues = new List<string>();
+            var githubValid = false;
+            var railwayValid = false;
+            var databaseValid = false;
+            var codeStructureValid = false;
+
+            // 1. GitHub Repository Validation
+            var githubResult = await ValidateGitHubBackendAsync(board, boardId, branchName);
+            githubValid = githubResult.Valid;
+            if (!githubValid)
+            {
+                issues.AddRange(githubResult.Issues);
+            }
+
+            // 2. Railway Service Validation
+            var railwayResult = await ValidateRailwayBackendAsync(board, boardId);
+            railwayValid = railwayResult.Valid;
+            if (!railwayValid)
+            {
+                issues.AddRange(railwayResult.Issues);
+            }
+
+            // 3. Database Connection Validation
+            var databaseResult = await ValidateDatabaseBackendAsync(board, boardId);
+            databaseValid = databaseResult.Valid;
+            if (!databaseValid)
+            {
+                issues.AddRange(databaseResult.Issues);
+            }
+
+            // 4. Code Structure Validation (middleware, CORS, etc.)
+            var codeResult = await ValidateCodeStructureBackendAsync(board, boardId, branchName);
+            codeStructureValid = codeResult.Valid;
+            if (!codeStructureValid)
+            {
+                issues.AddRange(codeResult.Issues);
+            }
+
+            // 5. Build Status Validation (Railway)
+            var buildStatusResult = await ValidateBuildStatusBackendAsync(board, boardId);
+            var buildStatusValid = buildStatusResult.Valid;
+            if (!buildStatusValid)
+            {
+                issues.AddRange(buildStatusResult.Issues);
+            }
+
+            var overallValid = githubValid && railwayValid && databaseValid && codeStructureValid && buildStatusValid;
+
+            return Ok(new
+            {
+                Success = true,
+                BoardId = boardId,
+                Branch = branchName,
+                Timestamp = DateTime.UtcNow,
+                Overall = new
+                {
+                    Valid = overallValid,
+                    Issues = issues
+                },
+                GitHub = githubResult,
+                Railway = railwayResult,
+                Database = databaseResult,
+                CodeStructure = codeResult,
+                BuildStatus = buildStatusResult
+            });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "❌ [VALIDATION] Error validating backend for BoardId: {BoardId}", boardId);
+            return StatusCode(500, new { Success = false, Message = $"Error validating backend: {ex.Message}" });
+        }
+    }
+
+    /// <summary>
+    /// Validate frontend configuration for a board
+    /// Validates GitHub repository, config.js, API URL configuration, and deployment
+    /// </summary>
+    [HttpGet("use/validate-frontend")]
+    public async Task<ActionResult<object>> ValidateFrontend([FromQuery] string boardId, [FromQuery] string? branch = null)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(boardId))
+            {
+                return BadRequest(new { Success = false, Message = "boardId query parameter is required" });
+            }
+
+            var branchName = branch ?? "main";
+            _logger.LogInformation("🔍 [VALIDATION] Starting frontend validation for BoardId: {BoardId}, Branch: {Branch}", boardId, branchName);
+
+            // Get board from database
+            var board = await _context.ProjectBoards
+                .FirstOrDefaultAsync(pb => pb.Id == boardId);
+
+            if (board == null)
+            {
+                return NotFound(new { Success = false, Message = $"Board with ID {boardId} not found" });
+            }
+
+            var issues = new List<string>();
+            var githubValid = false;
+            var configValid = false;
+            var deploymentValid = false;
+
+            // 1. GitHub Repository Validation
+            var githubResult = await ValidateGitHubFrontendAsync(board, boardId, branchName);
+            githubValid = githubResult.Valid;
+            if (!githubValid)
+            {
+                issues.AddRange(githubResult.Issues);
+            }
+
+            // 2. Config.js Validation
+            var configResult = await ValidateFrontendConfigAsync(board, boardId, branchName);
+            configValid = configResult.Valid;
+            if (!configValid)
+            {
+                issues.AddRange(configResult.Issues);
+            }
+
+            // 3. Deployment Validation
+            var deploymentResult = await ValidateFrontendDeploymentAsync(board, boardId);
+            deploymentValid = deploymentResult.Valid;
+            if (!deploymentValid)
+            {
+                issues.AddRange(deploymentResult.Issues);
+            }
+
+            // 4. Build Status Validation (GitHub Pages - for future implementation)
+            var buildStatusResult = await ValidateBuildStatusFrontendAsync(board, boardId);
+            var buildStatusValid = buildStatusResult.Valid;
+            if (!buildStatusValid)
+            {
+                issues.AddRange(buildStatusResult.Issues);
+            }
+
+            var overallValid = githubValid && configValid && deploymentValid && buildStatusValid;
+
+            return Ok(new
+            {
+                Success = true,
+                BoardId = boardId,
+                Branch = branchName,
+                Timestamp = DateTime.UtcNow,
+                Overall = new
+                {
+                    Valid = overallValid,
+                    Issues = issues
+                },
+                GitHub = githubResult,
+                Config = configResult,
+                Deployment = deploymentResult,
+                BuildStatus = buildStatusResult
+            });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "❌ [VALIDATION] Error validating frontend for BoardId: {BoardId}", boardId);
+            return StatusCode(500, new { Success = false, Message = $"Error validating frontend: {ex.Message}" });
+        }
+    }
+
+    /// <summary>
     /// Request model for mentor response endpoint
     /// </summary>
     public class MentorRequest
@@ -5785,6 +5885,1499 @@ Your intelligence is strictly tethered to the Current Project Context and the us
         public int SprintId { get; set; }
         public string UserQuestion { get; set; } = string.Empty;
     }
+
+    #region Validation Helper Methods
+
+    private async Task<(bool Valid, List<string> Issues, object Details)> ValidateGitHubBackendAsync(ProjectBoard board, string boardId, string branch = "main")
+    {
+        var issues = new List<string>();
+        var details = new Dictionary<string, object>();
+
+        if (string.IsNullOrEmpty(board.GithubBackendUrl))
+        {
+            issues.Add("GithubBackendUrl is not set in ProjectBoards table");
+            return (false, issues, details);
+        }
+
+        try
+        {
+            // Parse GitHub URL
+            var uri = new Uri(board.GithubBackendUrl);
+            var pathParts = uri.AbsolutePath.TrimStart('/').Split('/');
+            if (pathParts.Length < 2)
+            {
+                issues.Add($"Invalid GitHub backend URL format: {board.GithubBackendUrl}");
+                return (false, issues, details);
+            }
+
+            var owner = pathParts[0];
+            var repo = pathParts[1].Replace(".git", "");
+
+            details["Owner"] = owner;
+            details["Repository"] = repo;
+            details["Url"] = board.GithubBackendUrl;
+
+            // Check if repository exists via GitHub API
+            var accessToken = _configuration["GitHub:AccessToken"];
+            if (string.IsNullOrEmpty(accessToken))
+            {
+                issues.Add("GitHub access token not configured");
+                return (false, issues, details);
+            }
+
+            // Try to get repository info
+            using var httpClient = _httpClientFactory.CreateClient();
+            httpClient.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", accessToken);
+            httpClient.DefaultRequestHeaders.Add("User-Agent", "StrAppersBackend/1.0");
+            httpClient.DefaultRequestHeaders.Accept.Add(new System.Net.Http.Headers.MediaTypeWithQualityHeaderValue("application/vnd.github.v3+json"));
+
+            var repoResponse = await httpClient.GetAsync($"https://api.github.com/repos/{owner}/{repo}");
+            if (!repoResponse.IsSuccessStatusCode)
+            {
+                issues.Add($"GitHub repository not found or not accessible: {board.GithubBackendUrl} (Status: {repoResponse.StatusCode})");
+                details["RepositoryExists"] = false;
+                return (false, issues, details);
+            }
+
+            details["RepositoryExists"] = true;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error validating GitHub backend for BoardId: {BoardId}", boardId);
+            issues.Add($"Error validating GitHub repository: {ex.Message}");
+        }
+
+        return (issues.Count == 0, issues, details);
+    }
+
+    private async Task<(bool Valid, List<string> Issues, object Details)> ValidateRailwayBackendAsync(ProjectBoard board, string boardId)
+    {
+        var issues = new List<string>();
+        var details = new Dictionary<string, object>();
+
+        var railwayApiToken = _configuration["Railway:ApiToken"];
+        var railwayApiUrl = _configuration["Railway:ApiUrl"] ?? "https://backboard.railway.app/graphql/v2";
+        var railwayProjectId = _configuration["Railway:SharedProjectId"];
+
+        if (string.IsNullOrEmpty(railwayApiToken) || string.IsNullOrEmpty(railwayProjectId))
+        {
+            issues.Add("Railway API token or project ID not configured");
+            return (false, issues, details);
+        }
+
+        try
+        {
+            using var httpClient = _httpClientFactory.CreateClient();
+            httpClient.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", railwayApiToken);
+            httpClient.DefaultRequestHeaders.Accept.Add(new System.Net.Http.Headers.MediaTypeWithQualityHeaderValue("application/json"));
+
+            // Derive service name from boardId
+            var serviceNamePattern = $"webapi-{boardId.ToLowerInvariant()}";
+            var sanitizedPattern = System.Text.RegularExpressions.Regex.Replace(serviceNamePattern, @"[^a-z0-9-_]", "-");
+
+            details["ExpectedServiceName"] = sanitizedPattern;
+
+            // Query Railway API for services in the project
+            var queryServices = new
+            {
+                query = @"
+                    query GetProjectServices($projectId: String!) {
+                        project(id: $projectId) {
+                            id
+                            services {
+                                edges {
+                                    node {
+                                        id
+                                        name
+                                    }
+                                }
+                            }
+                        }
+                    }",
+                variables = new { projectId = railwayProjectId }
+            };
+
+            var queryBody = System.Text.Json.JsonSerializer.Serialize(queryServices);
+            var queryContent = new StringContent(queryBody, System.Text.Encoding.UTF8, "application/json");
+            var queryResponse = await httpClient.PostAsync(railwayApiUrl, queryContent);
+
+            if (!queryResponse.IsSuccessStatusCode)
+            {
+                issues.Add($"Failed to query Railway API: {queryResponse.StatusCode}");
+                return (false, issues, details);
+            }
+
+            var queryResponseContent = await queryResponse.Content.ReadAsStringAsync();
+            var queryDoc = System.Text.Json.JsonDocument.Parse(queryResponseContent);
+
+            string? serviceId = null;
+            string? serviceName = null;
+
+            if (queryDoc.RootElement.TryGetProperty("data", out var dataObj) &&
+                dataObj.TryGetProperty("project", out var projectObj) &&
+                projectObj.TryGetProperty("services", out var servicesObj) &&
+                servicesObj.TryGetProperty("edges", out var edgesProp))
+            {
+                var edges = edgesProp.EnumerateArray().ToList();
+                foreach (var edge in edges)
+                {
+                    if (edge.TryGetProperty("node", out var nodeProp))
+                    {
+                        var name = nodeProp.TryGetProperty("name", out var nameProp) ? nameProp.GetString() : null;
+                        if (!string.IsNullOrEmpty(name) && 
+                            (name.Equals(sanitizedPattern, StringComparison.OrdinalIgnoreCase) ||
+                             name.StartsWith($"webapi-{boardId}", StringComparison.OrdinalIgnoreCase) ||
+                             name.StartsWith($"webapi_{boardId}", StringComparison.OrdinalIgnoreCase)))
+                        {
+                            serviceId = nodeProp.TryGetProperty("id", out var idProp) ? idProp.GetString() : null;
+                            serviceName = name;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            if (string.IsNullOrEmpty(serviceId))
+            {
+                issues.Add($"Railway service not found with name pattern: {sanitizedPattern}");
+                details["ServiceExists"] = false;
+                return (false, issues, details);
+            }
+
+            details["ServiceExists"] = true;
+            details["ServiceId"] = serviceId;
+            details["ServiceName"] = serviceName;
+
+            // Query service for environment variables and deployment status
+            var queryService = new
+            {
+                query = @"
+                    query GetService($serviceId: String!) {
+                        service(id: $serviceId) {
+                            id
+                            name
+                            deployments(first: 1) {
+                                edges {
+                                    node {
+                                        id
+                                        status
+                                        url
+                                    }
+                                }
+                            }
+                        }
+                    }",
+                variables = new { serviceId = serviceId }
+            };
+
+            var serviceQueryBody = System.Text.Json.JsonSerializer.Serialize(queryService);
+            var serviceQueryContent = new StringContent(serviceQueryBody, System.Text.Encoding.UTF8, "application/json");
+            var serviceQueryResponse = await httpClient.PostAsync(railwayApiUrl, serviceQueryContent);
+
+            if (serviceQueryResponse.IsSuccessStatusCode)
+            {
+                var serviceResponseContent = await serviceQueryResponse.Content.ReadAsStringAsync();
+                var serviceDoc = System.Text.Json.JsonDocument.Parse(serviceResponseContent);
+
+                if (serviceDoc.RootElement.TryGetProperty("data", out var serviceDataObj) &&
+                    serviceDataObj.TryGetProperty("service", out var serviceObj))
+                {
+                    // Check deployments
+                    if (serviceObj.TryGetProperty("deployments", out var deploymentsObj) &&
+                        deploymentsObj.TryGetProperty("edges", out var deploymentEdges))
+                    {
+                        var deploymentList = deploymentEdges.EnumerateArray().ToList();
+                        if (deploymentList.Count > 0 && deploymentList[0].TryGetProperty("node", out var deploymentNode))
+                        {
+                            var deploymentStatus = deploymentNode.TryGetProperty("status", out var statusProp) ? statusProp.GetString() : null;
+                            var deploymentUrl = deploymentNode.TryGetProperty("url", out var urlProp) ? urlProp.GetString() : null;
+
+                            details["LatestDeploymentStatus"] = deploymentStatus ?? "UNKNOWN";
+                            details["LatestDeploymentUrl"] = deploymentUrl;
+
+                            if (deploymentStatus != "SUCCESS" && deploymentStatus != "ACTIVE")
+                            {
+                                issues.Add($"Latest deployment status is {deploymentStatus}, expected SUCCESS or ACTIVE");
+                            }
+
+                            // Compare with WebApiUrl from ProjectBoards
+                            if (!string.IsNullOrEmpty(board.WebApiUrl) && !string.IsNullOrEmpty(deploymentUrl))
+                            {
+                                var urlMatches = board.WebApiUrl.Equals(deploymentUrl, StringComparison.OrdinalIgnoreCase) ||
+                                                 board.WebApiUrl.Contains(deploymentUrl, StringComparison.OrdinalIgnoreCase) ||
+                                                 deploymentUrl.Contains(board.WebApiUrl, StringComparison.OrdinalIgnoreCase);
+                                
+                                details["WebApiUrlMatches"] = urlMatches;
+                                details["ProjectBoardsWebApiUrl"] = board.WebApiUrl;
+                                
+                                if (!urlMatches)
+                                {
+                                    issues.Add($"Railway service URL ({deploymentUrl}) does not match WebApiUrl in ProjectBoards ({board.WebApiUrl})");
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Query environment variables
+            var envQuery = new
+            {
+                query = @"
+                    query GetServiceVariables($serviceId: String!) {
+                        service(id: $serviceId) {
+                            variables {
+                                name
+                            }
+                        }
+                    }",
+                variables = new { serviceId = serviceId }
+            };
+
+            var envQueryBody = System.Text.Json.JsonSerializer.Serialize(envQuery);
+            var envQueryContent = new StringContent(envQueryBody, System.Text.Encoding.UTF8, "application/json");
+            var envQueryResponse = await httpClient.PostAsync(railwayApiUrl, envQueryContent);
+
+            if (envQueryResponse.IsSuccessStatusCode)
+            {
+                var envResponseContent = await envQueryResponse.Content.ReadAsStringAsync();
+                var envDoc = System.Text.Json.JsonDocument.Parse(envResponseContent);
+
+                var envVars = new Dictionary<string, bool>();
+                if (envDoc.RootElement.TryGetProperty("data", out var envDataObj) &&
+                    envDataObj.TryGetProperty("service", out var serviceObj) &&
+                    serviceObj.TryGetProperty("variables", out var variablesProp))
+                {
+                    var variables = variablesProp.EnumerateArray().ToList();
+                    var varNames = variables.Select(v => v.TryGetProperty("name", out var n) ? n.GetString() : null)
+                                           .Where(n => !string.IsNullOrEmpty(n))
+                                           .ToList();
+
+                    envVars["DATABASE_URL"] = varNames.Contains("DATABASE_URL");
+                    envVars["PORT"] = varNames.Contains("PORT");
+                    envVars["RUNTIME_ERROR_ENDPOINT_URL"] = varNames.Contains("RUNTIME_ERROR_ENDPOINT_URL");
+
+                    details["EnvironmentVariables"] = envVars;
+
+                    if (!envVars["DATABASE_URL"])
+                    {
+                        issues.Add("DATABASE_URL environment variable is not set in Railway service");
+                    }
+                    if (!envVars["PORT"])
+                    {
+                        issues.Add("PORT environment variable is not set in Railway service");
+                    }
+                    if (!envVars["RUNTIME_ERROR_ENDPOINT_URL"])
+                    {
+                        issues.Add("RUNTIME_ERROR_ENDPOINT_URL environment variable is not set in Railway service");
+                    }
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error validating Railway backend for BoardId: {BoardId}", boardId);
+            issues.Add($"Error validating Railway service: {ex.Message}");
+        }
+
+        return (issues.Count == 0, issues, details);
+    }
+
+    private async Task<(bool Valid, List<string> Issues, object Details)> ValidateDatabaseBackendAsync(ProjectBoard board, string boardId)
+    {
+        var issues = new List<string>();
+        var details = new Dictionary<string, object>();
+
+        if (string.IsNullOrEmpty(board.NeonProjectId) || string.IsNullOrEmpty(board.NeonBranchId) || string.IsNullOrEmpty(board.DBPassword))
+        {
+            issues.Add("NeonProjectId, NeonBranchId, or DBPassword is missing in ProjectBoards table");
+            details["HasNeonProjectId"] = !string.IsNullOrEmpty(board.NeonProjectId);
+            details["HasNeonBranchId"] = !string.IsNullOrEmpty(board.NeonBranchId);
+            details["HasDBPassword"] = !string.IsNullOrEmpty(board.DBPassword);
+            return (false, issues, details);
+        }
+
+        try
+        {
+            var dbName = $"AppDB_{boardId}";
+            var neonApiKey = _configuration["Neon:ApiKey"];
+            var neonBaseUrl = _configuration["Neon:BaseUrl"];
+            var neonDefaultOwnerName = _configuration["Neon:DefaultOwnerName"] ?? "neondb_owner";
+
+            if (string.IsNullOrEmpty(neonApiKey) || string.IsNullOrEmpty(neonBaseUrl))
+            {
+                issues.Add("Neon API key or base URL not configured");
+                return (false, issues, details);
+            }
+
+            // Get connection string from Neon API
+            var connectionUrl = $"{neonBaseUrl}/projects/{board.NeonProjectId}/connection_uri?database_name={Uri.EscapeDataString(dbName)}&role_name={Uri.EscapeDataString(neonDefaultOwnerName)}&branch_id={Uri.EscapeDataString(board.NeonBranchId)}&pooled=false";
+
+            using var httpClient = _httpClientFactory.CreateClient();
+            httpClient.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", neonApiKey);
+
+            var connResponse = await httpClient.GetAsync(connectionUrl);
+            if (!connResponse.IsSuccessStatusCode)
+            {
+                issues.Add($"Failed to get database connection string from Neon API: {connResponse.StatusCode}");
+                return (false, issues, details);
+            }
+
+            var connContent = await connResponse.Content.ReadAsStringAsync();
+            var connDoc = System.Text.Json.JsonDocument.Parse(connContent);
+
+            string? connectionString = null;
+            if (connDoc.RootElement.TryGetProperty("uri", out var uriProp))
+            {
+                connectionString = uriProp.GetString();
+            }
+
+            if (string.IsNullOrEmpty(connectionString))
+            {
+                issues.Add("Database connection string is empty or invalid");
+                return (false, issues, details);
+            }
+
+            details["ConnectionStringRetrieved"] = true;
+            details["DatabaseName"] = dbName;
+
+            // Validate connection string format (cold validation - no actual connection)
+            // Just verify it's a valid PostgreSQL connection string format
+            try
+            {
+                var connBuilder = new Npgsql.NpgsqlConnectionStringBuilder(connectionString);
+                details["ConnectionStringFormatValid"] = true;
+                details["ConnectionStringHost"] = connBuilder.Host;
+                details["ConnectionStringDatabase"] = connBuilder.Database;
+                details["ConnectionStringUsername"] = connBuilder.Username;
+                
+                // Verify the connection string components match what's stored in ProjectBoards
+                // The connection string should contain the database name and use the stored credentials
+                if (!string.IsNullOrEmpty(connBuilder.Database) && connBuilder.Database != dbName)
+                {
+                    issues.Add($"Connection string database name ({connBuilder.Database}) does not match expected database name ({dbName})");
+                }
+            }
+            catch (Exception ex)
+            {
+                issues.Add($"Database connection string format is invalid: {ex.Message}");
+                details["ConnectionStringFormatValid"] = false;
+                details["ConnectionStringError"] = ex.Message;
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error validating database backend for BoardId: {BoardId}", boardId);
+            issues.Add($"Error validating database: {ex.Message}");
+        }
+
+        return (issues.Count == 0, issues, details);
+    }
+
+    private async Task<(bool Valid, List<string> Issues, object Details)> ValidateCodeStructureBackendAsync(ProjectBoard board, string boardId, string branch = "main")
+    {
+        var issues = new List<string>();
+        var details = new Dictionary<string, object>();
+
+        if (string.IsNullOrEmpty(board.GithubBackendUrl))
+        {
+            issues.Add("GithubBackendUrl is not set - cannot validate code structure");
+            return (false, issues, details);
+        }
+
+        try
+        {
+            // Parse GitHub URL
+            var uri = new Uri(board.GithubBackendUrl);
+            var pathParts = uri.AbsolutePath.TrimStart('/').Split('/');
+            if (pathParts.Length < 2)
+            {
+                issues.Add("Invalid GitHub backend URL format");
+                return (false, issues, details);
+            }
+
+            var owner = pathParts[0];
+            var repo = pathParts[1].Replace(".git", "");
+            var accessToken = _configuration["GitHub:AccessToken"];
+
+            if (string.IsNullOrEmpty(accessToken))
+            {
+                issues.Add("GitHub access token not configured");
+                return (false, issues, details);
+            }
+
+            // Check for nixpacks.toml at root
+            var nixpacksContent = await _githubService.GetFileContentAsync(owner, repo, "nixpacks.toml", accessToken, branch);
+            details["NixpacksTomlExists"] = !string.IsNullOrEmpty(nixpacksContent);
+            if (string.IsNullOrEmpty(nixpacksContent))
+            {
+                issues.Add("nixpacks.toml file not found at repository root");
+            }
+            else
+            {
+                // Validate nixpacks.toml content
+                var hasPortBinding = nixpacksContent.Contains("0.0.0.0") || nixpacksContent.Contains("$PORT");
+                details["NixpacksHasPortBinding"] = hasPortBinding;
+                if (!hasPortBinding)
+                {
+                    issues.Add("nixpacks.toml does not bind to 0.0.0.0 or use PORT environment variable");
+                }
+            }
+
+            // Check for middleware registration (language-specific)
+            // This is a simplified check - we'd need to know the programming language
+            // For now, check common files
+            var programCs = await _githubService.GetFileContentAsync(owner, repo, "backend/Program.cs", accessToken, branch) ??
+                           await _githubService.GetFileContentAsync(owner, repo, "Program.cs", accessToken, branch);
+            
+            if (!string.IsNullOrEmpty(programCs))
+            {
+                // C# backend
+                var hasMiddleware = programCs.Contains("UseMiddleware") && programCs.Contains("GlobalExceptionHandlerMiddleware");
+                var hasCors = programCs.Contains("UseCors") && programCs.Contains("AllowAll");
+                var hasPortBinding = programCs.Contains("UseUrls") && (programCs.Contains("0.0.0.0") || programCs.Contains("$PORT") || programCs.Contains("PORT"));
+                var hasDatabaseUrl = programCs.Contains("DATABASE_URL") || (programCs.Contains("Environment.GetEnvironmentVariable") && programCs.Contains("DATABASE_URL"));
+                var hasRuntimeErrorEndpoint = programCs.Contains("RUNTIME_ERROR_ENDPOINT_URL") || (programCs.Contains("Environment.GetEnvironmentVariable") && programCs.Contains("RUNTIME_ERROR_ENDPOINT_URL"));
+                var hasConnectionStringParsing = programCs.Contains("postgresql://") || programCs.Contains("postgres://") || programCs.Contains("Uri(") || programCs.Contains("ConnectionString");
+                
+                details["MiddlewareRegistered"] = hasMiddleware;
+                details["CorsConfigured"] = hasCors;
+                details["PortBindingConfigured"] = hasPortBinding;
+                details["DatabaseUrlReferenced"] = hasDatabaseUrl;
+                details["RuntimeErrorEndpointReferenced"] = hasRuntimeErrorEndpoint;
+                details["ConnectionStringParsing"] = hasConnectionStringParsing;
+                
+                if (!hasMiddleware)
+                {
+                    issues.Add("GlobalExceptionHandlerMiddleware is not registered in Program.cs");
+                }
+                if (!hasCors)
+                {
+                    issues.Add("CORS is not configured in Program.cs");
+                }
+                if (!hasPortBinding)
+                {
+                    issues.Add("Port binding to 0.0.0.0 is not configured in Program.cs (required for Railway)");
+                }
+                if (!hasDatabaseUrl)
+                {
+                    issues.Add("DATABASE_URL environment variable is not referenced in Program.cs");
+                }
+                if (!hasRuntimeErrorEndpoint)
+                {
+                    issues.Add("RUNTIME_ERROR_ENDPOINT_URL environment variable is not referenced in middleware code");
+                }
+                if (!hasConnectionStringParsing)
+                {
+                    issues.Add("Database connection string parsing logic not found in Program.cs (required for PostgreSQL URL format)");
+                }
+
+                // Check for SET search_path in database queries (check TestController as sample)
+                var testController = await _githubService.GetFileContentAsync(owner, repo, "backend/Controllers/TestController.cs", accessToken, branch) ??
+                                   await _githubService.GetFileContentAsync(owner, repo, "Controllers/TestController.cs", accessToken, branch);
+                
+                if (!string.IsNullOrEmpty(testController))
+                {
+                    var hasSearchPath = testController.Contains("SET search_path") || testController.Contains("search_path");
+                    details["HasSearchPathInQueries"] = hasSearchPath;
+                    if (!hasSearchPath)
+                    {
+                        issues.Add("SET search_path command not found in database queries (required for Neon database isolation)");
+                    }
+                }
+
+                // Check package dependencies
+                var csproj = await _githubService.GetFileContentAsync(owner, repo, "backend/Backend.csproj", accessToken, branch) ??
+                            await _githubService.GetFileContentAsync(owner, repo, "Backend.csproj", accessToken, branch);
+                
+                if (!string.IsNullOrEmpty(csproj))
+                {
+                    var hasNpgsql = csproj.Contains("Npgsql");
+                    details["HasNpgsqlPackage"] = hasNpgsql;
+                    if (!hasNpgsql)
+                    {
+                        issues.Add("Npgsql package not found in .csproj file (required for PostgreSQL)");
+                    }
+                }
+            }
+            else
+            {
+                // Check for Python main.py
+                var mainPy = await _githubService.GetFileContentAsync(owner, repo, "backend/main.py", accessToken, branch) ??
+                            await _githubService.GetFileContentAsync(owner, repo, "main.py", accessToken, branch);
+                
+                if (!string.IsNullOrEmpty(mainPy))
+                {
+                        var hasExceptionHandler = mainPy.Contains("setup_exception_handlers") || mainPy.Contains("ExceptionHandler") ||
+                                                 (mainPy.Contains("from ExceptionHandler") || mainPy.Contains("import ExceptionHandler"));
+                    var hasCors = mainPy.Contains("CORSMiddleware") || mainPy.Contains("allow_origins");
+                    var hasPortBinding = mainPy.Contains("0.0.0.0") || mainPy.Contains("$PORT") || mainPy.Contains("PORT");
+                    var hasDatabaseUrl = mainPy.Contains("DATABASE_URL") || (mainPy.Contains("os.getenv") && mainPy.Contains("DATABASE_URL"));
+                    var hasRuntimeErrorEndpoint = mainPy.Contains("RUNTIME_ERROR_ENDPOINT_URL") || (mainPy.Contains("os.getenv") && mainPy.Contains("RUNTIME_ERROR_ENDPOINT_URL"));
+                    var hasConnectionStringParsing = mainPy.Contains("postgresql://") || mainPy.Contains("postgres://") || mainPy.Contains("asyncpg") || mainPy.Contains("create_engine");
+                    
+                    details["ExceptionHandlerRegistered"] = hasExceptionHandler;
+                    details["CorsConfigured"] = hasCors;
+                    details["PortBindingConfigured"] = hasPortBinding;
+                    details["DatabaseUrlReferenced"] = hasDatabaseUrl;
+                    details["RuntimeErrorEndpointReferenced"] = hasRuntimeErrorEndpoint;
+                    details["ConnectionStringParsing"] = hasConnectionStringParsing;
+                    
+                    if (!hasExceptionHandler)
+                    {
+                        issues.Add("Exception handler is not registered in main.py");
+                    }
+                    if (!hasCors)
+                    {
+                        issues.Add("CORS is not configured in main.py");
+                    }
+                    if (!hasPortBinding)
+                    {
+                        issues.Add("Port binding to 0.0.0.0 is not configured in main.py (required for Railway)");
+                    }
+                    if (!hasDatabaseUrl)
+                    {
+                        issues.Add("DATABASE_URL environment variable is not referenced in main.py");
+                    }
+                    if (!hasRuntimeErrorEndpoint)
+                    {
+                        issues.Add("RUNTIME_ERROR_ENDPOINT_URL environment variable is not referenced in exception handler code");
+                    }
+                    if (!hasConnectionStringParsing)
+                    {
+                        issues.Add("Database connection string parsing logic not found in main.py (required for PostgreSQL URL format)");
+                    }
+
+                    // Check for SET search_path in database queries
+                    var testController = await _githubService.GetFileContentAsync(owner, repo, "backend/Controllers/test_controller.py", accessToken, branch) ??
+                                       await _githubService.GetFileContentAsync(owner, repo, "Controllers/test_controller.py", accessToken, branch);
+                    
+                    if (!string.IsNullOrEmpty(testController))
+                    {
+                        var hasSearchPath = testController.Contains("SET search_path") || testController.Contains("search_path");
+                        details["HasSearchPathInQueries"] = hasSearchPath;
+                        if (!hasSearchPath)
+                        {
+                            issues.Add("SET search_path command not found in database queries (required for Neon database isolation)");
+                        }
+                    }
+
+                    // Check package dependencies
+                    var requirementsTxt = await _githubService.GetFileContentAsync(owner, repo, "backend/requirements.txt", accessToken, branch) ??
+                                         await _githubService.GetFileContentAsync(owner, repo, "requirements.txt", accessToken, branch);
+                    
+                    if (!string.IsNullOrEmpty(requirementsTxt))
+                    {
+                        var hasFastApi = requirementsTxt.Contains("fastapi");
+                        var hasUvicorn = requirementsTxt.Contains("uvicorn");
+                        var hasAsyncpg = requirementsTxt.Contains("asyncpg");
+                        
+                        details["HasFastApi"] = hasFastApi;
+                        details["HasUvicorn"] = hasUvicorn;
+                        details["HasAsyncpg"] = hasAsyncpg;
+                        
+                        if (!hasFastApi)
+                        {
+                            issues.Add("fastapi package not found in requirements.txt");
+                        }
+                        if (!hasUvicorn)
+                        {
+                            issues.Add("uvicorn package not found in requirements.txt");
+                        }
+                        if (!hasAsyncpg)
+                        {
+                            issues.Add("asyncpg package not found in requirements.txt (required for PostgreSQL)");
+                        }
+                    }
+                }
+                else
+                {
+                    // Check for Node.js app.js
+                    var appJs = await _githubService.GetFileContentAsync(owner, repo, "backend/app.js", accessToken, branch) ??
+                               await _githubService.GetFileContentAsync(owner, repo, "app.js", accessToken, branch);
+                    
+                    if (!string.IsNullOrEmpty(appJs))
+                    {
+                        var hasErrorMiddleware = appJs.Contains("errorMiddleware") || appJs.Contains("error-handler");
+                        var hasCors = appJs.Contains("cors()") || appJs.Contains("CORS");
+                        var hasPortBinding = appJs.Contains("listen") && (appJs.Contains("0.0.0.0") || appJs.Contains("process.env.PORT"));
+                        var hasDatabaseUrl = appJs.Contains("DATABASE_URL") || (appJs.Contains("process.env") && appJs.Contains("DATABASE_URL"));
+                        var hasRuntimeErrorEndpoint = appJs.Contains("RUNTIME_ERROR_ENDPOINT_URL") || (appJs.Contains("process.env") && appJs.Contains("RUNTIME_ERROR_ENDPOINT_URL"));
+                        var hasConnectionStringParsing = appJs.Contains("postgresql://") || appJs.Contains("postgres://") || appJs.Contains("Pool(") || appJs.Contains("connectionString");
+                        
+                        details["ErrorMiddlewareRegistered"] = hasErrorMiddleware;
+                        details["CorsConfigured"] = hasCors;
+                        details["PortBindingConfigured"] = hasPortBinding;
+                        details["DatabaseUrlReferenced"] = hasDatabaseUrl;
+                        details["RuntimeErrorEndpointReferenced"] = hasRuntimeErrorEndpoint;
+                        details["ConnectionStringParsing"] = hasConnectionStringParsing;
+                        
+                        if (!hasErrorMiddleware)
+                        {
+                            issues.Add("Error middleware is not registered in app.js");
+                        }
+                        if (!hasCors)
+                        {
+                            issues.Add("CORS is not configured in app.js");
+                        }
+                        if (!hasPortBinding)
+                        {
+                            issues.Add("Port binding to 0.0.0.0 is not configured in app.js (required for Railway)");
+                        }
+                        if (!hasDatabaseUrl)
+                        {
+                            issues.Add("DATABASE_URL environment variable is not referenced in app.js");
+                        }
+                        if (!hasRuntimeErrorEndpoint)
+                        {
+                            issues.Add("RUNTIME_ERROR_ENDPOINT_URL environment variable is not referenced in error middleware code");
+                        }
+                        if (!hasConnectionStringParsing)
+                        {
+                            issues.Add("Database connection string parsing logic not found in app.js (required for PostgreSQL URL format)");
+                        }
+
+                        // Check for SET search_path in database queries
+                        var testController = await _githubService.GetFileContentAsync(owner, repo, "backend/Controllers/test_controller.js", accessToken, branch) ??
+                                           await _githubService.GetFileContentAsync(owner, repo, "Controllers/test_controller.js", accessToken, branch);
+                        
+                        if (!string.IsNullOrEmpty(testController))
+                        {
+                            var hasSearchPath = testController.Contains("SET search_path") || testController.Contains("search_path");
+                            details["HasSearchPathInQueries"] = hasSearchPath;
+                            if (!hasSearchPath)
+                            {
+                                issues.Add("SET search_path command not found in database queries (required for Neon database isolation)");
+                            }
+                        }
+
+                        // Check package dependencies
+                        var packageJson = await _githubService.GetFileContentAsync(owner, repo, "backend/package.json", accessToken, branch) ??
+                                         await _githubService.GetFileContentAsync(owner, repo, "package.json", accessToken, branch);
+                        
+                        if (!string.IsNullOrEmpty(packageJson))
+                        {
+                            var hasExpress = packageJson.Contains("\"express\"") || packageJson.Contains("'express'");
+                            var hasPg = packageJson.Contains("\"pg\"") || packageJson.Contains("'pg'");
+                            var hasCorsPackage = packageJson.Contains("\"cors\"") || packageJson.Contains("'cors'");
+                            
+                            details["HasExpress"] = hasExpress;
+                            details["HasPg"] = hasPg;
+                            details["HasCorsPackage"] = hasCorsPackage;
+                            
+                            if (!hasExpress)
+                            {
+                                issues.Add("express package not found in package.json");
+                            }
+                            if (!hasPg)
+                            {
+                                issues.Add("pg package not found in package.json (required for PostgreSQL)");
+                            }
+                            if (!hasCorsPackage)
+                            {
+                                issues.Add("cors package not found in package.json");
+                            }
+                        }
+                    }
+                    else
+                    {
+                        // Check for Java Application.java
+                        var applicationJava = await _githubService.GetFileContentAsync(owner, repo, "backend/src/main/java/com/backend/Application.java", accessToken, branch) ??
+                                            await _githubService.GetFileContentAsync(owner, repo, "src/main/java/com/backend/Application.java", accessToken, branch);
+                        
+                        if (!string.IsNullOrEmpty(applicationJava))
+                        {
+                        // Java/Spring Boot backend - check application.properties or application.yml for port and database config
+                        var applicationProperties = await _githubService.GetFileContentAsync(owner, repo, "backend/src/main/resources/application.properties", accessToken, branch) ??
+                                                   await _githubService.GetFileContentAsync(owner, repo, "src/main/resources/application.properties", accessToken, branch);
+                        var applicationYml = await _githubService.GetFileContentAsync(owner, repo, "backend/src/main/resources/application.yml", accessToken, branch) ??
+                                            await _githubService.GetFileContentAsync(owner, repo, "src/main/resources/application.yml", accessToken, branch);
+                        
+                        var configFile = applicationProperties ?? applicationYml ?? "";
+                        
+                        // Check for exception handler (Spring Boot @ControllerAdvice or @ExceptionHandler) - load it first
+                        var exceptionHandler = await _githubService.GetFileContentAsync(owner, repo, "backend/src/main/java/com/backend/GlobalExceptionHandler.java", accessToken, branch) ??
+                                              await _githubService.GetFileContentAsync(owner, repo, "src/main/java/com/backend/GlobalExceptionHandler.java", accessToken, branch);
+                        
+                        var hasPortBinding = configFile.Contains("server.port") || configFile.Contains("PORT") || 
+                                           applicationJava.Contains("System.getenv(\"PORT\")") ||
+                                           configFile.Contains("${PORT}");
+                        var hasDatabaseUrl = configFile.Contains("DATABASE_URL") || configFile.Contains("spring.datasource.url") ||
+                                           applicationJava.Contains("DATABASE_URL") || applicationJava.Contains("spring.datasource.url");
+                        var hasRuntimeErrorEndpoint = applicationJava.Contains("RUNTIME_ERROR_ENDPOINT_URL") || 
+                                                     configFile.Contains("RUNTIME_ERROR_ENDPOINT_URL") ||
+                                                     (!string.IsNullOrEmpty(exceptionHandler) && exceptionHandler.Contains("RUNTIME_ERROR_ENDPOINT_URL"));
+                        var hasConnectionStringParsing = configFile.Contains("postgresql://") || configFile.Contains("postgres://") ||
+                                                        configFile.Contains("spring.datasource.url");
+                        
+                        details["PortBindingConfigured"] = hasPortBinding;
+                        details["DatabaseUrlReferenced"] = hasDatabaseUrl;
+                        details["RuntimeErrorEndpointReferenced"] = hasRuntimeErrorEndpoint;
+                        details["ConnectionStringParsing"] = hasConnectionStringParsing;
+                        
+                        if (!hasPortBinding)
+                        {
+                            issues.Add("Port binding configuration not found in Application.java or application.properties/yml (required for Railway)");
+                        }
+                        if (!hasDatabaseUrl)
+                        {
+                            issues.Add("DATABASE_URL environment variable is not referenced in Application.java or application.properties/yml");
+                        }
+                        if (!hasRuntimeErrorEndpoint)
+                        {
+                            issues.Add("RUNTIME_ERROR_ENDPOINT_URL environment variable is not referenced in GlobalExceptionHandler.java");
+                        }
+                        if (!hasConnectionStringParsing)
+                        {
+                            issues.Add("Database connection string configuration not found in application.properties/yml (required for PostgreSQL)");
+                        }
+                        
+                        var hasExceptionHandler = !string.IsNullOrEmpty(exceptionHandler) && 
+                                                 (exceptionHandler.Contains("@ControllerAdvice") || exceptionHandler.Contains("@ExceptionHandler"));
+                        details["ExceptionHandlerRegistered"] = hasExceptionHandler;
+                        if (!hasExceptionHandler)
+                        {
+                            issues.Add("Global exception handler is not registered (GlobalExceptionHandler.java with @ControllerAdvice)");
+                        }
+
+                        // Check for CORS configuration
+                        var corsConfig = await _githubService.GetFileContentAsync(owner, repo, "backend/src/main/java/com/backend/WebConfig.java", accessToken, branch) ??
+                                        await _githubService.GetFileContentAsync(owner, repo, "src/main/java/com/backend/WebConfig.java", accessToken, branch);
+                        
+                        var hasCors = !string.IsNullOrEmpty(corsConfig) && corsConfig.Contains("CorsConfiguration") ||
+                                     applicationJava.Contains("CorsConfiguration") || applicationJava.Contains("addCorsMappings");
+                        details["CorsConfigured"] = hasCors;
+                        if (!hasCors)
+                        {
+                            issues.Add("CORS is not configured in Java backend");
+                        }
+
+                        // Check for SET search_path in database queries
+                        var testController = await _githubService.GetFileContentAsync(owner, repo, "backend/src/main/java/com/backend/Controllers/TestController.java", accessToken, branch) ??
+                                           await _githubService.GetFileContentAsync(owner, repo, "src/main/java/com/backend/Controllers/TestController.java", accessToken, branch);
+                        
+                        if (!string.IsNullOrEmpty(testController))
+                        {
+                            var hasSearchPath = testController.Contains("SET search_path") || testController.Contains("search_path");
+                            details["HasSearchPathInQueries"] = hasSearchPath;
+                            if (!hasSearchPath)
+                            {
+                                issues.Add("SET search_path command not found in database queries (required for Neon database isolation)");
+                            }
+                        }
+
+                        // Check package dependencies (pom.xml)
+                        var pomXml = await _githubService.GetFileContentAsync(owner, repo, "backend/pom.xml", accessToken, branch) ??
+                                    await _githubService.GetFileContentAsync(owner, repo, "pom.xml", accessToken, branch);
+                        
+                        if (!string.IsNullOrEmpty(pomXml))
+                        {
+                            var hasPostgresql = pomXml.Contains("postgresql");
+                            var hasSpringBoot = pomXml.Contains("spring-boot-starter-web");
+                            
+                            details["HasPostgresql"] = hasPostgresql;
+                            details["HasSpringBoot"] = hasSpringBoot;
+                            
+                            if (!hasPostgresql)
+                            {
+                                issues.Add("PostgreSQL driver not found in pom.xml (required for PostgreSQL)");
+                            }
+                            if (!hasSpringBoot)
+                            {
+                                issues.Add("Spring Boot starter not found in pom.xml");
+                            }
+                        }
+                    }
+                    else
+                    {
+                        // Check for Ruby app.rb
+                        var appRb = await _githubService.GetFileContentAsync(owner, repo, "backend/app.rb", accessToken, branch) ??
+                                   await _githubService.GetFileContentAsync(owner, repo, "app.rb", accessToken, branch);
+                        
+                        if (!string.IsNullOrEmpty(appRb))
+                        {
+                            // Ruby/Sinatra backend
+                            // Check puma.rb for port binding (Ruby uses Puma server)
+                            var pumaRb = await _githubService.GetFileContentAsync(owner, repo, "backend/puma.rb", accessToken, branch) ??
+                                        await _githubService.GetFileContentAsync(owner, repo, "puma.rb", accessToken, branch);
+                            
+                            var hasPortBinding = (!string.IsNullOrEmpty(pumaRb) && (pumaRb.Contains("0.0.0.0") || pumaRb.Contains("bind"))) ||
+                                                appRb.Contains("0.0.0.0") || appRb.Contains("ENV['PORT']") || appRb.Contains("ENV.fetch('PORT'") ||
+                                                appRb.Contains("set :bind, '0.0.0.0'");
+                            var hasDatabaseUrl = appRb.Contains("DATABASE_URL") || appRb.Contains("ENV['DATABASE_URL']");
+                            var hasRuntimeErrorEndpoint = appRb.Contains("RUNTIME_ERROR_ENDPOINT_URL") || appRb.Contains("ENV['RUNTIME_ERROR_ENDPOINT_URL']");
+                            var hasConnectionStringParsing = appRb.Contains("postgresql://") || appRb.Contains("postgres://") || appRb.Contains("PG.connect") || appRb.Contains("PG::Connection");
+                            
+                            details["PortBindingConfigured"] = hasPortBinding;
+                            details["DatabaseUrlReferenced"] = hasDatabaseUrl;
+                            details["RuntimeErrorEndpointReferenced"] = hasRuntimeErrorEndpoint;
+                            details["ConnectionStringParsing"] = hasConnectionStringParsing;
+                            
+                            if (!hasPortBinding)
+                            {
+                                issues.Add("Port binding to 0.0.0.0 is not configured in app.rb or puma.rb (required for Railway)");
+                            }
+                            if (!hasDatabaseUrl)
+                            {
+                                issues.Add("DATABASE_URL environment variable is not referenced in app.rb");
+                            }
+                            if (!hasRuntimeErrorEndpoint)
+                            {
+                                issues.Add("RUNTIME_ERROR_ENDPOINT_URL environment variable is not referenced in exception handler code");
+                            }
+                            if (!hasConnectionStringParsing)
+                            {
+                                issues.Add("Database connection string parsing logic not found in app.rb (required for PostgreSQL URL format)");
+                            }
+
+                            // Check for exception middleware
+                            var hasExceptionMiddleware = appRb.Contains("error do") || (appRb.Contains("extract_board_id") && appRb.Contains("send_error_to_endpoint")) ||
+                                                       appRb.Contains("exception") || appRb.Contains("rescue");
+                            details["ExceptionHandlerRegistered"] = hasExceptionMiddleware;
+                            if (!hasExceptionMiddleware)
+                            {
+                                issues.Add("Exception handling is not configured in app.rb");
+                            }
+
+                            // Check for CORS headers
+                            var hasCors = appRb.Contains("Access-Control-Allow-Origin") || appRb.Contains("CORS") || appRb.Contains("before do");
+                            details["CorsConfigured"] = hasCors;
+                            if (!hasCors)
+                            {
+                                issues.Add("CORS headers are not configured in app.rb");
+                            }
+
+                            // Check for SET search_path in database queries
+                            var testController = await _githubService.GetFileContentAsync(owner, repo, "backend/Controllers/test_controller.rb", accessToken, branch) ??
+                                               await _githubService.GetFileContentAsync(owner, repo, "Controllers/test_controller.rb", accessToken, branch);
+                            
+                            if (!string.IsNullOrEmpty(testController))
+                            {
+                                var hasSearchPath = testController.Contains("SET search_path") || testController.Contains("search_path");
+                                details["HasSearchPathInQueries"] = hasSearchPath;
+                                if (!hasSearchPath)
+                                {
+                                    issues.Add("SET search_path command not found in database queries (required for Neon database isolation)");
+                                }
+                            }
+
+                            // Check package dependencies (Gemfile)
+                            var gemfile = await _githubService.GetFileContentAsync(owner, repo, "backend/Gemfile", accessToken, branch) ??
+                                         await _githubService.GetFileContentAsync(owner, repo, "Gemfile", accessToken, branch);
+                            
+                            if (!string.IsNullOrEmpty(gemfile))
+                            {
+                                var hasSinatra = gemfile.Contains("sinatra");
+                                var hasPg = gemfile.Contains("pg");
+                                
+                                details["HasSinatra"] = hasSinatra;
+                                details["HasPg"] = hasPg;
+                                
+                                if (!hasSinatra)
+                                {
+                                    issues.Add("sinatra gem not found in Gemfile");
+                                }
+                                if (!hasPg)
+                                {
+                                    issues.Add("pg gem not found in Gemfile (required for PostgreSQL)");
+                                }
+                            }
+                        }
+                        else
+                        {
+                            // Check for Go main.go
+                            var mainGo = await _githubService.GetFileContentAsync(owner, repo, "backend/main.go", accessToken, branch) ??
+                                       await _githubService.GetFileContentAsync(owner, repo, "main.go", accessToken, branch);
+                            
+                            if (!string.IsNullOrEmpty(mainGo))
+                            {
+                                // Go backend
+                                var hasPortBinding = mainGo.Contains("0.0.0.0") || mainGo.Contains("PORT") || mainGo.Contains("Listen");
+                                var hasDatabaseUrl = mainGo.Contains("DATABASE_URL") || mainGo.Contains("os.Getenv(\"DATABASE_URL\")");
+                                var hasRuntimeErrorEndpoint = mainGo.Contains("RUNTIME_ERROR_ENDPOINT_URL") || mainGo.Contains("os.Getenv(\"RUNTIME_ERROR_ENDPOINT_URL\")");
+                                var hasConnectionStringParsing = mainGo.Contains("postgresql://") || mainGo.Contains("postgres://") || mainGo.Contains("sql.Open") || mainGo.Contains("database/sql");
+                                
+                                details["PortBindingConfigured"] = hasPortBinding;
+                                details["DatabaseUrlReferenced"] = hasDatabaseUrl;
+                                details["RuntimeErrorEndpointReferenced"] = hasRuntimeErrorEndpoint;
+                                details["ConnectionStringParsing"] = hasConnectionStringParsing;
+                                
+                                if (!hasPortBinding)
+                                {
+                                    issues.Add("Port binding to 0.0.0.0 is not configured in main.go (required for Railway)");
+                                }
+                                if (!hasDatabaseUrl)
+                                {
+                                    issues.Add("DATABASE_URL environment variable is not referenced in main.go");
+                                }
+                                if (!hasRuntimeErrorEndpoint)
+                                {
+                                    issues.Add("RUNTIME_ERROR_ENDPOINT_URL environment variable is not referenced in error handler code");
+                                }
+                                if (!hasConnectionStringParsing)
+                                {
+                                    issues.Add("Database connection string parsing logic not found in main.go (required for PostgreSQL URL format)");
+                                }
+
+                                // Check for error middleware/handler
+                                var hasErrorHandler = mainGo.Contains("panicRecoveryMiddleware") || 
+                                                   (mainGo.Contains("recover") && mainGo.Contains("PANIC RECOVERY")) ||
+                                                   mainGo.Contains("Error") || mainGo.Contains("error");
+                                details["ErrorHandlerRegistered"] = hasErrorHandler;
+                                if (!hasErrorHandler)
+                                {
+                                    issues.Add("Error handler/middleware is not configured in main.go");
+                                }
+
+                                // Check for CORS middleware
+                                var hasCors = mainGo.Contains("CORS") || mainGo.Contains("cors") || mainGo.Contains("Access-Control");
+                                details["CorsConfigured"] = hasCors;
+                                if (!hasCors)
+                                {
+                                    issues.Add("CORS middleware is not configured in main.go");
+                                }
+
+                                // Check for SET search_path in database queries
+                                var testController = await _githubService.GetFileContentAsync(owner, repo, "backend/Controllers/test_controller.go", accessToken, branch) ??
+                                                   await _githubService.GetFileContentAsync(owner, repo, "Controllers/test_controller.go", accessToken, branch);
+                                
+                                if (!string.IsNullOrEmpty(testController))
+                                {
+                                    var hasSearchPath = testController.Contains("SET search_path") || testController.Contains("search_path");
+                                    details["HasSearchPathInQueries"] = hasSearchPath;
+                                    if (!hasSearchPath)
+                                    {
+                                        issues.Add("SET search_path command not found in database queries (required for Neon database isolation)");
+                                    }
+                                }
+
+                                // Check package dependencies (go.mod)
+                                var goMod = await _githubService.GetFileContentAsync(owner, repo, "backend/go.mod", accessToken, branch) ??
+                                          await _githubService.GetFileContentAsync(owner, repo, "go.mod", accessToken, branch);
+                                
+                                if (!string.IsNullOrEmpty(goMod))
+                                {
+                                    var hasLibPq = goMod.Contains("lib/pq");
+                                    
+                                    details["HasLibPq"] = hasLibPq;
+                                    
+                                    if (!hasLibPq)
+                                    {
+                                        issues.Add("github.com/lib/pq package not found in go.mod (required for PostgreSQL)");
+                                    }
+                                }
+                            }
+                            else
+                            {
+                                // Check for PHP index.php
+                                var indexPhp = await _githubService.GetFileContentAsync(owner, repo, "backend/index.php", accessToken, branch) ??
+                                            await _githubService.GetFileContentAsync(owner, repo, "index.php", accessToken, branch);
+                                
+                                if (!string.IsNullOrEmpty(indexPhp))
+                                {
+                                    // PHP backend
+                                    var hasExceptionHandler = indexPhp.Contains("set_exception_handler") || indexPhp.Contains("set_error_handler");
+                                    var hasPortBinding = indexPhp.Contains("0.0.0.0") || indexPhp.Contains("$PORT") || indexPhp.Contains("$_ENV['PORT']");
+                                    var hasDatabaseUrl = indexPhp.Contains("DATABASE_URL") || indexPhp.Contains("$_ENV['DATABASE_URL']") || indexPhp.Contains("getenv('DATABASE_URL')");
+                                    var hasRuntimeErrorEndpoint = indexPhp.Contains("RUNTIME_ERROR_ENDPOINT_URL") || indexPhp.Contains("$_ENV['RUNTIME_ERROR_ENDPOINT_URL']") || indexPhp.Contains("getenv('RUNTIME_ERROR_ENDPOINT_URL')");
+                                    var hasConnectionStringParsing = indexPhp.Contains("postgresql://") || indexPhp.Contains("postgres://") || indexPhp.Contains("PDO") || indexPhp.Contains("pg_connect");
+                                    
+                                    details["ExceptionHandlerRegistered"] = hasExceptionHandler;
+                                    details["PortBindingConfigured"] = hasPortBinding;
+                                    details["DatabaseUrlReferenced"] = hasDatabaseUrl;
+                                    details["RuntimeErrorEndpointReferenced"] = hasRuntimeErrorEndpoint;
+                                    details["ConnectionStringParsing"] = hasConnectionStringParsing;
+                                    
+                                    if (!hasExceptionHandler)
+                                    {
+                                        issues.Add("Exception handler (set_exception_handler/set_error_handler) is not configured in index.php");
+                                    }
+                                    
+                                    if (!hasPortBinding)
+                                    {
+                                        issues.Add("Port binding to 0.0.0.0 is not configured in index.php (required for Railway)");
+                                    }
+                                    if (!hasDatabaseUrl)
+                                    {
+                                        issues.Add("DATABASE_URL environment variable is not referenced in index.php");
+                                    }
+                                    if (!hasRuntimeErrorEndpoint)
+                                    {
+                                        issues.Add("RUNTIME_ERROR_ENDPOINT_URL environment variable is not referenced in error handler code");
+                                    }
+                                    if (!hasConnectionStringParsing)
+                                    {
+                                        issues.Add("Database connection string parsing logic not found in index.php (required for PostgreSQL URL format)");
+                                    }
+
+
+                                    // Check for CORS headers
+                                    var hasCors = indexPhp.Contains("Access-Control-Allow-Origin") || indexPhp.Contains("header('Access-Control") || indexPhp.Contains("CORS");
+                                    details["CorsConfigured"] = hasCors;
+                                    if (!hasCors)
+                                    {
+                                        issues.Add("CORS headers are not configured in index.php");
+                                    }
+
+                                    // Check for SET search_path in database queries
+                                    var testController = await _githubService.GetFileContentAsync(owner, repo, "backend/Controllers/test_controller.php", accessToken, branch) ??
+                                                       await _githubService.GetFileContentAsync(owner, repo, "Controllers/test_controller.php", accessToken, branch);
+                                    
+                                    if (!string.IsNullOrEmpty(testController))
+                                    {
+                                        var hasSearchPath = testController.Contains("SET search_path") || testController.Contains("search_path");
+                                        details["HasSearchPathInQueries"] = hasSearchPath;
+                                        if (!hasSearchPath)
+                                        {
+                                            issues.Add("SET search_path command not found in database queries (required for Neon database isolation)");
+                                        }
+                                    }
+
+                                    // Check package dependencies (composer.json)
+                                    var composerJson = await _githubService.GetFileContentAsync(owner, repo, "backend/composer.json", accessToken, branch) ??
+                                                     await _githubService.GetFileContentAsync(owner, repo, "composer.json", accessToken, branch);
+                                    
+                                    if (!string.IsNullOrEmpty(composerJson))
+                                    {
+                                        var hasPdoPg = composerJson.Contains("pdo_pgsql") || composerJson.Contains("pgsql");
+                                        
+                                        details["HasPdoPg"] = hasPdoPg;
+                                        
+                                        if (!hasPdoPg)
+                                        {
+                                            issues.Add("PostgreSQL PDO driver not found in composer.json (required for PostgreSQL)");
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error validating code structure for BoardId: {BoardId}", boardId);
+            issues.Add($"Error validating code structure: {ex.Message}");
+        }
+
+        return (issues.Count == 0, issues, details);
+    }
+
+    private async Task<(bool Valid, List<string> Issues, object Details)> ValidateGitHubFrontendAsync(ProjectBoard board, string boardId, string branch = "main")
+    {
+        var issues = new List<string>();
+        var details = new Dictionary<string, object>();
+
+        if (string.IsNullOrEmpty(board.GithubFrontendUrl))
+        {
+            issues.Add("GithubFrontendUrl is not set in ProjectBoards table");
+            return (false, issues, details);
+        }
+
+        try
+        {
+            // Parse GitHub URL
+            var uri = new Uri(board.GithubFrontendUrl);
+            var pathParts = uri.AbsolutePath.TrimStart('/').Split('/');
+            if (pathParts.Length < 2)
+            {
+                issues.Add($"Invalid GitHub frontend URL format: {board.GithubFrontendUrl}");
+                return (false, issues, details);
+            }
+
+            var owner = pathParts[0];
+            var repo = pathParts[1].Replace(".git", "");
+
+            details["Owner"] = owner;
+            details["Repository"] = repo;
+            details["Url"] = board.GithubFrontendUrl;
+
+            // Check if repository exists via GitHub API
+            var accessToken = _configuration["GitHub:AccessToken"];
+            if (string.IsNullOrEmpty(accessToken))
+            {
+                issues.Add("GitHub access token not configured");
+                return (false, issues, details);
+            }
+
+            using var httpClient = _httpClientFactory.CreateClient();
+            httpClient.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", accessToken);
+            httpClient.DefaultRequestHeaders.Add("User-Agent", "StrAppersBackend/1.0");
+            httpClient.DefaultRequestHeaders.Accept.Add(new System.Net.Http.Headers.MediaTypeWithQualityHeaderValue("application/vnd.github.v3+json"));
+
+            var repoResponse = await httpClient.GetAsync($"https://api.github.com/repos/{owner}/{repo}");
+            if (!repoResponse.IsSuccessStatusCode)
+            {
+                issues.Add($"GitHub repository not found or not accessible: {board.GithubFrontendUrl} (Status: {repoResponse.StatusCode})");
+                details["RepositoryExists"] = false;
+                return (false, issues, details);
+            }
+
+            details["RepositoryExists"] = true;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error validating GitHub frontend for BoardId: {BoardId}", boardId);
+            issues.Add($"Error validating GitHub repository: {ex.Message}");
+        }
+
+        return (issues.Count == 0, issues, details);
+    }
+
+    private async Task<(bool Valid, List<string> Issues, object Details)> ValidateFrontendConfigAsync(ProjectBoard board, string boardId, string branch = "main")
+    {
+        var issues = new List<string>();
+        var details = new Dictionary<string, object>();
+
+        if (string.IsNullOrEmpty(board.GithubFrontendUrl))
+        {
+            issues.Add("GithubFrontendUrl is not set - cannot validate config.js");
+            return (false, issues, details);
+        }
+
+        try
+        {
+            // Parse GitHub URL
+            var uri = new Uri(board.GithubFrontendUrl);
+            var pathParts = uri.AbsolutePath.TrimStart('/').Split('/');
+            if (pathParts.Length < 2)
+            {
+                issues.Add("Invalid GitHub frontend URL format");
+                return (false, issues, details);
+            }
+
+            var owner = pathParts[0];
+            var repo = pathParts[1].Replace(".git", "");
+            var accessToken = _configuration["GitHub:AccessToken"];
+
+            if (string.IsNullOrEmpty(accessToken))
+            {
+                issues.Add("GitHub access token not configured");
+                return (false, issues, details);
+            }
+
+            // Check for config.js
+            var configJs = await _githubService.GetFileContentAsync(owner, repo, "config.js", accessToken, branch) ??
+                          await _githubService.GetFileContentAsync(owner, repo, "frontend/config.js", accessToken, branch);
+
+            details["ConfigJsExists"] = !string.IsNullOrEmpty(configJs);
+            if (string.IsNullOrEmpty(configJs))
+            {
+                issues.Add("config.js file not found in frontend repository");
+                return (false, issues, details);
+            }
+
+            // Check if config.js is included in index.html
+            var indexHtml = await _githubService.GetFileContentAsync(owner, repo, "index.html", accessToken, branch) ??
+                           await _githubService.GetFileContentAsync(owner, repo, "frontend/index.html", accessToken, branch);
+            
+            if (!string.IsNullOrEmpty(indexHtml))
+            {
+                var configJsIncluded = indexHtml.Contains("config.js") || 
+                                     System.Text.RegularExpressions.Regex.IsMatch(indexHtml, 
+                                         @"<script[^>]*src\s*=\s*[""'][^""']*config\.js[""']",
+                                         System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                
+                details["ConfigJsIncludedInIndexHtml"] = configJsIncluded;
+                
+                if (!configJsIncluded)
+                {
+                    issues.Add("config.js is not included/referenced in index.html (required for CONFIG object to be available)");
+                }
+            }
+            else
+            {
+                details["ConfigJsIncludedInIndexHtml"] = false;
+                issues.Add("index.html file not found - cannot verify if config.js is included");
+            }
+
+            // Validate config.js content
+            var hasApiUrl = configJs.Contains("API_URL") || configJs.Contains("apiUrl");
+            details["HasApiUrl"] = hasApiUrl;
+
+            if (!hasApiUrl)
+            {
+                issues.Add("config.js does not contain API_URL configuration");
+            }
+            else
+            {
+                // Extract API_URL value
+                var apiUrlMatch = System.Text.RegularExpressions.Regex.Match(
+                    configJs,
+                    @"API_URL\s*:\s*[""']([^""']+)[""']",
+                    System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+
+                if (apiUrlMatch.Success)
+                {
+                    var apiUrl = apiUrlMatch.Groups[1].Value;
+                    details["ApiUrl"] = apiUrl;
+
+                    // Validate API URL
+                    var isHttps = apiUrl.StartsWith("https://", StringComparison.OrdinalIgnoreCase);
+                    var isNotProjectUrl = !apiUrl.Contains("railway.app/project/");
+                    var matchesWebApiUrl = !string.IsNullOrEmpty(board.WebApiUrl) &&
+                                          (apiUrl.Equals(board.WebApiUrl, StringComparison.OrdinalIgnoreCase) ||
+                                           apiUrl.Contains(board.WebApiUrl, StringComparison.OrdinalIgnoreCase) ||
+                                           board.WebApiUrl.Contains(apiUrl, StringComparison.OrdinalIgnoreCase));
+
+                    details["ApiUrlIsHttps"] = isHttps;
+                    details["ApiUrlNotProjectUrl"] = isNotProjectUrl;
+                    details["ApiUrlMatchesWebApiUrl"] = matchesWebApiUrl;
+                    details["ProjectBoardsWebApiUrl"] = board.WebApiUrl;
+
+                    if (!isHttps)
+                    {
+                        issues.Add($"API_URL in config.js is not HTTPS: {apiUrl}");
+                    }
+                    if (!isNotProjectUrl)
+                    {
+                        issues.Add($"API_URL in config.js is a Railway project URL (not a service URL): {apiUrl}");
+                    }
+                    if (!matchesWebApiUrl && !string.IsNullOrEmpty(board.WebApiUrl))
+                    {
+                        issues.Add($"API_URL in config.js ({apiUrl}) does not match WebApiUrl in ProjectBoards ({board.WebApiUrl})");
+                    }
+                }
+                else
+                {
+                    issues.Add("Could not extract API_URL value from config.js");
+                }
+            }
+
+            // Check if frontend code uses CONFIG.API_URL (not hardcoded URLs)
+            // Note: indexHtml was already loaded above, reuse it
+            if (string.IsNullOrEmpty(indexHtml))
+            {
+                indexHtml = await _githubService.GetFileContentAsync(owner, repo, "index.html", accessToken, branch) ??
+                           await _githubService.GetFileContentAsync(owner, repo, "frontend/index.html", accessToken, branch);
+            }
+            var scriptJs = await _githubService.GetFileContentAsync(owner, repo, "script.js", accessToken, branch) ??
+                          await _githubService.GetFileContentAsync(owner, repo, "frontend/script.js", accessToken, branch) ??
+                          await _githubService.GetFileContentAsync(owner, repo, "js/script.js", accessToken, branch);
+            
+            var frontendCode = (indexHtml ?? "") + (scriptJs ?? "");
+            if (!string.IsNullOrEmpty(frontendCode))
+            {
+                var usesConfigApiUrl = frontendCode.Contains("CONFIG.API_URL") || frontendCode.Contains("CONFIG['API_URL']") || 
+                                      frontendCode.Contains("config.API_URL") || frontendCode.Contains("config['API_URL']");
+                var hasHardcodedUrls = System.Text.RegularExpressions.Regex.IsMatch(frontendCode, 
+                    @"https?://[^\s""']+\.railway\.app|https?://[^\s""']+\.github\.io",
+                    System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                
+                details["UsesConfigApiUrl"] = usesConfigApiUrl;
+                details["HasHardcodedUrls"] = hasHardcodedUrls;
+                
+                if (!usesConfigApiUrl && hasHardcodedUrls)
+                {
+                    issues.Add("Frontend code contains hardcoded API URLs instead of using CONFIG.API_URL");
+                }
+                if (!usesConfigApiUrl)
+                {
+                    issues.Add("Frontend code does not use CONFIG.API_URL for API calls");
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error validating frontend config for BoardId: {BoardId}", boardId);
+            issues.Add($"Error validating config.js: {ex.Message}");
+        }
+
+        return (issues.Count == 0, issues, details);
+    }
+
+    private async Task<(bool Valid, List<string> Issues, object Details)> ValidateFrontendDeploymentAsync(ProjectBoard board, string boardId)
+    {
+        var issues = new List<string>();
+        var details = new Dictionary<string, object>();
+
+        if (string.IsNullOrEmpty(board.GithubFrontendUrl))
+        {
+            issues.Add("GithubFrontendUrl is not set - cannot validate deployment");
+            return (false, issues, details);
+        }
+
+        try
+        {
+            // Parse GitHub URL
+            var uri = new Uri(board.GithubFrontendUrl);
+            var pathParts = uri.AbsolutePath.TrimStart('/').Split('/');
+            if (pathParts.Length < 2)
+            {
+                issues.Add("Invalid GitHub frontend URL format");
+                return (false, issues, details);
+            }
+
+            var owner = pathParts[0];
+            var repo = pathParts[1].Replace(".git", "");
+            var accessToken = _configuration["GitHub:AccessToken"];
+
+            if (string.IsNullOrEmpty(accessToken))
+            {
+                issues.Add("GitHub access token not configured");
+                return (false, issues, details);
+            }
+
+            // Check GitHub Pages status
+            using var httpClient = _httpClientFactory.CreateClient();
+            httpClient.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", accessToken);
+            httpClient.DefaultRequestHeaders.Add("User-Agent", "StrAppersBackend/1.0");
+            httpClient.DefaultRequestHeaders.Accept.Add(new System.Net.Http.Headers.MediaTypeWithQualityHeaderValue("application/vnd.github.v3+json"));
+
+            var pagesResponse = await httpClient.GetAsync($"https://api.github.com/repos/{owner}/{repo}/pages");
+            if (pagesResponse.IsSuccessStatusCode)
+            {
+                var pagesContent = await pagesResponse.Content.ReadAsStringAsync();
+                var pagesDoc = System.Text.Json.JsonDocument.Parse(pagesContent);
+                
+                var status = pagesDoc.RootElement.TryGetProperty("status", out var statusProp) ? statusProp.GetString() : null;
+                var htmlUrl = pagesDoc.RootElement.TryGetProperty("html_url", out var htmlUrlProp) ? htmlUrlProp.GetString() : null;
+
+                details["GitHubPagesEnabled"] = status != null;
+                details["GitHubPagesStatus"] = status;
+                details["GitHubPagesUrl"] = htmlUrl;
+
+                if (status == null)
+                {
+                    issues.Add("GitHub Pages is not enabled for the frontend repository");
+                }
+            }
+            else
+            {
+                details["GitHubPagesEnabled"] = false;
+                issues.Add($"GitHub Pages is not enabled or not accessible (Status: {pagesResponse.StatusCode})");
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error validating frontend deployment for BoardId: {BoardId}", boardId);
+            issues.Add($"Error validating deployment: {ex.Message}");
+        }
+
+        return (issues.Count == 0, issues, details);
+    }
+
+    private async Task<(bool Valid, List<string> Issues, object Details)> ValidateBuildStatusBackendAsync(ProjectBoard board, string boardId)
+    {
+        var issues = new List<string>();
+        var details = new Dictionary<string, object>();
+
+        try
+        {
+            // Query BoardStates table for Railway build status
+            var boardState = await _context.BoardStates
+                .Where(bs => bs.BoardId == boardId && bs.Source == "Railway")
+                .OrderByDescending(bs => bs.UpdatedAt)
+                .FirstOrDefaultAsync();
+
+            details["BoardStateExists"] = boardState != null;
+
+            if (boardState == null)
+            {
+                issues.Add("No BoardState record found for Railway source (backend may not have been deployed yet)");
+                details["LastBuildStatus"] = null;
+                return (false, issues, details);
+            }
+
+            details["LastBuildStatus"] = boardState.LastBuildStatus;
+            details["LastUpdated"] = boardState.UpdatedAt;
+            details["ServiceName"] = boardState.ServiceName;
+
+            if (string.IsNullOrEmpty(boardState.LastBuildStatus))
+            {
+                issues.Add("LastBuildStatus is not set in BoardStates table for Railway source");
+                return (false, issues, details);
+            }
+
+            if (!boardState.LastBuildStatus.Equals("SUCCESS", StringComparison.OrdinalIgnoreCase))
+            {
+                issues.Add($"Last build status is '{boardState.LastBuildStatus}', expected 'SUCCESS' for Railway backend deployment");
+                if (!string.IsNullOrEmpty(boardState.ErrorMessage))
+                {
+                    details["ErrorMessage"] = boardState.ErrorMessage;
+                }
+                if (!string.IsNullOrEmpty(boardState.LatestErrorSummary))
+                {
+                    details["LatestErrorSummary"] = boardState.LatestErrorSummary;
+                }
+                return (false, issues, details);
+            }
+
+            details["BuildStatusValid"] = true;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error validating build status for backend BoardId: {BoardId}", boardId);
+            issues.Add($"Error validating build status: {ex.Message}");
+        }
+
+        return (issues.Count == 0, issues, details);
+    }
+
+    private async Task<(bool Valid, List<string> Issues, object Details)> ValidateBuildStatusFrontendAsync(ProjectBoard board, string boardId)
+    {
+        var issues = new List<string>();
+        var details = new Dictionary<string, object>();
+
+        try
+        {
+            // Query BoardStates table for GitHub Pages build status
+            // Note: This is for future implementation when GitHub Pages deployment tracking is added
+            var boardState = await _context.BoardStates
+                .Where(bs => bs.BoardId == boardId && bs.Source == "GithubPages")
+                .OrderByDescending(bs => bs.UpdatedAt)
+                .FirstOrDefaultAsync();
+
+            details["BoardStateExists"] = boardState != null;
+            details["ImplementationNote"] = "GitHub Pages build status tracking will be implemented in the future";
+
+            if (boardState == null)
+            {
+                // For now, we don't fail validation if the record doesn't exist
+                // since GitHub Pages tracking is not yet implemented
+                details["LastBuildStatus"] = null;
+                details["Status"] = "Not yet implemented - GitHub Pages build status tracking will be added later";
+                return (true, issues, details); // Return valid for now since it's not implemented
+            }
+
+            details["LastBuildStatus"] = boardState.LastBuildStatus;
+            details["LastUpdated"] = boardState.UpdatedAt;
+
+            if (string.IsNullOrEmpty(boardState.LastBuildStatus))
+            {
+                // Don't fail if status is not set yet (implementation pending)
+                details["Status"] = "Build status tracking not yet fully implemented";
+                return (true, issues, details);
+            }
+
+            if (!boardState.LastBuildStatus.Equals("SUCCESS", StringComparison.OrdinalIgnoreCase))
+            {
+                issues.Add($"Last build status is '{boardState.LastBuildStatus}', expected 'SUCCESS' for GitHub Pages frontend deployment");
+                if (!string.IsNullOrEmpty(boardState.ErrorMessage))
+                {
+                    details["ErrorMessage"] = boardState.ErrorMessage;
+                }
+                if (!string.IsNullOrEmpty(boardState.LatestErrorSummary))
+                {
+                    details["LatestErrorSummary"] = boardState.LatestErrorSummary;
+                }
+                return (false, issues, details);
+            }
+
+            details["BuildStatusValid"] = true;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error validating build status for frontend BoardId: {BoardId}", boardId);
+            issues.Add($"Error validating build status: {ex.Message}");
+        }
+
+        return (issues.Count == 0, issues, details);
+    }
+
+    #endregion
 
         /// <summary>
         /// Filters out database connection information from messages to prevent using outdated credentials
@@ -5826,7 +7419,7 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                 System.Text.RegularExpressions.RegexOptions.IgnoreCase);
             
             return filtered;
-        }
+    }
 
     /// <summary>
     /// Chat history item for API calls

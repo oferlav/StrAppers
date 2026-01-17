@@ -5,6 +5,7 @@ using strAppersBackend.Data;
 using strAppersBackend.Models;
 using strAppersBackend.Services;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Options;
 using System.Text.RegularExpressions;
 using System.Text.Json;
 using System.Net.Http;
@@ -49,8 +50,9 @@ public class BoardsController : ControllerBase
     private readonly IConfiguration _configuration;
     private readonly IHttpClientFactory _httpClientFactory;
     private readonly ILoggerFactory _loggerFactory;
+    private readonly IOptions<TestingConfig> _testingConfig;
 
-    public BoardsController(ApplicationDbContext context, ILogger<BoardsController> logger, ITrelloService trelloService, IAIService aiService, IGitHubService gitHubService, IMicrosoftGraphService graphService, ISmtpEmailService smtpEmailService, IConfiguration configuration, IHttpClientFactory httpClientFactory, ILoggerFactory loggerFactory)
+    public BoardsController(ApplicationDbContext context, ILogger<BoardsController> logger, ITrelloService trelloService, IAIService aiService, IGitHubService gitHubService, IMicrosoftGraphService graphService, ISmtpEmailService smtpEmailService, IConfiguration configuration, IHttpClientFactory httpClientFactory, ILoggerFactory loggerFactory, IOptions<TestingConfig> testingConfig)
     {
         _context = context;
         _logger = logger;
@@ -62,6 +64,7 @@ public class BoardsController : ControllerBase
         _configuration = configuration;
         _httpClientFactory = httpClientFactory;
         _loggerFactory = loggerFactory;
+        _testingConfig = testingConfig;
     }
 
     /// <summary>
@@ -298,27 +301,44 @@ public class BoardsController : ControllerBase
                 }).ToList()
             };
             
-            _logger.LogInformation("Calling AI service with {RequestStudentCount} students", sprintPlanRequest.Students.Count);
-            var sprintPlanResponse = await _aiService.GenerateSprintPlanAsync(sprintPlanRequest);
+            SprintPlanningResponse? sprintPlanResponse;
             
-            if (sprintPlanResponse == null)
+            // Check if we should skip AI service (for testing)
+            if (_testingConfig.Value.SkipAIService)
             {
-                _logger.LogError("AI service returned null response");
-                return StatusCode(500, "AI service returned null response");
-            }
-            
-            if (sprintPlanResponse.SprintPlan == null)
-            {
-                _logger.LogWarning("AI service returned null SprintPlan: {ErrorMessage}. Proceeding with basic sprint plan.", sprintPlanResponse.Message);
-                
-                // Create a basic fallback sprint plan
+                _logger.LogInformation("Testing mode: Skipping AI service, using fallback sprint plan");
                 var fallbackSprintPlan = CreateFallbackSprintPlan(project, students, roleGroups, projectLengthWeeks, sprintLengthWeeks);
                 sprintPlanResponse = new SprintPlanningResponse
                 {
                     Success = true,
                     SprintPlan = fallbackSprintPlan,
-                    Message = "Using fallback sprint plan due to AI service issues"
+                    Message = "Using fallback sprint plan (Testing mode: SkipAIService=true)"
                 };
+            }
+            else
+            {
+                _logger.LogInformation("Calling AI service with {RequestStudentCount} students", sprintPlanRequest.Students.Count);
+                sprintPlanResponse = await _aiService.GenerateSprintPlanAsync(sprintPlanRequest);
+                
+                if (sprintPlanResponse == null)
+                {
+                    _logger.LogError("AI service returned null response");
+                    return StatusCode(500, "AI service returned null response");
+                }
+                
+                if (sprintPlanResponse.SprintPlan == null)
+                {
+                    _logger.LogWarning("AI service returned null SprintPlan: {ErrorMessage}. Proceeding with basic sprint plan.", sprintPlanResponse.Message);
+                    
+                    // Create a basic fallback sprint plan
+                    var fallbackSprintPlan = CreateFallbackSprintPlan(project, students, roleGroups, projectLengthWeeks, sprintLengthWeeks);
+                    sprintPlanResponse = new SprintPlanningResponse
+                    {
+                        Success = true,
+                        SprintPlan = fallbackSprintPlan,
+                        Message = "Using fallback sprint plan due to AI service issues"
+                    };
+                }
             }
             
             _logger.LogInformation("AI sprint plan generated successfully with {SprintCount} sprints", sprintPlanResponse.SprintPlan.Sprints?.Count ?? 0);
@@ -392,23 +412,59 @@ public class BoardsController : ControllerBase
                 SprintPlan = trelloSprintPlan
             };
             
-            _logger.LogInformation("Calling Trello service to create board");
-            var trelloResponse = await _trelloService.CreateProjectWithSprintsAsync(trelloRequest, project.Title);
+            TrelloProjectCreationResponse? trelloResponse;
+            string trelloBoardId;
             
-            if (trelloResponse == null)
+            // Declare URL variables early so they can be used in SkipTrelloApi block
+            string? backendRepositoryUrl = null;
+            string? frontendRepositoryUrl = null;
+            string? webApiUrl = null;
+            string? swaggerUrl = null;
+            
+            // Check if we should skip Trello API (for testing)
+            if (_testingConfig.Value.SkipTrelloApi)
             {
-                _logger.LogError("Trello service returned null response");
-                return StatusCode(500, "Trello service returned null response");
+                _logger.LogInformation("Testing mode: Skipping Trello API, generating mock board ID");
+                // Generate a mock board ID (24 hex characters, similar to Trello format)
+                trelloBoardId = Guid.NewGuid().ToString("N").Substring(0, 24);
+                trelloResponse = new TrelloProjectCreationResponse
+                {
+                    Success = true,
+                    BoardId = trelloBoardId,
+                    BoardUrl = $"https://trello.com/b/{trelloBoardId}",
+                    BoardName = project.Title,
+                    Message = "Mock Trello board (Testing mode: SkipTrelloApi=true)"
+                };
+                _logger.LogInformation("Mock Trello board created with ID: {BoardId}, URL: {BoardUrl}", trelloBoardId, trelloResponse.BoardUrl);
+                
+                // Set mock URLs for testing (will be updated later when actual URLs are available)
+                webApiUrl = $"https://webapi{trelloBoardId}.up.railway.app";
+                swaggerUrl = $"{webApiUrl}/swagger";
+                backendRepositoryUrl = $"https://github.com/skill-in-projects/backend_{trelloBoardId}";
+                frontendRepositoryUrl = $"https://github.com/skill-in-projects/{trelloBoardId}";
+                _logger.LogInformation("Testing mode: Set mock URLs - WebApiUrl: {WebApiUrl}, BackendUrl: {BackendUrl}, FrontendUrl: {FrontendUrl}", 
+                    webApiUrl, backendRepositoryUrl, frontendRepositoryUrl);
             }
-            
-            if (string.IsNullOrEmpty(trelloResponse.BoardId))
+            else
             {
-                _logger.LogError("Trello board creation failed - BoardId is null or empty");
-                return StatusCode(500, "Failed to create Trello board - no board ID returned");
+                _logger.LogInformation("Calling Trello service to create board");
+                trelloResponse = await _trelloService.CreateProjectWithSprintsAsync(trelloRequest, project.Title);
+                
+                if (trelloResponse == null)
+                {
+                    _logger.LogError("Trello service returned null response");
+                    return StatusCode(500, "Trello service returned null response");
+                }
+                
+                if (string.IsNullOrEmpty(trelloResponse.BoardId))
+                {
+                    _logger.LogError("Trello board creation failed - BoardId is null or empty");
+                    return StatusCode(500, "Failed to create Trello board - no board ID returned");
+                }
+                
+                _logger.LogInformation("Trello board created with ID: {BoardId}, URL: {BoardUrl}", trelloResponse.BoardId, trelloResponse.BoardUrl);
+                trelloBoardId = trelloResponse.BoardId;
             }
-            
-            _logger.LogInformation("Trello board created with ID: {BoardId}, URL: {BoardUrl}", trelloResponse.BoardId, trelloResponse.BoardUrl);
-            var trelloBoardId = trelloResponse.BoardId;
 
             // Create Neon database for the project
             string? dbConnectionString = null;
@@ -1357,13 +1413,10 @@ public class BoardsController : ControllerBase
             _logger.LogInformation("Found {GitHubUserCount} GitHub usernames: {GitHubUsers}", 
                 githubUsernames.Count, string.Join(", ", githubUsernames));
             
-            string? backendRepositoryUrl = null;
-            string? frontendRepositoryUrl = null;
+            // Note: backendRepositoryUrl, frontendRepositoryUrl, webApiUrl, and swaggerUrl are already declared earlier (before Trello creation)
             string? publishUrl = null;
             List<string> addedCollaborators = new List<string>();
             List<string> failedCollaborators = new List<string>();
-            string? webApiUrl = null;
-            string? swaggerUrl = null;
             string? railwayServiceId = null;
             string? environmentId = null;
             string? programmingLanguage = null;
@@ -2046,7 +2099,7 @@ public class BoardsController : ControllerBase
                                         if (!string.IsNullOrEmpty(environmentId) && !string.IsNullOrEmpty(projectId) && !string.IsNullOrEmpty(programmingLanguage))
                                         {
                                             await SetRailwayBuildSettings(railwayHttpClient, railwayApiUrl, railwayApiToken, 
-                                                projectId, railwayServiceId, environmentId, programmingLanguage);
+                                                projectId, railwayServiceId, environmentId, programmingLanguage, trelloBoardId);
                                         }
                                         
                                         // Create public domain for the service
@@ -2290,7 +2343,7 @@ public class BoardsController : ControllerBase
                 NextMeetingUrl = meetingUrl, // Will be updated after Teams meeting is created
                 GithubBackendUrl = backendRepositoryUrl,
                 GithubFrontendUrl = frontendRepositoryUrl,
-                WebApiUrl = swaggerUrl ?? webApiUrl, // Swagger URL from Railway deployment (fallback to base URL if swagger URL not set)
+                WebApiUrl = swaggerUrl ?? webApiUrl ?? $"https://webapi{trelloBoardId}.up.railway.app", // Swagger URL from Railway deployment (fallback to base URL if swagger URL not set, or default Railway pattern)
                 PublishUrl = publishUrl,
                 DBPassword = dbPassword, // Save the isolated role password for manual connections
                 NeonProjectId = createdNeonProjectId, // Save the Neon project ID (project-per-tenant isolation)
@@ -5691,7 +5744,7 @@ INSERT INTO ""TestProjects"" (""Name"") VALUES
     /// Build commands vary by programming language
     /// Note: nixpacks.toml should handle most build configuration, but these variables provide additional control
     /// </summary>
-    private async Task SetRailwayBuildSettings(HttpClient httpClient, string railwayApiUrl, string railwayApiToken, string projectId, string serviceId, string environmentId, string programmingLanguage)
+    private async Task SetRailwayBuildSettings(HttpClient httpClient, string railwayApiUrl, string railwayApiToken, string projectId, string serviceId, string environmentId, string programmingLanguage, string? boardId = null)
     {
         try
         {
@@ -5747,8 +5800,43 @@ INSERT INTO ""TestProjects"" (""Name"") VALUES
                 new { name = "MAVEN_ARGS", value = "-ntp -q" }
             };
             
-            // Combine language-specific variables with Maven variables
-            var buildVariables = languageSpecificVariables.Concat(mavenVariables).ToArray();
+            // Runtime error endpoint URL - set for ALL languages to enable error reporting
+            var apiBaseUrl = _configuration["ApiBaseUrl"];
+            var runtimeErrorVariables = new[]
+            {
+                !string.IsNullOrWhiteSpace(apiBaseUrl)
+                    ? new { name = "RUNTIME_ERROR_ENDPOINT_URL", value = $"{apiBaseUrl.TrimEnd('/')}/api/Mentor/runtime-error" }
+                    : null
+            }.Where(v => v != null).ToArray();
+            
+            if (runtimeErrorVariables.Length > 0)
+            {
+                _logger.LogInformation("[RAILWAY] Setting RUNTIME_ERROR_ENDPOINT_URL: {Url}", runtimeErrorVariables[0].value);
+            }
+            else
+            {
+                _logger.LogWarning("[RAILWAY] ApiBaseUrl not configured - RUNTIME_ERROR_ENDPOINT_URL will not be set");
+            }
+            
+            // BOARD_ID environment variable - set for ALL languages to enable boardId extraction in middleware
+            var boardIdVariables = new[]
+            {
+                !string.IsNullOrWhiteSpace(boardId)
+                    ? new { name = "BOARD_ID", value = boardId }
+                    : null
+            }.Where(v => v != null).ToArray();
+            
+            if (boardIdVariables.Length > 0)
+            {
+                _logger.LogInformation("[RAILWAY] Setting BOARD_ID: {BoardId}", boardIdVariables[0].value);
+            }
+            
+            // Combine language-specific variables with Maven variables, runtime error endpoint, and board ID
+            var buildVariables = languageSpecificVariables
+                .Concat(mavenVariables)
+                .Concat(runtimeErrorVariables)
+                .Concat(boardIdVariables)
+                .ToArray();
             
             // Set each environment variable
             foreach (var variable in buildVariables)
@@ -6427,7 +6515,8 @@ INSERT INTO ""TestProjects"" (""Name"") VALUES
             _logger.LogInformation("📝 [GITHUB] Updating config.js in {Owner}/{Repo}", repoOwner, repoName);
             
             // Generate new config.js content with actual service URL
-            var newConfigJs = _gitHubService.GenerateConfigJs(serviceUrl);
+            var mentorApiBaseUrl = _configuration["ApiBaseUrl"];
+            var newConfigJs = _gitHubService.GenerateConfigJs(serviceUrl, mentorApiBaseUrl);
             
             // Update the file in GitHub (config.js is now at root, not in frontend/ subdirectory)
             var success = await _gitHubService.UpdateFileAsync(

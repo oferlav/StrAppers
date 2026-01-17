@@ -1107,6 +1107,353 @@ jobs:
             _ => 8080
         };
     }
+
+    /// <summary>
+    /// Utility endpoint to delete all Neon databases in the account.
+    /// WARNING: This is a destructive operation that permanently deletes all databases.
+    /// Requires confirmation=true in the request body to proceed.
+    /// </summary>
+    [HttpPost("neon/delete-all-databases")]
+    public async Task<ActionResult<object>> DeleteAllNeonDatabases([FromBody] DeleteAllNeonDatabasesRequest request)
+    {
+        try
+        {
+            if (!request.Confirmation)
+            {
+                return BadRequest(new 
+                { 
+                    Success = false, 
+                    Message = "Confirmation required. Set 'confirmation' to true in the request body to proceed with deletion." 
+                });
+            }
+
+            var neonApiKey = _configuration["Neon:ApiKey"];
+            var neonBaseUrl = _configuration["Neon:BaseUrl"];
+
+            if (string.IsNullOrWhiteSpace(neonApiKey) || neonApiKey == "your-neon-api-key-here")
+            {
+                _logger.LogWarning("Neon API key not configured");
+                return BadRequest(new { Success = false, Message = "Neon API key is not configured" });
+            }
+
+            if (string.IsNullOrWhiteSpace(neonBaseUrl))
+            {
+                _logger.LogWarning("Neon base URL not configured");
+                return BadRequest(new { Success = false, Message = "Neon base URL is not configured" });
+            }
+
+            _logger.LogWarning("🗑️ [NEON] Starting deletion of all databases. This is a destructive operation!");
+
+            using var httpClient = _httpClientFactory.CreateClient();
+            httpClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", neonApiKey);
+            httpClient.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+
+            var stats = new DeleteAllNeonDatabasesStats();
+            var errors = new List<string>();
+
+            // Step 1: List all projects (with pagination support and infinite loop protection)
+            var projects = new List<(string Id, string Name)>();
+            string? cursor = null;
+            string? previousCursor = null;
+            int pageCount = 0;
+            const int maxPages = 100; // Safety limit to prevent infinite loops
+            int projectsInLastPage = 0;
+            
+            do
+            {
+                pageCount++;
+                
+                // Safety check: prevent infinite loops
+                if (pageCount > maxPages)
+                {
+                    _logger.LogWarning("⚠️ [NEON] Reached maximum page limit ({MaxPages}). Stopping pagination to prevent infinite loop.", maxPages);
+                    break;
+                }
+                
+                // Safety check: detect if cursor is not changing (infinite loop)
+                if (!string.IsNullOrEmpty(cursor) && cursor == previousCursor)
+                {
+                    _logger.LogWarning("⚠️ [NEON] Cursor unchanged between iterations (possible infinite loop). Stopping pagination. Cursor: {Cursor}", cursor);
+                    break;
+                }
+                
+                previousCursor = cursor;
+                
+                var projectsApiUrl = string.IsNullOrEmpty(cursor) 
+                    ? $"{neonBaseUrl}/projects" 
+                    : $"{neonBaseUrl}/projects?cursor={Uri.EscapeDataString(cursor)}";
+                    
+                _logger.LogInformation("📋 [NEON] Listing projects page {Page} from: {Url}", pageCount, projectsApiUrl);
+
+                var projectsResponse = await httpClient.GetAsync(projectsApiUrl);
+                if (!projectsResponse.IsSuccessStatusCode)
+                {
+                    var errorContent = await projectsResponse.Content.ReadAsStringAsync();
+                    _logger.LogError("❌ [NEON] Failed to list projects (page {Page}): {StatusCode} - {Error}", pageCount, projectsResponse.StatusCode, errorContent);
+                    if (projects.Count == 0)
+                    {
+                        // If we haven't gotten any projects yet, fail the operation
+                        return StatusCode((int)projectsResponse.StatusCode, new
+                        {
+                            Success = false,
+                            Message = $"Failed to list projects: {projectsResponse.StatusCode}",
+                            Error = errorContent
+                        });
+                    }
+                    // If we have some projects, continue with what we have
+                    break;
+                }
+
+                var projectsContent = await projectsResponse.Content.ReadAsStringAsync();
+                var projectsDoc = JsonDocument.Parse(projectsContent);
+                
+                // Track projects count before this page
+                var projectsBeforePage = projects.Count;
+                
+                // Parse projects from this page
+                if (projectsDoc.RootElement.TryGetProperty("projects", out var projectsProp) && projectsProp.ValueKind == JsonValueKind.Array)
+                {
+                    foreach (var projectElement in projectsProp.EnumerateArray())
+                    {
+                        if (projectElement.TryGetProperty("id", out var projectIdProp) && 
+                            projectElement.TryGetProperty("name", out var projectNameProp))
+                        {
+                            var projectId = projectIdProp.GetString();
+                            var projectName = projectNameProp.GetString() ?? "Unknown";
+                            if (!string.IsNullOrEmpty(projectId))
+                            {
+                                projects.Add((projectId, projectName));
+                            }
+                        }
+                    }
+                }
+                
+                // Calculate how many projects we got in this page
+                projectsInLastPage = projects.Count - projectsBeforePage;
+                _logger.LogInformation("📋 [NEON] Page {Page}: Found {Count} projects (total so far: {Total})", pageCount, projectsInLastPage, projects.Count);
+                
+                // Safety check: if we got 0 projects on this page, stop pagination
+                if (projectsInLastPage == 0 && pageCount > 1)
+                {
+                    _logger.LogInformation("📋 [NEON] No projects in page {Page}. Stopping pagination.", pageCount);
+                    break;
+                }
+                
+                // Check for pagination cursor
+                cursor = null;
+                if (projectsDoc.RootElement.TryGetProperty("pagination", out var paginationProp))
+                {
+                    if (paginationProp.TryGetProperty("cursor", out var cursorProp) && cursorProp.ValueKind == JsonValueKind.String)
+                    {
+                        var cursorValue = cursorProp.GetString();
+                        if (!string.IsNullOrEmpty(cursorValue))
+                        {
+                            cursor = cursorValue;
+                            _logger.LogInformation("📋 [NEON] Found pagination cursor for next page: {Cursor}", cursor);
+                        }
+                    }
+                }
+                else
+                {
+                    // If there's no pagination object, assume no more pages
+                    _logger.LogInformation("📋 [NEON] No pagination object in response. Assuming all projects retrieved.");
+                    break;
+                }
+            } while (!string.IsNullOrEmpty(cursor));
+
+            _logger.LogInformation("📋 [NEON] Found {Count} projects", projects.Count);
+            stats.ProjectsFound = projects.Count;
+
+            // Step 2: For each project, list branches and databases
+            foreach (var (projectId, projectName) in projects)
+            {
+                _logger.LogInformation("🔍 [NEON] Processing project: {ProjectName} ({ProjectId})", projectName, projectId);
+
+                // Step 2.1: Remove quota limitations to allow deletion
+                try
+                {
+                    _logger.LogInformation("🔓 [NEON] Removing quota limitations for project: {ProjectName} ({ProjectId})", projectName, projectId);
+
+                    // Update project settings to remove quota limits by setting very high values
+                    var updateProjectRequest = new
+                    {
+                        project = new
+                        {
+                            settings = new
+                            {
+                                quota = new
+                                {
+                                    active_time_seconds = 31536000,      // 1 year (effectively unlimited)
+                                    compute_time_seconds = 31536000,     // 1 year (effectively unlimited)
+                                    written_data_bytes = 1000000000000L,  // 1 TB (effectively unlimited)
+                                    data_transfer_bytes = 1000000000000L // 1 TB (effectively unlimited)
+                                }
+                            }
+                        }
+                    };
+
+                    var updateRequestBody = JsonSerializer.Serialize(updateProjectRequest);
+                    var updateContent = new StringContent(updateRequestBody, System.Text.Encoding.UTF8, "application/json");
+
+                    var updateProjectUrl = $"{neonBaseUrl}/projects/{Uri.EscapeDataString(projectId)}";
+                    _logger.LogInformation("🔓 [NEON] Updating project quota: PATCH {Url}", updateProjectUrl);
+
+                    var updateResponse = await httpClient.PatchAsync(updateProjectUrl, updateContent);
+
+                    if (updateResponse.IsSuccessStatusCode)
+                    {
+                        _logger.LogInformation("✅ [NEON] Successfully removed quota limitations for project: {ProjectName}", projectName);
+                        // Wait a moment for the quota update to take effect
+                        await Task.Delay(1000);
+                    }
+                    else
+                    {
+                        var errorContent = await updateResponse.Content.ReadAsStringAsync();
+                        _logger.LogWarning("⚠️ [NEON] Failed to update quota for project {ProjectName} ({ProjectId}): {StatusCode} - {Error}. Continuing with deletion attempt anyway.",
+                            projectName, projectId, updateResponse.StatusCode, errorContent);
+                    }
+                }
+                catch (Exception quotaEx)
+                {
+                    _logger.LogWarning(quotaEx, "⚠️ [NEON] Error removing quota limitations for project {ProjectName} ({ProjectId}). Continuing with deletion attempt anyway.",
+                        projectName, projectId);
+                }
+
+                // Step 2.2: List branches in this project
+                var branchesApiUrl = $"{neonBaseUrl}/projects/{projectId}/branches";
+                var branchesResponse = await httpClient.GetAsync(branchesApiUrl);
+
+                if (!branchesResponse.IsSuccessStatusCode)
+                {
+                    var errorContent = await branchesResponse.Content.ReadAsStringAsync();
+                    var errorMsg = $"Failed to list branches for project {projectName} ({projectId}): {branchesResponse.StatusCode}";
+                    _logger.LogError("❌ [NEON] {Error}", errorMsg);
+                    errors.Add(errorMsg);
+                    stats.Errors++;
+                    continue;
+                }
+
+                var branchesContent = await branchesResponse.Content.ReadAsStringAsync();
+                var branchesDoc = JsonDocument.Parse(branchesContent);
+
+                var branches = new List<(string Id, string Name)>();
+                if (branchesDoc.RootElement.TryGetProperty("branches", out var branchesProp) && branchesProp.ValueKind == JsonValueKind.Array)
+                {
+                    foreach (var branchElement in branchesProp.EnumerateArray())
+                    {
+                        if (branchElement.TryGetProperty("id", out var branchIdProp) && 
+                            branchElement.TryGetProperty("name", out var branchNameProp))
+                        {
+                            var branchId = branchIdProp.GetString();
+                            var branchName = branchNameProp.GetString() ?? "Unknown";
+                            if (!string.IsNullOrEmpty(branchId))
+                            {
+                                branches.Add((branchId, branchName));
+                            }
+                        }
+                    }
+                }
+
+                _logger.LogInformation("🌿 [NEON] Found {Count} branches in project {ProjectName}", branches.Count, projectName);
+                stats.BranchesFound += branches.Count;
+
+                // Step 3: For each branch, list and delete databases
+                foreach (var (branchId, branchName) in branches)
+                {
+                    _logger.LogInformation("📦 [NEON] Processing branch: {BranchName} ({BranchId}) in project {ProjectName}", branchName, branchId, projectName);
+
+                    // List databases in this branch
+                    var databasesApiUrl = $"{neonBaseUrl}/projects/{projectId}/branches/{Uri.EscapeDataString(branchId)}/databases";
+                    var databasesResponse = await httpClient.GetAsync(databasesApiUrl);
+
+                    if (!databasesResponse.IsSuccessStatusCode)
+                    {
+                        var errorContent = await databasesResponse.Content.ReadAsStringAsync();
+                        var errorMsg = $"Failed to list databases for branch {branchName} ({branchId}) in project {projectName}: {databasesResponse.StatusCode}";
+                        _logger.LogError("❌ [NEON] {Error}", errorMsg);
+                        errors.Add(errorMsg);
+                        stats.Errors++;
+                        continue;
+                    }
+
+                    var databasesContent = await databasesResponse.Content.ReadAsStringAsync();
+                    var databasesDoc = JsonDocument.Parse(databasesContent);
+
+                    var databases = new List<string>();
+                    if (databasesDoc.RootElement.TryGetProperty("databases", out var databasesProp) && databasesProp.ValueKind == JsonValueKind.Array)
+                    {
+                        foreach (var dbElement in databasesProp.EnumerateArray())
+                        {
+                            if (dbElement.TryGetProperty("name", out var dbNameProp))
+                            {
+                                var dbName = dbNameProp.GetString();
+                                if (!string.IsNullOrEmpty(dbName))
+                                {
+                                    // Skip reserved database names if requested
+                                    if (request.SkipReserved && (dbName == "neondb" || dbName == "postgres" || dbName == "template0" || dbName == "template1"))
+                                    {
+                                        _logger.LogInformation("⏭️ [NEON] Skipping reserved database: {DbName}", dbName);
+                                        stats.DatabasesSkipped++;
+                                        continue;
+                                    }
+                                    databases.Add(dbName);
+                                }
+                            }
+                        }
+                    }
+
+                    _logger.LogInformation("📦 [NEON] Found {Count} databases in branch {BranchName}", databases.Count, branchName);
+                    stats.DatabasesFound += databases.Count;
+
+                    // Step 4: Delete each database
+                    foreach (var dbName in databases)
+                    {
+                        var deleteApiUrl = $"{neonBaseUrl}/projects/{projectId}/branches/{Uri.EscapeDataString(branchId)}/databases/{Uri.EscapeDataString(dbName)}";
+                        _logger.LogWarning("🗑️ [NEON] Deleting database: {DbName} from branch {BranchName} in project {ProjectName}", dbName, branchName, projectName);
+
+                        var deleteResponse = await httpClient.DeleteAsync(deleteApiUrl);
+
+                        if (deleteResponse.IsSuccessStatusCode)
+                        {
+                            _logger.LogInformation("✅ [NEON] Successfully deleted database: {DbName}", dbName);
+                            stats.DatabasesDeleted++;
+                        }
+                        else
+                        {
+                            var errorContent = await deleteResponse.Content.ReadAsStringAsync();
+                            var errorMsg = $"Failed to delete database {dbName} from branch {branchName} in project {projectName}: {deleteResponse.StatusCode} - {errorContent}";
+                            _logger.LogError("❌ [NEON] {Error}", errorMsg);
+                            errors.Add(errorMsg);
+                            stats.Errors++;
+                        }
+
+                        // Add a small delay between deletions to avoid rate limiting
+                        await Task.Delay(500);
+                    }
+                }
+            }
+
+            _logger.LogWarning("✅ [NEON] Deletion process completed. Databases deleted: {Deleted}, Errors: {Errors}", stats.DatabasesDeleted, stats.Errors);
+
+            return Ok(new
+            {
+                Success = true,
+                Message = $"Deletion process completed. {stats.DatabasesDeleted} database(s) deleted.",
+                Stats = stats,
+                Errors = errors.Any() ? errors : null
+            });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "❌ [NEON] Error during deletion of all databases");
+            return StatusCode(500, new
+            {
+                Success = false,
+                Message = $"An error occurred: {ex.Message}",
+                Error = ex.ToString()
+            });
+        }
+    }
 }
 
 public class SetPasswordForAllRequest
@@ -1152,4 +1499,26 @@ public class AddWorkflowRequest
     
     [Required]
     public string ProgrammingLanguage { get; set; } = string.Empty;
+}
+
+public class DeleteAllNeonDatabasesRequest
+{
+    /// <summary>
+    /// Must be set to true to confirm deletion. This is a safety measure.
+    /// </summary>
+    [Required]
+    public bool Confirmation { get; set; } = false;
+
+    /// <summary>
+    /// If true, skips deletion of reserved database names (neondb, postgres, template0, template1)
+    /// </summary>
+    public bool SkipReserved { get; set; } = true;
+}public class DeleteAllNeonDatabasesStats
+{
+    public int ProjectsFound { get; set; }
+    public int BranchesFound { get; set; }
+    public int DatabasesFound { get; set; }
+    public int DatabasesDeleted { get; set; }
+    public int DatabasesSkipped { get; set; }
+    public int Errors { get; set; }
 }

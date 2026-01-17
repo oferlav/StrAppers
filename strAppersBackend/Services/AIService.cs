@@ -2458,10 +2458,10 @@ Example responses:
             _logger.LogInformation("Parsing build output using AI model {Model}", cheapModel);
 
             // Create a system prompt that instructs the AI to parse build logs and extract error information
-            var systemPrompt = @"You are an expert at analyzing build and deployment logs from various programming languages (C#, Java, Python, PHP, Ruby, Node.js, Go).
+            var systemPrompt = @"You are an expert at analyzing build logs, deployment logs, and runtime stack traces from various programming languages (C#, Java, Python, PHP, Ruby, Node.js, Go).
 
-Your task is to analyze the provided build/deployment logs and extract the following information in JSON format:
-1. File: The file path where the error occurred (if available)
+Your task is to analyze the provided logs/stack traces and extract the following information in JSON format:
+1. File: The file path where the error occurred (if available). Extract just the filename if the full path is long (e.g., ""TestController.js"" from ""/app/Controllers/TestController.js:43:11"")
 2. Line: The line number where the error occurred (if available, as an integer)
 3. StackTrace: The full stack trace if available
 4. LatestErrorSummary: A concise, human-readable summary of the error (2-3 sentences maximum)
@@ -2472,9 +2472,14 @@ IMPORTANT RULES:
 - The JSON structure must be: {""File"": ""path/to/file"", ""Line"": 123, ""StackTrace"": ""..."", ""LatestErrorSummary"": ""...""}
 - LatestErrorSummary should be clear and actionable, explaining what went wrong and why
 - Look for error patterns common to the programming language (compile errors, syntax errors, import errors, runtime exceptions, etc.)
-- If multiple errors exist, focus on the FIRST/PRIMARY error that caused the build to fail
+- If multiple errors exist, focus on the FIRST/PRIMARY error that caused the failure
 - Extract file paths and line numbers from error messages, stack traces, or compiler output
 - For stack traces, include the full trace if available, otherwise include what's available
+- For Node.js stack traces, look for patterns like ""at functionName (file:line:column)"" or ""at file:line:column""
+- For Python stack traces, look for patterns like ""File ""/path/to/file.py"", line X, in function""
+- For Go stack traces, look for patterns like ""/path/to/file.go:line""
+- For PHP stack traces, look for patterns like ""#X /path/to/file.php(line)""
+- Extract the FIRST user code location (skip framework/library code when possible)
 
 Return the JSON response now:";
 

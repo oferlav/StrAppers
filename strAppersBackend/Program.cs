@@ -3,6 +3,7 @@ using strAppersBackend.Data;
 using strAppersBackend.Models;
 using strAppersBackend.Services;
 using System.Text.Json;
+using System.Linq;
 using Microsoft.Extensions.Logging;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.DependencyInjection;
@@ -17,17 +18,35 @@ builder.Services.AddCors(options =>
     options.AddPolicy(name: "AllowFrontend",
                       policy =>
                       {
-                          // Allow requests from the specific frontend domain and localhost for development
-                          policy.WithOrigins("https://preview--skill-in-ce9dcf39.base44.app", 
-                                            "http://localhost:9001",
-                                            "https://localhost:9001",
-                                            "http://localhost:5000", // Backend localhost
-                                            "https://localhost:5000", // Backend localhost HTTPS
-                                            "http://20.126.90.3:9001", // Production frontend IP
-                                            "https://20.126.90.3:9001") // Production frontend IP HTTPS
-                                .AllowAnyHeader()
-                                .AllowAnyMethod()
-                                .AllowCredentials(); // Allow credentials for CORS requests
+                          // Allow requests from GitHub Pages (*.github.io), specific frontend domains, and localhost
+                          policy.SetIsOriginAllowed(origin =>
+                          {
+                              if (string.IsNullOrEmpty(origin)) return false;
+                              
+                              var uri = new Uri(origin);
+                              
+                              // Allow GitHub Pages (*.github.io) - for generated frontend projects
+                              if (uri.Host.EndsWith(".github.io", StringComparison.OrdinalIgnoreCase))
+                                  return true;
+                              
+                              // Allow specific frontend domains
+                              var allowedOrigins = new[]
+                              {
+                                  "preview--skill-in-ce9dcf39.base44.app",
+                                  "localhost",
+                                  "127.0.0.1",
+                                  "20.126.90.3"
+                              };
+                              
+                              if (allowedOrigins.Any(allowed => uri.Host.Equals(allowed, StringComparison.OrdinalIgnoreCase) || 
+                                                               uri.Host.EndsWith($".{allowed}", StringComparison.OrdinalIgnoreCase)))
+                                  return true;
+                              
+                              return false;
+                          })
+                          .AllowAnyHeader()
+                          .AllowAnyMethod()
+                          .AllowCredentials(); // Allow credentials for CORS requests
                       });
     
     // Add a more permissive policy for development/testing
@@ -228,6 +247,10 @@ builder.Services.Configure<SystemDesignAIAgentConfig>(builder.Configuration.GetS
 // Configure AI settings
 builder.Services.Configure<AIConfig>(builder.Configuration.GetSection("AIConfig"));
 
+// Configure Deployments settings
+builder.Services.Configure<DeploymentsConfig>(builder.Configuration.GetSection("DeploymentsConfig"));
+builder.Services.Configure<TestingConfig>(builder.Configuration.GetSection("Testing"));
+
 // Add HttpClientFactory for Slack API calls, OpenAI API calls, Trello API calls, and Microsoft Graph API calls
 builder.Services.AddHttpClient();
 builder.Services.AddHttpClient<AIService>(client =>
@@ -280,6 +303,10 @@ else
 {
     app.UseCors("AllowFrontend");
 }
+
+// Add global exception handler middleware
+// This will catch unhandled exceptions and send them to the runtime error endpoint
+app.UseMiddleware<strAppersBackend.Middleware.GlobalExceptionHandlerMiddleware>();
 
 // Note: GetChat log suppression is now handled via log level configuration in appsettings.json
 // The middleware approach didn't work reliably because log filters don't have access to HttpContext at runtime
