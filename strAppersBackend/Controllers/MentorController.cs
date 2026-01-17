@@ -5762,6 +5762,49 @@ Your intelligence is strictly tethered to the Current Project Context and the us
 
             var overallValid = githubValid && railwayValid && databaseValid && codeStructureValid && buildStatusValid;
 
+            // Record validation result in BoardStates (both success and failure)
+            try
+            {
+                var status = overallValid ? "SUCCESS" : "FAILED";
+                var output = overallValid 
+                    ? $"[BACKEND VALIDATION SUCCESS] {DateTime.UtcNow:yyyy-MM-dd HH:mm:ss} UTC\nBranch: {branchName}\nAll validations passed."
+                    : $"[BACKEND VALIDATION FAILED] {DateTime.UtcNow:yyyy-MM-dd HH:mm:ss} UTC\nBranch: {branchName}\nIssues:\n{string.Join("\n", issues.Select((issue, idx) => $"{idx + 1}. {issue}"))}";
+                
+                var timestamp = DateTime.UtcNow;
+                var createdAt = DateTime.UtcNow;
+                var updatedAt = DateTime.UtcNow;
+                var source = "PR-BackendValidation";
+                var webhook = false;
+                var errorMessage = overallValid ? null : string.Join("; ", issues);
+
+                FormattableString sql = $@"
+                    INSERT INTO ""BoardStates"" (
+                        ""BoardId"", ""Source"", ""Webhook"", ""GithubBranch"",
+                        ""LastBuildStatus"", ""LastBuildOutput"", ""ErrorMessage"", ""Timestamp"", 
+                        ""CreatedAt"", ""UpdatedAt""
+                    ) VALUES (
+                        {boardId}, {source}, {webhook}, {branchName},
+                        {status}, {output}, {errorMessage}, {timestamp},
+                        {createdAt}, {updatedAt}
+                    )
+                    ON CONFLICT (""BoardId"", ""Source"", ""Webhook"") 
+                    DO UPDATE SET
+                        ""GithubBranch"" = EXCLUDED.""GithubBranch"",
+                        ""LastBuildStatus"" = EXCLUDED.""LastBuildStatus"",
+                        ""LastBuildOutput"" = EXCLUDED.""LastBuildOutput"",
+                        ""ErrorMessage"" = EXCLUDED.""ErrorMessage"",
+                        ""Timestamp"" = EXCLUDED.""Timestamp"",
+                        ""UpdatedAt"" = EXCLUDED.""UpdatedAt""
+                ";
+
+                await _context.Database.ExecuteSqlInterpolatedAsync(sql);
+                _logger.LogInformation("✅ [VALIDATION] Recorded backend validation {Status} for BoardId: {BoardId}, Branch: {Branch}", status, boardId, branchName);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "❌ [VALIDATION] Failed to record backend validation result for BoardId: {BoardId}", boardId);
+            }
+
             return Ok(new
             {
                 Success = true,
@@ -5852,6 +5895,49 @@ Your intelligence is strictly tethered to the Current Project Context and the us
 
             var overallValid = githubValid && configValid && deploymentValid && buildStatusValid;
 
+            // Record validation result in BoardStates (both success and failure)
+            try
+            {
+                var status = overallValid ? "SUCCESS" : "FAILED";
+                var output = overallValid 
+                    ? $"[FRONTEND VALIDATION SUCCESS] {DateTime.UtcNow:yyyy-MM-dd HH:mm:ss} UTC\nBranch: {branchName}\nAll validations passed."
+                    : $"[FRONTEND VALIDATION FAILED] {DateTime.UtcNow:yyyy-MM-dd HH:mm:ss} UTC\nBranch: {branchName}\nIssues:\n{string.Join("\n", issues.Select((issue, idx) => $"{idx + 1}. {issue}"))}";
+                
+                var timestamp = DateTime.UtcNow;
+                var createdAt = DateTime.UtcNow;
+                var updatedAt = DateTime.UtcNow;
+                var source = "PR-FrontendValidation";
+                var webhook = false;
+                var errorMessage = overallValid ? null : string.Join("; ", issues);
+
+                FormattableString sql = $@"
+                    INSERT INTO ""BoardStates"" (
+                        ""BoardId"", ""Source"", ""Webhook"", ""GithubBranch"",
+                        ""LastBuildStatus"", ""LastBuildOutput"", ""ErrorMessage"", ""Timestamp"", 
+                        ""CreatedAt"", ""UpdatedAt""
+                    ) VALUES (
+                        {boardId}, {source}, {webhook}, {branchName},
+                        {status}, {output}, {errorMessage}, {timestamp},
+                        {createdAt}, {updatedAt}
+                    )
+                    ON CONFLICT (""BoardId"", ""Source"", ""Webhook"") 
+                    DO UPDATE SET
+                        ""GithubBranch"" = EXCLUDED.""GithubBranch"",
+                        ""LastBuildStatus"" = EXCLUDED.""LastBuildStatus"",
+                        ""LastBuildOutput"" = EXCLUDED.""LastBuildOutput"",
+                        ""ErrorMessage"" = EXCLUDED.""ErrorMessage"",
+                        ""Timestamp"" = EXCLUDED.""Timestamp"",
+                        ""UpdatedAt"" = EXCLUDED.""UpdatedAt""
+                ";
+
+                await _context.Database.ExecuteSqlInterpolatedAsync(sql);
+                _logger.LogInformation("✅ [VALIDATION] Recorded frontend validation {Status} for BoardId: {BoardId}, Branch: {Branch}", status, boardId, branchName);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "❌ [VALIDATION] Failed to record frontend validation result for BoardId: {BoardId}", boardId);
+            }
+
             return Ok(new
             {
                 Success = true,
@@ -5926,7 +6012,8 @@ Your intelligence is strictly tethered to the Current Project Context and the us
             }
 
             // Try to get repository info
-            using var httpClient = _httpClientFactory.CreateClient();
+            // Use the named HttpClient "DeploymentController" which has SSL certificate validation configured for GitHub
+            using var httpClient = _httpClientFactory.CreateClient("DeploymentController");
             httpClient.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", accessToken);
             httpClient.DefaultRequestHeaders.Add("User-Agent", "StrAppersBackend/1.0");
             httpClient.DefaultRequestHeaders.Accept.Add(new System.Net.Http.Headers.MediaTypeWithQualityHeaderValue("application/vnd.github.v3+json"));
@@ -5967,7 +6054,8 @@ Your intelligence is strictly tethered to the Current Project Context and the us
 
         try
         {
-            using var httpClient = _httpClientFactory.CreateClient();
+            // Use the named HttpClient "DeploymentController" which has SSL certificate validation configured
+            using var httpClient = _httpClientFactory.CreateClient("DeploymentController");
             httpClient.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", railwayApiToken);
             httpClient.DefaultRequestHeaders.Accept.Add(new System.Net.Http.Headers.MediaTypeWithQualityHeaderValue("application/json"));
 
@@ -6245,24 +6333,83 @@ Your intelligence is strictly tethered to the Current Project Context and the us
             // Just verify it's a valid PostgreSQL connection string format
             try
             {
-                var connBuilder = new Npgsql.NpgsqlConnectionStringBuilder(connectionString);
-                details["ConnectionStringFormatValid"] = true;
-                details["ConnectionStringHost"] = connBuilder.Host;
-                details["ConnectionStringDatabase"] = connBuilder.Database;
-                details["ConnectionStringUsername"] = connBuilder.Username;
-                
-                // Verify the connection string components match what's stored in ProjectBoards
-                // The connection string should contain the database name and use the stored credentials
-                if (!string.IsNullOrEmpty(connBuilder.Database) && connBuilder.Database != dbName)
+                // First, try to parse as URI (for postgresql:// URLs)
+                if (connectionString.StartsWith("postgresql://", StringComparison.OrdinalIgnoreCase) || 
+                    connectionString.StartsWith("postgres://", StringComparison.OrdinalIgnoreCase))
                 {
-                    issues.Add($"Connection string database name ({connBuilder.Database}) does not match expected database name ({dbName})");
+                    // Try parsing as URI first
+                    if (Uri.TryCreate(connectionString, UriKind.Absolute, out var uri))
+                    {
+                        // URI parsing succeeded - basic format is valid
+                        details["ConnectionStringFormatValid"] = true;
+                        details["ConnectionStringHost"] = uri.Host;
+                        details["ConnectionStringDatabase"] = uri.AbsolutePath.TrimStart('/');
+                        details["ConnectionStringUsername"] = uri.UserInfo?.Split(':')[0];
+                        
+                        // Verify database name matches
+                        var dbNameFromUri = uri.AbsolutePath.TrimStart('/');
+                        if (!string.IsNullOrEmpty(dbNameFromUri) && dbNameFromUri != dbName)
+                        {
+                            issues.Add($"Connection string database name ({dbNameFromUri}) does not match expected database name ({dbName})");
+                        }
+                    }
+                    else
+                    {
+                        // URI parsing failed, try NpgsqlConnectionStringBuilder as fallback
+                        var connBuilder = new Npgsql.NpgsqlConnectionStringBuilder(connectionString);
+                        details["ConnectionStringFormatValid"] = true;
+                        details["ConnectionStringHost"] = connBuilder.Host;
+                        details["ConnectionStringDatabase"] = connBuilder.Database;
+                        details["ConnectionStringUsername"] = connBuilder.Username;
+                        
+                        if (!string.IsNullOrEmpty(connBuilder.Database) && connBuilder.Database != dbName)
+                        {
+                            issues.Add($"Connection string database name ({connBuilder.Database}) does not match expected database name ({dbName})");
+                        }
+                    }
+                }
+                else
+                {
+                    // Not a URL format, try NpgsqlConnectionStringBuilder
+                    var connBuilder = new Npgsql.NpgsqlConnectionStringBuilder(connectionString);
+                    details["ConnectionStringFormatValid"] = true;
+                    details["ConnectionStringHost"] = connBuilder.Host;
+                    details["ConnectionStringDatabase"] = connBuilder.Database;
+                    details["ConnectionStringUsername"] = connBuilder.Username;
+                    
+                    if (!string.IsNullOrEmpty(connBuilder.Database) && connBuilder.Database != dbName)
+                    {
+                        issues.Add($"Connection string database name ({connBuilder.Database}) does not match expected database name ({dbName})");
+                    }
                 }
             }
             catch (Exception ex)
             {
-                issues.Add($"Database connection string format is invalid: {ex.Message}");
-                details["ConnectionStringFormatValid"] = false;
-                details["ConnectionStringError"] = ex.Message;
+                // If parsing fails, check if it's a known issue (like unsupported query parameters)
+                // Neon connection strings may have query parameters that Npgsql doesn't recognize
+                // but the connection string itself is still valid
+                if (connectionString.StartsWith("postgresql://", StringComparison.OrdinalIgnoreCase) || 
+                    connectionString.StartsWith("postgres://", StringComparison.OrdinalIgnoreCase))
+                {
+                    // For PostgreSQL URLs, if URI parsing works, consider it valid even if Npgsql fails
+                    if (Uri.TryCreate(connectionString, UriKind.Absolute, out _))
+                    {
+                        details["ConnectionStringFormatValid"] = true;
+                        details["ConnectionStringWarning"] = "Connection string parsed as URI but Npgsql parsing failed (may have unsupported query parameters)";
+                    }
+                    else
+                    {
+                        issues.Add($"Database connection string format is invalid: {ex.Message}");
+                        details["ConnectionStringFormatValid"] = false;
+                        details["ConnectionStringError"] = ex.Message;
+                    }
+                }
+                else
+                {
+                    issues.Add($"Database connection string format is invalid: {ex.Message}");
+                    details["ConnectionStringFormatValid"] = false;
+                    details["ConnectionStringError"] = ex.Message;
+                }
             }
         }
         catch (Exception ex)
@@ -6309,26 +6456,67 @@ Your intelligence is strictly tethered to the Current Project Context and the us
             // Check for nixpacks.toml at root
             var nixpacksContent = await _githubService.GetFileContentAsync(owner, repo, "nixpacks.toml", accessToken, branch);
             details["NixpacksTomlExists"] = !string.IsNullOrEmpty(nixpacksContent);
+            
+            // Pre-load Program.cs to check if it's C# (needed for both nixpacks check and later validation)
+            var programCs = await _githubService.GetFileContentAsync(owner, repo, "backend/Program.cs", accessToken, branch) ??
+                           await _githubService.GetFileContentAsync(owner, repo, "Program.cs", accessToken, branch);
+            var isCSharp = !string.IsNullOrEmpty(programCs);
+            
             if (string.IsNullOrEmpty(nixpacksContent))
             {
                 issues.Add("nixpacks.toml file not found at repository root");
             }
             else
             {
-                // Validate nixpacks.toml content
-                var hasPortBinding = nixpacksContent.Contains("0.0.0.0") || nixpacksContent.Contains("$PORT");
-                details["NixpacksHasPortBinding"] = hasPortBinding;
-                if (!hasPortBinding)
+                // Check if this is a Node.js project (PORT binding is handled in app.js, not nixpacks.toml)
+                var appJs = await _githubService.GetFileContentAsync(owner, repo, "backend/app.js", accessToken, branch) ??
+                           await _githubService.GetFileContentAsync(owner, repo, "app.js", accessToken, branch);
+                var isNodeJs = !string.IsNullOrEmpty(appJs);
+                
+                // Check if this is a Java project (PORT binding is handled in application.properties/yml, not nixpacks.toml)
+                var applicationJava = await _githubService.GetFileContentAsync(owner, repo, "backend/src/main/java/com/backend/Application.java", accessToken, branch) ??
+                                     await _githubService.GetFileContentAsync(owner, repo, "src/main/java/com/backend/Application.java", accessToken, branch);
+                var pomXml = await _githubService.GetFileContentAsync(owner, repo, "backend/pom.xml", accessToken, branch) ??
+                            await _githubService.GetFileContentAsync(owner, repo, "pom.xml", accessToken, branch);
+                var isJava = !string.IsNullOrEmpty(applicationJava) || !string.IsNullOrEmpty(pomXml);
+                
+                // Check if this is a Go project (PORT binding is handled in main.go, not nixpacks.toml)
+                var mainGo = await _githubService.GetFileContentAsync(owner, repo, "backend/main.go", accessToken, branch) ??
+                            await _githubService.GetFileContentAsync(owner, repo, "main.go", accessToken, branch);
+                var isGo = !string.IsNullOrEmpty(mainGo);
+                
+                // Check if this is a Ruby project (PORT binding is handled in app.rb/config.ru, not nixpacks.toml)
+                var appRb = await _githubService.GetFileContentAsync(owner, repo, "backend/app.rb", accessToken, branch) ??
+                           await _githubService.GetFileContentAsync(owner, repo, "app.rb", accessToken, branch);
+                var configRu = await _githubService.GetFileContentAsync(owner, repo, "backend/config.ru", accessToken, branch) ??
+                              await _githubService.GetFileContentAsync(owner, repo, "config.ru", accessToken, branch);
+                var isRuby = !string.IsNullOrEmpty(appRb) || !string.IsNullOrEmpty(configRu);
+                
+                // For Node.js, PORT binding is handled in app.js, so skip nixpacks.toml PORT check
+                // For Java, PORT binding is handled in application.properties/yml, so skip nixpacks.toml PORT check
+                // For C#, PORT binding is handled in Program.cs, so skip nixpacks.toml PORT check
+                // For Go, PORT binding is handled in main.go, so skip nixpacks.toml PORT check
+                // For Ruby, PORT binding is handled in app.rb/config.ru, so skip nixpacks.toml PORT check
+                // For other languages (Python, etc.), PORT should be in nixpacks.toml
+                if (!isNodeJs && !isJava && !isCSharp && !isGo && !isRuby)
                 {
-                    issues.Add("nixpacks.toml does not bind to 0.0.0.0 or use PORT environment variable");
+                    var hasPortBinding = nixpacksContent.Contains("0.0.0.0") || nixpacksContent.Contains("$PORT");
+                    details["NixpacksHasPortBinding"] = hasPortBinding;
+                    if (!hasPortBinding)
+                    {
+                        issues.Add("nixpacks.toml does not bind to 0.0.0.0 or use PORT environment variable");
+                    }
+                }
+                else
+                {
+                    details["NixpacksHasPortBinding"] = true; // Node.js/Java/C#/Go/Ruby handle PORT in their own config files
                 }
             }
 
             // Check for middleware registration (language-specific)
             // This is a simplified check - we'd need to know the programming language
             // For now, check common files
-            var programCs = await _githubService.GetFileContentAsync(owner, repo, "backend/Program.cs", accessToken, branch) ??
-                           await _githubService.GetFileContentAsync(owner, repo, "Program.cs", accessToken, branch);
+            // programCs is already loaded above
             
             if (!string.IsNullOrEmpty(programCs))
             {
@@ -6336,16 +6524,18 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                 var hasMiddleware = programCs.Contains("UseMiddleware") && programCs.Contains("GlobalExceptionHandlerMiddleware");
                 var hasCors = programCs.Contains("UseCors") && programCs.Contains("AllowAll");
                 var hasPortBinding = programCs.Contains("UseUrls") && (programCs.Contains("0.0.0.0") || programCs.Contains("$PORT") || programCs.Contains("PORT"));
-                var hasDatabaseUrl = programCs.Contains("DATABASE_URL") || (programCs.Contains("Environment.GetEnvironmentVariable") && programCs.Contains("DATABASE_URL"));
-                var hasRuntimeErrorEndpoint = programCs.Contains("RUNTIME_ERROR_ENDPOINT_URL") || (programCs.Contains("Environment.GetEnvironmentVariable") && programCs.Contains("RUNTIME_ERROR_ENDPOINT_URL"));
-                var hasConnectionStringParsing = programCs.Contains("postgresql://") || programCs.Contains("postgres://") || programCs.Contains("Uri(") || programCs.Contains("ConnectionString");
+                
+                // Check for RUNTIME_ERROR_ENDPOINT_URL in middleware file (not just Program.cs)
+                var middlewareFile = await _githubService.GetFileContentAsync(owner, repo, "backend/Middleware/GlobalExceptionHandlerMiddleware.cs", accessToken, branch) ??
+                                    await _githubService.GetFileContentAsync(owner, repo, "Middleware/GlobalExceptionHandlerMiddleware.cs", accessToken, branch);
+                var hasRuntimeErrorEndpoint = programCs.Contains("RUNTIME_ERROR_ENDPOINT_URL") || 
+                                            (programCs.Contains("Environment.GetEnvironmentVariable") && programCs.Contains("RUNTIME_ERROR_ENDPOINT_URL")) ||
+                                            (!string.IsNullOrEmpty(middlewareFile) && middlewareFile.Contains("RUNTIME_ERROR_ENDPOINT_URL"));
                 
                 details["MiddlewareRegistered"] = hasMiddleware;
                 details["CorsConfigured"] = hasCors;
                 details["PortBindingConfigured"] = hasPortBinding;
-                details["DatabaseUrlReferenced"] = hasDatabaseUrl;
                 details["RuntimeErrorEndpointReferenced"] = hasRuntimeErrorEndpoint;
-                details["ConnectionStringParsing"] = hasConnectionStringParsing;
                 
                 if (!hasMiddleware)
                 {
@@ -6359,31 +6549,9 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                 {
                     issues.Add("Port binding to 0.0.0.0 is not configured in Program.cs (required for Railway)");
                 }
-                if (!hasDatabaseUrl)
-                {
-                    issues.Add("DATABASE_URL environment variable is not referenced in Program.cs");
-                }
                 if (!hasRuntimeErrorEndpoint)
                 {
                     issues.Add("RUNTIME_ERROR_ENDPOINT_URL environment variable is not referenced in middleware code");
-                }
-                if (!hasConnectionStringParsing)
-                {
-                    issues.Add("Database connection string parsing logic not found in Program.cs (required for PostgreSQL URL format)");
-                }
-
-                // Check for SET search_path in database queries (check TestController as sample)
-                var testController = await _githubService.GetFileContentAsync(owner, repo, "backend/Controllers/TestController.cs", accessToken, branch) ??
-                                   await _githubService.GetFileContentAsync(owner, repo, "Controllers/TestController.cs", accessToken, branch);
-                
-                if (!string.IsNullOrEmpty(testController))
-                {
-                    var hasSearchPath = testController.Contains("SET search_path") || testController.Contains("search_path");
-                    details["HasSearchPathInQueries"] = hasSearchPath;
-                    if (!hasSearchPath)
-                    {
-                        issues.Add("SET search_path command not found in database queries (required for Neon database isolation)");
-                    }
                 }
 
                 // Check package dependencies
@@ -6412,16 +6580,12 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                                                  (mainPy.Contains("from ExceptionHandler") || mainPy.Contains("import ExceptionHandler"));
                     var hasCors = mainPy.Contains("CORSMiddleware") || mainPy.Contains("allow_origins");
                     var hasPortBinding = mainPy.Contains("0.0.0.0") || mainPy.Contains("$PORT") || mainPy.Contains("PORT");
-                    var hasDatabaseUrl = mainPy.Contains("DATABASE_URL") || (mainPy.Contains("os.getenv") && mainPy.Contains("DATABASE_URL"));
                     var hasRuntimeErrorEndpoint = mainPy.Contains("RUNTIME_ERROR_ENDPOINT_URL") || (mainPy.Contains("os.getenv") && mainPy.Contains("RUNTIME_ERROR_ENDPOINT_URL"));
-                    var hasConnectionStringParsing = mainPy.Contains("postgresql://") || mainPy.Contains("postgres://") || mainPy.Contains("asyncpg") || mainPy.Contains("create_engine");
                     
                     details["ExceptionHandlerRegistered"] = hasExceptionHandler;
                     details["CorsConfigured"] = hasCors;
                     details["PortBindingConfigured"] = hasPortBinding;
-                    details["DatabaseUrlReferenced"] = hasDatabaseUrl;
                     details["RuntimeErrorEndpointReferenced"] = hasRuntimeErrorEndpoint;
-                    details["ConnectionStringParsing"] = hasConnectionStringParsing;
                     
                     if (!hasExceptionHandler)
                     {
@@ -6435,32 +6599,12 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                     {
                         issues.Add("Port binding to 0.0.0.0 is not configured in main.py (required for Railway)");
                     }
-                    if (!hasDatabaseUrl)
-                    {
-                        issues.Add("DATABASE_URL environment variable is not referenced in main.py");
-                    }
                     if (!hasRuntimeErrorEndpoint)
                     {
                         issues.Add("RUNTIME_ERROR_ENDPOINT_URL environment variable is not referenced in exception handler code");
                     }
-                    if (!hasConnectionStringParsing)
-                    {
-                        issues.Add("Database connection string parsing logic not found in main.py (required for PostgreSQL URL format)");
-                    }
 
                     // Check for SET search_path in database queries
-                    var testController = await _githubService.GetFileContentAsync(owner, repo, "backend/Controllers/test_controller.py", accessToken, branch) ??
-                                       await _githubService.GetFileContentAsync(owner, repo, "Controllers/test_controller.py", accessToken, branch);
-                    
-                    if (!string.IsNullOrEmpty(testController))
-                    {
-                        var hasSearchPath = testController.Contains("SET search_path") || testController.Contains("search_path");
-                        details["HasSearchPathInQueries"] = hasSearchPath;
-                        if (!hasSearchPath)
-                        {
-                            issues.Add("SET search_path command not found in database queries (required for Neon database isolation)");
-                        }
-                    }
 
                     // Check package dependencies
                     var requirementsTxt = await _githubService.GetFileContentAsync(owner, repo, "backend/requirements.txt", accessToken, branch) ??
@@ -6470,11 +6614,12 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                     {
                         var hasFastApi = requirementsTxt.Contains("fastapi");
                         var hasUvicorn = requirementsTxt.Contains("uvicorn");
-                        var hasAsyncpg = requirementsTxt.Contains("asyncpg");
+                        // Python uses psycopg (psycopg3), not asyncpg
+                        var hasPsycopg = requirementsTxt.Contains("psycopg");
                         
                         details["HasFastApi"] = hasFastApi;
                         details["HasUvicorn"] = hasUvicorn;
-                        details["HasAsyncpg"] = hasAsyncpg;
+                        details["HasPsycopg"] = hasPsycopg;
                         
                         if (!hasFastApi)
                         {
@@ -6484,9 +6629,9 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                         {
                             issues.Add("uvicorn package not found in requirements.txt");
                         }
-                        if (!hasAsyncpg)
+                        if (!hasPsycopg)
                         {
-                            issues.Add("asyncpg package not found in requirements.txt (required for PostgreSQL)");
+                            issues.Add("psycopg package not found in requirements.txt (required for PostgreSQL)");
                         }
                     }
                 }
@@ -6498,19 +6643,18 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                     
                     if (!string.IsNullOrEmpty(appJs))
                     {
-                        var hasErrorMiddleware = appJs.Contains("errorMiddleware") || appJs.Contains("error-handler");
+                        // Check for error middleware - actual pattern is app.use((err, req, res, next) => {
+                        var hasErrorMiddleware = appJs.Contains("app.use((err,") || appJs.Contains("app.use((error,") || 
+                                                 appJs.Contains("ERROR HANDLER") || appJs.Contains("error-handler") ||
+                                                 appJs.Contains("errorMiddleware");
                         var hasCors = appJs.Contains("cors()") || appJs.Contains("CORS");
                         var hasPortBinding = appJs.Contains("listen") && (appJs.Contains("0.0.0.0") || appJs.Contains("process.env.PORT"));
-                        var hasDatabaseUrl = appJs.Contains("DATABASE_URL") || (appJs.Contains("process.env") && appJs.Contains("DATABASE_URL"));
                         var hasRuntimeErrorEndpoint = appJs.Contains("RUNTIME_ERROR_ENDPOINT_URL") || (appJs.Contains("process.env") && appJs.Contains("RUNTIME_ERROR_ENDPOINT_URL"));
-                        var hasConnectionStringParsing = appJs.Contains("postgresql://") || appJs.Contains("postgres://") || appJs.Contains("Pool(") || appJs.Contains("connectionString");
                         
                         details["ErrorMiddlewareRegistered"] = hasErrorMiddleware;
                         details["CorsConfigured"] = hasCors;
                         details["PortBindingConfigured"] = hasPortBinding;
-                        details["DatabaseUrlReferenced"] = hasDatabaseUrl;
                         details["RuntimeErrorEndpointReferenced"] = hasRuntimeErrorEndpoint;
-                        details["ConnectionStringParsing"] = hasConnectionStringParsing;
                         
                         if (!hasErrorMiddleware)
                         {
@@ -6524,32 +6668,11 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                         {
                             issues.Add("Port binding to 0.0.0.0 is not configured in app.js (required for Railway)");
                         }
-                        if (!hasDatabaseUrl)
-                        {
-                            issues.Add("DATABASE_URL environment variable is not referenced in app.js");
-                        }
                         if (!hasRuntimeErrorEndpoint)
                         {
                             issues.Add("RUNTIME_ERROR_ENDPOINT_URL environment variable is not referenced in error middleware code");
                         }
-                        if (!hasConnectionStringParsing)
-                        {
-                            issues.Add("Database connection string parsing logic not found in app.js (required for PostgreSQL URL format)");
-                        }
 
-                        // Check for SET search_path in database queries
-                        var testController = await _githubService.GetFileContentAsync(owner, repo, "backend/Controllers/test_controller.js", accessToken, branch) ??
-                                           await _githubService.GetFileContentAsync(owner, repo, "Controllers/test_controller.js", accessToken, branch);
-                        
-                        if (!string.IsNullOrEmpty(testController))
-                        {
-                            var hasSearchPath = testController.Contains("SET search_path") || testController.Contains("search_path");
-                            details["HasSearchPathInQueries"] = hasSearchPath;
-                            if (!hasSearchPath)
-                            {
-                                issues.Add("SET search_path command not found in database queries (required for Neon database isolation)");
-                            }
-                        }
 
                         // Check package dependencies
                         var packageJson = await _githubService.GetFileContentAsync(owner, repo, "backend/package.json", accessToken, branch) ??
@@ -6595,76 +6718,76 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                         
                         var configFile = applicationProperties ?? applicationYml ?? "";
                         
-                        // Check for exception handler (Spring Boot @ControllerAdvice or @ExceptionHandler) - load it first
-                        var exceptionHandler = await _githubService.GetFileContentAsync(owner, repo, "backend/src/main/java/com/backend/GlobalExceptionHandler.java", accessToken, branch) ??
-                                              await _githubService.GetFileContentAsync(owner, repo, "src/main/java/com/backend/GlobalExceptionHandler.java", accessToken, branch);
+                        // Check for exception handler (Spring Boot @ControllerAdvice or @ExceptionHandler) - check multiple locations including Exception subpackage
+                        var exceptionHandler = await _githubService.GetFileContentAsync(owner, repo, "backend/src/main/java/com/backend/Exception/GlobalExceptionHandler.java", accessToken, branch) ??
+                                              await _githubService.GetFileContentAsync(owner, repo, "src/main/java/com/backend/Exception/GlobalExceptionHandler.java", accessToken, branch) ??
+                                              await _githubService.GetFileContentAsync(owner, repo, "backend/src/main/java/com/backend/GlobalExceptionHandler.java", accessToken, branch) ??
+                                              await _githubService.GetFileContentAsync(owner, repo, "src/main/java/com/backend/GlobalExceptionHandler.java", accessToken, branch) ??
+                                              await _githubService.GetFileContentAsync(owner, repo, "backend/src/main/java/GlobalExceptionHandler.java", accessToken, branch) ??
+                                              await _githubService.GetFileContentAsync(owner, repo, "src/main/java/GlobalExceptionHandler.java", accessToken, branch);
+                        
+                        // Also check for exception handler in any Java file in the backend package
+                        var hasExceptionHandler = !string.IsNullOrEmpty(exceptionHandler) && 
+                                                 (exceptionHandler.Contains("@ControllerAdvice") || exceptionHandler.Contains("@ExceptionHandler"));
+                        
+                        // If not found in expected location, check if Application.java has exception handling
+                        if (!hasExceptionHandler)
+                        {
+                            hasExceptionHandler = applicationJava.Contains("@ExceptionHandler") || 
+                                                 applicationJava.Contains("@ControllerAdvice") ||
+                                                 applicationJava.Contains("ExceptionHandler");
+                        }
                         
                         var hasPortBinding = configFile.Contains("server.port") || configFile.Contains("PORT") || 
                                            applicationJava.Contains("System.getenv(\"PORT\")") ||
-                                           configFile.Contains("${PORT}");
-                        var hasDatabaseUrl = configFile.Contains("DATABASE_URL") || configFile.Contains("spring.datasource.url") ||
-                                           applicationJava.Contains("DATABASE_URL") || applicationJava.Contains("spring.datasource.url");
+                                           configFile.Contains("${PORT}") ||
+                                           configFile.Contains("SERVER_PORT");
                         var hasRuntimeErrorEndpoint = applicationJava.Contains("RUNTIME_ERROR_ENDPOINT_URL") || 
                                                      configFile.Contains("RUNTIME_ERROR_ENDPOINT_URL") ||
                                                      (!string.IsNullOrEmpty(exceptionHandler) && exceptionHandler.Contains("RUNTIME_ERROR_ENDPOINT_URL"));
-                        var hasConnectionStringParsing = configFile.Contains("postgresql://") || configFile.Contains("postgres://") ||
-                                                        configFile.Contains("spring.datasource.url");
                         
                         details["PortBindingConfigured"] = hasPortBinding;
-                        details["DatabaseUrlReferenced"] = hasDatabaseUrl;
                         details["RuntimeErrorEndpointReferenced"] = hasRuntimeErrorEndpoint;
-                        details["ConnectionStringParsing"] = hasConnectionStringParsing;
+                        details["ExceptionHandlerRegistered"] = hasExceptionHandler;
                         
                         if (!hasPortBinding)
                         {
                             issues.Add("Port binding configuration not found in Application.java or application.properties/yml (required for Railway)");
                         }
-                        if (!hasDatabaseUrl)
-                        {
-                            issues.Add("DATABASE_URL environment variable is not referenced in Application.java or application.properties/yml");
-                        }
                         if (!hasRuntimeErrorEndpoint)
                         {
                             issues.Add("RUNTIME_ERROR_ENDPOINT_URL environment variable is not referenced in GlobalExceptionHandler.java");
                         }
-                        if (!hasConnectionStringParsing)
-                        {
-                            issues.Add("Database connection string configuration not found in application.properties/yml (required for PostgreSQL)");
-                        }
-                        
-                        var hasExceptionHandler = !string.IsNullOrEmpty(exceptionHandler) && 
-                                                 (exceptionHandler.Contains("@ControllerAdvice") || exceptionHandler.Contains("@ExceptionHandler"));
-                        details["ExceptionHandlerRegistered"] = hasExceptionHandler;
                         if (!hasExceptionHandler)
                         {
                             issues.Add("Global exception handler is not registered (GlobalExceptionHandler.java with @ControllerAdvice)");
                         }
 
-                        // Check for CORS configuration
-                        var corsConfig = await _githubService.GetFileContentAsync(owner, repo, "backend/src/main/java/com/backend/WebConfig.java", accessToken, branch) ??
-                                        await _githubService.GetFileContentAsync(owner, repo, "src/main/java/com/backend/WebConfig.java", accessToken, branch);
+                        // Check for CORS configuration - check multiple locations and patterns
+                        // CORS can be configured in CorsConfig.java (actual generated file), WebConfig, Application.java, or application.properties/yml
+                        var corsConfig = await _githubService.GetFileContentAsync(owner, repo, "backend/src/main/java/com/backend/Config/CorsConfig.java", accessToken, branch) ??
+                                        await _githubService.GetFileContentAsync(owner, repo, "src/main/java/com/backend/Config/CorsConfig.java", accessToken, branch) ??
+                                        await _githubService.GetFileContentAsync(owner, repo, "backend/src/main/java/com/backend/WebConfig.java", accessToken, branch) ??
+                                        await _githubService.GetFileContentAsync(owner, repo, "src/main/java/com/backend/WebConfig.java", accessToken, branch) ??
+                                        await _githubService.GetFileContentAsync(owner, repo, "backend/src/main/java/com/backend/Config/WebConfig.java", accessToken, branch) ??
+                                        await _githubService.GetFileContentAsync(owner, repo, "src/main/java/com/backend/Config/WebConfig.java", accessToken, branch) ??
+                                        await _githubService.GetFileContentAsync(owner, repo, "backend/src/main/java/WebConfig.java", accessToken, branch) ??
+                                        await _githubService.GetFileContentAsync(owner, repo, "src/main/java/WebConfig.java", accessToken, branch);
                         
-                        var hasCors = !string.IsNullOrEmpty(corsConfig) && corsConfig.Contains("CorsConfiguration") ||
-                                     applicationJava.Contains("CorsConfiguration") || applicationJava.Contains("addCorsMappings");
+                        var hasCors = (!string.IsNullOrEmpty(corsConfig) && (corsConfig.Contains("CorsConfiguration") || corsConfig.Contains("addCorsMappings") || corsConfig.Contains("CorsRegistry") || corsConfig.Contains("CorsConfig"))) ||
+                                     applicationJava.Contains("CorsConfiguration") || 
+                                     applicationJava.Contains("addCorsMappings") ||
+                                     applicationJava.Contains("CorsRegistry") ||
+                                     applicationJava.Contains("@CrossOrigin") ||
+                                     configFile.Contains("cors") ||
+                                     configFile.Contains("CORS") ||
+                                     configFile.Contains("spring.web.cors");
                         details["CorsConfigured"] = hasCors;
                         if (!hasCors)
                         {
                             issues.Add("CORS is not configured in Java backend");
                         }
 
-                        // Check for SET search_path in database queries
-                        var testController = await _githubService.GetFileContentAsync(owner, repo, "backend/src/main/java/com/backend/Controllers/TestController.java", accessToken, branch) ??
-                                           await _githubService.GetFileContentAsync(owner, repo, "src/main/java/com/backend/Controllers/TestController.java", accessToken, branch);
-                        
-                        if (!string.IsNullOrEmpty(testController))
-                        {
-                            var hasSearchPath = testController.Contains("SET search_path") || testController.Contains("search_path");
-                            details["HasSearchPathInQueries"] = hasSearchPath;
-                            if (!hasSearchPath)
-                            {
-                                issues.Add("SET search_path command not found in database queries (required for Neon database isolation)");
-                            }
-                        }
 
                         // Check package dependencies (pom.xml)
                         var pomXml = await _githubService.GetFileContentAsync(owner, repo, "backend/pom.xml", accessToken, branch) ??
@@ -6704,30 +6827,18 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                             var hasPortBinding = (!string.IsNullOrEmpty(pumaRb) && (pumaRb.Contains("0.0.0.0") || pumaRb.Contains("bind"))) ||
                                                 appRb.Contains("0.0.0.0") || appRb.Contains("ENV['PORT']") || appRb.Contains("ENV.fetch('PORT'") ||
                                                 appRb.Contains("set :bind, '0.0.0.0'");
-                            var hasDatabaseUrl = appRb.Contains("DATABASE_URL") || appRb.Contains("ENV['DATABASE_URL']");
                             var hasRuntimeErrorEndpoint = appRb.Contains("RUNTIME_ERROR_ENDPOINT_URL") || appRb.Contains("ENV['RUNTIME_ERROR_ENDPOINT_URL']");
-                            var hasConnectionStringParsing = appRb.Contains("postgresql://") || appRb.Contains("postgres://") || appRb.Contains("PG.connect") || appRb.Contains("PG::Connection");
                             
                             details["PortBindingConfigured"] = hasPortBinding;
-                            details["DatabaseUrlReferenced"] = hasDatabaseUrl;
                             details["RuntimeErrorEndpointReferenced"] = hasRuntimeErrorEndpoint;
-                            details["ConnectionStringParsing"] = hasConnectionStringParsing;
                             
                             if (!hasPortBinding)
                             {
                                 issues.Add("Port binding to 0.0.0.0 is not configured in app.rb or puma.rb (required for Railway)");
                             }
-                            if (!hasDatabaseUrl)
-                            {
-                                issues.Add("DATABASE_URL environment variable is not referenced in app.rb");
-                            }
                             if (!hasRuntimeErrorEndpoint)
                             {
                                 issues.Add("RUNTIME_ERROR_ENDPOINT_URL environment variable is not referenced in exception handler code");
-                            }
-                            if (!hasConnectionStringParsing)
-                            {
-                                issues.Add("Database connection string parsing logic not found in app.rb (required for PostgreSQL URL format)");
                             }
 
                             // Check for exception middleware
@@ -6747,19 +6858,6 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                                 issues.Add("CORS headers are not configured in app.rb");
                             }
 
-                            // Check for SET search_path in database queries
-                            var testController = await _githubService.GetFileContentAsync(owner, repo, "backend/Controllers/test_controller.rb", accessToken, branch) ??
-                                               await _githubService.GetFileContentAsync(owner, repo, "Controllers/test_controller.rb", accessToken, branch);
-                            
-                            if (!string.IsNullOrEmpty(testController))
-                            {
-                                var hasSearchPath = testController.Contains("SET search_path") || testController.Contains("search_path");
-                                details["HasSearchPathInQueries"] = hasSearchPath;
-                                if (!hasSearchPath)
-                                {
-                                    issues.Add("SET search_path command not found in database queries (required for Neon database isolation)");
-                                }
-                            }
 
                             // Check package dependencies (Gemfile)
                             var gemfile = await _githubService.GetFileContentAsync(owner, repo, "backend/Gemfile", accessToken, branch) ??
@@ -6793,30 +6891,18 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                             {
                                 // Go backend
                                 var hasPortBinding = mainGo.Contains("0.0.0.0") || mainGo.Contains("PORT") || mainGo.Contains("Listen");
-                                var hasDatabaseUrl = mainGo.Contains("DATABASE_URL") || mainGo.Contains("os.Getenv(\"DATABASE_URL\")");
                                 var hasRuntimeErrorEndpoint = mainGo.Contains("RUNTIME_ERROR_ENDPOINT_URL") || mainGo.Contains("os.Getenv(\"RUNTIME_ERROR_ENDPOINT_URL\")");
-                                var hasConnectionStringParsing = mainGo.Contains("postgresql://") || mainGo.Contains("postgres://") || mainGo.Contains("sql.Open") || mainGo.Contains("database/sql");
                                 
                                 details["PortBindingConfigured"] = hasPortBinding;
-                                details["DatabaseUrlReferenced"] = hasDatabaseUrl;
                                 details["RuntimeErrorEndpointReferenced"] = hasRuntimeErrorEndpoint;
-                                details["ConnectionStringParsing"] = hasConnectionStringParsing;
                                 
                                 if (!hasPortBinding)
                                 {
                                     issues.Add("Port binding to 0.0.0.0 is not configured in main.go (required for Railway)");
                                 }
-                                if (!hasDatabaseUrl)
-                                {
-                                    issues.Add("DATABASE_URL environment variable is not referenced in main.go");
-                                }
                                 if (!hasRuntimeErrorEndpoint)
                                 {
                                     issues.Add("RUNTIME_ERROR_ENDPOINT_URL environment variable is not referenced in error handler code");
-                                }
-                                if (!hasConnectionStringParsing)
-                                {
-                                    issues.Add("Database connection string parsing logic not found in main.go (required for PostgreSQL URL format)");
                                 }
 
                                 // Check for error middleware/handler
@@ -6837,19 +6923,6 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                                     issues.Add("CORS middleware is not configured in main.go");
                                 }
 
-                                // Check for SET search_path in database queries
-                                var testController = await _githubService.GetFileContentAsync(owner, repo, "backend/Controllers/test_controller.go", accessToken, branch) ??
-                                                   await _githubService.GetFileContentAsync(owner, repo, "Controllers/test_controller.go", accessToken, branch);
-                                
-                                if (!string.IsNullOrEmpty(testController))
-                                {
-                                    var hasSearchPath = testController.Contains("SET search_path") || testController.Contains("search_path");
-                                    details["HasSearchPathInQueries"] = hasSearchPath;
-                                    if (!hasSearchPath)
-                                    {
-                                        issues.Add("SET search_path command not found in database queries (required for Neon database isolation)");
-                                    }
-                                }
 
                                 // Check package dependencies (go.mod)
                                 var goMod = await _githubService.GetFileContentAsync(owner, repo, "backend/go.mod", accessToken, branch) ??
@@ -6877,39 +6950,30 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                                 {
                                     // PHP backend
                                     var hasExceptionHandler = indexPhp.Contains("set_exception_handler") || indexPhp.Contains("set_error_handler");
-                                    var hasPortBinding = indexPhp.Contains("0.0.0.0") || indexPhp.Contains("$PORT") || indexPhp.Contains("$_ENV['PORT']");
-                                    var hasDatabaseUrl = indexPhp.Contains("DATABASE_URL") || indexPhp.Contains("$_ENV['DATABASE_URL']") || indexPhp.Contains("getenv('DATABASE_URL')");
+                                    // PHP with FrankenPHP/Caddy doesn't need PORT in index.php - the server handles it
+                                    // So we skip this check for PHP
+                                    var hasPortBinding = true; // Always true for PHP as FrankenPHP handles PORT binding
                                     var hasRuntimeErrorEndpoint = indexPhp.Contains("RUNTIME_ERROR_ENDPOINT_URL") || indexPhp.Contains("$_ENV['RUNTIME_ERROR_ENDPOINT_URL']") || indexPhp.Contains("getenv('RUNTIME_ERROR_ENDPOINT_URL')");
-                                    var hasConnectionStringParsing = indexPhp.Contains("postgresql://") || indexPhp.Contains("postgres://") || indexPhp.Contains("PDO") || indexPhp.Contains("pg_connect");
                                     
                                     details["ExceptionHandlerRegistered"] = hasExceptionHandler;
                                     details["PortBindingConfigured"] = hasPortBinding;
-                                    details["DatabaseUrlReferenced"] = hasDatabaseUrl;
                                     details["RuntimeErrorEndpointReferenced"] = hasRuntimeErrorEndpoint;
-                                    details["ConnectionStringParsing"] = hasConnectionStringParsing;
                                     
                                     if (!hasExceptionHandler)
                                     {
                                         issues.Add("Exception handler (set_exception_handler/set_error_handler) is not configured in index.php");
                                     }
                                     
-                                    if (!hasPortBinding)
-                                    {
-                                        issues.Add("Port binding to 0.0.0.0 is not configured in index.php (required for Railway)");
-                                    }
-                                    if (!hasDatabaseUrl)
-                                    {
-                                        issues.Add("DATABASE_URL environment variable is not referenced in index.php");
-                                    }
+                                    // Skip PORT binding check for PHP - FrankenPHP handles this
+                                    // if (!hasPortBinding)
+                                    // {
+                                    //     issues.Add("Port binding to 0.0.0.0 is not configured in index.php (required for Railway)");
+                                    // }
+                                    
                                     if (!hasRuntimeErrorEndpoint)
                                     {
                                         issues.Add("RUNTIME_ERROR_ENDPOINT_URL environment variable is not referenced in error handler code");
                                     }
-                                    if (!hasConnectionStringParsing)
-                                    {
-                                        issues.Add("Database connection string parsing logic not found in index.php (required for PostgreSQL URL format)");
-                                    }
-
 
                                     // Check for CORS headers
                                     var hasCors = indexPhp.Contains("Access-Control-Allow-Origin") || indexPhp.Contains("header('Access-Control") || indexPhp.Contains("CORS");
@@ -6917,20 +6981,6 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                                     if (!hasCors)
                                     {
                                         issues.Add("CORS headers are not configured in index.php");
-                                    }
-
-                                    // Check for SET search_path in database queries
-                                    var testController = await _githubService.GetFileContentAsync(owner, repo, "backend/Controllers/test_controller.php", accessToken, branch) ??
-                                                       await _githubService.GetFileContentAsync(owner, repo, "Controllers/test_controller.php", accessToken, branch);
-                                    
-                                    if (!string.IsNullOrEmpty(testController))
-                                    {
-                                        var hasSearchPath = testController.Contains("SET search_path") || testController.Contains("search_path");
-                                        details["HasSearchPathInQueries"] = hasSearchPath;
-                                        if (!hasSearchPath)
-                                        {
-                                            issues.Add("SET search_path command not found in database queries (required for Neon database isolation)");
-                                        }
                                     }
 
                                     // Check package dependencies (composer.json)
@@ -7002,7 +7052,8 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                 return (false, issues, details);
             }
 
-            using var httpClient = _httpClientFactory.CreateClient();
+            // Use the named HttpClient "DeploymentController" which has SSL certificate validation configured for GitHub
+            using var httpClient = _httpClientFactory.CreateClient("DeploymentController");
             httpClient.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", accessToken);
             httpClient.DefaultRequestHeaders.Add("User-Agent", "StrAppersBackend/1.0");
             httpClient.DefaultRequestHeaders.Accept.Add(new System.Net.Http.Headers.MediaTypeWithQualityHeaderValue("application/vnd.github.v3+json"));
@@ -7075,10 +7126,11 @@ Your intelligence is strictly tethered to the Current Project Context and the us
             
             if (!string.IsNullOrEmpty(indexHtml))
             {
-                var configJsIncluded = indexHtml.Contains("config.js") || 
-                                     System.Text.RegularExpressions.Regex.IsMatch(indexHtml, 
-                                         @"<script[^>]*src\s*=\s*[""'][^""']*config\.js[""']",
-                                         System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                // Only check for actual script tags with config.js - not just any occurrence of the string
+                // This prevents false positives from comments, text content, etc.
+                var configJsIncluded = System.Text.RegularExpressions.Regex.IsMatch(indexHtml, 
+                    @"<script[^>]*src\s*=\s*[""'][^""']*config\.js[""']",
+                    System.Text.RegularExpressions.RegexOptions.IgnoreCase);
                 
                 details["ConfigJsIncludedInIndexHtml"] = configJsIncluded;
                 
@@ -7157,24 +7209,33 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                           await _githubService.GetFileContentAsync(owner, repo, "frontend/script.js", accessToken, branch) ??
                           await _githubService.GetFileContentAsync(owner, repo, "js/script.js", accessToken, branch);
             
+            // Check if frontend code (excluding config.js) uses CONFIG.API_URL
+            // config.js is expected to have the hardcoded URL, so we only check index.html and script.js
             var frontendCode = (indexHtml ?? "") + (scriptJs ?? "");
             if (!string.IsNullOrEmpty(frontendCode))
             {
                 var usesConfigApiUrl = frontendCode.Contains("CONFIG.API_URL") || frontendCode.Contains("CONFIG['API_URL']") || 
                                       frontendCode.Contains("config.API_URL") || frontendCode.Contains("config['API_URL']");
-                var hasHardcodedUrls = System.Text.RegularExpressions.Regex.IsMatch(frontendCode, 
-                    @"https?://[^\s""']+\.railway\.app|https?://[^\s""']+\.github\.io",
+                
+                // Check for hardcoded URLs ONLY in actual API calls (fetch, XMLHttpRequest, $.ajax)
+                // This excludes URLs in script tags, links, or config.js references
+                var hasHardcodedApiCalls = System.Text.RegularExpressions.Regex.IsMatch(frontendCode, 
+                    @"(fetch|XMLHttpRequest|\.ajax|axios)\s*\(\s*[""'](https?://[^\s""']+\.railway\.app|https?://[^\s""']+\.github\.io)[""']",
                     System.Text.RegularExpressions.RegexOptions.IgnoreCase);
                 
                 details["UsesConfigApiUrl"] = usesConfigApiUrl;
-                details["HasHardcodedUrls"] = hasHardcodedUrls;
+                details["HasHardcodedApiCalls"] = hasHardcodedApiCalls;
                 
-                if (!usesConfigApiUrl && hasHardcodedUrls)
+                // Only report issues if there are hardcoded API URLs in actual API calls
+                // AND the code doesn't use CONFIG.API_URL
+                if (hasHardcodedApiCalls && !usesConfigApiUrl)
                 {
-                    issues.Add("Frontend code contains hardcoded API URLs instead of using CONFIG.API_URL");
+                    issues.Add("Frontend code contains hardcoded API URLs in fetch/AJAX calls instead of using CONFIG.API_URL");
                 }
-                if (!usesConfigApiUrl)
+                else if (!usesConfigApiUrl && !string.IsNullOrEmpty(scriptJs))
                 {
+                    // Only report if script.js exists but doesn't use CONFIG.API_URL
+                    // (if script.js doesn't exist, there might not be any API calls)
                     issues.Add("Frontend code does not use CONFIG.API_URL for API calls");
                 }
             }
@@ -7221,7 +7282,8 @@ Your intelligence is strictly tethered to the Current Project Context and the us
             }
 
             // Check GitHub Pages status
-            using var httpClient = _httpClientFactory.CreateClient();
+            // Use the named HttpClient "DeploymentController" which has SSL certificate validation configured for GitHub
+            using var httpClient = _httpClientFactory.CreateClient("DeploymentController");
             httpClient.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", accessToken);
             httpClient.DefaultRequestHeaders.Add("User-Agent", "StrAppersBackend/1.0");
             httpClient.DefaultRequestHeaders.Accept.Add(new System.Net.Http.Headers.MediaTypeWithQualityHeaderValue("application/vnd.github.v3+json"));

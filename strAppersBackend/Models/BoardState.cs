@@ -120,6 +120,13 @@ namespace strAppersBackend.Models
         public string? BranchUrl { get; set; }
 
         /// <summary>
+        /// GitHub branch name (for validations, webhooks, runtime errors, etc.)
+        /// </summary>
+        [MaxLength(255)]
+        [Column("GithubBranch")]
+        public string? GithubBranch { get; set; }
+
+        /// <summary>
         /// Latest commit ID (set by webhook or API)
         /// </summary>
         [MaxLength(100)]

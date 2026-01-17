@@ -304,6 +304,7 @@ public class BoardsController : ControllerBase
             SprintPlanningResponse? sprintPlanResponse;
             
             // Check if we should skip AI service (for testing)
+            _logger.LogInformation("[TESTING CONFIG] Before AI service check - SkipAIService: {SkipAIService}", _testingConfig.Value.SkipAIService);
             if (_testingConfig.Value.SkipAIService)
             {
                 _logger.LogInformation("Testing mode: Skipping AI service, using fallback sprint plan");
@@ -422,6 +423,7 @@ public class BoardsController : ControllerBase
             string? swaggerUrl = null;
             
             // Check if we should skip Trello API (for testing)
+            _logger.LogInformation("[TESTING CONFIG] Before Trello API check - SkipTrelloApi: {SkipTrelloApi}", _testingConfig.Value.SkipTrelloApi);
             if (_testingConfig.Value.SkipTrelloApi)
             {
                 _logger.LogInformation("Testing mode: Skipping Trello API, generating mock board ID");

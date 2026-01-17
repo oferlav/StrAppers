@@ -766,6 +766,7 @@ public class ApplicationDbContext : DbContext
             entity.Property(e => e.SprintNumber);
             entity.Property(e => e.BranchName).HasMaxLength(255);
             entity.Property(e => e.BranchUrl).HasMaxLength(500);
+            entity.Property(e => e.GithubBranch).HasMaxLength(255);
             entity.Property(e => e.LatestCommitId).HasMaxLength(100);
             entity.Property(e => e.LatestCommitDescription).HasColumnType("text");
             entity.Property(e => e.LatestCommitDate).HasColumnType("timestamp with time zone");
