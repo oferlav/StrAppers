@@ -22,6 +22,7 @@ public interface IAIService
     Task<TranslateTextResponse> TranslateTextToEnglishAsync(string text);
     Task<ProjectCriteriaClassificationResponse> ClassifyProjectCriteriaAsync(string projectTitle, string projectDescription, string? extendedDescription, List<ProjectCriteria> availableCriteria);
     Task<ParsedBuildOutput?> ParseBuildOutputAsync(string buildOutput);
+    Task<string?> GenerateTextResponseAsync(string prompt, string? serviceName = null);
 }
 
 public class AIService : IAIService
@@ -2549,6 +2550,36 @@ Return the JSON response now:";
             return null;
         }
     }
+
+    /// <summary>
+    /// Generates a text response using AI service (OpenAI or Anthropic)
+    /// </summary>
+    public async Task<string?> GenerateTextResponseAsync(string prompt, string? serviceName = null)
+    {
+        try
+        {
+            // Use provided model name, or fall back to default from config
+            var model = !string.IsNullOrWhiteSpace(serviceName) ? serviceName : _aiConfig.Model;
+            
+            _logger.LogInformation("Using AI model: {Model} for text generation", model);
+            var result = await CallOpenAIAsync(prompt, model);
+            
+            if (result.Success)
+            {
+                return result.Content;
+            }
+            else
+            {
+                _logger.LogError("Failed to generate text response: {Error}", result.ErrorMessage);
+                return null;
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error generating text response");
+            return null;
+        }
+    }
 }
 
 // Helper class for parsing modules response
@@ -2676,9 +2707,5 @@ file sealed class TextTranslationResult
 {
     [JsonPropertyName("text")]
     public string? Text { get; set; }
-
-
-    
-
 }
 

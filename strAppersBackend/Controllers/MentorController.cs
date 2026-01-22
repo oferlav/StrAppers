@@ -8,6 +8,7 @@ using System.Text;
 using System.Text.Json;
 using System.IO;
 using System.Net.Http;
+using Npgsql;
 
 namespace strAppersBackend.Controllers
 {
@@ -27,6 +28,8 @@ namespace strAppersBackend.Controllers
         private readonly IHttpClientFactory _httpClientFactory;
         private readonly IAIService _aiService;
         private readonly DeploymentsConfig _deploymentsConfig;
+        private readonly IOptions<TestingConfig> _testingConfig;
+        private readonly IServiceScopeFactory _serviceScopeFactory;
 
         public MentorController(
             ApplicationDbContext context,
@@ -40,7 +43,9 @@ namespace strAppersBackend.Controllers
             IConfiguration configuration,
             IHttpClientFactory httpClientFactory,
             IAIService aiService,
-            IOptions<DeploymentsConfig> deploymentsConfig)
+            IOptions<DeploymentsConfig> deploymentsConfig,
+            IOptions<TestingConfig> testingConfig,
+            IServiceScopeFactory serviceScopeFactory)
         {
             _context = context;
             _logger = logger;
@@ -54,6 +59,8 @@ namespace strAppersBackend.Controllers
             _httpClientFactory = httpClientFactory;
             _aiService = aiService;
             _deploymentsConfig = deploymentsConfig.Value;
+            _testingConfig = testingConfig;
+            _serviceScopeFactory = serviceScopeFactory;
         }
 
         /// <summary>
@@ -1574,6 +1581,58 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                 _logger.LogInformation("Extracted boardId from service name: ServiceName={ServiceName}, BoardId={BoardId}", 
                     serviceName, boardId);
                 
+                // Verify that ProjectBoard exists before trying to insert/update BoardState
+                // This prevents foreign key constraint violations
+                // Note: ProjectBoard should exist regardless of SkipTrelloApi setting
+                var projectBoard = await _context.ProjectBoards
+                    .FirstOrDefaultAsync(pb => pb.Id == boardId);
+                
+                if (projectBoard == null)
+                {
+                    // This is an error - ProjectBoard should exist whether SkipTrelloApi is true or false
+                    // Check for potential timing issues by looking for recently created boards
+                    var recentBoards = await _context.ProjectBoards
+                        .Where(pb => pb.CreatedAt >= DateTime.UtcNow.AddMinutes(-5))
+                        .OrderByDescending(pb => pb.CreatedAt)
+                        .Select(pb => new { pb.Id, pb.CreatedAt })
+                        .Take(10)
+                        .ToListAsync();
+                    
+                    _logger.LogError("ProjectBoard with BoardId {BoardId} does not exist. " +
+                        "This may be a timing issue (webhook arrived before board creation completed) or the board creation failed. " +
+                        "SkipTrelloApi setting: {SkipTrelloApi}. " +
+                        "Recent boards created in last 5 minutes: {RecentBoardCount}. " +
+                        "Recent board IDs: {RecentBoardIds}. " +
+                        "Skipping BoardState update to avoid foreign key constraint violation.", 
+                        boardId, 
+                        _testingConfig.Value.SkipTrelloApi,
+                        recentBoards.Count,
+                        string.Join(", ", recentBoards.Select(b => $"{b.Id} (created: {b.CreatedAt:yyyy-MM-dd HH:mm:ss} UTC)")));
+                    
+                    // Also check if there's a board with similar ID (case sensitivity issue?)
+                    var similarBoards = await _context.ProjectBoards
+                        .Where(pb => pb.Id.ToLower() == boardId.ToLower() || pb.Id.Contains(boardId) || boardId.Contains(pb.Id))
+                        .Select(pb => new { pb.Id, pb.CreatedAt })
+                        .Take(5)
+                        .ToListAsync();
+                    
+                    if (similarBoards.Any())
+                    {
+                        _logger.LogWarning("Found {Count} boards with similar IDs to {BoardId}: {SimilarIds}", 
+                            similarBoards.Count, boardId, string.Join(", ", similarBoards.Select(b => b.Id)));
+                    }
+                    
+                    return Ok(new { Success = true, Message = $"ProjectBoard {boardId} not found, skipping BoardState update" });
+                }
+                
+                // Log ProjectBoard details for timing analysis
+                _logger.LogInformation("ProjectBoard found: BoardId={BoardId}, CreatedAt={CreatedAt}, UpdatedAt={UpdatedAt}, " +
+                    "TimeSinceCreation={TimeSinceCreation} seconds", 
+                    projectBoard.Id, 
+                    projectBoard.CreatedAt, 
+                    projectBoard.UpdatedAt,
+                    (DateTime.UtcNow - projectBoard.CreatedAt).TotalSeconds);
+                
                 // Determine build status from webhook type and details
                 // Handle Railway webhook event types:
                 // - "Deployment.Deployed" = SUCCESS
@@ -1837,21 +1896,25 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                 
                 // Use parameterized SQL for atomic upsert to prevent race conditions
                 // Using FormattableString for safe parameterization
+                // For Railway records, GithubBranch is always NULL, so we use empty string '' as sentinel value
+                // This ensures ON CONFLICT works correctly (NULL != NULL in PostgreSQL, but '' == '')
+                // Railway records should be unique per board (one record per board), so using '' ensures proper conflict detection
+                var railwayGithubBranch = ""; // Use empty string instead of NULL for Railway records
                 FormattableString sql = $@"
                     INSERT INTO ""BoardStates"" (
                         ""BoardId"", ""Source"", ""Webhook"", ""ServiceName"", 
                         ""LastBuildStatus"", ""LastBuildOutput"", ""ErrorMessage"", 
                         ""File"", ""Line"", ""StackTrace"", ""LatestErrorSummary"", ""Timestamp"", 
-                        ""LatestCommitId"", ""LatestCommitDescription"",
+                        ""LatestCommitId"", ""LatestCommitDescription"", ""DevRole"", ""GithubBranch"",
                         ""CreatedAt"", ""UpdatedAt""
                     ) VALUES (
                         {boardId}, {"Railway"}, {true}, {serviceName}, 
                         {buildStatus}, {buildOutput}, {errorMsgValue}, 
                         {errorFileValue}, {errorLineValue}, {errorStackTraceValue}, {latestErrorSummaryValue}, 
-                        {timestamp}, {latestCommitId}, {latestCommitDescription},
+                        {timestamp}, {latestCommitId}, {latestCommitDescription}, {"Backend"}, {railwayGithubBranch},
                         {createdAt}, {updatedAt}
                     )
-                    ON CONFLICT (""BoardId"", ""Source"", ""Webhook"") 
+                    ON CONFLICT (""BoardId"", ""Source"", ""Webhook"", ""GithubBranch"") 
                     DO UPDATE SET
                         ""ServiceName"" = EXCLUDED.""ServiceName"",
                         ""LastBuildStatus"" = EXCLUDED.""LastBuildStatus"",
@@ -1859,6 +1922,7 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                         ""Timestamp"" = EXCLUDED.""Timestamp"",
                         ""LatestCommitId"" = EXCLUDED.""LatestCommitId"",
                         ""LatestCommitDescription"" = EXCLUDED.""LatestCommitDescription"",
+                        ""DevRole"" = EXCLUDED.""DevRole"",
                         ""UpdatedAt"" = EXCLUDED.""UpdatedAt"",
                         ""ErrorMessage"" = CASE 
                             WHEN EXCLUDED.""LastBuildStatus"" = 'FAILED' THEN EXCLUDED.""ErrorMessage""
@@ -1883,8 +1947,12 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                     ";
                 
                 // Log before upsert to help diagnose duplicate issues
+                // Railway records use empty string '' for GithubBranch (not NULL) to ensure ON CONFLICT works
                 var existingState = await _context.BoardStates
-                    .FirstOrDefaultAsync(bs => bs.BoardId == boardId && bs.Source == "Railway" && bs.Webhook == true);
+                    .FirstOrDefaultAsync(bs => bs.BoardId == boardId && 
+                                               bs.Source == "Railway" && 
+                                               bs.Webhook == true &&
+                                               (bs.GithubBranch == "" || bs.GithubBranch == null)); // Check both for backward compatibility
                 
                 if (existingState != null)
                 {
@@ -1900,8 +1968,12 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                 await _context.Database.ExecuteSqlInterpolatedAsync(sql);
                 
                 // Retrieve the updated record for logging
+                // Railway records use empty string '' for GithubBranch (not NULL) to ensure ON CONFLICT works
                 var boardState = await _context.BoardStates
-                    .FirstOrDefaultAsync(bs => bs.BoardId == boardId && bs.Source == "Railway" && bs.Webhook == true);
+                    .FirstOrDefaultAsync(bs => bs.BoardId == boardId && 
+                                               bs.Source == "Railway" && 
+                                               bs.Webhook == true &&
+                                               (bs.GithubBranch == "" || bs.GithubBranch == null)); // Check both for backward compatibility
                 
                 _logger.LogInformation("BoardState upsert completed for BoardId: {BoardId}, Status: {Status}, Deployment: {DeploymentId}", 
                     boardId, buildStatus, deploymentId);
@@ -2092,16 +2164,16 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                         ""BoardId"", ""Source"", ""Webhook"", 
                         ""LastBuildStatus"", ""LastBuildOutput"", ""ErrorMessage"", 
                         ""File"", ""Line"", ""StackTrace"", ""LatestErrorSummary"", ""Timestamp"", 
-                        ""RequestUrl"", ""RequestMethod"",
+                        ""RequestUrl"", ""RequestMethod"", ""GithubBranch"",
                         ""CreatedAt"", ""UpdatedAt""
                     ) VALUES (
                         {request.BoardId}, {source}, {webhook}, 
                         {buildStatus}, {errorOutput}, {request.Message}, 
                         {file}, {line}, {request.StackTrace}, {request.Message}, {timestamp}, 
-                        {request.RequestPath}, {request.RequestMethod},
+                        {request.RequestPath}, {request.RequestMethod}, {(string?)null},
                         {createdAt}, {updatedAt}
                     )
-                    ON CONFLICT (""BoardId"", ""Source"", ""Webhook"") 
+                    ON CONFLICT (""BoardId"", ""Source"", ""Webhook"", ""GithubBranch"") 
                     DO UPDATE SET
                         ""LastBuildStatus"" = EXCLUDED.""LastBuildStatus"",
                         ""LastBuildOutput"" = EXCLUDED.""LastBuildOutput"",
@@ -2240,14 +2312,16 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                         ""BoardId"", ""Source"", ""Webhook"", 
                         ""LastBuildStatus"", ""LastBuildOutput"", ""ErrorMessage"", 
                         ""File"", ""Line"", ""StackTrace"", ""LatestErrorSummary"", ""Timestamp"", 
+                        ""DevRole"", ""GithubBranch"",
                         ""CreatedAt"", ""UpdatedAt""
                     ) VALUES (
                         {request.BoardId}, {source}, {webhook}, 
                         {buildStatus}, {errorOutput}, {errorMessage}, 
                         {request.File}, {request.Line}, {request.Stack}, {latestErrorSummary}, {timestamp}, 
+                        {"Frontend"}, {(string?)null},
                         {createdAt}, {updatedAt}
                     )
-                    ON CONFLICT (""BoardId"", ""Source"", ""Webhook"") 
+                    ON CONFLICT (""BoardId"", ""Source"", ""Webhook"", ""GithubBranch"") 
                     DO UPDATE SET
                         ""LastBuildStatus"" = EXCLUDED.""LastBuildStatus"",
                         ""LastBuildOutput"" = EXCLUDED.""LastBuildOutput"",
@@ -2257,6 +2331,7 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                         ""StackTrace"" = EXCLUDED.""StackTrace"",
                         ""LatestErrorSummary"" = EXCLUDED.""LatestErrorSummary"",
                         ""Timestamp"" = EXCLUDED.""Timestamp"",
+                        ""DevRole"" = EXCLUDED.""DevRole"",
                         ""UpdatedAt"" = EXCLUDED.""UpdatedAt""
                     ";
 
@@ -5776,24 +5851,27 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                 var source = "PR-BackendValidation";
                 var webhook = false;
                 var errorMessage = overallValid ? null : string.Join("; ", issues);
+                var devRole = DetermineDevRole(source, branchName);
 
                 FormattableString sql = $@"
                     INSERT INTO ""BoardStates"" (
                         ""BoardId"", ""Source"", ""Webhook"", ""GithubBranch"",
                         ""LastBuildStatus"", ""LastBuildOutput"", ""ErrorMessage"", ""Timestamp"", 
+                        ""DevRole"",
                         ""CreatedAt"", ""UpdatedAt""
                     ) VALUES (
                         {boardId}, {source}, {webhook}, {branchName},
                         {status}, {output}, {errorMessage}, {timestamp},
+                        {devRole},
                         {createdAt}, {updatedAt}
                     )
-                    ON CONFLICT (""BoardId"", ""Source"", ""Webhook"") 
+                    ON CONFLICT (""BoardId"", ""Source"", ""Webhook"", ""GithubBranch"") 
                     DO UPDATE SET
-                        ""GithubBranch"" = EXCLUDED.""GithubBranch"",
                         ""LastBuildStatus"" = EXCLUDED.""LastBuildStatus"",
                         ""LastBuildOutput"" = EXCLUDED.""LastBuildOutput"",
                         ""ErrorMessage"" = EXCLUDED.""ErrorMessage"",
                         ""Timestamp"" = EXCLUDED.""Timestamp"",
+                        ""DevRole"" = EXCLUDED.""DevRole"",
                         ""UpdatedAt"" = EXCLUDED.""UpdatedAt""
                 ";
 
@@ -5909,24 +5987,27 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                 var source = "PR-FrontendValidation";
                 var webhook = false;
                 var errorMessage = overallValid ? null : string.Join("; ", issues);
+                var devRole = DetermineDevRole(source, branchName);
 
                 FormattableString sql = $@"
                     INSERT INTO ""BoardStates"" (
                         ""BoardId"", ""Source"", ""Webhook"", ""GithubBranch"",
                         ""LastBuildStatus"", ""LastBuildOutput"", ""ErrorMessage"", ""Timestamp"", 
+                        ""DevRole"",
                         ""CreatedAt"", ""UpdatedAt""
                     ) VALUES (
                         {boardId}, {source}, {webhook}, {branchName},
                         {status}, {output}, {errorMessage}, {timestamp},
+                        {devRole},
                         {createdAt}, {updatedAt}
                     )
-                    ON CONFLICT (""BoardId"", ""Source"", ""Webhook"") 
+                    ON CONFLICT (""BoardId"", ""Source"", ""Webhook"", ""GithubBranch"") 
                     DO UPDATE SET
-                        ""GithubBranch"" = EXCLUDED.""GithubBranch"",
                         ""LastBuildStatus"" = EXCLUDED.""LastBuildStatus"",
                         ""LastBuildOutput"" = EXCLUDED.""LastBuildOutput"",
                         ""ErrorMessage"" = EXCLUDED.""ErrorMessage"",
                         ""Timestamp"" = EXCLUDED.""Timestamp"",
+                        ""DevRole"" = EXCLUDED.""DevRole"",
                         ""UpdatedAt"" = EXCLUDED.""UpdatedAt""
                 ";
 
@@ -7126,13 +7207,22 @@ Your intelligence is strictly tethered to the Current Project Context and the us
             
             if (!string.IsNullOrEmpty(indexHtml))
             {
-                // Only check for actual script tags with config.js - not just any occurrence of the string
-                // This prevents false positives from comments, text content, etc.
-                var configJsIncluded = System.Text.RegularExpressions.Regex.IsMatch(indexHtml, 
+                // Check for static script tag with config.js (e.g., <script src="config.js">)
+                var staticScriptTag = System.Text.RegularExpressions.Regex.IsMatch(indexHtml, 
                     @"<script[^>]*src\s*=\s*[""'][^""']*config\.js[""']",
                     System.Text.RegularExpressions.RegexOptions.IgnoreCase);
                 
+                // Check for dynamic script loading (e.g., configScript.src = 'config.js' or .src = "config.js")
+                // This pattern matches JavaScript code that sets the src property to config.js
+                var dynamicScriptLoading = System.Text.RegularExpressions.Regex.IsMatch(indexHtml, 
+                    @"\.src\s*=\s*[""']config\.js[""']",
+                    System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                
+                var configJsIncluded = staticScriptTag || dynamicScriptLoading;
+                
                 details["ConfigJsIncludedInIndexHtml"] = configJsIncluded;
+                details["StaticScriptTag"] = staticScriptTag;
+                details["DynamicScriptLoading"] = dynamicScriptLoading;
                 
                 if (!configJsIncluded)
                 {
@@ -7208,6 +7298,35 @@ Your intelligence is strictly tethered to the Current Project Context and the us
             var scriptJs = await _githubService.GetFileContentAsync(owner, repo, "script.js", accessToken, branch) ??
                           await _githubService.GetFileContentAsync(owner, repo, "frontend/script.js", accessToken, branch) ??
                           await _githubService.GetFileContentAsync(owner, repo, "js/script.js", accessToken, branch);
+            
+            // Check if script.js is referenced in index.html but doesn't exist
+            if (!string.IsNullOrEmpty(indexHtml))
+            {
+                // Check for script tag referencing script.js (various patterns)
+                var scriptJsReferenced = System.Text.RegularExpressions.Regex.IsMatch(indexHtml, 
+                    @"<script[^>]*src\s*=\s*[""'][^""']*script\.js[""']",
+                    System.Text.RegularExpressions.RegexOptions.IgnoreCase) ||
+                    System.Text.RegularExpressions.Regex.IsMatch(indexHtml, 
+                    @"\.src\s*=\s*[""']script\.js[""']",
+                    System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                
+                details["ScriptJsReferencedInIndexHtml"] = scriptJsReferenced;
+                details["ScriptJsExists"] = !string.IsNullOrEmpty(scriptJs);
+                
+                _logger.LogInformation("🔍 [VALIDATION] script.js check - Referenced: {Referenced}, Exists: {Exists}", 
+                    scriptJsReferenced, !string.IsNullOrEmpty(scriptJs));
+                
+                if (scriptJsReferenced && string.IsNullOrEmpty(scriptJs))
+                {
+                    var issue = "script.js is referenced in index.html but the file does not exist in the repository";
+                    issues.Add(issue);
+                    _logger.LogWarning("❌ [VALIDATION] {Issue}", issue);
+                }
+            }
+            else
+            {
+                _logger.LogInformation("🔍 [VALIDATION] script.js check skipped - index.html is empty or not found");
+            }
             
             // Check if frontend code (excluding config.js) uses CONFIG.API_URL
             // config.js is expected to have the hardcoded URL, so we only check index.html and script.js
@@ -7513,6 +7632,2549 @@ Your intelligence is strictly tethered to the Current Project Context and the us
             public string? GitHubResponse { get; set; }
             public string? ErrorMessage { get; set; }
             public int StatusCode { get; set; }
+        }
+
+        /// <summary>
+        /// Request model for code review endpoint
+        /// </summary>
+        public class CodeReviewRequest
+        {
+            public string BoardId { get; set; } = string.Empty;
+            public string GithubBranch { get; set; } = string.Empty;
+            public string? AIServiceName { get; set; } // Model Name from GET /api/Mentor/use/get-models
+        }
+
+        /// <summary>
+        /// Extracts the base source name from a sequenced source (e.g., "Junior-1" -> "Junior", "GitHub-Success-PR-2" -> "GitHub-Success-PR")
+        /// </summary>
+        private string ExtractBaseSource(string source)
+        {
+            // Check if source ends with a sequence pattern like "-1", "-2", etc.
+            var lastDashIndex = source.LastIndexOf('-');
+            if (lastDashIndex > 0 && lastDashIndex < source.Length - 1)
+            {
+                var sequencePart = source.Substring(lastDashIndex + 1);
+                if (int.TryParse(sequencePart, out _))
+                {
+                    // It's a sequence number, return the base source
+                    return source.Substring(0, lastDashIndex);
+                }
+            }
+            // No sequence found, return as-is
+            return source;
+        }
+
+        /// <summary>
+        /// Gets the next sequence number for a given (BoardId, baseSource, GithubBranch) combination
+        /// Returns 1 if no previous records exist, otherwise returns last sequence + 1
+        /// </summary>
+        private async Task<int> GetNextSequenceNumberAsync(string boardId, string baseSource, string githubBranch, string? serviceName = null)
+        {
+            // Get all records with the same BoardId, baseSource (with or without sequence), and GithubBranch
+            // If serviceName is provided, filter by it; otherwise check all records
+            var query = _context.BoardStates
+                .Where(bs => bs.BoardId == boardId && 
+                            bs.GithubBranch == githubBranch);
+            
+            if (!string.IsNullOrEmpty(serviceName))
+            {
+                query = query.Where(bs => bs.ServiceName == serviceName);
+            }
+            
+            var existingRecords = await query.ToListAsync();
+
+            int maxSequence = 0;
+            foreach (var record in existingRecords)
+            {
+                var recordBaseSource = ExtractBaseSource(record.Source);
+                if (recordBaseSource == baseSource)
+                {
+                    // Extract sequence from this record's source
+                    var lastDashIndex = record.Source.LastIndexOf('-');
+                    if (lastDashIndex > 0 && lastDashIndex < record.Source.Length - 1)
+                    {
+                        var sequencePart = record.Source.Substring(lastDashIndex + 1);
+                        if (int.TryParse(sequencePart, out var sequence))
+                        {
+                            maxSequence = Math.Max(maxSequence, sequence);
+                        }
+                    }
+                    else
+                    {
+                        // Record has base source without sequence, treat as sequence 0
+                        maxSequence = Math.Max(maxSequence, 0);
+                    }
+                }
+            }
+
+            return maxSequence + 1;
+        }
+
+        /// <summary>
+        /// Generates a sequenced source name for records
+        /// Format: "{baseSource}-{sequenceNumber}" (e.g., "Junior-1", "GitHub-Success-PR-2", "GitHub-Failed-PR-1")
+        /// </summary>
+        private async Task<string> GetSequencedSourceAsync(string boardId, string baseSource, string githubBranch, string? serviceName = null)
+        {
+            var nextSequence = await GetNextSequenceNumberAsync(boardId, baseSource, githubBranch, serviceName);
+            return $"{baseSource}-{nextSequence}";
+        }
+
+        /// <summary>
+        /// Determines DevRole based on Source and GithubBranch
+        /// Rules:
+        /// - Source="Railway" -> "Backend"
+        /// - Source="GithubPages" -> "Frontend"
+        /// - For other sources: if GithubBranch contains 'B' -> "Backend", otherwise "Frontend"
+        /// </summary>
+        private string? DetermineDevRole(string source, string? githubBranch)
+        {
+            // Railway is always Backend
+            if (source == "Railway")
+            {
+                return "Backend";
+            }
+            
+            // GithubPages is always Frontend
+            if (source == "GithubPages")
+            {
+                return "Frontend";
+            }
+            
+            // For other sources, check GithubBranch
+            if (!string.IsNullOrEmpty(githubBranch))
+            {
+                // If branch name contains 'B' (case-insensitive), it's Backend
+                if (githubBranch.Contains('B', StringComparison.OrdinalIgnoreCase))
+                {
+                    return "Backend";
+                }
+                // Otherwise, it's Frontend
+                return "Frontend";
+            }
+            
+            // If no GithubBranch, return null (will be set later or remain null)
+            return null;
+        }
+
+        /// <summary>
+        /// Performs code review for a branch and logs it to BoardStates
+        /// Matches branch name to Trello card, reviews code, and provides feedback
+        /// </summary>
+        [HttpPost("use/code-review")]
+        public async Task<ActionResult<object>> CodeReview([FromBody] CodeReviewRequest request)
+        {
+            return await CodeReviewInternal(request, "Junior");
+        }
+
+        /// <summary>
+        /// Internal method for code review with explicit source
+        /// </summary>
+        private async Task<ActionResult<object>> CodeReviewInternal(CodeReviewRequest request, string source, bool isWebhook = false)
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace(request.BoardId))
+                {
+                    return BadRequest(new { Success = false, Message = "BoardId is required" });
+                }
+
+                if (string.IsNullOrWhiteSpace(request.GithubBranch))
+                {
+                    return BadRequest(new { Success = false, Message = "GithubBranch is required" });
+                }
+
+                _logger.LogInformation("📝 [CODE REVIEW] Starting code review for BoardId: {BoardId}, Branch: {Branch}, Source: {Source}", 
+                    request.BoardId, request.GithubBranch, source);
+
+                // Deduplication: Check if a recent "GitHub-Success-PR" record was just created (within last 30 seconds)
+                // This prevents duplicate code reviews when both POST /api/Mentor/use/github-pr and webhook process the same PR
+                // We use a 30-second window to catch records created recently, accounting for processing time
+                if (source == "GitHub-Success-PR")
+                {
+                    var recentCutoff = DateTime.UtcNow.AddSeconds(-30);
+                    var recentRecord = await _context.BoardStates
+                        .Where(bs => bs.BoardId == request.BoardId && 
+                                    bs.GithubBranch == request.GithubBranch &&
+                                    bs.ServiceName == "CodeReview" &&
+                                    (bs.Source.StartsWith("GitHub-Success-PR-") || bs.Source == "GitHub-Success-PR"))
+                        .OrderByDescending(bs => bs.CreatedAt)
+                        .FirstOrDefaultAsync();
+                    
+                    if (recentRecord != null && recentRecord.CreatedAt >= recentCutoff)
+                    {
+                        var baseSource = ExtractBaseSource(recentRecord.Source);
+                        if (baseSource == "GitHub-Success-PR")
+                        {
+                            _logger.LogInformation("⏭️ [CODE REVIEW] Skipping duplicate code review - recent record found: Source={Source}, CreatedAt={CreatedAt}, Webhook={Webhook}, Feedback length={FeedbackLength}", 
+                                recentRecord.Source, recentRecord.CreatedAt, recentRecord.Webhook, recentRecord.MentorFeedback?.Length ?? 0);
+                            
+                            // Return the existing feedback
+                            return Ok(new 
+                            { 
+                                Success = true, 
+                                Message = "Code review already completed recently",
+                                Feedback = recentRecord.MentorFeedback ?? "Code review completed successfully.",
+                                Source = recentRecord.Source,
+                                PRStatus = recentRecord.PRStatus
+                            });
+                        }
+                    }
+                }
+
+                // Get board from database
+                var board = await _context.ProjectBoards
+                    .Include(pb => pb.Project)
+                    .FirstOrDefaultAsync(pb => pb.Id == request.BoardId);
+
+                if (board == null)
+                {
+                    return NotFound(new { Success = false, Message = $"Board with ID {request.BoardId} not found" });
+                }
+
+                // Parse branch name to get sprint number and role
+                // Format: "SprintNumber-RoleLetter" (e.g., "2-F" for Sprint 2, Frontend)
+                var branchParts = request.GithubBranch.Split('-');
+                if (branchParts.Length != 2 || !int.TryParse(branchParts[0], out var sprintNumber))
+                {
+                    return BadRequest(new { Success = false, Message = $"Invalid branch name format. Expected format: 'SprintNumber-RoleLetter' (e.g., '2-F')" });
+                }
+
+                var roleLetter = branchParts[1].ToUpper();
+                var cardId = request.GithubBranch; // CardId matches branch name
+
+                // Get Trello card by CardId
+                var trelloCard = await _trelloService.GetCardByCardIdAsync(request.BoardId, cardId);
+                if (trelloCard == null)
+                {
+                    return NotFound(new { Success = false, Message = $"Trello card with CardId '{cardId}' not found" });
+                }
+
+                // Determine if backend or frontend based on role letter
+                var isBackend = roleLetter == "B";
+                var isFrontend = roleLetter == "F";
+                var githubUrl = isBackend ? board.GithubBackendUrl : board.GithubFrontendUrl;
+
+                if (string.IsNullOrEmpty(githubUrl))
+                {
+                    return BadRequest(new { Success = false, Message = $"GitHub {(isBackend ? "backend" : "frontend")} URL not found for board" });
+                }
+
+                // Extract owner and repo from GitHub URL
+                var uri = new Uri(githubUrl);
+                var pathParts = uri.AbsolutePath.TrimStart('/').Split('/');
+                if (pathParts.Length < 2)
+                {
+                    return BadRequest(new { Success = false, Message = $"Invalid GitHub URL format: {githubUrl}" });
+                }
+
+                var owner = pathParts[0];
+                var repo = pathParts[1];
+                var accessToken = _configuration["GitHub:AccessToken"];
+
+                if (string.IsNullOrEmpty(accessToken))
+                {
+                    return StatusCode(500, new { Success = false, Message = "GitHub access token is not configured" });
+                }
+
+                // Diff-Only Review: Use GitHub Compare API to get only the code changes (patch/diff)
+                // Compare main...{branch} to get only the changes, not the whole repo
+                _logger.LogInformation("📊 [CODE REVIEW] Getting diff using Compare API: main...{Branch}", request.GithubBranch);
+                var commitDiff = await _githubService.GetCompareDiffAsync(owner, repo, "main", request.GithubBranch, accessToken);
+                
+                if (commitDiff == null || commitDiff.FileChanges == null || !commitDiff.FileChanges.Any())
+                {
+                    _logger.LogWarning("⚠️ [CODE REVIEW] No code changes found in diff for branch {Branch}", request.GithubBranch);
+                    return BadRequest(new { Success = false, Message = "No code changes found in branch. Please make sure you have committed and pushed changes." });
+                }
+
+                // Check if there are actual code changes (additions or deletions)
+                // Require at least 3 lines of changes to filter out trivial changes (whitespace, single newlines, etc.)
+                var hasActualCodeChanges = (commitDiff.TotalAdditions + commitDiff.TotalDeletions) >= 3;
+                
+                // Also check if any file has meaningful patch content (not just whitespace)
+                var hasMeaningfulChanges = false;
+                foreach (var fileChange in commitDiff.FileChanges)
+                {
+                    // Check if patch contains actual code (not just whitespace, newlines, or comments)
+                    if (!string.IsNullOrEmpty(fileChange.Patch))
+                    {
+                        // Count non-whitespace lines in the patch (lines starting with + or - that have actual content)
+                        var patchLines = fileChange.Patch.Split('\n', StringSplitOptions.RemoveEmptyEntries);
+                        var meaningfulLines = patchLines.Count(line => 
+                        {
+                            var trimmed = line.Trim();
+                            // Skip lines that are just diff markers, whitespace, or pure whitespace changes
+                            if (trimmed.Length < 3) return false;
+                            if (trimmed.StartsWith("+++") || trimmed.StartsWith("---") || trimmed.StartsWith("@@")) return false;
+                            // Count lines that start with + or - and have actual content (not just whitespace)
+                            if ((trimmed.StartsWith("+") || trimmed.StartsWith("-")) && trimmed.Length > 2)
+                            {
+                                var content = trimmed.Substring(1).Trim();
+                                // Must have at least 2 non-whitespace characters to be meaningful
+                                return content.Length >= 2 && !string.IsNullOrWhiteSpace(content);
+                            }
+                            return false;
+                        });
+                        
+                        if (meaningfulLines >= 2) // At least 2 meaningful lines of code changes
+                        {
+                            hasMeaningfulChanges = true;
+                            break;
+                        }
+                    }
+                    // If no patch but has additions/deletions, check if it's significant
+                    else if ((fileChange.Additions + fileChange.Deletions) >= 3)
+                    {
+                        hasMeaningfulChanges = true;
+                        break;
+                    }
+                }
+                
+                if (!hasActualCodeChanges && !hasMeaningfulChanges)
+                {
+                    _logger.LogWarning("⚠️ [CODE REVIEW] Diff has no meaningful code changes (only trivial changes like whitespace) for branch {Branch}. Total: {Additions} additions, {Deletions} deletions", 
+                        request.GithubBranch, commitDiff.TotalAdditions, commitDiff.TotalDeletions);
+                    return BadRequest(new { Success = false, Message = "No meaningful code changes found in diff. The branch may only contain trivial changes (whitespace, formatting) or metadata changes. Please make actual code changes before requesting review." });
+                }
+
+                _logger.LogInformation("✅ [CODE REVIEW] Found {FileCount} changed files in diff with {Additions} additions, {Deletions} deletions", 
+                    commitDiff.FileChanges.Count, commitDiff.TotalAdditions, commitDiff.TotalDeletions);
+                
+                // Build diff content from file changes (patch/diff format)
+                var diffContent = new StringBuilder();
+                foreach (var fileChange in commitDiff.FileChanges)
+                {
+                    diffContent.AppendLine($"=== {fileChange.FilePath} ({fileChange.Status}) ===");
+                    if (!string.IsNullOrEmpty(fileChange.Patch))
+                    {
+                        diffContent.AppendLine(fileChange.Patch);
+                    }
+                    else
+                    {
+                        diffContent.AppendLine($"[File {fileChange.Status}: +{fileChange.Additions} -{fileChange.Deletions} lines]");
+                    }
+                    diffContent.AppendLine();
+                }
+
+                // Extract card information
+                var cardName = trelloCard.Value.TryGetProperty("name", out var nameProp) ? nameProp.GetString() : "";
+                var cardDesc = trelloCard.Value.TryGetProperty("desc", out var descProp) ? descProp.GetString() : "";
+                
+                // Get checklist items
+                var checklistItems = new List<string>();
+                if (trelloCard.Value.TryGetProperty("idChecklists", out var checklistIdsProp))
+                {
+                    // Note: Would need to fetch checklist details separately if needed
+                }
+
+                // Prepare AI prompt for code review
+                // Align the diff against the actual Trello card requirements
+                var codeReviewPrompt = $@"Please review the following code changes (diff) for a Trello card task.
+
+Trello Card Information:
+- Card ID: {cardId}
+- Card Name: {cardName}
+- Description: {cardDesc}
+- Sprint: {sprintNumber}
+- Role: {(isBackend ? "Backend Developer" : "Frontend Developer")}
+
+Code Changes (Diff):
+{diffContent}
+
+Please provide:
+1. General code review (code quality, best practices, potential bugs)
+2. Alignment check: Does the code changes align with the Trello card requirements? What's missing or incorrect?
+3. Detailed feedback and suggestions for improvements
+
+Format your response as a clear, actionable feedback that can be provided to the developer.
+Focus on the actual changes made (the diff), not the entire codebase.";
+
+                // Look up AI model from database if AIServiceName is provided
+                string? modelName = null;
+                if (!string.IsNullOrWhiteSpace(request.AIServiceName))
+                {
+                    var aiModel = await _context.AIModels
+                        .FirstOrDefaultAsync(m => m.Name == request.AIServiceName && m.IsActive);
+                    
+                    if (aiModel == null)
+                    {
+                        _logger.LogWarning("⚠️ [CODE REVIEW] AI model '{ModelName}' not found or not active, using default", request.AIServiceName);
+                    }
+                    else
+                    {
+                        modelName = aiModel.Name;
+                        _logger.LogInformation("✅ [CODE REVIEW] Using AI model: {ModelName} (Provider: {Provider})", aiModel.Name, aiModel.Provider);
+                    }
+                }
+
+                // Call AI service for code review
+                var feedback = await _aiService.GenerateTextResponseAsync(codeReviewPrompt, modelName);
+
+                if (string.IsNullOrEmpty(feedback))
+                {
+                    return StatusCode(500, new { Success = false, Message = "Failed to generate code review feedback" });
+                }
+
+                // Record in BoardStates (APPEND-ONLY - preserve history)
+                // For CodeReview records, we use sequenced sources (e.g., "Junior-1", "GitHub-Success-PR-2")
+                // to allow multiple records while maintaining uniqueness
+                // For GitHub-Success-PR: Replace any existing GitHub-Failed-PR records for the same (BoardId, GithubBranch)
+                try
+                {
+                    // Get the base source (without sequence)
+                    var baseSource = ExtractBaseSource(source);
+                    
+                    // If this is a successful PR validation, delete any existing GitHub-Failed-PR records
+                    // (regardless of ServiceName - could be "CodeReview", "Github", or "Validator")
+                    if (baseSource == "GitHub-Success-PR")
+                    {
+                        var failedRecords = await _context.BoardStates
+                            .Where(bs => bs.BoardId == request.BoardId && 
+                                        bs.GithubBranch == request.GithubBranch &&
+                                        (bs.Source.StartsWith("GitHub-Failed-PR-") || bs.Source == "GitHub-Failed-PR"))
+                            .ToListAsync();
+                        
+                        if (failedRecords.Any())
+                        {
+                            foreach (var failedRecord in failedRecords)
+                            {
+                                var failedBaseSource = ExtractBaseSource(failedRecord.Source);
+                                if (failedBaseSource == "GitHub-Failed-PR")
+                                {
+                                    _context.BoardStates.Remove(failedRecord);
+                                    _logger.LogInformation("ℹ️ [CODE REVIEW] Removing failed PR record (Source: {Source}, ServiceName: {ServiceName}) to be replaced by success record", 
+                                        failedRecord.Source, failedRecord.ServiceName);
+                                }
+                            }
+                            await _context.SaveChangesAsync();
+                        }
+                    }
+                    
+                    // Generate sequenced source (e.g., "Junior-1", "GitHub-Success-PR-2")
+                    // Retry logic to handle race conditions when multiple requests come in concurrently
+                    const int maxRetries = 5;
+                    bool recordCreated = false;
+                    string? sequencedSource = null;
+                    int lastAttemptedSequence = 0;
+                    
+                    for (int attempt = 1; attempt <= maxRetries; attempt++)
+                    {
+                        try
+                        {
+                            // On retry, query fresh from database to see what actually exists
+                            if (attempt > 1)
+                            {
+                                // Clear change tracker and wait a bit for other transactions to commit
+                                _context.ChangeTracker.Clear();
+                                await Task.Delay(200 * attempt); // Longer delay on later attempts
+                                
+                                // Query database fresh to see what records actually exist now
+                                var existingRecords = await _context.BoardStates
+                                    .Where(bs => bs.BoardId == request.BoardId && 
+                                               bs.GithubBranch == request.GithubBranch &&
+                                               bs.ServiceName == "CodeReview")
+                                    .ToListAsync();
+                                
+                                // Find max sequence from existing records
+                                int maxSequence = 0;
+                                foreach (var record in existingRecords)
+                                {
+                                    var recordBaseSource = ExtractBaseSource(record.Source);
+                                    if (recordBaseSource == baseSource)
+                                    {
+                                        var lastDashIndex = record.Source.LastIndexOf('-');
+                                        if (lastDashIndex > 0 && lastDashIndex < record.Source.Length - 1)
+                                        {
+                                            var sequencePart = record.Source.Substring(lastDashIndex + 1);
+                                            if (int.TryParse(sequencePart, out var sequence))
+                                            {
+                                                maxSequence = Math.Max(maxSequence, sequence);
+                                            }
+                                        }
+                                        else
+                                        {
+                                            maxSequence = Math.Max(maxSequence, 0);
+                                        }
+                                    }
+                                }
+                                
+                                // Use max + 1, but ensure it's higher than what we tried before
+                                // Add attempt number to be more aggressive and avoid conflicts
+                                lastAttemptedSequence = Math.Max(maxSequence + 1, lastAttemptedSequence + attempt);
+                                sequencedSource = $"{baseSource}-{lastAttemptedSequence}";
+                                
+                                _logger.LogInformation("🔄 [CODE REVIEW] Retry attempt {Attempt}/{MaxRetries}: Found max sequence {MaxSequence}, using {Source}", 
+                                    attempt, maxRetries, maxSequence, sequencedSource);
+                            }
+                            else
+                            {
+                                // First attempt - use normal sequenced source generation
+                                sequencedSource = await GetSequencedSourceAsync(request.BoardId, baseSource, request.GithubBranch, "CodeReview");
+                                var lastDashIndex = sequencedSource.LastIndexOf('-');
+                                if (lastDashIndex > 0 && int.TryParse(sequencedSource.Substring(lastDashIndex + 1), out var seq))
+                                {
+                                    lastAttemptedSequence = seq;
+                                }
+                            }
+                            
+                            // Double-check that a record with this exact source and webhook flag doesn't already exist
+                            var existingRecord = await _context.BoardStates
+                                .FirstOrDefaultAsync(bs => bs.BoardId == request.BoardId && 
+                                                           bs.Source == sequencedSource && 
+                                                           bs.Webhook == isWebhook);
+                            
+                            if (existingRecord != null)
+                            {
+                                _logger.LogWarning("⚠️ [CODE REVIEW] Record with Source={Source} already exists, skipping creation on attempt {Attempt}", 
+                                    sequencedSource, attempt);
+                                
+                                // If it's a retry, continue to next attempt; if first attempt, this shouldn't happen
+                                if (attempt < maxRetries)
+                                {
+                                    continue; // Will retry with new sequence
+                                }
+                                else
+                                {
+                                    _logger.LogError("❌ [CODE REVIEW] Record already exists and max retries reached for BoardId: {BoardId}, Source: {Source}", 
+                                        request.BoardId, sequencedSource);
+                                    break;
+                                }
+                            }
+                            
+                            var boardState = new BoardState
+                            {
+                                BoardId = request.BoardId,
+                                Source = sequencedSource,
+                                Webhook = isWebhook, // Set based on whether this is from webhook or platform-triggered
+                                ServiceName = "CodeReview",
+                                GithubBranch = request.GithubBranch,
+                                MentorFeedback = feedback,
+                                PRStatus = baseSource == "GitHub-Success-PR" ? "Approved" : null,
+                                BranchStatus = null, // BranchStatus should remain null for GitHub-Success-PR records
+                                LastBuildStatus = baseSource == "GitHub-Success-PR" ? "SUCCESS" : null,
+                                DevRole = DetermineDevRole(baseSource, request.GithubBranch),
+                                CreatedAt = DateTime.UtcNow,
+                                UpdatedAt = DateTime.UtcNow
+                            };
+
+                            _context.BoardStates.Add(boardState);
+                            await _context.SaveChangesAsync();
+                            
+                            recordCreated = true;
+                            _logger.LogInformation("✅ [CODE REVIEW] Successfully recorded code review for BoardId: {BoardId}, Branch: {Branch}, Source: {Source}, PRStatus: {PRStatus}, DevRole: {DevRole}, Webhook: {Webhook}", 
+                                request.BoardId, request.GithubBranch, sequencedSource, boardState.PRStatus, boardState.DevRole, boardState.Webhook);
+                            break;
+                        }
+                        catch (DbUpdateException dbEx) when (dbEx.InnerException is Npgsql.PostgresException pgEx && pgEx.SqlState == "23505")
+                        {
+                            // Duplicate key error - another request created a record with the same source
+                            // Retry with a new sequence number
+                            if (attempt < maxRetries)
+                            {
+                                _logger.LogWarning("⚠️ [CODE REVIEW] Duplicate key detected on attempt {Attempt}/{MaxRetries} for BoardId: {BoardId}, Source: {Source}, Webhook: {Webhook}. Retrying with new sequence...", 
+                                    attempt, maxRetries, request.BoardId, sequencedSource, isWebhook);
+                                
+                                // Will retry with fresh query in next iteration
+                            }
+                            else
+                            {
+                                _logger.LogError(dbEx, "❌ [CODE REVIEW] Failed to create record after {MaxRetries} attempts due to duplicate key for BoardId: {BoardId}, Source: {Source}, Webhook: {Webhook}. Constraint: {Constraint}", 
+                                    maxRetries, request.BoardId, sequencedSource, isWebhook, pgEx.ConstraintName ?? "unknown");
+                                // Don't throw - continue execution even if record creation fails
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            // Catch any other exceptions during record creation
+                            _logger.LogError(ex, "❌ [CODE REVIEW] Unexpected error creating record on attempt {Attempt}/{MaxRetries} for BoardId: {BoardId}, Source: {Source}, Webhook: {Webhook}: {Error}", 
+                                attempt, maxRetries, request.BoardId, sequencedSource, isWebhook, ex.Message);
+                            
+                            if (attempt < maxRetries)
+                            {
+                                // Retry on next attempt
+                                continue;
+                            }
+                            else
+                            {
+                                // Max retries reached
+                                break;
+                            }
+                        }
+                    }
+                    
+                    if (!recordCreated)
+                    {
+                        _logger.LogError("❌ [CODE REVIEW] Failed to create record after {MaxRetries} retries for BoardId: {BoardId}. Code review completed but record was not saved.", maxRetries, request.BoardId);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "❌ [CODE REVIEW] Failed to record code review in BoardStates for BoardId: {BoardId}", request.BoardId);
+                    // Continue even if recording fails
+                }
+
+                return Ok(new
+                {
+                    Success = true,
+                    BoardId = request.BoardId,
+                    Branch = request.GithubBranch,
+                    CardId = cardId,
+                    CardName = cardName,
+                    Feedback = feedback,
+                    Timestamp = DateTime.UtcNow
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "❌ [CODE REVIEW] Error performing code review for BoardId: {BoardId}", request.BoardId);
+                return StatusCode(500, new { Success = false, Message = $"Error performing code review: {ex.Message}" });
+            }
+        }
+
+        /// <summary>
+        /// GitHub webhook endpoint - receives and processes GitHub events
+        /// </summary>
+        [HttpPost("github-webhook")]
+        public async Task<IActionResult> GitHubWebhook()
+        {
+            try
+            {
+                // Read raw request body for HMAC verification
+                Request.EnableBuffering();
+                var bodyStream = new MemoryStream();
+                await Request.Body.CopyToAsync(bodyStream);
+                bodyStream.Position = 0;
+                var rawBody = await new StreamReader(bodyStream).ReadToEndAsync();
+                Request.Body.Position = 0;
+
+                // Verify HMAC signature
+                var webhookSecret = _configuration["GitHub:WebhookSecret"];
+                if (string.IsNullOrEmpty(webhookSecret))
+                {
+                    _logger.LogError("❌ [WEBHOOK] WebhookSecret is not configured");
+                    return Unauthorized(new { Success = false, Message = "Webhook secret not configured" });
+                }
+
+                var signatureHeader = Request.Headers["X-Hub-Signature-256"].FirstOrDefault();
+                if (string.IsNullOrEmpty(signatureHeader))
+                {
+                    _logger.LogWarning("⚠️ [WEBHOOK] Missing X-Hub-Signature-256 header");
+                    return Unauthorized(new { Success = false, Message = "Missing signature header" });
+                }
+
+                // Compute HMAC SHA256
+                using (var hmac = new System.Security.Cryptography.HMACSHA256(Encoding.UTF8.GetBytes(webhookSecret)))
+                {
+                    var hashBytes = hmac.ComputeHash(Encoding.UTF8.GetBytes(rawBody));
+                    var computedHash = "sha256=" + BitConverter.ToString(hashBytes).Replace("-", "").ToLower();
+
+                    if (signatureHeader != computedHash)
+                    {
+                        _logger.LogWarning("⚠️ [WEBHOOK] HMAC signature verification failed");
+                        return Unauthorized(new { Success = false, Message = "Invalid signature" });
+                    }
+                }
+
+                _logger.LogInformation("✅ [WEBHOOK] HMAC signature verified");
+
+                // Parse webhook payload
+                var payload = JsonSerializer.Deserialize<JsonElement>(rawBody);
+                var eventType = Request.Headers["X-GitHub-Event"].FirstOrDefault() ?? "unknown";
+                var deliveryId = Request.Headers["X-GitHub-Delivery"].FirstOrDefault() ?? "unknown";
+
+                _logger.LogInformation("📥 [WEBHOOK] Received GitHub event: {EventType}, Delivery: {DeliveryId}", eventType, deliveryId);
+
+                // Extract repository information
+                string? owner = null;
+                string? repo = null;
+                string? boardId = null;
+
+                if (payload.TryGetProperty("repository", out var repoProp))
+                {
+                    if (repoProp.TryGetProperty("owner", out var ownerProp))
+                    {
+                        owner = ownerProp.TryGetProperty("login", out var loginProp) ? loginProp.GetString() : null;
+                    }
+                    repo = repoProp.TryGetProperty("name", out var nameProp) ? nameProp.GetString() : null;
+                }
+
+                // Try to find board by GitHub URL
+                if (!string.IsNullOrEmpty(owner) && !string.IsNullOrEmpty(repo))
+                {
+                    var githubUrl = $"https://github.com/{owner}/{repo}";
+                    var board = await _context.ProjectBoards
+                        .FirstOrDefaultAsync(pb => pb.GithubBackendUrl == githubUrl || pb.GithubFrontendUrl == githubUrl);
+                    
+                    if (board != null)
+                    {
+                        boardId = board.Id;
+                        _logger.LogInformation("Found ProjectBoard: BoardId={BoardId}, CreatedAt={CreatedAt}, TimeSinceCreation={TimeSinceCreation} seconds", 
+                            board.Id, board.CreatedAt, (DateTime.UtcNow - board.CreatedAt).TotalSeconds);
+                    }
+                    else
+                    {
+                        // Check for potential timing issues
+                        var recentBoards = await _context.ProjectBoards
+                            .Where(pb => pb.CreatedAt >= DateTime.UtcNow.AddMinutes(-5))
+                            .OrderByDescending(pb => pb.CreatedAt)
+                            .Select(pb => new { pb.Id, pb.GithubBackendUrl, pb.GithubFrontendUrl, pb.CreatedAt })
+                            .Take(10)
+                            .ToListAsync();
+                        
+                        _logger.LogWarning("ProjectBoard not found for GitHub URL: {GithubUrl}. " +
+                            "Recent boards created in last 5 minutes: {RecentBoardCount}. " +
+                            "Recent board URLs: {RecentBoardUrls}", 
+                            githubUrl,
+                            recentBoards.Count,
+                            string.Join(", ", recentBoards.Select(b => $"Backend: {b.GithubBackendUrl}, Frontend: {b.GithubFrontendUrl}")));
+                    }
+                }
+
+                // Verify ProjectBoard exists before creating BoardState
+                if (string.IsNullOrEmpty(boardId))
+                {
+                    _logger.LogWarning("BoardId is null or empty, cannot create BoardState. Skipping webhook recording.");
+                    return Ok(new { Success = true, Message = "Webhook received but BoardId not found, skipping BoardState update" });
+                }
+
+                // Verify ProjectBoard exists in database to prevent FK constraint violation
+                var projectBoardExists = await _context.ProjectBoards
+                    .AnyAsync(pb => pb.Id == boardId);
+                
+                if (!projectBoardExists)
+                {
+                    var recentBoards = await _context.ProjectBoards
+                        .Where(pb => pb.CreatedAt >= DateTime.UtcNow.AddMinutes(-5))
+                        .OrderByDescending(pb => pb.CreatedAt)
+                        .Select(pb => new { pb.Id, pb.CreatedAt })
+                        .Take(10)
+                        .ToListAsync();
+                    
+                    _logger.LogError("ProjectBoard with BoardId {BoardId} does not exist. " +
+                        "This may be a timing issue (webhook arrived before board creation completed) or the board creation failed. " +
+                        "Recent boards created in last 5 minutes: {RecentBoardCount}. " +
+                        "Recent board IDs: {RecentBoardIds}. " +
+                        "Skipping BoardState update to avoid foreign key constraint violation.", 
+                        boardId,
+                        recentBoards.Count,
+                        string.Join(", ", recentBoards.Select(b => $"{b.Id} (created: {b.CreatedAt:yyyy-MM-dd HH:mm:ss} UTC)")));
+                    
+                    return Ok(new { Success = true, Message = $"ProjectBoard {boardId} not found, skipping BoardState update" });
+                }
+
+                // Record webhook event in BoardStates (non-replaceable, always append)
+                try
+                {
+                        var boardState = new BoardState
+                        {
+                            BoardId = boardId,
+                            Source = "GitHub",
+                            Webhook = true,
+                            ServiceName = eventType,
+                            CreatedAt = DateTime.UtcNow,
+                            UpdatedAt = DateTime.UtcNow
+                        };
+
+                    // Extract additional information based on event type
+                    if (eventType == "pull_request")
+                    {
+                        if (payload.TryGetProperty("action", out var actionProp))
+                        {
+                            var action = actionProp.GetString();
+                            boardState.LatestEvent = $"pull_request_{action}";
+
+                            // Extract PR information for ALL actions (opened, synchronize, reopened, closed, etc.)
+                            if (payload.TryGetProperty("pull_request", out var prProp))
+                            {
+                                string? headRef = null;
+                                string? headSha = null;
+                                int? issueNumber = null;
+                                
+                                // Extract branch and SHA for all actions
+                                if (prProp.TryGetProperty("head", out var headProp))
+                                {
+                                    if (headProp.TryGetProperty("ref", out var refProp))
+                                    {
+                                        headRef = refProp.GetString();
+                                        boardState.GithubBranch = headRef;
+                                        boardState.DevRole = DetermineDevRole("GitHub", headRef);
+                                    }
+                                    if (headProp.TryGetProperty("sha", out var shaProp))
+                                    {
+                                        headSha = shaProp.GetString();
+                                        boardState.LatestCommitId = headSha;
+                                    }
+                                }
+                                
+                                if (prProp.TryGetProperty("number", out var numberProp))
+                                {
+                                    issueNumber = numberProp.GetInt32();
+                                    boardState.LatestEvent = $"pull_request_{action}_#{issueNumber}";
+                                    _logger.LogInformation("📥 [WEBHOOK] PR {Action}: Issue #{IssueNumber}, Branch: {Branch}, SHA: {Sha}", 
+                                        action, issueNumber, headRef, headSha);
+                                }
+
+                                // Handle "reopened" action - set PRStatus and update GitHub-Merge record
+                                if (action == "reopened")
+                                {
+                                    boardState.PRStatus = "Re-opened";
+                                    
+                                    // Update existing "GitHub-Merge" record if it exists
+                                    if (!string.IsNullOrEmpty(headRef) && !string.IsNullOrEmpty(boardId))
+                                    {
+                                        try
+                                        {
+                                            var existingMergeRecord = await _context.BoardStates
+                                                .FirstOrDefaultAsync(bs => bs.BoardId == boardId && 
+                                                                           bs.Source == "GitHub-Merge" && 
+                                                                           bs.GithubBranch == headRef);
+                                            
+                                            if (existingMergeRecord != null)
+                                            {
+                                                existingMergeRecord.PRStatus = "Re-opened";
+                                                existingMergeRecord.BranchStatus = "Un-Merged";
+                                                existingMergeRecord.UpdatedAt = DateTime.UtcNow;
+                                                await _context.SaveChangesAsync();
+                                                _logger.LogInformation("✅ [WEBHOOK] Updated GitHub-Merge record to Re-opened for PR #{IssueNumber}, Branch: {Branch}", issueNumber, headRef);
+                                            }
+                                        }
+                                        catch (Exception mergeUpdateEx)
+                                        {
+                                            _logger.LogWarning(mergeUpdateEx, "⚠️ [WEBHOOK] Failed to update GitHub-Merge record for PR #{IssueNumber} (non-critical)", issueNumber);
+                                        }
+                                    }
+                                }
+
+                                if (action == "opened" || action == "synchronize" || action == "reopened")
+                                {
+                                    // When PR is opened, update existing "GitHub-Merge" record if it exists
+                                    if (action == "opened" && !string.IsNullOrEmpty(headRef) && !string.IsNullOrEmpty(boardId))
+                                    {
+                                        try
+                                        {
+                                            var existingMergeRecord = await _context.BoardStates
+                                                .FirstOrDefaultAsync(bs => bs.BoardId == boardId && 
+                                                                           bs.Source == "GitHub-Merge" && 
+                                                                           bs.GithubBranch == headRef);
+                                            
+                                            if (existingMergeRecord != null)
+                                            {
+                                                existingMergeRecord.PRStatus = "Re-opened";
+                                                existingMergeRecord.BranchStatus = "Un-Merged";
+                                                existingMergeRecord.UpdatedAt = DateTime.UtcNow;
+                                                await _context.SaveChangesAsync();
+                                                _logger.LogInformation("✅ [WEBHOOK] Updated GitHub-Merge record to Re-opened for PR #{IssueNumber}, Branch: {Branch}", issueNumber, headRef);
+                                            }
+                                        }
+                                        catch (Exception mergeUpdateEx)
+                                        {
+                                            _logger.LogWarning(mergeUpdateEx, "⚠️ [WEBHOOK] Failed to update GitHub-Merge record for PR #{IssueNumber} (non-critical)", issueNumber);
+                                        }
+                                    }
+                                    
+                                    // Identify if repo is Backend or Frontend based on name
+                                    var isBackend = repo?.StartsWith("backend_") ?? false;
+                                    
+                                    // Deduplication: Check if validation is already in progress or recently completed
+                                    // This prevents duplicate processing when POST /api/Mentor/use/github-pr creates a PR and triggers this webhook
+                                    // Strategy: Check both database records AND GitHub commit status to catch in-progress validations
+                                    bool shouldSkipValidation = false;
+                                    if ((action == "opened" || action == "reopened") && !string.IsNullOrEmpty(boardId) && !string.IsNullOrEmpty(headRef) && !string.IsNullOrEmpty(headSha) && !string.IsNullOrEmpty(owner) && !string.IsNullOrEmpty(repo))
+                                    {
+                                        // Check 1: Look for recent "GitHub-Success-PR" records (within last 30 seconds)
+                                        // This catches cases where POST endpoint already completed
+                                        var recentCutoff = DateTime.UtcNow.AddSeconds(-30);
+                                        var recentRecord = await _context.BoardStates
+                                            .Where(bs => bs.BoardId == boardId && 
+                                                        bs.GithubBranch == headRef &&
+                                                        bs.ServiceName == "CodeReview" &&
+                                                        (bs.Source.StartsWith("GitHub-Success-PR-") || bs.Source == "GitHub-Success-PR"))
+                                            .OrderByDescending(bs => bs.CreatedAt)
+                                            .FirstOrDefaultAsync();
+                                        
+                                        if (recentRecord != null && recentRecord.CreatedAt >= recentCutoff)
+                                        {
+                                            var baseSource = ExtractBaseSource(recentRecord.Source);
+                                            if (baseSource == "GitHub-Success-PR")
+                                            {
+                                                shouldSkipValidation = true;
+                                                _logger.LogInformation("⏭️ [WEBHOOK] Skipping validation for PR #{IssueNumber} - recent GitHub-Success-PR record found (likely created by POST endpoint): Source={Source}, CreatedAt={CreatedAt}, Webhook={Webhook}", 
+                                                    issueNumber, recentRecord.Source, recentRecord.CreatedAt, recentRecord.Webhook);
+                                            }
+                                        }
+                                        
+                                        // Check 2: If no record found, check GitHub commit status
+                                        // Skip when: "pending" (POST is processing), "success" (already passed), or "failure" (already failed)
+                                        // This prevents duplicate validation when POST creates PR then fails (e.g. Trello card not found) and webhook arrives
+                                        if (!shouldSkipValidation)
+                                        {
+                                            try
+                                            {
+                                                var validationContext = _configuration["GitHub:ValidationContext"] ?? "Mentor-Validation";
+                                                var accessToken = _configuration["GitHub:AccessToken"];
+                                                var commitStatus = await _githubService.GetCommitStatusAsync(owner, repo, headSha, validationContext, accessToken);
+                                                
+                                                if (commitStatus != null)
+                                                {
+                                                    var state = commitStatus.State ?? "";
+                                                    if (state == "pending")
+                                                    {
+                                                        shouldSkipValidation = true;
+                                                        _logger.LogInformation("⏭️ [WEBHOOK] Skipping validation for PR #{IssueNumber} - GitHub commit status is 'pending' (validation in progress from POST endpoint)", issueNumber);
+                                                    }
+                                                    else if (state == "success" || state == "failure")
+                                                    {
+                                                        shouldSkipValidation = true;
+                                                        _logger.LogInformation("⏭️ [WEBHOOK] Skipping validation for PR #{IssueNumber} - GitHub commit status is '{State}' (validation already completed by POST endpoint)", issueNumber, state);
+                                                    }
+                                                }
+                                            }
+                                            catch (Exception statusEx)
+                                            {
+                                                _logger.LogWarning(statusEx, "⚠️ [WEBHOOK] Failed to check commit status for deduplication (non-critical), proceeding with validation");
+                                                // Continue - if status check fails, proceed with validation to be safe
+                                            }
+                                        }
+                                    }
+                                    
+                                    // Call shared validation service (only if not skipped)
+                                    if (shouldSkipValidation)
+                                    {
+                                        // Validation was skipped due to deduplication - this is expected and correct
+                                        _logger.LogInformation("ℹ️ [WEBHOOK] Validation skipped for PR #{IssueNumber} (deduplication)", issueNumber);
+                                    }
+                                    else if (!string.IsNullOrEmpty(headSha) && !string.IsNullOrEmpty(repo) && !string.IsNullOrEmpty(boardId) && !string.IsNullOrEmpty(headRef))
+                                    {
+                                        _logger.LogInformation("📥 [WEBHOOK] Triggering shared validation service for PR #{IssueNumber}: Repo={Repo}, SHA={Sha}, Branch={Branch}, IsBackend={IsBackend}", 
+                                            issueNumber, repo, headSha, headRef, isBackend);
+                                        
+                                        // Create a background task with its own service scope to avoid DbContext disposal issues
+                                        // Capture variables before the background task
+                                        var capturedBoardId = boardId;
+                                        var capturedHeadRef = headRef;
+                                        var capturedHeadSha = headSha;
+                                        var capturedRepo = repo;
+                                        var capturedIsBackend = isBackend;
+                                        var capturedIssueNumber = issueNumber;
+                                        
+                                        _ = Task.Run(async () =>
+                                        {
+                                            // Create a new scope for the background task
+                                            using (var scope = _serviceScopeFactory.CreateScope())
+                                            {
+                                                ILogger<MentorController>? scopedLogger = null;
+                                                try
+                                                {
+                                                    await Task.Delay(2000); // Small delay to ensure BoardState is saved
+                                                    
+                                                    // Get all required services from the new scope
+                                                    scopedLogger = scope.ServiceProvider.GetRequiredService<ILogger<MentorController>>();
+                                                    var scopedContext = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+                                                    
+                                                    // Verify context is not disposed by attempting a simple query
+                                                    try
+                                                    {
+                                                        await scopedContext.Database.CanConnectAsync();
+                                                    }
+                                                    catch (Exception ctxEx)
+                                                    {
+                                                        scopedLogger.LogError(ctxEx, "❌ [WEBHOOK] Context validation failed for PR #{IssueNumber}: {Error}", capturedIssueNumber, ctxEx.Message);
+                                                        return;
+                                                    }
+                                                    
+                                                    var scopedTrelloService = scope.ServiceProvider.GetRequiredService<ITrelloService>();
+                                                    var scopedGitHubService = scope.ServiceProvider.GetRequiredService<IGitHubService>();
+                                                    var scopedAIService = scope.ServiceProvider.GetRequiredService<IAIService>();
+                                                    var scopedCodeReviewAgent = scope.ServiceProvider.GetRequiredService<ICodeReviewAgent>();
+                                                    var scopedConfiguration = scope.ServiceProvider.GetRequiredService<IConfiguration>();
+                                                    var scopedHttpClientFactory = scope.ServiceProvider.GetRequiredService<IHttpClientFactory>();
+                                                    var scopedIntentService = scope.ServiceProvider.GetRequiredService<IMentorIntentService>();
+                                                    var scopedPromptConfig = scope.ServiceProvider.GetRequiredService<IOptions<PromptConfig>>();
+                                                    var scopedTrelloConfig = scope.ServiceProvider.GetRequiredService<IOptions<TrelloConfig>>();
+                                                    var scopedDeploymentsConfig = scope.ServiceProvider.GetRequiredService<IOptions<DeploymentsConfig>>();
+                                                    var scopedTestingConfig = scope.ServiceProvider.GetRequiredService<IOptions<TestingConfig>>();
+                                                    
+                                                    // Create a temporary controller instance with scoped services to call ProcessValidationAsync
+                                                    var tempController = new MentorController(
+                                                        scopedContext,
+                                                        scopedLogger,
+                                                        scopedTrelloService,
+                                                        scopedGitHubService,
+                                                        scopedIntentService,
+                                                        scopedCodeReviewAgent,
+                                                        scopedPromptConfig,
+                                                        scopedTrelloConfig,
+                                                        scopedConfiguration,
+                                                        scopedHttpClientFactory,
+                                                        scopedAIService,
+                                                        scopedDeploymentsConfig,
+                                                        scopedTestingConfig,
+                                                        scope.ServiceProvider.GetRequiredService<IServiceScopeFactory>());
+                                                    
+                                                    // Call ProcessValidationAsync with scoped services (isWebhook=true for webhook-initiated)
+                                                    var (success, feedback, errorMessage) = await tempController.ProcessValidationAsync(
+                                                        capturedRepo, 
+                                                        capturedHeadRef, 
+                                                        capturedHeadSha, 
+                                                        capturedBoardId, 
+                                                        capturedIsBackend, 
+                                                        capturedIssueNumber,
+                                                        isWebhook: true);
+                                                    
+                                                    scopedLogger.LogInformation("✅ [WEBHOOK] Validation completed for PR #{IssueNumber}: Success={Success}", capturedIssueNumber, success);
+                                                }
+                                                catch (Exception ex)
+                                                {
+                                                    if (scopedLogger == null)
+                                                    {
+                                                        scopedLogger = scope.ServiceProvider.GetRequiredService<ILogger<MentorController>>();
+                                                    }
+                                                    scopedLogger.LogError(ex, "❌ [WEBHOOK] Failed to process validation for PR #{IssueNumber}: {Error}", capturedIssueNumber, ex.Message);
+                                                }
+                                            }
+                                        });
+                                    }
+                                    else
+                                    {
+                                        // Data is actually missing
+                                        _logger.LogWarning("⚠️ [WEBHOOK] Missing required PR data: HeadRef={HeadRef}, HeadSha={HeadSha}, BoardId={BoardId}, Repo={Repo}", 
+                                            headRef, headSha, boardId, repo);
+                                    }
+                                }
+                                
+                                // Handle "closed" action - PSA Tracking: Handle closed PRs with merged status
+                                if (action == "closed")
+                                {
+                                    // Reuse headRef and issueNumber already extracted above
+                                    string? branchName = headRef;
+                                    
+                                    // Update LatestEvent for closed action
+                                    if (issueNumber.HasValue)
+                                    {
+                                        boardState.LatestEvent = $"pull_request_closed_#{issueNumber}";
+                                    }
+                                    
+                                    if (prProp.TryGetProperty("merged", out var mergedProp))
+                                    {
+                                        var merged = mergedProp.GetBoolean();
+                                        
+                                        // Handle PR merge: Update or create "GitHub-Merge" record (key: BoardId, Source="GitHub-Merge", GithubBranch)
+                                        if (merged && !string.IsNullOrEmpty(branchName) && !string.IsNullOrEmpty(boardId))
+                                        {
+                                            try
+                                            {
+                                                // Find existing "GitHub-Merge" record
+                                                var existingMergeRecord = await _context.BoardStates
+                                                    .FirstOrDefaultAsync(bs => bs.BoardId == boardId && 
+                                                                               bs.Source == "GitHub-Merge" && 
+                                                                               bs.GithubBranch == branchName);
+                                                
+                                                DateTime mergedAt = DateTime.UtcNow;
+                                                if (prProp.TryGetProperty("merged_at", out var mergedAtProp))
+                                                {
+                                                    var mergedAtStr = mergedAtProp.GetString();
+                                                    if (!string.IsNullOrEmpty(mergedAtStr) && DateTime.TryParse(mergedAtStr, out var parsedMergedAt))
+                                                    {
+                                                        // Ensure UTC - PostgreSQL requires UTC for timestamp with time zone
+                                                        mergedAt = parsedMergedAt.Kind == DateTimeKind.Utc 
+                                                            ? parsedMergedAt 
+                                                            : parsedMergedAt.ToUniversalTime();
+                                                    }
+                                                }
+                                                
+                                                if (existingMergeRecord != null)
+                                                {
+                                                    // UPDATE existing "GitHub-Merge" record
+                                                    existingMergeRecord.BranchStatus = "Completed-Merged";
+                                                    existingMergeRecord.PRStatus = "Merged";
+                                                    existingMergeRecord.LastBuildStatus = "Completed-Merged";
+                                                    existingMergeRecord.LastMergeDate = mergedAt;
+                                                    existingMergeRecord.Webhook = true; // Mark as webhook-initiated
+                                                    existingMergeRecord.UpdatedAt = DateTime.UtcNow;
+                                                    
+                                                    await _context.SaveChangesAsync();
+                                                    _logger.LogInformation("✅ [WEBHOOK] Updated existing GitHub-Merge record for PR #{IssueNumber}, Branch: {Branch}", issueNumber, branchName);
+                                                }
+                                                else
+                                                {
+                                                    // CREATE new "GitHub-Merge" record
+                                                    var mergeBoardState = new BoardState
+                                                    {
+                                                        BoardId = boardId,
+                                                        Source = "GitHub-Merge",
+                                                        Webhook = true, // Webhook-initiated
+                                                        ServiceName = "GitHubMerge",
+                                                        BranchStatus = "Completed-Merged",
+                                                        PRStatus = "Merged",
+                                                        LastBuildStatus = "Completed-Merged",
+                                                        GithubBranch = branchName,
+                                                        LastMergeDate = mergedAt,
+                                                        DevRole = DetermineDevRole("GitHub-Merge", branchName),
+                                                        CreatedAt = DateTime.UtcNow,
+                                                        UpdatedAt = DateTime.UtcNow
+                                                    };
+                                                    
+                                                    _context.BoardStates.Add(mergeBoardState);
+                                                    await _context.SaveChangesAsync();
+                                                    _logger.LogInformation("✅ [WEBHOOK] Created new GitHub-Merge record for PR #{IssueNumber}, Branch: {Branch}", issueNumber, branchName);
+                                                }
+                                            }
+                                            catch (Exception mergeEx)
+                                            {
+                                                _logger.LogWarning(mergeEx, "⚠️ [WEBHOOK] Failed to update/create GitHub-Merge record for PR #{IssueNumber} (non-critical)", issueNumber);
+                                            }
+                                            
+                                            // Don't set merge status on the webhook record itself (it's just for webhook tracking)
+                                            boardState.BranchStatus = null;
+                                            boardState.PRStatus = null;
+                                            boardState.LastBuildStatus = null;
+                                        }
+                                        else if (!merged)
+                                        {
+                                            // PR closed without merge
+                                            boardState.BranchStatus = "Abandoned-Discarded";
+                                            boardState.PRStatus = "Closed";
+                                            boardState.LastBuildStatus = "Abandoned-Discarded";
+                                            _logger.LogInformation("⚠️ [WEBHOOK] PR #{IssueNumber} closed without merge - Status: Abandoned-Discarded", issueNumber);
+                                        }
+                                        
+                                        // Terminate: Stop further processing; do not trigger validation router
+                                        _logger.LogInformation("📥 [WEBHOOK] PR closed - skipping validation router");
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Append webhook record (constraint now includes GithubBranch, allowing multiple PRs for different branches)
+                    // The unique constraint on (BoardId, Source, Webhook, GithubBranch) allows:
+                    // - Multiple PRs for different branches (different GithubBranch values)
+                    // - Multiple records with NULL GithubBranch (NULLs are distinct in PostgreSQL)
+                    _context.BoardStates.Add(boardState);
+                    await _context.SaveChangesAsync();
+                    _logger.LogInformation("✅ [WEBHOOK] Recorded webhook event {EventType} for BoardId: {BoardId}, Branch: {Branch}", 
+                        eventType, boardId, boardState.GithubBranch ?? "N/A");
+                }
+                catch (DbUpdateException ex) when (ex.InnerException is Npgsql.PostgresException pgEx && pgEx.SqlState == "23505")
+                {
+                    // Duplicate key error - record already exists, this is expected for webhook events
+                    _logger.LogInformation("ℹ️ [WEBHOOK] Webhook record already exists for BoardId: {BoardId}, EventType: {EventType} (duplicate key)", boardId, eventType);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "❌ [WEBHOOK] Failed to record webhook event in BoardStates");
+                }
+
+                return Ok(new { Success = true, Message = "Webhook processed" });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "❌ [WEBHOOK] Error processing GitHub webhook");
+                return StatusCode(500, new { Success = false, Message = $"Error processing webhook: {ex.Message}" });
+            }
+        }
+
+        /// <summary>
+        /// Validation router endpoint - validates PR and updates GitHub status
+        /// </summary>
+        [HttpGet("use/validate-pr")]
+        public async Task<ActionResult<object>> ValidatePR([FromQuery] string repoName, [FromQuery] string sha, [FromQuery] string type, [FromQuery] int? issueNumber = null, [FromQuery] string? headRef = null)
+        {
+            var accessToken = _configuration["GitHub:AccessToken"];
+            var owner = _configuration["GitHub:Organization"] ?? "";
+            var validationContext = _configuration["GitHub:ValidationContext"] ?? "Mentor-Validation";
+            var statusSet = false; // Track if we've set a status to ensure we always set a final status
+            
+            try
+            {
+                if (string.IsNullOrWhiteSpace(repoName) || string.IsNullOrWhiteSpace(sha) || string.IsNullOrWhiteSpace(type))
+                {
+                    _logger.LogWarning("🔍 [VALIDATE-PR] Missing required parameters: Repo={Repo}, SHA={Sha}, Type={Type}", repoName, sha, type);
+                    return BadRequest(new { Success = false, Message = "repoName, sha, and type are required" });
+                }
+
+                if (type != "be" && type != "fe")
+                {
+                    _logger.LogWarning("🔍 [VALIDATE-PR] Invalid type parameter: {Type} (must be 'be' or 'fe')", type);
+                    return BadRequest(new { Success = false, Message = "type must be 'be' or 'fe'" });
+                }
+
+                _logger.LogInformation("🔍 [VALIDATE-PR] ===== Starting PR validation =====");
+                _logger.LogInformation("🔍 [VALIDATE-PR] Repository: {Repo}, SHA: {Sha}, Type: {Type}", repoName, sha, type);
+
+                if (string.IsNullOrEmpty(accessToken) || string.IsNullOrEmpty(owner))
+                {
+                    _logger.LogError("🔍 [VALIDATE-PR] GitHub configuration missing: AccessToken={HasToken}, Owner={Owner}", 
+                        !string.IsNullOrEmpty(accessToken), owner);
+                    return StatusCode(500, new { Success = false, Message = "GitHub configuration is missing" });
+                }
+
+                // Step 1: Set status to pending
+                _logger.LogInformation("🔍 [VALIDATE-PR] Step 1: Setting status to 'pending'");
+                try
+                {
+                    await _githubService.UpdateCommitStatusAsync(owner, repoName, sha, "pending", validationContext, 
+                        "Mentor is analyzing your code...", accessToken);
+                    statusSet = true;
+                    _logger.LogInformation("✅ [VALIDATE-PR] Status set to 'pending' successfully");
+                }
+                catch (Exception statusEx)
+                {
+                    _logger.LogError(statusEx, "❌ [VALIDATE-PR] Failed to set status to 'pending': {Error}", statusEx.Message);
+                    // Continue anyway - we'll try to set final status later
+                }
+
+                // Step 2: Branch naming validation
+                _logger.LogInformation("🔍 [VALIDATE-PR] Step 2: Validating branch naming");
+                
+                // Use head_ref from query parameter (passed from webhook) or fallback to BoardStates
+                string? branchName = headRef;
+                
+                if (string.IsNullOrEmpty(branchName))
+                {
+                    _logger.LogInformation("🔍 [VALIDATE-PR] headRef not provided, attempting to get from BoardStates");
+                    var latestWebhook = await _context.BoardStates
+                        .Where(bs => bs.Source == "GitHub" && bs.ServiceName == "pull_request" && bs.GithubBranch != null && bs.LatestCommitId == sha)
+                        .OrderByDescending(bs => bs.CreatedAt)
+                        .FirstOrDefaultAsync();
+
+                    if (latestWebhook != null && !string.IsNullOrEmpty(latestWebhook.GithubBranch))
+                    {
+                        branchName = latestWebhook.GithubBranch;
+                        _logger.LogInformation("🔍 [VALIDATE-PR] Retrieved branch name from BoardStates: {Branch}", branchName);
+                    }
+                }
+                
+                if (string.IsNullOrEmpty(branchName))
+                {
+                    _logger.LogError("❌ [VALIDATE-PR] Could not determine branch name (head_ref). HeadRef={HeadRef}, SHA={Sha}", headRef, sha);
+                    
+                    try
+                    {
+                        await _githubService.UpdateCommitStatusAsync(owner, repoName, sha, "failure", validationContext,
+                            "Could not determine branch name (head_ref)", accessToken);
+                        statusSet = true;
+                    }
+                    catch (Exception statusEx)
+                    {
+                        _logger.LogError(statusEx, "❌ [VALIDATE-PR] Failed to set failure status: {Error}", statusEx.Message);
+                    }
+                    
+                    return BadRequest(new { Success = false, Message = "Could not determine branch name (head_ref) from PR" });
+                }
+                _logger.LogInformation("🔍 [VALIDATE-PR] Extracted branch name: {Branch}", branchName);
+                
+                var patternKey = type == "be" ? "GitHub:BranchNamingPatterns:Backend" : "GitHub:BranchNamingPatterns:Frontend";
+                var pattern = _configuration[patternKey] ?? (type == "be" ? "^([1-9]|1[0-9]|20)-B$" : "^([1-9]|1[0-9]|20)-F$");
+                _logger.LogInformation("🔍 [VALIDATE-PR] Branch naming pattern: {Pattern} (from config key: {PatternKey})", pattern, patternKey);
+
+                var regex = new System.Text.RegularExpressions.Regex(pattern);
+                if (!regex.IsMatch(branchName))
+                {
+                    _logger.LogWarning("❌ [VALIDATE-PR] Branch naming validation FAILED: Branch '{Branch}' does not match pattern '{Pattern}'", branchName, pattern);
+                    
+                    try
+                    {
+                        await _githubService.UpdateCommitStatusAsync(owner, repoName, sha, "failure", validationContext,
+                            $"Invalid branch name: '{branchName}' does not match pattern '{pattern}'", accessToken);
+                        statusSet = true;
+                    }
+                    catch (Exception statusEx)
+                    {
+                        _logger.LogError(statusEx, "❌ [VALIDATE-PR] Failed to set failure status: {Error}", statusEx.Message);
+                    }
+
+                    // Record in BoardStates - find board by repo URL
+                    string? boardId = null;
+                    var githubUrl = $"https://github.com/{owner}/{repoName}";
+                    var boardForNaming = await _context.ProjectBoards
+                        .FirstOrDefaultAsync(pb => (type == "be" ? pb.GithubBackendUrl : pb.GithubFrontendUrl) == githubUrl);
+                    
+                    if (boardForNaming != null)
+                    {
+                        boardId = boardForNaming.Id;
+                    }
+                    else
+                    {
+                        // Fallback: try to get from latest webhook if available
+                        var latestWebhook = await _context.BoardStates
+                            .Where(bs => bs.Source == "GitHub" && bs.ServiceName == "pull_request" && bs.GithubBranch == branchName && bs.LatestCommitId == sha)
+                            .OrderByDescending(bs => bs.CreatedAt)
+                            .FirstOrDefaultAsync();
+                        
+                        if (latestWebhook != null)
+                        {
+                            boardId = latestWebhook.BoardId;
+                        }
+                    }
+                    
+                    if (!string.IsNullOrEmpty(boardId))
+                    {
+                        var boardState = new BoardState
+                        {
+                            BoardId = boardId,
+                            Source = type == "be" ? "PR-BackendValidation" : "PR-FrontendValidation",
+                            Webhook = false,
+                            ServiceName = "BranchNamingValidation",
+                            ErrorMessage = $"Invalid branch name naming convention. Branch: '{branchName}', Expected pattern: '{pattern}'",
+                            GithubBranch = branchName,
+                            DevRole = DetermineDevRole(type == "be" ? "PR-BackendValidation" : "PR-FrontendValidation", branchName),
+                            CreatedAt = DateTime.UtcNow,
+                            UpdatedAt = DateTime.UtcNow
+                        };
+                        _context.BoardStates.Add(boardState);
+                        await _context.SaveChangesAsync();
+                    }
+                    else
+                    {
+                        _logger.LogWarning("⚠️ [VALIDATE-PR] Could not find board for repo {Repo}, skipping BoardState record", repoName);
+                    }
+
+                    _logger.LogInformation("🔍 [VALIDATE-PR] ===== Validation FAILED: Branch naming =====");
+                    return Ok(new { Success = false, Message = "Branch naming validation failed", BranchName = branchName, Pattern = pattern });
+                }
+
+                _logger.LogInformation("✅ [VALIDATE-PR] Branch naming validation PASSED for '{Branch}'", branchName);
+
+                // Step 3: Execute validation
+                _logger.LogInformation("🔍 [VALIDATE-PR] Step 3: Finding board for repository");
+                var board = await _context.ProjectBoards
+                    .FirstOrDefaultAsync(pb => pb.GithubBackendUrl.Contains(repoName) || pb.GithubFrontendUrl.Contains(repoName));
+
+                if (board == null)
+                {
+                    _logger.LogError("❌ [VALIDATE-PR] Board not found for repository: {Repo}", repoName);
+                    try
+                    {
+                        await _githubService.UpdateCommitStatusAsync(owner, repoName, sha, "failure", validationContext,
+                            "Board not found for repository", accessToken);
+                        statusSet = true;
+                    }
+                    catch (Exception statusEx)
+                    {
+                        _logger.LogError(statusEx, "❌ [VALIDATE-PR] Failed to set failure status: {Error}", statusEx.Message);
+                    }
+                    return NotFound(new { Success = false, Message = "Board not found for repository" });
+                }
+
+                _logger.LogInformation("✅ [VALIDATE-PR] Found board: BoardId={BoardId}", board.Id);
+                _logger.LogInformation("🔍 [VALIDATE-PR] Step 4: Running {Type} validation for BoardId={BoardId}, Branch={Branch}", 
+                    type == "be" ? "Backend" : "Frontend", board.Id, branchName);
+
+                var validationStartTime = DateTime.UtcNow;
+                ActionResult<object> validationResult;
+                
+                try
+                {
+                    validationResult = type == "be" 
+                        ? await ValidateBackend(board.Id, branchName)
+                        : await ValidateFrontend(board.Id, branchName);
+                    
+                    var validationDuration = (DateTime.UtcNow - validationStartTime).TotalSeconds;
+                    _logger.LogInformation("✅ [VALIDATE-PR] Validation completed in {Duration} seconds", validationDuration);
+                }
+                catch (Exception validationEx)
+                {
+                    _logger.LogError(validationEx, "❌ [VALIDATE-PR] Exception during {Type} validation: {Error}", 
+                        type == "be" ? "Backend" : "Frontend", validationEx.Message);
+                    throw; // Re-throw to be caught by outer catch block
+                }
+
+                // Step 4: Report result
+                _logger.LogInformation("🔍 [VALIDATE-PR] Step 5: Parsing validation result");
+                bool isValid = false;
+                List<string> validationIssues = new List<string>();
+                
+                // Handle ActionResult<object> - extract value using Value property
+                try
+                {
+                    // ActionResult<object> has a Value property when it's an OkObjectResult
+                    // We need to check the actual result type
+                    var resultValue = validationResult.Value;
+                    
+                    if (resultValue != null)
+                    {
+                        var jsonString = JsonSerializer.Serialize(resultValue);
+                        var jsonElement = JsonSerializer.Deserialize<JsonElement>(jsonString);
+                        
+                        if (jsonElement.TryGetProperty("Overall", out var overallProp))
+                        {
+                            if (overallProp.TryGetProperty("Valid", out var validProp))
+                            {
+                                isValid = validProp.GetBoolean();
+                                _logger.LogInformation("🔍 [VALIDATE-PR] Overall validation result: {IsValid}", isValid);
+                            }
+                            
+                            if (overallProp.TryGetProperty("Issues", out var issuesProp) && issuesProp.ValueKind == JsonValueKind.Array)
+                            {
+                                foreach (var issue in issuesProp.EnumerateArray())
+                                {
+                                    if (issue.ValueKind == JsonValueKind.String)
+                                    {
+                                        validationIssues.Add(issue.GetString() ?? "");
+                                    }
+                                }
+                            }
+                        }
+                        
+                        // Log individual validation results
+                        if (type == "be")
+                        {
+                            if (jsonElement.TryGetProperty("GitHub", out var githubProp))
+                            {
+                                var githubValid = githubProp.TryGetProperty("Valid", out var gv) && gv.GetBoolean();
+                                _logger.LogInformation("🔍 [VALIDATE-PR] GitHub validation: {Valid}", githubValid ? "PASSED" : "FAILED");
+                            }
+                            if (jsonElement.TryGetProperty("Railway", out var railwayProp))
+                            {
+                                var railwayValid = railwayProp.TryGetProperty("Valid", out var rv) && rv.GetBoolean();
+                                _logger.LogInformation("🔍 [VALIDATE-PR] Railway validation: {Valid}", railwayValid ? "PASSED" : "FAILED");
+                            }
+                            if (jsonElement.TryGetProperty("Database", out var dbProp))
+                            {
+                                var dbValid = dbProp.TryGetProperty("Valid", out var dv) && dv.GetBoolean();
+                                _logger.LogInformation("🔍 [VALIDATE-PR] Database validation: {Valid}", dbValid ? "PASSED" : "FAILED");
+                            }
+                            if (jsonElement.TryGetProperty("CodeStructure", out var codeProp))
+                            {
+                                var codeValid = codeProp.TryGetProperty("Valid", out var cv) && cv.GetBoolean();
+                                _logger.LogInformation("🔍 [VALIDATE-PR] Code structure validation: {Valid}", codeValid ? "PASSED" : "FAILED");
+                            }
+                            if (jsonElement.TryGetProperty("BuildStatus", out var buildProp))
+                            {
+                                var buildValid = buildProp.TryGetProperty("Valid", out var bv) && bv.GetBoolean();
+                                _logger.LogInformation("🔍 [VALIDATE-PR] Build status validation: {Valid}", buildValid ? "PASSED" : "FAILED");
+                            }
+                        }
+                        else // Frontend
+                        {
+                            if (jsonElement.TryGetProperty("GitHub", out var githubProp))
+                            {
+                                var githubValid = githubProp.TryGetProperty("Valid", out var gv) && gv.GetBoolean();
+                                _logger.LogInformation("🔍 [VALIDATE-PR] GitHub validation: {Valid}", githubValid ? "PASSED" : "FAILED");
+                            }
+                            if (jsonElement.TryGetProperty("Config", out var configProp))
+                            {
+                                var configValid = configProp.TryGetProperty("Valid", out var cv) && cv.GetBoolean();
+                                _logger.LogInformation("🔍 [VALIDATE-PR] Config validation: {Valid}", configValid ? "PASSED" : "FAILED");
+                            }
+                            if (jsonElement.TryGetProperty("Deployment", out var deployProp))
+                            {
+                                var deployValid = deployProp.TryGetProperty("Valid", out var dv) && dv.GetBoolean();
+                                _logger.LogInformation("🔍 [VALIDATE-PR] Deployment validation: {Valid}", deployValid ? "PASSED" : "FAILED");
+                            }
+                            if (jsonElement.TryGetProperty("BuildStatus", out var buildProp))
+                            {
+                                var buildValid = buildProp.TryGetProperty("Valid", out var bv) && bv.GetBoolean();
+                                _logger.LogInformation("🔍 [VALIDATE-PR] Build status validation: {Valid}", buildValid ? "PASSED" : "FAILED");
+                            }
+                        }
+                    }
+                    else
+                    {
+                        // If Value is null, check if it's an error result
+                        _logger.LogWarning("❌ [VALIDATE-PR] Validation result Value is null, assuming invalid");
+                        isValid = false;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "❌ [VALIDATE-PR] Failed to parse validation result, assuming invalid: {Error}", ex.Message);
+                    isValid = false;
+                }
+                
+                if (validationIssues.Any())
+                {
+                    _logger.LogWarning("❌ [VALIDATE-PR] Validation found {IssueCount} issues:", validationIssues.Count);
+                    foreach (var issue in validationIssues)
+                    {
+                        _logger.LogWarning("  - {Issue}", issue);
+                    }
+                }
+
+                if (isValid)
+                {
+                    _logger.LogInformation("✅ [VALIDATE-PR] All validations PASSED");
+                    _logger.LogInformation("🔍 [VALIDATE-PR] Step 6: Running code review");
+                    
+                    // Success: Call code-review endpoint (internal call with source="GitHub-Success-PR")
+                    var codeReviewRequest = new CodeReviewRequest
+                    {
+                        BoardId = board.Id,
+                        GithubBranch = branchName,
+                        AIServiceName = null
+                    };
+
+                    string feedback = "Code review completed successfully.";
+                    try
+                    {
+                        var codeReviewActionResult = await CodeReviewInternal(codeReviewRequest, "GitHub-Success-PR");
+                        
+                        // Get feedback from BoardStates (handle sequenced sources like "GitHub-Success-PR-1", "GitHub-Success-PR-2")
+                        // Fetch all matching records and filter by base source in memory
+                        var baseSource = "GitHub-Success-PR";
+                        var allCodeReviewStates = await _context.BoardStates
+                            .Where(bs => bs.BoardId == board.Id && 
+                                        bs.ServiceName == "CodeReview" && 
+                                        bs.GithubBranch == branchName &&
+                                        (bs.Source.StartsWith(baseSource + "-") || bs.Source == baseSource))
+                            .ToListAsync();
+                        
+                        var codeReviewState = allCodeReviewStates
+                            .Where(bs => ExtractBaseSource(bs.Source) == baseSource)
+                            .OrderByDescending(bs => bs.CreatedAt)
+                            .FirstOrDefault();
+
+                        feedback = codeReviewState?.MentorFeedback ?? feedback;
+                        _logger.LogInformation("✅ [VALIDATE-PR] Code review completed");
+                    }
+                    catch (Exception codeReviewEx)
+                    {
+                        _logger.LogWarning(codeReviewEx, "⚠️ [VALIDATE-PR] Code review failed (non-critical): {Error}", codeReviewEx.Message);
+                        // Continue - code review failure doesn't block validation success
+                    }
+
+                    // Step 6: Post AI Feedback to GitHub PR comment BEFORE setting success status
+                    // Use issue_number from query parameter or extract from BoardStates
+                    int? prNumber = issueNumber;
+                    
+                    if (!prNumber.HasValue)
+                    {
+                        _logger.LogInformation("🔍 [VALIDATE-PR] Issue number not provided, attempting to get from BoardStates");
+                        var prWebhook = await _context.BoardStates
+                            .Where(bs => bs.Source == "GitHub" && bs.ServiceName == "pull_request" && bs.GithubBranch == branchName && bs.LatestCommitId == sha)
+                            .OrderByDescending(bs => bs.CreatedAt)
+                            .FirstOrDefaultAsync();
+
+                        // Extract PR number from LatestEvent
+                        if (prWebhook != null && !string.IsNullOrEmpty(prWebhook.LatestEvent))
+                        {
+                            // LatestEvent format: "pull_request_opened_#123" or "pull_request_synchronize_#123"
+                            var parts = prWebhook.LatestEvent.Split('#');
+                            if (parts.Length > 1 && int.TryParse(parts[1], out var parsedPrNumber))
+                            {
+                                prNumber = parsedPrNumber;
+                                _logger.LogInformation("🔍 [VALIDATE-PR] Found PR number from BoardStates: {PRNumber}", prNumber);
+                            }
+                        }
+                    }
+                    else
+                    {
+                        _logger.LogInformation("🔍 [VALIDATE-PR] Using PR number from query parameter: {PRNumber}", prNumber);
+                    }
+
+                    // Post comment to GitHub PR BEFORE setting success status
+                    if (prNumber.HasValue)
+                    {
+                        _logger.LogInformation("🔍 [VALIDATE-PR] Step 6: Posting feedback comment to PR #{PRNumber}", prNumber);
+                        try
+                        {
+                            await _githubService.AddPullRequestCommentAsync(owner, repoName, prNumber.Value, feedback, accessToken);
+                            _logger.LogInformation("✅ [VALIDATE-PR] Posted comment to PR #{PRNumber}", prNumber);
+                        }
+                        catch (Exception commentEx)
+                        {
+                            _logger.LogError(commentEx, "❌ [VALIDATE-PR] Failed to add PR comment: {Error}", commentEx.Message);
+                            // Continue - comment failure doesn't block success status, but log it
+                        }
+                    }
+                    else
+                    {
+                        _logger.LogWarning("⚠️ [VALIDATE-PR] PR number not available, skipping comment post");
+                    }
+
+                    // Step 7: Update GitHub Status to "success" ONLY after comment is posted
+                    _logger.LogInformation("🔍 [VALIDATE-PR] Step 7: Setting status to 'success' (after comment posted)");
+                    try
+                    {
+                        await _githubService.UpdateCommitStatusAsync(owner, repoName, sha, "success", validationContext,
+                            "Validation passed!", accessToken);
+                        statusSet = true;
+                        _logger.LogInformation("✅ [VALIDATE-PR] Status set to 'success' - Status check will CLEAR");
+                        _logger.LogInformation("🔍 [VALIDATE-PR] ===== Validation COMPLETED SUCCESSFULLY =====");
+                    }
+                    catch (Exception statusEx)
+                    {
+                        _logger.LogError(statusEx, "❌ [VALIDATE-PR] Failed to set success status: {Error}", statusEx.Message);
+                        throw; // Re-throw to be caught by outer catch
+                    }
+
+                    return Ok(new { Success = true, Message = "Validation passed", Feedback = feedback });
+                }
+                else
+                {
+                    var failureMessage = validationIssues.Any() 
+                        ? $"Validation failed: {string.Join("; ", validationIssues.Take(3))}" 
+                        : "Check the Board for feedback.";
+                    
+                    _logger.LogWarning("❌ [VALIDATE-PR] Validation FAILED - Status check will NOT clear");
+                    _logger.LogWarning("❌ [VALIDATE-PR] Failure reason: {Message}", failureMessage);
+                    if (validationIssues.Any())
+                    {
+                        _logger.LogWarning("❌ [VALIDATE-PR] Failed validations: {Issues}", string.Join(" | ", validationIssues));
+                    }
+                    
+                    _logger.LogInformation("🔍 [VALIDATE-PR] Step 7: Setting status to 'failure'");
+                    try
+                    {
+                        await _githubService.UpdateCommitStatusAsync(owner, repoName, sha, "failure", validationContext,
+                            failureMessage, accessToken);
+                        statusSet = true;
+                        _logger.LogInformation("✅ [VALIDATE-PR] Status set to 'failure'");
+                        _logger.LogInformation("🔍 [VALIDATE-PR] ===== Validation COMPLETED WITH FAILURES =====");
+                    }
+                    catch (Exception statusEx)
+                    {
+                        _logger.LogError(statusEx, "❌ [VALIDATE-PR] Failed to set failure status: {Error}", statusEx.Message);
+                        throw; // Re-throw to be caught by outer catch
+                    }
+                    
+                    return Ok(new { Success = false, Message = "Validation failed", Issues = validationIssues });
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "❌ [VALIDATE-PR] ===== EXCEPTION during validation =====");
+                _logger.LogError(ex, "❌ [VALIDATE-PR] Repository: {Repo}, SHA: {Sha}, Type: {Type}", repoName, sha, type);
+                _logger.LogError(ex, "❌ [VALIDATE-PR] Exception type: {ExceptionType}, Message: {Message}", ex.GetType().Name, ex.Message);
+                _logger.LogError(ex, "❌ [VALIDATE-PR] Stack trace: {StackTrace}", ex.StackTrace);
+                
+                // Always try to set a failure status if we haven't set a final status yet
+                if (!statusSet || statusSet) // Always try to set final status on exception
+                {
+                    try
+                    {
+                        var errorDescription = $"Validation error: {ex.GetType().Name} - {ex.Message}";
+                        if (errorDescription.Length > 140) // GitHub status description limit
+                        {
+                            errorDescription = errorDescription.Substring(0, 137) + "...";
+                        }
+                        
+                        await _githubService.UpdateCommitStatusAsync(owner, repoName, sha, "failure", validationContext,
+                            errorDescription, accessToken);
+                        _logger.LogInformation("✅ [VALIDATE-PR] Set failure status due to exception");
+                        _logger.LogInformation("🔍 [VALIDATE-PR] ===== Validation FAILED due to exception =====");
+                    }
+                    catch (Exception statusEx)
+                    {
+                        _logger.LogError(statusEx, "❌ [VALIDATE-PR] CRITICAL: Failed to set failure status after exception: {Error}", statusEx.Message);
+                        _logger.LogError(statusEx, "❌ [VALIDATE-PR] Status check may remain 'Waiting for status to be reported'");
+                    }
+                }
+                
+                return StatusCode(500, new { Success = false, Message = $"Error validating PR: {ex.Message}", ExceptionType = ex.GetType().Name });
+            }
+        }
+
+        /// <summary>
+        /// Shared validation service - processes PR validation, code review, and status updates
+        /// This method is used by both the webhook and the platform-triggered endpoint
+        /// </summary>
+        private async Task<(bool Success, string? Feedback, string? ErrorMessage)> ProcessValidationAsync(
+            string repoName, 
+            string branchName, 
+            string sha, 
+            string boardId, 
+            bool isBackend, 
+            int? issueNumber = null,
+            bool isWebhook = false)
+        {
+            var accessToken = _configuration["GitHub:AccessToken"];
+            var owner = _configuration["GitHub:Organization"] ?? "";
+            var validationContext = _configuration["GitHub:ValidationContext"] ?? "Mentor-Validation";
+            var type = isBackend ? "be" : "fe";
+            var statusSet = false;
+
+            try
+            {
+                if (string.IsNullOrEmpty(accessToken) || string.IsNullOrEmpty(owner))
+                {
+                    _logger.LogError("🔍 [SHARED VALIDATION] GitHub configuration missing");
+                    return (false, null, "GitHub configuration is missing");
+                }
+
+                // Step 1: Set status to pending
+                _logger.LogInformation("🔍 [SHARED VALIDATION] Step 1: Setting status to 'pending'");
+                try
+                {
+                    await _githubService.UpdateCommitStatusAsync(owner, repoName, sha, "pending", validationContext,
+                        "Mentor is analyzing your code...", accessToken);
+                    statusSet = true;
+                }
+                catch (Exception statusEx)
+                {
+                    _logger.LogError(statusEx, "❌ [SHARED VALIDATION] Failed to set status to 'pending': {Error}", statusEx.Message);
+                }
+
+                // Step 2: Branch naming validation
+                _logger.LogInformation("🔍 [SHARED VALIDATION] Step 2: Validating branch naming");
+                var patternKey = type == "be" ? "GitHub:BranchNamingPatterns:Backend" : "GitHub:BranchNamingPatterns:Frontend";
+                var pattern = _configuration[patternKey] ?? (type == "be" ? "^([1-9]|1[0-9]|20)-B$" : "^([1-9]|1[0-9]|20)-F$");
+                var regex = new System.Text.RegularExpressions.Regex(pattern);
+                
+                if (!regex.IsMatch(branchName))
+                {
+                    _logger.LogWarning("❌ [SHARED VALIDATION] Branch naming validation FAILED: Branch '{Branch}' does not match pattern '{Pattern}'", branchName, pattern);
+                    
+                    try
+                    {
+                        await _githubService.UpdateCommitStatusAsync(owner, repoName, sha, "failure", validationContext,
+                            $"Invalid branch name: '{branchName}' does not match pattern '{pattern}'", accessToken);
+                        statusSet = true;
+                    }
+                    catch (Exception statusEx)
+                    {
+                        _logger.LogError(statusEx, "❌ [SHARED VALIDATION] Failed to set failure status: {Error}", statusEx.Message);
+                    }
+
+                    // Record in BoardStates
+                    try
+                    {
+                        var boardState = new BoardState
+                        {
+                            BoardId = boardId,
+                            Source = type == "be" ? "PR-BackendValidation" : "PR-FrontendValidation",
+                            Webhook = false,
+                            ServiceName = "BranchNamingValidation",
+                            ErrorMessage = $"Invalid branch name naming convention. Branch: '{branchName}', Expected pattern: '{pattern}'",
+                            GithubBranch = branchName,
+                            DevRole = DetermineDevRole(type == "be" ? "PR-BackendValidation" : "PR-FrontendValidation", branchName),
+                            CreatedAt = DateTime.UtcNow,
+                            UpdatedAt = DateTime.UtcNow
+                        };
+                        _context.BoardStates.Add(boardState);
+                        await _context.SaveChangesAsync();
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning(ex, "⚠️ [SHARED VALIDATION] Failed to record branch naming failure in BoardStates");
+                    }
+
+                    return (false, null, $"Branch naming validation failed: '{branchName}' does not match pattern '{pattern}'");
+                }
+
+                _logger.LogInformation("✅ [SHARED VALIDATION] Branch naming validation PASSED");
+
+                // Step 3: Execute validation
+                _logger.LogInformation("🔍 [SHARED VALIDATION] Step 3: Running {Type} validation", type == "be" ? "Backend" : "Frontend");
+                var board = await _context.ProjectBoards.FirstOrDefaultAsync(pb => pb.Id == boardId);
+                if (board == null)
+                {
+                    _logger.LogError("❌ [SHARED VALIDATION] Board not found: {BoardId}", boardId);
+                    try
+                    {
+                        await _githubService.UpdateCommitStatusAsync(owner, repoName, sha, "failure", validationContext,
+                            "Board not found", accessToken);
+                        statusSet = true;
+                    }
+                    catch (Exception statusEx)
+                    {
+                        _logger.LogError(statusEx, "❌ [SHARED VALIDATION] Failed to set failure status: {Error}", statusEx.Message);
+                    }
+                    return (false, null, "Board not found");
+                }
+
+                var validationStartTime = DateTime.UtcNow;
+                ActionResult<object> validationResult;
+                
+                try
+                {
+                    validationResult = type == "be" 
+                        ? await ValidateBackend(board.Id, branchName)
+                        : await ValidateFrontend(board.Id, branchName);
+                    
+                    var validationDuration = (DateTime.UtcNow - validationStartTime).TotalSeconds;
+                    _logger.LogInformation("✅ [SHARED VALIDATION] Validation completed in {Duration} seconds", validationDuration);
+                }
+                catch (Exception validationEx)
+                {
+                    _logger.LogError(validationEx, "❌ [SHARED VALIDATION] Exception during validation: {Error}", validationEx.Message);
+                    throw;
+                }
+
+                // Step 4: Parse validation result
+                _logger.LogInformation("🔍 [SHARED VALIDATION] Step 4: Parsing validation result");
+                bool isValid = false;
+                List<string> validationIssues = new List<string>();
+                
+                try
+                {
+                    // Extract value from ActionResult - when called directly, Value may be null, so check Result property
+                    object? resultValue = validationResult.Value;
+                    
+                    if (resultValue == null && validationResult.Result != null)
+                    {
+                        _logger.LogInformation("🔍 [SHARED VALIDATION] Value is null, extracting from Result property. Result type: {ResultType}", 
+                            validationResult.Result.GetType().Name);
+                        
+                        // If Value is null, try to extract from Result (OkObjectResult, etc.)
+                        if (validationResult.Result is Microsoft.AspNetCore.Mvc.OkObjectResult okResult)
+                        {
+                            resultValue = okResult.Value;
+                            _logger.LogInformation("🔍 [SHARED VALIDATION] Extracted value from OkObjectResult");
+                        }
+                        else if (validationResult.Result is Microsoft.AspNetCore.Mvc.ObjectResult objectResult)
+                        {
+                            resultValue = objectResult.Value;
+                            _logger.LogInformation("🔍 [SHARED VALIDATION] Extracted value from ObjectResult");
+                        }
+                    }
+                    
+                    if (resultValue == null)
+                    {
+                        _logger.LogWarning("❌ [SHARED VALIDATION] Validation result value is NULL. Result type: {ResultType}, Value type: {ValueType}", 
+                            validationResult.Result?.GetType().Name ?? "null", 
+                            validationResult.Value?.GetType().Name ?? "null");
+                        isValid = false;
+                    }
+                    else
+                    {
+                        var jsonString = JsonSerializer.Serialize(resultValue);
+                        _logger.LogInformation("🔍 [SHARED VALIDATION] Validation result JSON: {JsonResult}", jsonString);
+                        
+                        var jsonElement = JsonSerializer.Deserialize<JsonElement>(jsonString);
+                        
+                        // Log all top-level properties to understand the structure
+                        _logger.LogInformation("🔍 [SHARED VALIDATION] Top-level properties: {Properties}", 
+                            string.Join(", ", jsonElement.EnumerateObject().Select(p => p.Name)));
+                        
+                        if (jsonElement.TryGetProperty("Overall", out var overallProp))
+                        {
+                            _logger.LogInformation("🔍 [SHARED VALIDATION] Found 'Overall' property, type: {ValueKind}", overallProp.ValueKind);
+                            
+                            // Log all properties within Overall
+                            if (overallProp.ValueKind == JsonValueKind.Object)
+                            {
+                                var overallProps = overallProp.EnumerateObject().Select(p => $"{p.Name}:{p.Value.ValueKind}").ToList();
+                                _logger.LogInformation("🔍 [SHARED VALIDATION] 'Overall' properties: {Properties}", string.Join(", ", overallProps));
+                            }
+                            
+                            if (overallProp.TryGetProperty("Valid", out var validProp))
+                            {
+                                isValid = validProp.GetBoolean();
+                                _logger.LogInformation("✅ [SHARED VALIDATION] Found 'Overall.Valid' = {IsValid}", isValid);
+                            }
+                            else
+                            {
+                                _logger.LogWarning("❌ [SHARED VALIDATION] 'Overall.Valid' property NOT FOUND in validation result");
+                            }
+                            
+                            if (overallProp.TryGetProperty("Issues", out var issuesProp) && issuesProp.ValueKind == JsonValueKind.Array)
+                            {
+                                foreach (var issue in issuesProp.EnumerateArray())
+                                {
+                                    if (issue.ValueKind == JsonValueKind.String)
+                                    {
+                                        validationIssues.Add(issue.GetString() ?? "");
+                                    }
+                                }
+                                _logger.LogInformation("🔍 [SHARED VALIDATION] Found {Count} validation issues", validationIssues.Count);
+                            }
+                        }
+                        else
+                        {
+                            _logger.LogWarning("❌ [SHARED VALIDATION] 'Overall' property NOT FOUND in validation result. Available properties: {Properties}", 
+                                string.Join(", ", jsonElement.EnumerateObject().Select(p => p.Name)));
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "❌ [SHARED VALIDATION] Failed to parse validation result: {Error}", ex.Message);
+                    isValid = false;
+                }
+
+                _logger.LogInformation("🔍 [SHARED VALIDATION] Final validation result: isValid={IsValid}, IssuesCount={IssuesCount}", 
+                    isValid, validationIssues.Count);
+                
+                if (isValid)
+                {
+                    _logger.LogInformation("✅ [SHARED VALIDATION] All validations PASSED");
+                    _logger.LogInformation("🔍 [SHARED VALIDATION] Step 5: Running code review");
+                    
+                    // Deduplication: Check if a recent "GitHub-Success-PR" record was just created (within last 30 seconds)
+                    // This prevents duplicate code reviews when both POST /api/Mentor/use/github-pr and webhook process the same PR
+                    // We use a 30-second window to catch records created recently, accounting for processing time
+                    var recentCutoff = DateTime.UtcNow.AddSeconds(-30);
+                    var recentRecord = await _context.BoardStates
+                        .Where(bs => bs.BoardId == board.Id && 
+                                    bs.GithubBranch == branchName &&
+                                    bs.ServiceName == "CodeReview" &&
+                                    (bs.Source.StartsWith("GitHub-Success-PR-") || bs.Source == "GitHub-Success-PR"))
+                        .OrderByDescending(bs => bs.CreatedAt)
+                        .FirstOrDefaultAsync();
+                    
+                    string feedback = "Code review completed successfully.";
+                    bool codeReviewSuccess = false;
+                    string? codeReviewError = null;
+                    
+                    if (recentRecord != null && recentRecord.CreatedAt >= recentCutoff)
+                    {
+                        var baseSource = ExtractBaseSource(recentRecord.Source);
+                        if (baseSource == "GitHub-Success-PR")
+                        {
+                            _logger.LogInformation("⏭️ [SHARED VALIDATION] Skipping duplicate code review - recent record found: Source={Source}, CreatedAt={CreatedAt}, Webhook={Webhook}", 
+                                recentRecord.Source, recentRecord.CreatedAt, recentRecord.Webhook);
+                            feedback = recentRecord.MentorFeedback ?? "Code review completed successfully.";
+                            codeReviewSuccess = true;
+                        }
+                    }
+                    
+                    if (!codeReviewSuccess)
+                    {
+                        // Success: Call code-review endpoint
+                        var codeReviewRequest = new CodeReviewRequest
+                        {
+                            BoardId = board.Id,
+                            GithubBranch = branchName,
+                            AIServiceName = null
+                        };
+                        
+                        try
+                        {
+                            var codeReviewActionResult = await CodeReviewInternal(codeReviewRequest, "GitHub-Success-PR", isWebhook);
+                        
+                            // Extract result from ActionResult
+                            object? codeReviewResult = null;
+                            if (codeReviewActionResult.Value != null)
+                            {
+                                codeReviewResult = codeReviewActionResult.Value;
+                            }
+                            else if (codeReviewActionResult.Result is Microsoft.AspNetCore.Mvc.OkObjectResult okResult)
+                            {
+                                codeReviewResult = okResult.Value;
+                            }
+                            else if (codeReviewActionResult.Result is Microsoft.AspNetCore.Mvc.ObjectResult objectResult)
+                            {
+                                codeReviewResult = objectResult.Value;
+                            }
+                            
+                            if (codeReviewResult != null)
+                            {
+                                var jsonString = JsonSerializer.Serialize(codeReviewResult);
+                                var jsonElement = JsonSerializer.Deserialize<JsonElement>(jsonString);
+                                
+                                // Check if code review was successful
+                                if (jsonElement.TryGetProperty("Success", out var successProp))
+                                {
+                                    codeReviewSuccess = successProp.GetBoolean();
+                                    
+                                    if (codeReviewSuccess)
+                                    {
+                                        // Extract feedback if available
+                                        if (jsonElement.TryGetProperty("Feedback", out var feedbackProp))
+                                        {
+                                            feedback = feedbackProp.GetString() ?? feedback;
+                                        }
+                                        
+                                        // Also check BoardStates as fallback (handle sequenced sources)
+                                        var baseSource = "GitHub-Success-PR";
+                                        var allCodeReviewStates = await _context.BoardStates
+                                            .Where(bs => bs.BoardId == board.Id && 
+                                                        bs.ServiceName == "CodeReview" && 
+                                                        bs.GithubBranch == branchName &&
+                                                        (bs.Source.StartsWith(baseSource + "-") || bs.Source == baseSource))
+                                            .ToListAsync();
+                                        
+                                        var codeReviewState = allCodeReviewStates
+                                            .Where(bs => ExtractBaseSource(bs.Source) == baseSource)
+                                            .OrderByDescending(bs => bs.CreatedAt)
+                                            .FirstOrDefault();
+                                        
+                                        if (codeReviewState?.MentorFeedback != null)
+                                        {
+                                            feedback = codeReviewState.MentorFeedback;
+                                        }
+                                        
+                                        _logger.LogInformation("✅ [SHARED VALIDATION] Code review completed successfully");
+                                        
+                                        // Verify the record was actually created
+                                        var verifyRecord = await _context.BoardStates
+                                            .Where(bs => bs.BoardId == board.Id && 
+                                                        bs.ServiceName == "CodeReview" && 
+                                                        bs.GithubBranch == branchName &&
+                                                        (bs.Source.StartsWith("GitHub-Success-PR-") || bs.Source == "GitHub-Success-PR") &&
+                                                        bs.Webhook == isWebhook)
+                                            .OrderByDescending(bs => bs.CreatedAt)
+                                            .FirstOrDefaultAsync();
+                                        
+                                        if (verifyRecord != null)
+                                        {
+                                            _logger.LogInformation("✅ [SHARED VALIDATION] Verified GitHub-Success-PR record created: Source={Source}, DevRole={DevRole}, Webhook={Webhook}", 
+                                                verifyRecord.Source, verifyRecord.DevRole, verifyRecord.Webhook);
+                                        }
+                                        else
+                                        {
+                                            _logger.LogWarning("⚠️ [SHARED VALIDATION] Code review reported success but GitHub-Success-PR record not found in database!");
+                                        }
+                                    }
+                                    else
+                                    {
+                                        // Extract error message
+                                        if (jsonElement.TryGetProperty("Message", out var messageProp))
+                                        {
+                                            codeReviewError = messageProp.GetString() ?? "Code review failed";
+                                        }
+                                        else
+                                        {
+                                            codeReviewError = "Code review failed";
+                                        }
+                                        
+                                        _logger.LogWarning("❌ [SHARED VALIDATION] Code review failed: {Error}", codeReviewError);
+                                    }
+                                }
+                                else
+                                {
+                                    // If Success property not found, assume failure
+                                    codeReviewError = "Code review response missing Success property";
+                                    _logger.LogWarning("❌ [SHARED VALIDATION] Code review response missing Success property");
+                                }
+                            }
+                            else
+                            {
+                                codeReviewError = "Code review returned null result";
+                                _logger.LogWarning("❌ [SHARED VALIDATION] Code review returned null result");
+                            }
+                        }
+                        catch (Exception codeReviewEx)
+                        {
+                            codeReviewError = $"Code review exception: {codeReviewEx.Message}";
+                            _logger.LogError(codeReviewEx, "❌ [SHARED VALIDATION] Code review failed with exception: {Error}", codeReviewEx.Message);
+                        }
+                    }
+                    
+                    // If code review failed, mark validation as failed
+                    if (!codeReviewSuccess)
+                    {
+                        var failureMessage = codeReviewError ?? "Code review failed";
+                        _logger.LogWarning("❌ [SHARED VALIDATION] Validation FAILED due to code review failure: {Error}", failureMessage);
+                        
+                        try
+                        {
+                            // GitHub status description has a 140 character limit - truncate if needed
+                            var statusDescription = failureMessage.Length > 140 
+                                ? failureMessage.Substring(0, 137) + "..." 
+                                : failureMessage;
+                            
+                            await _githubService.UpdateCommitStatusAsync(owner, repoName, sha, "failure", validationContext,
+                                statusDescription, accessToken);
+                            statusSet = true;
+                        }
+                        catch (Exception statusEx)
+                        {
+                            _logger.LogError(statusEx, "❌ [SHARED VALIDATION] Failed to set failure status: {Error}", statusEx.Message);
+                            throw;
+                        }
+                        
+                        // No record created for failed PR validation
+                        // Records are only created for successful reviews (GitHub-Success-PR or Junior)
+                        _logger.LogInformation("ℹ️ [SHARED VALIDATION] Code review failed - no record created (only success records are logged)");
+                        
+                        // Return failure with code review error as feedback
+                        return (false, failureMessage, failureMessage);
+                    }
+
+                    // Post comment to GitHub PR BEFORE setting success status
+                    if (issueNumber.HasValue)
+                    {
+                        _logger.LogInformation("🔍 [SHARED VALIDATION] Step 6: Posting feedback comment to PR #{PRNumber}", issueNumber);
+                        try
+                        {
+                            await _githubService.AddPullRequestCommentAsync(owner, repoName, issueNumber.Value, feedback, accessToken);
+                            _logger.LogInformation("✅ [SHARED VALIDATION] Posted comment to PR #{PRNumber}", issueNumber);
+                        }
+                        catch (Exception commentEx)
+                        {
+                            _logger.LogError(commentEx, "❌ [SHARED VALIDATION] Failed to add PR comment: {Error}", commentEx.Message);
+                        }
+                    }
+
+                    // Step 7: Update GitHub Status to "success" ONLY after comment is posted
+                    _logger.LogInformation("🔍 [SHARED VALIDATION] Step 7: Setting status to 'success'");
+                    try
+                    {
+                        await _githubService.UpdateCommitStatusAsync(owner, repoName, sha, "success", validationContext,
+                            "Validation passed!", accessToken);
+                        statusSet = true;
+                        _logger.LogInformation("✅ [SHARED VALIDATION] Status set to 'success'");
+                    }
+                    catch (Exception statusEx)
+                    {
+                        _logger.LogError(statusEx, "❌ [SHARED VALIDATION] Failed to set success status: {Error}", statusEx.Message);
+                        throw;
+                    }
+
+                    // Note: The successful PR record is created by the CodeReview method with Source="GitHub-Success-PR", ServiceName="CodeReview", PRStatus="Approved"
+                    return (true, feedback, null);
+                }
+                else
+                {
+                    var failureMessage = validationIssues.Any() 
+                        ? $"Validation failed: {string.Join("; ", validationIssues.Take(3))}" 
+                        : "Check the Board for feedback.";
+                    
+                    _logger.LogWarning("❌ [SHARED VALIDATION] Validation FAILED - isValid={IsValid}, IssuesCount={IssuesCount}, FailureMessage={FailureMessage}", 
+                        isValid, validationIssues.Count, failureMessage);
+                    try
+                    {
+                        await _githubService.UpdateCommitStatusAsync(owner, repoName, sha, "failure", validationContext,
+                            failureMessage, accessToken);
+                        statusSet = true;
+                    }
+                    catch (Exception statusEx)
+                    {
+                        _logger.LogError(statusEx, "❌ [SHARED VALIDATION] Failed to set failure status: {Error}", statusEx.Message);
+                        throw;
+                    }
+                    
+                    // No record created for failed PR validation
+                    // Records are only created for successful reviews (GitHub-Success-PR or Junior)
+                    _logger.LogInformation("ℹ️ [SHARED VALIDATION] PR validation failed - no record created (only success records are logged)");
+                    
+                    return (false, null, failureMessage);
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "❌ [SHARED VALIDATION] Exception during validation");
+                
+                // Always try to set a failure status
+                try
+                {
+                    var errorDescription = $"Validation error: {ex.GetType().Name} - {ex.Message}";
+                    if (errorDescription.Length > 140)
+                    {
+                        errorDescription = errorDescription.Substring(0, 137) + "...";
+                    }
+                    
+                    await _githubService.UpdateCommitStatusAsync(owner, repoName, sha, "failure", validationContext,
+                        errorDescription, accessToken);
+                }
+                catch (Exception statusEx)
+                {
+                    _logger.LogError(statusEx, "❌ [SHARED VALIDATION] CRITICAL: Failed to set failure status after exception");
+                }
+                
+                return (false, null, $"Error validating PR: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Platform-triggered PR validation endpoint
+        /// Route: POST /api/Mentor/use/github-pr
+        /// Parameters: boardId, branchName, isBackend
+        /// </summary>
+        [HttpPost("use/github-pr")]
+        public async Task<ActionResult<object>> GitHubPRValidation([FromBody] GitHubPRValidationRequest request)
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace(request.BoardId))
+                {
+                    return BadRequest(new { Success = false, Message = "boardId is required" });
+                }
+
+                if (string.IsNullOrWhiteSpace(request.BranchName))
+                {
+                    return BadRequest(new { Success = false, Message = "branchName is required" });
+                }
+
+                _logger.LogInformation("📥 [GITHUB-PR] Platform-triggered validation: BoardId={BoardId}, Branch={Branch}, IsBackend={IsBackend}",
+                    request.BoardId, request.BranchName, request.IsBackend);
+
+                // Get board to find GitHub repo info
+                var board = await _context.ProjectBoards
+                    .FirstOrDefaultAsync(pb => pb.Id == request.BoardId);
+
+                if (board == null)
+                {
+                    return NotFound(new { Success = false, Message = $"Board with ID {request.BoardId} not found" });
+                }
+
+                // Determine GitHub URL based on isBackend
+                var githubUrl = request.IsBackend ? board.GithubBackendUrl : board.GithubFrontendUrl;
+                if (string.IsNullOrEmpty(githubUrl))
+                {
+                    return BadRequest(new { Success = false, Message = $"GitHub {(request.IsBackend ? "backend" : "frontend")} URL not found for board" });
+                }
+
+                // Extract owner and repo from GitHub URL
+                var uri = new Uri(githubUrl);
+                var pathParts = uri.AbsolutePath.TrimStart('/').Split('/');
+                if (pathParts.Length < 2)
+                {
+                    return BadRequest(new { Success = false, Message = $"Invalid GitHub URL format: {githubUrl}" });
+                }
+
+                var owner = pathParts[0];
+                var repo = pathParts[1];
+                var accessToken = _configuration["GitHub:AccessToken"];
+
+                if (string.IsNullOrEmpty(accessToken))
+                {
+                    return StatusCode(500, new { Success = false, Message = "GitHub access token is not configured" });
+                }
+
+                // SHA Lookup: Get the latest commit SHA for the branch
+                _logger.LogInformation("📥 [GITHUB-PR] Looking up SHA for branch {Branch} in {Owner}/{Repo}", request.BranchName, owner, repo);
+                var sha = await _githubService.GetBranchShaAsync(owner, repo, request.BranchName, accessToken);
+
+                if (string.IsNullOrEmpty(sha))
+                {
+                    _logger.LogError("❌ [GITHUB-PR] Failed to get SHA for branch {Branch}", request.BranchName);
+                    return BadRequest(new { Success = false, Message = $"Failed to get SHA for branch '{request.BranchName}'. Branch may not exist." });
+                }
+
+                _logger.LogInformation("✅ [GITHUB-PR] Found SHA {Sha} for branch {Branch}", sha, request.BranchName);
+
+                // Check if PR exists (but DON'T create it yet - only create AFTER validation passes)
+                _logger.LogInformation("📥 [GITHUB-PR] Checking if PR exists for branch {Branch}", request.BranchName);
+                var existingPR = await _githubService.GetPullRequestByBranchAsync(owner, repo, request.BranchName, accessToken);
+                int? prNumber = null;
+
+                if (existingPR != null && existingPR.Number > 0)
+                {
+                    prNumber = existingPR.Number;
+                    _logger.LogInformation("✅ [GITHUB-PR] Found existing PR #{PRNumber} for branch {Branch}", prNumber, request.BranchName);
+                }
+
+                // Call shared validation service FIRST (before creating PR)
+                // Pass prNumber if available for PR comment posting
+                var (success, feedback, errorMessage) = await ProcessValidationAsync(
+                    repo, 
+                    request.BranchName, 
+                    sha, 
+                    request.BoardId, 
+                    request.IsBackend, 
+                    issueNumber: prNumber);
+
+                // Only create PR if validation PASSED
+                if (success && (existingPR == null || existingPR.Number == 0))
+                {
+                    _logger.LogInformation("📥 [GITHUB-PR] Validation passed, creating PR for branch {Branch}", request.BranchName);
+                    var prTitle = $"Sprint Task {request.BranchName}";
+                    var prBody = $"Pull request for sprint task {request.BranchName}.\n\nThis PR was automatically created by the validation system.";
+                    var newPR = await _githubService.CreatePullRequestAsync(owner, repo, request.BranchName, "main", prTitle, prBody, accessToken);
+                    
+                    if (newPR != null && newPR.Number > 0)
+                    {
+                        prNumber = newPR.Number;
+                        _logger.LogInformation("✅ [GITHUB-PR] Created PR #{PRNumber} for branch {Branch} after successful validation", prNumber, request.BranchName);
+                        
+                        // When PR is created, update existing "GitHub-Merge" record if it exists
+                        try
+                        {
+                            var existingMergeRecord = await _context.BoardStates
+                                .FirstOrDefaultAsync(bs => bs.BoardId == request.BoardId && 
+                                                           bs.Source == "GitHub-Merge" && 
+                                                           bs.GithubBranch == request.BranchName);
+                            
+                            if (existingMergeRecord != null)
+                            {
+                                existingMergeRecord.PRStatus = "Re-opened";
+                                existingMergeRecord.BranchStatus = "Un-Merged";
+                                existingMergeRecord.Webhook = false; // Platform-triggered, not webhook
+                                existingMergeRecord.UpdatedAt = DateTime.UtcNow;
+                                await _context.SaveChangesAsync();
+                                _logger.LogInformation("✅ [GITHUB-PR] Updated GitHub-Merge record to Re-opened for PR #{PRNumber}, Branch: {Branch}", prNumber, request.BranchName);
+                            }
+                        }
+                        catch (Exception mergeUpdateEx)
+                        {
+                            _logger.LogWarning(mergeUpdateEx, "⚠️ [GITHUB-PR] Failed to update GitHub-Merge record for PR #{PRNumber} (non-critical)", prNumber);
+                        }
+                    }
+                    else
+                    {
+                        // PR creation failed AFTER validation passed - this is unexpected but log it
+                        _logger.LogError("❌ [GITHUB-PR] Validation passed but failed to create PR for branch {Branch}", request.BranchName);
+                        // Don't fail the request - validation already passed, PR creation is secondary
+                    }
+                }
+                else if (!success && (existingPR == null || existingPR.Number == 0))
+                {
+                    // Validation failed and no PR exists - this is expected, don't create PR
+                    _logger.LogInformation("ℹ️ [GITHUB-PR] Validation failed, skipping PR creation for branch {Branch}", request.BranchName);
+                }
+
+                if (success)
+                {
+                    return Ok(new 
+                    { 
+                        Success = true, 
+                        Message = "Validation passed", 
+                        Feedback = feedback,
+                        CodeReviewFeedback = feedback, // AI response for code review
+                        CodeReviewStatus = "success",
+                        Sha = sha 
+                    });
+                }
+                else
+                {
+                    // Check if failure was due to code review (feedback will contain code review error)
+                    var isCodeReviewFailure = !string.IsNullOrEmpty(feedback) && 
+                                             (errorMessage?.Contains("Code review") == true || 
+                                              errorMessage?.Contains("Trello card") == true ||
+                                              feedback.Contains("Code review") == true ||
+                                              feedback.Contains("Trello card") == true);
+                    
+                    return Ok(new 
+                    { 
+                        Success = false, 
+                        Message = errorMessage ?? "Validation failed",
+                        Feedback = feedback, // Code review error message if code review failed
+                        CodeReviewFeedback = isCodeReviewFailure ? (feedback ?? errorMessage) : null,
+                        CodeReviewStatus = isCodeReviewFailure ? "failed" : "not_attempted",
+                        Sha = sha 
+                    });
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "❌ [GITHUB-PR] Error processing platform-triggered validation");
+                return StatusCode(500, new { Success = false, Message = $"Error validating PR: {ex.Message}" });
+            }
+        }
+
+        /// <summary>
+        /// Request model for platform-triggered PR validation
+        /// </summary>
+        public class GitHubPRValidationRequest
+        {
+            public string BoardId { get; set; } = string.Empty;
+            public string BranchName { get; set; } = string.Empty;
+            public bool IsBackend { get; set; }
+        }
+
+        /// <summary>
+        /// Platform-triggered PR merge endpoint
+        /// Route: POST /api/Mentor/use/github-merge
+        /// Parameters: boardId, branchName, isBackend
+        /// </summary>
+        [HttpPost("use/github-merge")]
+        public async Task<ActionResult<object>> GitHubPRMerge([FromBody] GitHubPRValidationRequest request)
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace(request.BoardId))
+                {
+                    return BadRequest(new { Success = false, Message = "boardId is required" });
+                }
+
+                if (string.IsNullOrWhiteSpace(request.BranchName))
+                {
+                    return BadRequest(new { Success = false, Message = "branchName is required" });
+                }
+
+                _logger.LogInformation("📥 [GITHUB-MERGE] Platform-triggered merge: BoardId={BoardId}, Branch={Branch}, IsBackend={IsBackend}",
+                    request.BoardId, request.BranchName, request.IsBackend);
+
+                // Get board to find GitHub repo info
+                var board = await _context.ProjectBoards
+                    .FirstOrDefaultAsync(pb => pb.Id == request.BoardId);
+
+                if (board == null)
+                {
+                    return NotFound(new { Success = false, Message = $"Board with ID {request.BoardId} not found" });
+                }
+
+                // Determine GitHub URL based on isBackend
+                var githubUrl = request.IsBackend ? board.GithubBackendUrl : board.GithubFrontendUrl;
+                if (string.IsNullOrEmpty(githubUrl))
+                {
+                    return BadRequest(new { Success = false, Message = $"GitHub {(request.IsBackend ? "backend" : "frontend")} URL not found for board" });
+                }
+
+                // Extract owner and repo from GitHub URL
+                var uri = new Uri(githubUrl);
+                var pathParts = uri.AbsolutePath.TrimStart('/').Split('/');
+                if (pathParts.Length < 2)
+                {
+                    return BadRequest(new { Success = false, Message = $"Invalid GitHub URL format: {githubUrl}" });
+                }
+
+                var owner = pathParts[0];
+                var repo = pathParts[1];
+                var accessToken = _configuration["GitHub:AccessToken"];
+
+                if (string.IsNullOrEmpty(accessToken))
+                {
+                    return StatusCode(500, new { Success = false, Message = "GitHub access token is not configured" });
+                }
+
+                // Phase 1: Identify the Pull Request
+                _logger.LogInformation("📥 [GITHUB-MERGE] Phase 1: Finding open PR for branch {Branch}", request.BranchName);
+                var pr = await _githubService.GetPullRequestByBranchAsync(owner, repo, request.BranchName, accessToken);
+
+                if (pr == null || pr.Number == 0)
+                {
+                    _logger.LogWarning("❌ [GITHUB-MERGE] No open PR found for branch {Branch}", request.BranchName);
+                    return NotFound(new { Success = false, Message = $"No open pull request found for branch '{request.BranchName}'" });
+                }
+
+                _logger.LogInformation("✅ [GITHUB-MERGE] Found PR #{PRNumber} for branch {Branch}", pr.Number, request.BranchName);
+
+                // Phase 2: Security Check (Pre-Merge)
+                _logger.LogInformation("📥 [GITHUB-MERGE] Phase 2: Performing security checks");
+
+                // Check mergeability - if null, GitHub hasn't computed it yet, so we'll poll for it
+                if (pr.Mergeable == null)
+                {
+                    _logger.LogInformation("⏳ [GITHUB-MERGE] PR #{PRNumber} mergeable status is null, waiting for GitHub to compute it...", pr.Number);
+                    
+                    // Poll up to 5 times with 2 second delays (max 10 seconds wait)
+                    const int maxRetries = 5;
+                    const int delaySeconds = 2;
+                    bool mergeableComputed = false;
+                    
+                    for (int attempt = 1; attempt <= maxRetries; attempt++)
+                    {
+                        await Task.Delay(TimeSpan.FromSeconds(delaySeconds));
+                        _logger.LogInformation("🔄 [GITHUB-MERGE] Refetching PR #{PRNumber} to check mergeable status (attempt {Attempt}/{MaxRetries})", 
+                            pr.Number, attempt, maxRetries);
+                        
+                        var refreshedPR = await _githubService.GetPullRequestByBranchAsync(owner, repo, request.BranchName, accessToken);
+                        if (refreshedPR != null && refreshedPR.Number == pr.Number)
+                        {
+                            pr = refreshedPR; // Update with refreshed data
+                            if (pr.Mergeable.HasValue)
+                            {
+                                mergeableComputed = true;
+                                _logger.LogInformation("✅ [GITHUB-MERGE] PR #{PRNumber} mergeable status computed: {Mergeable}", pr.Number, pr.Mergeable);
+                                break;
+                            }
+                        }
+                    }
+                    
+                    if (!mergeableComputed)
+                    {
+                        _logger.LogWarning("⚠️ [GITHUB-MERGE] PR #{PRNumber} mergeable status still null after {MaxRetries} attempts. Proceeding with merge attempt (GitHub will reject if not mergeable).", 
+                            pr.Number, maxRetries);
+                        // Continue - GitHub API will reject the merge if it's not actually mergeable
+                    }
+                }
+
+                // Only fail if mergeable is explicitly false
+                if (pr.Mergeable == false)
+                {
+                    _logger.LogWarning("❌ [GITHUB-MERGE] PR #{PRNumber} is not mergeable (mergeable=false). This usually means there are merge conflicts.", pr.Number);
+                    return StatusCode(403, new { Success = false, Message = "Pull request is not mergeable. Please resolve any conflicts first." });
+                }
+                
+                // If mergeable is still null after polling, log a warning but proceed
+                // GitHub API will reject the merge if it's not actually mergeable
+                if (pr.Mergeable == null)
+                {
+                    _logger.LogWarning("⚠️ [GITHUB-MERGE] PR #{PRNumber} mergeable status is still null. Proceeding with merge - GitHub will reject if conflicts exist.", pr.Number);
+                }
+
+                // Check validation status
+                var validationContext = _configuration["GitHub:ValidationContext"] ?? "Mentor-Validation";
+                var headSha = pr.HeadSha;
+                
+                if (string.IsNullOrEmpty(headSha))
+                {
+                    // Fallback: get SHA from branch
+                    headSha = await _githubService.GetBranchShaAsync(owner, repo, request.BranchName, accessToken);
+                }
+
+                if (string.IsNullOrEmpty(headSha))
+                {
+                    _logger.LogWarning("❌ [GITHUB-MERGE] Could not determine SHA for branch {Branch}", request.BranchName);
+                    return StatusCode(500, new { Success = false, Message = "Could not determine commit SHA for branch" });
+                }
+
+                _logger.LogInformation("📥 [GITHUB-MERGE] Checking validation status for SHA {Sha} with context {Context}", headSha, validationContext);
+                var commitStatus = await _githubService.GetCommitStatusAsync(owner, repo, headSha, validationContext, accessToken);
+
+                if (commitStatus == null)
+                {
+                    _logger.LogWarning("❌ [GITHUB-MERGE] No validation status found for SHA {Sha} with context {Context}", headSha, validationContext);
+                    return StatusCode(403, new { Success = false, Message = "Code must pass Mentor Validation before merging." });
+                }
+
+                if (commitStatus.State != "success")
+                {
+                    _logger.LogWarning("❌ [GITHUB-MERGE] Validation status is '{State}' (expected 'success') for SHA {Sha}", commitStatus.State, headSha);
+                    return StatusCode(403, new { Success = false, Message = "Code must pass Mentor Validation before merging." });
+                }
+
+                _logger.LogInformation("✅ [GITHUB-MERGE] Security checks passed: Mergeable={Mergeable}, Validation={ValidationState}", 
+                    pr.Mergeable, commitStatus.State);
+
+                // Phase 3: Execute Merge & Update PSA
+                _logger.LogInformation("📥 [GITHUB-MERGE] Phase 3: Executing merge");
+                var commitTitle = $"Completed: Sprint Task {request.BranchName}";
+                var mergeSuccess = await _githubService.MergePullRequestAsync(owner, repo, pr.Number, commitTitle, accessToken);
+
+                if (!mergeSuccess)
+                {
+                    _logger.LogError("❌ [GITHUB-MERGE] Failed to merge PR #{PRNumber}", pr.Number);
+                    return StatusCode(500, new { Success = false, Message = "Failed to merge pull request" });
+                }
+
+                _logger.LogInformation("✅ [GITHUB-MERGE] Successfully merged PR #{PRNumber}", pr.Number);
+
+                // Update or create BoardState record for merge (key: BoardId, Source="GitHub-Merge", GithubBranch)
+                try
+                {
+                    var existingMergeRecord = await _context.BoardStates
+                        .FirstOrDefaultAsync(bs => bs.BoardId == request.BoardId && 
+                                                   bs.Source == "GitHub-Merge" && 
+                                                   bs.GithubBranch == request.BranchName);
+                    
+                    DateTime mergedAt = DateTime.UtcNow;
+                    
+                    if (existingMergeRecord != null)
+                    {
+                        // UPDATE existing "GitHub-Merge" record
+                        existingMergeRecord.BranchStatus = "Completed-Merged";
+                        existingMergeRecord.PRStatus = "Merged";
+                        existingMergeRecord.LastBuildStatus = "Completed-Merged";
+                        existingMergeRecord.LastMergeDate = mergedAt;
+                        existingMergeRecord.Webhook = false; // Platform-triggered, not webhook
+                        existingMergeRecord.UpdatedAt = DateTime.UtcNow;
+                        
+                        await _context.SaveChangesAsync();
+                        _logger.LogInformation("✅ [GITHUB-MERGE] Updated existing GitHub-Merge record for PR #{PRNumber}, Branch: {Branch}", pr.Number, request.BranchName);
+                    }
+                    else
+                    {
+                        // CREATE new "GitHub-Merge" record
+                        var mergeBoardState = new BoardState
+                        {
+                            BoardId = request.BoardId,
+                            Source = "GitHub-Merge",
+                            Webhook = false, // Platform-triggered, not webhook
+                            ServiceName = "GitHubMerge",
+                            BranchStatus = "Completed-Merged",
+                            PRStatus = "Merged",
+                            LastBuildStatus = "Completed-Merged",
+                            GithubBranch = request.BranchName,
+                            LastMergeDate = mergedAt,
+                            DevRole = DetermineDevRole("GitHub-Merge", request.BranchName),
+                            CreatedAt = DateTime.UtcNow,
+                            UpdatedAt = DateTime.UtcNow
+                        };
+                        _context.BoardStates.Add(mergeBoardState);
+                        await _context.SaveChangesAsync();
+                        _logger.LogInformation("✅ [GITHUB-MERGE] Created new GitHub-Merge record for PR #{PRNumber}, Branch: {Branch}", pr.Number, request.BranchName);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "⚠️ [GITHUB-MERGE] Failed to update/create BoardState record (non-critical): {Error}", ex.Message);
+                    // Continue - merge was successful, BoardState record creation is non-critical
+                }
+
+                return Ok(new { Success = true, Message = "Pull request merged successfully", PRNumber = pr.Number, BranchName = request.BranchName });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "❌ [GITHUB-MERGE] Error processing platform-triggered merge");
+                return StatusCode(500, new { Success = false, Message = $"Error merging PR: {ex.Message}" });
+            }
         }
     }
 }

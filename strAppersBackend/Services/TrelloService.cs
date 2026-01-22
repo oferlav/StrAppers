@@ -14,6 +14,7 @@ namespace strAppersBackend.Services
         Task<object> ListAllBoardsAsync();
         Task<object> GetBoardMembersWithEmailResolutionAsync(string trelloBoardId);
         Task<object> GetCardsAndListsByLabelAsync(string trelloBoardId, string labelName);
+        Task<JsonElement?> GetCardByCardIdAsync(string trelloBoardId, string cardId);
     }
 
     public class TrelloService : ITrelloService
@@ -1526,6 +1527,103 @@ namespace strAppersBackend.Services
             {
                 _logger.LogError(ex, "Error setting custom field '{FieldId}' to '{Value}' on card {CardId}", customFieldId, value, cardId);
                 errors.Add($"Error setting custom field: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Gets a Trello card by CardId custom field value
+        /// </summary>
+        public async Task<JsonElement?> GetCardByCardIdAsync(string trelloBoardId, string cardId)
+        {
+            try
+            {
+                _logger.LogInformation("🔍 [TRELLO] Searching for card with CardId '{CardId}' in board {BoardId}", cardId, trelloBoardId);
+
+                // Get all cards from the board
+                var cardsUrl = $"https://api.trello.com/1/boards/{trelloBoardId}/cards?key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}&customFieldItems=true";
+                var response = await _httpClient.GetAsync(cardsUrl);
+
+                if (!response.IsSuccessStatusCode)
+                {
+                    var errorContent = await response.Content.ReadAsStringAsync();
+                    _logger.LogWarning("Failed to get cards from board {BoardId}: {Error}", trelloBoardId, errorContent);
+                    return null;
+                }
+
+                var content = await response.Content.ReadAsStringAsync();
+                var cards = JsonSerializer.Deserialize<JsonElement[]>(content);
+
+                if (cards == null)
+                {
+                    _logger.LogWarning("No cards found in board {BoardId}", trelloBoardId);
+                    return null;
+                }
+
+                // Get custom field definitions to find CardId field
+                var customFieldsUrl = $"https://api.trello.com/1/boards/{trelloBoardId}/customFields?key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
+                var fieldsResponse = await _httpClient.GetAsync(customFieldsUrl);
+                
+                string? cardIdFieldId = null;
+                if (fieldsResponse.IsSuccessStatusCode)
+                {
+                    var fieldsContent = await fieldsResponse.Content.ReadAsStringAsync();
+                    var fields = JsonSerializer.Deserialize<JsonElement[]>(fieldsContent);
+                    
+                    if (fields != null)
+                    {
+                        foreach (var field in fields)
+                        {
+                            if (field.TryGetProperty("name", out var nameProp) && nameProp.GetString() == "CardId")
+                            {
+                                if (field.TryGetProperty("id", out var idProp))
+                                {
+                                    cardIdFieldId = idProp.GetString();
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Search through cards to find one with matching CardId
+                foreach (var card in cards)
+                {
+                    if (card.TryGetProperty("customFieldItems", out var customFieldsProp))
+                    {
+                        foreach (var customField in customFieldsProp.EnumerateArray())
+                        {
+                            if (customField.TryGetProperty("idCustomField", out var fieldIdProp))
+                            {
+                                var fieldId = fieldIdProp.GetString();
+                                if (fieldId == cardIdFieldId)
+                                {
+                                    if (customField.TryGetProperty("value", out var valueProp))
+                                    {
+                                        string? cardIdValue = null;
+                                        if (valueProp.TryGetProperty("text", out var textProp))
+                                        {
+                                            cardIdValue = textProp.GetString();
+                                        }
+
+                                        if (cardIdValue == cardId)
+                                        {
+                                            _logger.LogInformation("✅ [TRELLO] Found card with CardId '{CardId}'", cardId);
+                                            return card;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                _logger.LogWarning("⚠️ [TRELLO] Card with CardId '{CardId}' not found in board {BoardId}", cardId, trelloBoardId);
+                return null;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "❌ [TRELLO] Error getting card by CardId '{CardId}': {Message}", cardId, ex.Message);
+                return null;
             }
         }
     }

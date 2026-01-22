@@ -91,7 +91,7 @@ namespace strAppersBackend.Migrations
                         {
                             Id = 1,
                             BaseUrl = "https://api.openai.com/v1",
-                            CreatedAt = new DateTime(2026, 1, 17, 19, 52, 51, 304, DateTimeKind.Utc).AddTicks(1826),
+                            CreatedAt = new DateTime(2026, 1, 22, 19, 15, 42, 934, DateTimeKind.Utc).AddTicks(1048),
                             DefaultTemperature = 0.20000000000000001,
                             Description = "OpenAI GPT-4o Mini model - fast and cost-effective",
                             IsActive = true,
@@ -104,7 +104,7 @@ namespace strAppersBackend.Migrations
                             Id = 2,
                             ApiVersion = "2023-06-01",
                             BaseUrl = "https://api.anthropic.com/v1",
-                            CreatedAt = new DateTime(2026, 1, 17, 19, 52, 51, 304, DateTimeKind.Utc).AddTicks(1831),
+                            CreatedAt = new DateTime(2026, 1, 22, 19, 15, 42, 934, DateTimeKind.Utc).AddTicks(1054),
                             DefaultTemperature = 0.29999999999999999,
                             Description = "Anthropic Claude Sonnet 4.5 model - powerful for complex tasks",
                             IsActive = true,
@@ -200,6 +200,10 @@ namespace strAppersBackend.Migrations
                         .HasColumnType("timestamp with time zone")
                         .HasDefaultValueSql("CURRENT_TIMESTAMP");
 
+                    b.Property<string>("DevRole")
+                        .HasMaxLength(50)
+                        .HasColumnType("character varying(50)");
+
                     b.Property<string>("ErrorMessage")
                         .HasColumnType("text");
 
@@ -241,6 +245,9 @@ namespace strAppersBackend.Migrations
 
                     b.Property<int?>("Line")
                         .HasColumnType("integer");
+
+                    b.Property<string>("MentorFeedback")
+                        .HasColumnType("text");
 
                     b.Property<string>("PRStatus")
                         .HasMaxLength(50)
@@ -301,7 +308,7 @@ namespace strAppersBackend.Migrations
 
                     b.HasIndex("UpdatedAt");
 
-                    b.HasIndex("BoardId", "Source")
+                    b.HasIndex("BoardId", "Source", "Webhook", "GithubBranch")
                         .IsUnique();
 
                     b.ToTable("BoardStates", (string)null);
@@ -727,7 +734,7 @@ namespace strAppersBackend.Migrations
                         new
                         {
                             Id = 1,
-                            CreatedAt = new DateTime(2025, 11, 18, 19, 52, 51, 281, DateTimeKind.Utc).AddTicks(6345),
+                            CreatedAt = new DateTime(2025, 11, 23, 19, 15, 42, 913, DateTimeKind.Utc).AddTicks(4678),
                             Department = "Computer Science",
                             Description = "Study of computational systems and design",
                             IsActive = true,
@@ -736,7 +743,7 @@ namespace strAppersBackend.Migrations
                         new
                         {
                             Id = 2,
-                            CreatedAt = new DateTime(2025, 11, 18, 19, 52, 51, 281, DateTimeKind.Utc).AddTicks(6364),
+                            CreatedAt = new DateTime(2025, 11, 23, 19, 15, 42, 913, DateTimeKind.Utc).AddTicks(4693),
                             Department = "Computer Science",
                             Description = "Engineering approach to software development",
                             IsActive = true,
@@ -745,7 +752,7 @@ namespace strAppersBackend.Migrations
                         new
                         {
                             Id = 3,
-                            CreatedAt = new DateTime(2025, 11, 18, 19, 52, 51, 281, DateTimeKind.Utc).AddTicks(6368),
+                            CreatedAt = new DateTime(2025, 11, 23, 19, 15, 42, 913, DateTimeKind.Utc).AddTicks(4696),
                             Department = "Computer Science",
                             Description = "Extracting insights from data",
                             IsActive = true,
@@ -754,7 +761,7 @@ namespace strAppersBackend.Migrations
                         new
                         {
                             Id = 4,
-                            CreatedAt = new DateTime(2025, 11, 18, 19, 52, 51, 281, DateTimeKind.Utc).AddTicks(6371),
+                            CreatedAt = new DateTime(2025, 11, 23, 19, 15, 42, 913, DateTimeKind.Utc).AddTicks(4698),
                             Department = "Computer Science",
                             Description = "Protecting digital systems and data",
                             IsActive = true,
@@ -763,7 +770,7 @@ namespace strAppersBackend.Migrations
                         new
                         {
                             Id = 5,
-                            CreatedAt = new DateTime(2025, 11, 18, 19, 52, 51, 281, DateTimeKind.Utc).AddTicks(6373),
+                            CreatedAt = new DateTime(2025, 11, 23, 19, 15, 42, 913, DateTimeKind.Utc).AddTicks(4700),
                             Department = "Information Systems",
                             Description = "Management and use of technology",
                             IsActive = true,
@@ -772,7 +779,7 @@ namespace strAppersBackend.Migrations
                         new
                         {
                             Id = 6,
-                            CreatedAt = new DateTime(2025, 11, 18, 19, 52, 51, 281, DateTimeKind.Utc).AddTicks(6376),
+                            CreatedAt = new DateTime(2025, 11, 23, 19, 15, 42, 913, DateTimeKind.Utc).AddTicks(4703),
                             Department = "Business",
                             Description = "General business management",
                             IsActive = true,
@@ -963,7 +970,7 @@ namespace strAppersBackend.Migrations
                             Id = 1,
                             Address = "123 Tech Street, Tech City",
                             ContactEmail = "info@techuniversity.edu",
-                            CreatedAt = new DateTime(2025, 11, 18, 19, 52, 51, 282, DateTimeKind.Utc).AddTicks(950),
+                            CreatedAt = new DateTime(2025, 11, 23, 19, 15, 42, 913, DateTimeKind.Utc).AddTicks(8866),
                             Description = "Leading technology university",
                             IsActive = true,
                             Name = "Tech University",
@@ -977,7 +984,7 @@ namespace strAppersBackend.Migrations
                             Id = 2,
                             Address = "456 Innovation Ave, Tech City",
                             ContactEmail = "contact@innovationlabs.com",
-                            CreatedAt = new DateTime(2025, 11, 23, 19, 52, 51, 282, DateTimeKind.Utc).AddTicks(956),
+                            CreatedAt = new DateTime(2025, 11, 28, 19, 15, 42, 913, DateTimeKind.Utc).AddTicks(8872),
                             Description = "Research and development company",
                             IsActive = true,
                             Name = "Innovation Labs",
@@ -991,7 +998,7 @@ namespace strAppersBackend.Migrations
                             Id = 3,
                             Address = "789 Good Street, Tech City",
                             ContactEmail = "hello@codeforgood.org",
-                            CreatedAt = new DateTime(2025, 11, 28, 19, 52, 51, 282, DateTimeKind.Utc).AddTicks(960),
+                            CreatedAt = new DateTime(2025, 12, 3, 19, 15, 42, 913, DateTimeKind.Utc).AddTicks(8875),
                             Description = "Non-profit organization promoting tech for social good",
                             IsActive = true,
                             Name = "Code for Good",
@@ -1146,7 +1153,7 @@ namespace strAppersBackend.Migrations
                         {
                             Id = 1,
                             CompletedChunks = 0,
-                            CreatedAt = new DateTime(2025, 12, 18, 19, 52, 51, 293, DateTimeKind.Utc).AddTicks(6484),
+                            CreatedAt = new DateTime(2025, 12, 23, 19, 15, 42, 924, DateTimeKind.Utc).AddTicks(4813),
                             Description = "Web application for managing student records and academic progress",
                             IdeGenerationStatus = "not_started",
                             IsAvailable = true,
@@ -1161,7 +1168,7 @@ namespace strAppersBackend.Migrations
                         {
                             Id = 2,
                             CompletedChunks = 0,
-                            CreatedAt = new DateTime(2025, 12, 28, 19, 52, 51, 293, DateTimeKind.Utc).AddTicks(6502),
+                            CreatedAt = new DateTime(2026, 1, 2, 19, 15, 42, 924, DateTimeKind.Utc).AddTicks(4825),
                             Description = "Machine learning platform for academic research",
                             IdeGenerationStatus = "not_started",
                             IsAvailable = true,
@@ -1176,7 +1183,7 @@ namespace strAppersBackend.Migrations
                         {
                             Id = 3,
                             CompletedChunks = 0,
-                            CreatedAt = new DateTime(2025, 10, 19, 19, 52, 51, 293, DateTimeKind.Utc).AddTicks(6506),
+                            CreatedAt = new DateTime(2025, 10, 24, 19, 15, 42, 924, DateTimeKind.Utc).AddTicks(4828),
                             Description = "Mobile app connecting volunteers with local community needs",
                             IdeGenerationStatus = "not_started",
                             IsAvailable = true,
@@ -1191,7 +1198,7 @@ namespace strAppersBackend.Migrations
                         {
                             Id = 4,
                             CompletedChunks = 0,
-                            CreatedAt = new DateTime(2026, 1, 2, 19, 52, 51, 293, DateTimeKind.Utc).AddTicks(6509),
+                            CreatedAt = new DateTime(2026, 1, 7, 19, 15, 42, 924, DateTimeKind.Utc).AddTicks(4831),
                             Description = "E-learning platform with video streaming and assessments",
                             IdeGenerationStatus = "not_started",
                             IsAvailable = true,
@@ -1206,7 +1213,7 @@ namespace strAppersBackend.Migrations
                         {
                             Id = 5,
                             CompletedChunks = 0,
-                            CreatedAt = new DateTime(2026, 1, 7, 19, 52, 51, 293, DateTimeKind.Utc).AddTicks(6512),
+                            CreatedAt = new DateTime(2026, 1, 12, 19, 15, 42, 924, DateTimeKind.Utc).AddTicks(4834),
                             Description = "Real-time dashboard for analyzing student performance metrics",
                             IdeGenerationStatus = "not_started",
                             IsAvailable = true,
@@ -1221,7 +1228,7 @@ namespace strAppersBackend.Migrations
                         {
                             Id = 6,
                             CompletedChunks = 0,
-                            CreatedAt = new DateTime(2026, 1, 12, 19, 52, 51, 293, DateTimeKind.Utc).AddTicks(6531),
+                            CreatedAt = new DateTime(2026, 1, 17, 19, 15, 42, 924, DateTimeKind.Utc).AddTicks(4837),
                             Description = "Mobile application for students to discover and register for campus events",
                             IdeGenerationStatus = "not_started",
                             IsAvailable = true,
@@ -1236,7 +1243,7 @@ namespace strAppersBackend.Migrations
                         {
                             Id = 7,
                             CompletedChunks = 0,
-                            CreatedAt = new DateTime(2026, 1, 14, 19, 52, 51, 293, DateTimeKind.Utc).AddTicks(6534),
+                            CreatedAt = new DateTime(2026, 1, 19, 19, 15, 42, 924, DateTimeKind.Utc).AddTicks(4840),
                             Description = "VR environment for immersive learning experiences",
                             IdeGenerationStatus = "not_started",
                             IsAvailable = true,
@@ -1251,7 +1258,7 @@ namespace strAppersBackend.Migrations
                         {
                             Id = 8,
                             CompletedChunks = 0,
-                            CreatedAt = new DateTime(2026, 1, 16, 19, 52, 51, 293, DateTimeKind.Utc).AddTicks(6537),
+                            CreatedAt = new DateTime(2026, 1, 21, 19, 15, 42, 924, DateTimeKind.Utc).AddTicks(4843),
                             Description = "Secure voting system using blockchain technology",
                             IdeGenerationStatus = "not_started",
                             IsAvailable = true,
@@ -1266,7 +1273,7 @@ namespace strAppersBackend.Migrations
                         {
                             Id = 9,
                             CompletedChunks = 0,
-                            CreatedAt = new DateTime(2026, 1, 15, 19, 52, 51, 293, DateTimeKind.Utc).AddTicks(6540),
+                            CreatedAt = new DateTime(2026, 1, 20, 19, 15, 42, 924, DateTimeKind.Utc).AddTicks(4846),
                             Description = "Internet of Things system for campus management",
                             IdeGenerationStatus = "not_started",
                             IsAvailable = true,
@@ -1567,7 +1574,7 @@ namespace strAppersBackend.Migrations
                         {
                             Id = 1,
                             Color = "#10B981",
-                            CreatedAt = new DateTime(2025, 12, 8, 19, 52, 51, 282, DateTimeKind.Utc).AddTicks(2241),
+                            CreatedAt = new DateTime(2025, 12, 13, 19, 15, 42, 914, DateTimeKind.Utc).AddTicks(71),
                             Description = "Newly created project",
                             IsActive = true,
                             Name = "New",
@@ -1577,7 +1584,7 @@ namespace strAppersBackend.Migrations
                         {
                             Id = 2,
                             Color = "#3B82F6",
-                            CreatedAt = new DateTime(2025, 12, 8, 19, 52, 51, 282, DateTimeKind.Utc).AddTicks(2248),
+                            CreatedAt = new DateTime(2025, 12, 13, 19, 15, 42, 914, DateTimeKind.Utc).AddTicks(78),
                             Description = "Project in planning phase",
                             IsActive = true,
                             Name = "Planning",
@@ -1587,7 +1594,7 @@ namespace strAppersBackend.Migrations
                         {
                             Id = 3,
                             Color = "#F59E0B",
-                            CreatedAt = new DateTime(2025, 12, 8, 19, 52, 51, 282, DateTimeKind.Utc).AddTicks(2251),
+                            CreatedAt = new DateTime(2025, 12, 13, 19, 15, 42, 914, DateTimeKind.Utc).AddTicks(81),
                             Description = "Project currently being worked on",
                             IsActive = true,
                             Name = "In Progress",
@@ -1597,7 +1604,7 @@ namespace strAppersBackend.Migrations
                         {
                             Id = 4,
                             Color = "#EF4444",
-                            CreatedAt = new DateTime(2025, 12, 8, 19, 52, 51, 282, DateTimeKind.Utc).AddTicks(2253),
+                            CreatedAt = new DateTime(2025, 12, 13, 19, 15, 42, 914, DateTimeKind.Utc).AddTicks(83),
                             Description = "Project temporarily paused",
                             IsActive = true,
                             Name = "On Hold",
@@ -1607,7 +1614,7 @@ namespace strAppersBackend.Migrations
                         {
                             Id = 5,
                             Color = "#059669",
-                            CreatedAt = new DateTime(2025, 12, 8, 19, 52, 51, 282, DateTimeKind.Utc).AddTicks(2256),
+                            CreatedAt = new DateTime(2025, 12, 13, 19, 15, 42, 914, DateTimeKind.Utc).AddTicks(86),
                             Description = "Project successfully completed",
                             IsActive = true,
                             Name = "Completed",
@@ -1617,7 +1624,7 @@ namespace strAppersBackend.Migrations
                         {
                             Id = 6,
                             Color = "#6B7280",
-                            CreatedAt = new DateTime(2025, 12, 8, 19, 52, 51, 282, DateTimeKind.Utc).AddTicks(2258),
+                            CreatedAt = new DateTime(2025, 12, 13, 19, 15, 42, 914, DateTimeKind.Utc).AddTicks(89),
                             Description = "Project cancelled or abandoned",
                             IsActive = true,
                             Name = "Cancelled",
@@ -1945,7 +1952,7 @@ namespace strAppersBackend.Migrations
                         new
                         {
                             Id = 1,
-                            CreatedAt = new DateTime(2025, 12, 3, 19, 52, 51, 292, DateTimeKind.Utc).AddTicks(9886),
+                            CreatedAt = new DateTime(2025, 12, 8, 19, 15, 42, 923, DateTimeKind.Utc).AddTicks(9300),
                             Email = "alex.johnson@techuniversity.edu",
                             FirstName = "Alex",
                             FreelanceWork = false,
@@ -1970,7 +1977,7 @@ namespace strAppersBackend.Migrations
                         new
                         {
                             Id = 2,
-                            CreatedAt = new DateTime(2025, 12, 8, 19, 52, 51, 292, DateTimeKind.Utc).AddTicks(9905),
+                            CreatedAt = new DateTime(2025, 12, 13, 19, 15, 42, 923, DateTimeKind.Utc).AddTicks(9315),
                             Email = "sarah.williams@techuniversity.edu",
                             FirstName = "Sarah",
                             FreelanceWork = false,
@@ -1995,7 +2002,7 @@ namespace strAppersBackend.Migrations
                         new
                         {
                             Id = 3,
-                            CreatedAt = new DateTime(2025, 12, 13, 19, 52, 51, 292, DateTimeKind.Utc).AddTicks(9908),
+                            CreatedAt = new DateTime(2025, 12, 18, 19, 15, 42, 923, DateTimeKind.Utc).AddTicks(9318),
                             Email = "michael.brown@techuniversity.edu",
                             FirstName = "Michael",
                             FreelanceWork = false,
@@ -2020,7 +2027,7 @@ namespace strAppersBackend.Migrations
                         new
                         {
                             Id = 4,
-                            CreatedAt = new DateTime(2025, 12, 18, 19, 52, 51, 292, DateTimeKind.Utc).AddTicks(9911),
+                            CreatedAt = new DateTime(2025, 12, 23, 19, 15, 42, 923, DateTimeKind.Utc).AddTicks(9321),
                             Email = "emily.davis@techuniversity.edu",
                             FirstName = "Emily",
                             FreelanceWork = false,
@@ -2045,7 +2052,7 @@ namespace strAppersBackend.Migrations
                         new
                         {
                             Id = 5,
-                            CreatedAt = new DateTime(2025, 12, 23, 19, 52, 51, 292, DateTimeKind.Utc).AddTicks(9914),
+                            CreatedAt = new DateTime(2025, 12, 28, 19, 15, 42, 923, DateTimeKind.Utc).AddTicks(9324),
                             Email = "david.miller@techuniversity.edu",
                             FirstName = "David",
                             FreelanceWork = false,
@@ -2107,7 +2114,7 @@ namespace strAppersBackend.Migrations
                         new
                         {
                             Id = 1,
-                            AssignedDate = new DateTime(2025, 12, 18, 19, 52, 51, 294, DateTimeKind.Utc).AddTicks(4021),
+                            AssignedDate = new DateTime(2025, 12, 23, 19, 15, 42, 925, DateTimeKind.Utc).AddTicks(3003),
                             IsActive = true,
                             Notes = "Leading the Student Management System project",
                             RoleId = 1,
@@ -2116,7 +2123,7 @@ namespace strAppersBackend.Migrations
                         new
                         {
                             Id = 2,
-                            AssignedDate = new DateTime(2025, 12, 23, 19, 52, 51, 294, DateTimeKind.Utc).AddTicks(4031),
+                            AssignedDate = new DateTime(2025, 12, 28, 19, 15, 42, 925, DateTimeKind.Utc).AddTicks(3010),
                             IsActive = true,
                             Notes = "Frontend development for multiple projects",
                             RoleId = 2,
@@ -2125,7 +2132,7 @@ namespace strAppersBackend.Migrations
                         new
                         {
                             Id = 3,
-                            AssignedDate = new DateTime(2025, 12, 28, 19, 52, 51, 294, DateTimeKind.Utc).AddTicks(4033),
+                            AssignedDate = new DateTime(2026, 1, 2, 19, 15, 42, 925, DateTimeKind.Utc).AddTicks(3012),
                             IsActive = true,
                             Notes = "Backend development and database design",
                             RoleId = 3,
@@ -2134,7 +2141,7 @@ namespace strAppersBackend.Migrations
                         new
                         {
                             Id = 4,
-                            AssignedDate = new DateTime(2026, 1, 2, 19, 52, 51, 294, DateTimeKind.Utc).AddTicks(4035),
+                            AssignedDate = new DateTime(2026, 1, 7, 19, 15, 42, 925, DateTimeKind.Utc).AddTicks(3015),
                             IsActive = true,
                             Notes = "UI/UX design for community outreach app",
                             RoleId = 4,
@@ -2143,7 +2150,7 @@ namespace strAppersBackend.Migrations
                         new
                         {
                             Id = 5,
-                            AssignedDate = new DateTime(2026, 1, 7, 19, 52, 51, 294, DateTimeKind.Utc).AddTicks(4038),
+                            AssignedDate = new DateTime(2026, 1, 12, 19, 15, 42, 925, DateTimeKind.Utc).AddTicks(3017),
                             IsActive = true,
                             Notes = "QA testing for online learning platform",
                             RoleId = 5,
@@ -2152,7 +2159,7 @@ namespace strAppersBackend.Migrations
                         new
                         {
                             Id = 6,
-                            AssignedDate = new DateTime(2025, 12, 13, 19, 52, 51, 294, DateTimeKind.Utc).AddTicks(4040),
+                            AssignedDate = new DateTime(2025, 12, 18, 19, 15, 42, 925, DateTimeKind.Utc).AddTicks(3019),
                             IsActive = true,
                             Notes = "Team lead for junior developers",
                             RoleId = 6,
@@ -2161,7 +2168,7 @@ namespace strAppersBackend.Migrations
                         new
                         {
                             Id = 7,
-                            AssignedDate = new DateTime(2025, 12, 30, 19, 52, 51, 294, DateTimeKind.Utc).AddTicks(4042),
+                            AssignedDate = new DateTime(2026, 1, 4, 19, 15, 42, 925, DateTimeKind.Utc).AddTicks(3021),
                             IsActive = true,
                             Notes = "Research on AI and machine learning",
                             RoleId = 7,
@@ -2170,7 +2177,7 @@ namespace strAppersBackend.Migrations
                         new
                         {
                             Id = 8,
-                            AssignedDate = new DateTime(2026, 1, 5, 19, 52, 51, 294, DateTimeKind.Utc).AddTicks(4044),
+                            AssignedDate = new DateTime(2026, 1, 10, 19, 15, 42, 925, DateTimeKind.Utc).AddTicks(3023),
                             IsActive = true,
                             Notes = "Documentation for frontend components",
                             RoleId = 8,
@@ -2210,28 +2217,28 @@ namespace strAppersBackend.Migrations
                         new
                         {
                             Id = 1,
-                            CreatedAt = new DateTime(2026, 1, 17, 19, 52, 51, 299, DateTimeKind.Utc).AddTicks(5030),
+                            CreatedAt = new DateTime(2026, 1, 22, 19, 15, 42, 929, DateTimeKind.Utc).AddTicks(9250),
                             Description = "Junior",
                             Price = 0m
                         },
                         new
                         {
                             Id = 2,
-                            CreatedAt = new DateTime(2026, 1, 17, 19, 52, 51, 299, DateTimeKind.Utc).AddTicks(5034),
+                            CreatedAt = new DateTime(2026, 1, 22, 19, 15, 42, 929, DateTimeKind.Utc).AddTicks(9255),
                             Description = "Product",
                             Price = 0m
                         },
                         new
                         {
                             Id = 3,
-                            CreatedAt = new DateTime(2026, 1, 17, 19, 52, 51, 299, DateTimeKind.Utc).AddTicks(5036),
+                            CreatedAt = new DateTime(2026, 1, 22, 19, 15, 42, 929, DateTimeKind.Utc).AddTicks(9305),
                             Description = "Enterprise A",
                             Price = 0m
                         },
                         new
                         {
                             Id = 4,
-                            CreatedAt = new DateTime(2026, 1, 17, 19, 52, 51, 299, DateTimeKind.Utc).AddTicks(5038),
+                            CreatedAt = new DateTime(2026, 1, 22, 19, 15, 42, 929, DateTimeKind.Utc).AddTicks(9307),
                             Description = "Enterprise B",
                             Price = 0m
                         });
@@ -2276,7 +2283,7 @@ namespace strAppersBackend.Migrations
                         new
                         {
                             Id = 1,
-                            CreatedAt = new DateTime(2025, 11, 18, 19, 52, 51, 281, DateTimeKind.Utc).AddTicks(7910),
+                            CreatedAt = new DateTime(2025, 11, 23, 19, 15, 42, 913, DateTimeKind.Utc).AddTicks(6112),
                             Description = "First year of study",
                             IsActive = true,
                             Name = "Freshman",
@@ -2285,7 +2292,7 @@ namespace strAppersBackend.Migrations
                         new
                         {
                             Id = 2,
-                            CreatedAt = new DateTime(2025, 11, 18, 19, 52, 51, 281, DateTimeKind.Utc).AddTicks(7916),
+                            CreatedAt = new DateTime(2025, 11, 23, 19, 15, 42, 913, DateTimeKind.Utc).AddTicks(6120),
                             Description = "Second year of study",
                             IsActive = true,
                             Name = "Sophomore",
@@ -2294,7 +2301,7 @@ namespace strAppersBackend.Migrations
                         new
                         {
                             Id = 3,
-                            CreatedAt = new DateTime(2025, 11, 18, 19, 52, 51, 281, DateTimeKind.Utc).AddTicks(7918),
+                            CreatedAt = new DateTime(2025, 11, 23, 19, 15, 42, 913, DateTimeKind.Utc).AddTicks(6122),
                             Description = "Third year of study",
                             IsActive = true,
                             Name = "Junior",
@@ -2303,7 +2310,7 @@ namespace strAppersBackend.Migrations
                         new
                         {
                             Id = 4,
-                            CreatedAt = new DateTime(2025, 11, 18, 19, 52, 51, 281, DateTimeKind.Utc).AddTicks(7921),
+                            CreatedAt = new DateTime(2025, 11, 23, 19, 15, 42, 913, DateTimeKind.Utc).AddTicks(6125),
                             Description = "Fourth year of study",
                             IsActive = true,
                             Name = "Senior",
@@ -2312,7 +2319,7 @@ namespace strAppersBackend.Migrations
                         new
                         {
                             Id = 5,
-                            CreatedAt = new DateTime(2025, 11, 18, 19, 52, 51, 281, DateTimeKind.Utc).AddTicks(7923),
+                            CreatedAt = new DateTime(2025, 11, 23, 19, 15, 42, 913, DateTimeKind.Utc).AddTicks(6127),
                             Description = "Graduate level study",
                             IsActive = true,
                             Name = "Graduate",

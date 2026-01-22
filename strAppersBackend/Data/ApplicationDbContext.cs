@@ -774,6 +774,8 @@ public class ApplicationDbContext : DbContext
             entity.Property(e => e.LatestEvent).HasMaxLength(100);
             entity.Property(e => e.PRStatus).HasMaxLength(50);
             entity.Property(e => e.BranchStatus).HasMaxLength(50);
+            entity.Property(e => e.MentorFeedback).HasColumnType("text");
+            entity.Property(e => e.DevRole).HasMaxLength(50);
             entity.Property(e => e.CreatedAt).IsRequired().HasColumnType("timestamp with time zone").HasDefaultValueSql("CURRENT_TIMESTAMP");
             entity.Property(e => e.UpdatedAt).IsRequired().HasColumnType("timestamp with time zone").HasDefaultValueSql("CURRENT_TIMESTAMP");
 
@@ -787,8 +789,10 @@ public class ApplicationDbContext : DbContext
             // Indexes for better performance
             entity.HasIndex(e => e.BoardId);
             entity.HasIndex(e => e.Source);
-            // Unique constraint to prevent duplicates (BoardId + Source must be unique)
-            entity.HasIndex(e => new { e.BoardId, e.Source }).IsUnique();
+            // Unique constraint to prevent duplicates (BoardId + Source + Webhook + GithubBranch must be unique)
+            // This allows multiple PRs for different branches while preventing duplicates for the same branch
+            // NULL values in GithubBranch are treated as distinct, so multiple records with NULL are allowed
+            entity.HasIndex(e => new { e.BoardId, e.Source, e.Webhook, e.GithubBranch }).IsUnique();
             entity.HasIndex(e => e.CreatedAt);
             entity.HasIndex(e => e.UpdatedAt);
             entity.HasIndex(e => e.LastBuildStatus);

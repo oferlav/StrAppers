@@ -28,6 +28,7 @@ public interface IGitHubService
     Task<bool> CreateInitialCommitAsync(string owner, string repositoryName, string projectTitle, string accessToken, string? databaseConnectionString = null, string? webApiUrl = null, string? swaggerUrl = null, string? programmingLanguage = null);
     Task<bool> CreateFrontendOnlyCommitAsync(string owner, string repositoryName, string projectTitle, string accessToken, string? webApiUrl = null);
     Task<bool> CreateBackendOnlyCommitAsync(string owner, string repositoryName, string projectTitle, string accessToken, string programmingLanguage, string? databaseConnectionString = null, string? webApiUrl = null, string? swaggerUrl = null);
+    Task<bool> CreateInitialReadmeAsync(string owner, string repositoryName, string projectTitle, string accessToken, bool isFrontend = false, string? webApiUrl = null, string? databaseConnectionString = null, string? swaggerUrl = null);
     Task<bool> EnableGitHubPagesAsync(string owner, string repositoryName, string accessToken);
     Task<bool> CheckGitHubPagesStatusAsync(string owner, string repositoryName, string accessToken);
     Task<bool> TriggerWorkflowDispatchAsync(string owner, string repositoryName, string workflowFileName, string accessToken);
@@ -48,6 +49,17 @@ public interface IGitHubService
     Task<bool> CreateRepositoryRulesetAsync(string owner, string repo, string repoType, string accessToken);
     Task<bool> CreateBranchProtectionAsync(string owner, string repo, string branchName, string accessToken);
     Task<CreateBranchResponse> CreateBranchAsync(string owner, string repo, string branchName, string sourceBranch, string accessToken);
+    Task<bool> CreateWebhookAsync(string owner, string repo, string webhookUrl, string webhookSecret, string accessToken);
+    Task<bool> UpdateCommitStatusAsync(string owner, string repo, string sha, string state, string context, string description, string accessToken);
+    Task<bool> AddPullRequestCommentAsync(string owner, string repo, int issueNumber, string comment, string accessToken);
+    Task<List<string>> GetBranchFilesAsync(string owner, string repo, string branch, string? accessToken = null);
+    Task<string?> GetPullRequestBranchAsync(string owner, string repo, int pullRequestNumber, string? accessToken = null);
+    Task<GitHubCommitDiff?> GetCompareDiffAsync(string owner, string repo, string baseBranch, string headBranch, string? accessToken = null);
+    Task<string?> GetBranchShaAsync(string owner, string repo, string branchName, string? accessToken = null);
+    Task<GitHubPullRequest?> GetPullRequestByBranchAsync(string owner, string repo, string branchName, string? accessToken = null);
+    Task<GitHubPullRequest?> CreatePullRequestAsync(string owner, string repo, string headBranch, string baseBranch, string title, string body, string? accessToken = null);
+    Task<GitHubCommitStatus?> GetCommitStatusAsync(string owner, string repo, string sha, string context, string? accessToken = null);
+    Task<bool> MergePullRequestAsync(string owner, string repo, int pullRequestNumber, string commitTitle, string? accessToken = null);
 }
 
 public class GitHubService : IGitHubService
@@ -1112,6 +1124,55 @@ public class GitHubService : IGitHubService
     }
 
     /// <summary>
+    /// Creates initial README.md file in the main branch immediately after repository creation (Step A)
+    /// This must be done before applying branch protection to avoid blocking branch creation
+    /// Uses UpdateFileAsync which handles both create and update scenarios (auto_init may create README.md)
+    /// </summary>
+    public async Task<bool> CreateInitialReadmeAsync(string owner, string repositoryName, string projectTitle, string accessToken, bool isFrontend = false, string? webApiUrl = null, string? databaseConnectionString = null, string? swaggerUrl = null)
+    {
+        try
+        {
+            _logger.LogInformation("📝 [GITHUB INITIAL README] Creating/updating initial README.md for {Owner}/{Repository} (Frontend: {IsFrontend})", 
+                owner, repositoryName, isFrontend);
+
+            // Generate README content based on repository type
+            string readmeContent;
+            if (isFrontend)
+            {
+                var pagesUrl = GetGitHubPagesUrl(owner, repositoryName);
+                readmeContent = GenerateFrontendReadmeContent(projectTitle, pagesUrl, webApiUrl);
+            }
+            else
+            {
+                readmeContent = GenerateBackendReadmeContent(projectTitle, databaseConnectionString, webApiUrl, swaggerUrl);
+            }
+
+            // Use UpdateFileAsync which handles both create and update scenarios
+            // This is important because auto_init = true may have already created a README.md
+            var success = await UpdateFileAsync(owner, repositoryName, "README.md", readmeContent, 
+                "Initial commit: Add README.md", accessToken, "main");
+
+            if (success)
+            {
+                _logger.LogInformation("✅ [GITHUB INITIAL README] Successfully created/updated initial README.md for {Owner}/{Repository}", 
+                    owner, repositoryName);
+            }
+            else
+            {
+                _logger.LogError("📝 [GITHUB INITIAL README] Failed to create/update README.md");
+            }
+
+            return success;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "❌ [GITHUB INITIAL README] Error creating initial README.md for {Owner}/{Repository}: {Message}", 
+                owner, repositoryName, ex.Message);
+            return false;
+        }
+    }
+
+    /// <summary>
     /// Enables GitHub Pages for a repository
     /// Note: We check if the workflow file exists first. If it exists, we try to enable Pages
     /// without source (workflow-based). If workflow doesn't exist, we enable with source (legacy mode).
@@ -2051,6 +2112,520 @@ public class GitHubService : IGitHubService
         {
             _logger.LogError(ex, "Error getting commit diff for {CommitSha} in repo {Owner}/{Repo}", commitSha, owner, repo);
             return null;
+        }
+    }
+
+    /// <summary>
+    /// Gets the diff between two branches using GitHub Compare API
+    /// Uses /compare/{base}...{head} endpoint to get only the changes (diff-only review)
+    /// </summary>
+    public async Task<GitHubCommitDiff?> GetCompareDiffAsync(string owner, string repo, string baseBranch, string headBranch, string? accessToken = null)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(owner) || string.IsNullOrWhiteSpace(repo) || string.IsNullOrWhiteSpace(baseBranch) || string.IsNullOrWhiteSpace(headBranch))
+            {
+                _logger.LogWarning("GetCompareDiffAsync: Invalid parameters");
+                return null;
+            }
+
+            var token = accessToken ?? _configuration["GitHub:AccessToken"];
+            var url = $"{GitHubApiBaseUrl}/repos/{owner}/{repo}/compare/{baseBranch}...{headBranch}";
+            
+            _logger.LogInformation("📊 [GITHUB COMPARE] Getting diff: {BaseBranch}...{HeadBranch} in {Owner}/{Repo}", baseBranch, headBranch, owner, repo);
+            
+            var request = new HttpRequestMessage(HttpMethod.Get, url);
+            if (!string.IsNullOrEmpty(token))
+            {
+                request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", token);
+            }
+
+            var response = await _httpClient.SendAsync(request);
+            
+            if (!response.IsSuccessStatusCode)
+            {
+                var errorContent = await response.Content.ReadAsStringAsync();
+                _logger.LogWarning("Failed to get compare diff for {BaseBranch}...{HeadBranch} in repo {Owner}/{Repo}. Status: {StatusCode}, Error: {Error}", 
+                    baseBranch, headBranch, owner, repo, response.StatusCode, errorContent);
+                return null;
+            }
+
+            var content = await response.Content.ReadAsStringAsync();
+            var compareData = JsonSerializer.Deserialize<JsonElement>(content, new JsonSerializerOptions 
+            { 
+                PropertyNameCaseInsensitive = true 
+            });
+
+            if (compareData.ValueKind == JsonValueKind.Null || compareData.ValueKind == JsonValueKind.Undefined)
+            {
+                return null;
+            }
+
+            // Extract file changes from the compare response
+            var fileChanges = new List<GitHubFileChange>();
+            if (compareData.TryGetProperty("files", out var filesProp) && filesProp.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var file in filesProp.EnumerateArray())
+                {
+                    var filePath = file.TryGetProperty("filename", out var filenameProp) ? filenameProp.GetString() ?? "" : "";
+                    var status = file.TryGetProperty("status", out var statusProp) ? statusProp.GetString() ?? "" : "";
+                    var additions = file.TryGetProperty("additions", out var addProp) ? addProp.GetInt32() : 0;
+                    var deletions = file.TryGetProperty("deletions", out var delProp) ? delProp.GetInt32() : 0;
+                    var patch = file.TryGetProperty("patch", out var patchProp) ? patchProp.GetString() ?? "" : "";
+                    
+                    fileChanges.Add(new GitHubFileChange
+                    {
+                        FilePath = filePath,
+                        Status = status,
+                        Additions = additions,
+                        Deletions = deletions,
+                        Patch = patch
+                    });
+                }
+            }
+
+            // Get commit information
+            string commitMessage = "";
+            DateTime commitDate = DateTime.UtcNow;
+            string author = "";
+            string commitSha = "";
+
+            if (compareData.TryGetProperty("commits", out var commitsProp) && commitsProp.ValueKind == JsonValueKind.Array && commitsProp.GetArrayLength() > 0)
+            {
+                // Get the most recent commit (last in array)
+                var lastCommit = commitsProp.EnumerateArray().Last();
+                commitSha = lastCommit.TryGetProperty("sha", out var shaProp) ? shaProp.GetString() ?? "" : "";
+                
+                if (lastCommit.TryGetProperty("commit", out var commitProp))
+                {
+                    commitMessage = commitProp.TryGetProperty("message", out var msgProp) ? msgProp.GetString() ?? "" : "";
+                    
+                    if (commitProp.TryGetProperty("author", out var authorProp))
+                    {
+                        author = authorProp.TryGetProperty("name", out var nameProp) ? nameProp.GetString() ?? "" : "";
+                        if (authorProp.TryGetProperty("date", out var dateProp))
+                        {
+                            var dateStr = dateProp.GetString();
+                            if (!string.IsNullOrEmpty(dateStr) && DateTime.TryParse(dateStr, out var parsedDate))
+                            {
+                                commitDate = parsedDate;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Get stats from compare response
+            var totalAdditions = fileChanges.Sum(f => f.Additions);
+            var totalDeletions = fileChanges.Sum(f => f.Deletions);
+            
+            // Also try to get from stats if available
+            if (compareData.TryGetProperty("files", out var _) && fileChanges.Any())
+            {
+                // Stats are already calculated from file changes
+            }
+
+            _logger.LogInformation("✅ [GITHUB COMPARE] Found {FileCount} changed files, {Additions} additions, {Deletions} deletions", 
+                fileChanges.Count, totalAdditions, totalDeletions);
+
+            return new GitHubCommitDiff
+            {
+                CommitSha = commitSha,
+                CommitMessage = commitMessage,
+                CommitDate = commitDate,
+                Author = author,
+                FileChanges = fileChanges,
+                TotalAdditions = totalAdditions,
+                TotalDeletions = totalDeletions,
+                TotalFilesChanged = fileChanges.Count
+            };
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error getting compare diff for {BaseBranch}...{HeadBranch} in repo {Owner}/{Repo}", baseBranch, headBranch, owner, repo);
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Gets the SHA of the latest commit for a branch
+    /// Uses GET /repos/{owner}/{repo}/branches/{branchName} endpoint
+    /// </summary>
+    public async Task<string?> GetBranchShaAsync(string owner, string repo, string branchName, string? accessToken = null)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(owner) || string.IsNullOrWhiteSpace(repo) || string.IsNullOrWhiteSpace(branchName))
+            {
+                _logger.LogWarning("GetBranchShaAsync: Invalid parameters");
+                return null;
+            }
+
+            var token = accessToken ?? _configuration["GitHub:AccessToken"];
+            var url = $"{GitHubApiBaseUrl}/repos/{owner}/{repo}/branches/{branchName}";
+            
+            _logger.LogInformation("📊 [GITHUB BRANCH] Getting SHA for branch {Branch} in {Owner}/{Repo}", branchName, owner, repo);
+            
+            var request = new HttpRequestMessage(HttpMethod.Get, url);
+            if (!string.IsNullOrEmpty(token))
+            {
+                request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", token);
+            }
+
+            var response = await _httpClient.SendAsync(request);
+            
+            if (!response.IsSuccessStatusCode)
+            {
+                var errorContent = await response.Content.ReadAsStringAsync();
+                _logger.LogWarning("Failed to get branch SHA for {Branch} in repo {Owner}/{Repo}. Status: {StatusCode}, Error: {Error}", 
+                    branchName, owner, repo, response.StatusCode, errorContent);
+                return null;
+            }
+
+            var content = await response.Content.ReadAsStringAsync();
+            var branchData = JsonSerializer.Deserialize<JsonElement>(content, new JsonSerializerOptions 
+            { 
+                PropertyNameCaseInsensitive = true 
+            });
+
+            if (branchData.ValueKind == JsonValueKind.Null || branchData.ValueKind == JsonValueKind.Undefined)
+            {
+                return null;
+            }
+
+            // Extract SHA from commit object
+            string? sha = null;
+            if (branchData.TryGetProperty("commit", out var commitProp))
+            {
+                sha = commitProp.TryGetProperty("sha", out var shaProp) ? shaProp.GetString() : null;
+            }
+
+            if (!string.IsNullOrEmpty(sha))
+            {
+                _logger.LogInformation("✅ [GITHUB BRANCH] Found SHA {Sha} for branch {Branch}", sha, branchName);
+            }
+            else
+            {
+                _logger.LogWarning("⚠️ [GITHUB BRANCH] SHA not found in response for branch {Branch}", branchName);
+            }
+
+            return sha;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error getting branch SHA for {Branch} in repo {Owner}/{Repo}", branchName, owner, repo);
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Gets an open pull request by branch name
+    /// Uses GET /repos/{owner}/{repo}/pulls?head={owner}:{branchName}&state=open
+    /// </summary>
+    public async Task<GitHubPullRequest?> GetPullRequestByBranchAsync(string owner, string repo, string branchName, string? accessToken = null)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(owner) || string.IsNullOrWhiteSpace(repo) || string.IsNullOrWhiteSpace(branchName))
+            {
+                _logger.LogWarning("GetPullRequestByBranchAsync: Invalid parameters");
+                return null;
+            }
+
+            var token = accessToken ?? _configuration["GitHub:AccessToken"];
+            var url = $"{GitHubApiBaseUrl}/repos/{owner}/{repo}/pulls?head={owner}:{branchName}&state=open";
+            
+            _logger.LogInformation("📊 [GITHUB PR] Getting open PR for branch {Branch} in {Owner}/{Repo}", branchName, owner, repo);
+            
+            var request = new HttpRequestMessage(HttpMethod.Get, url);
+            if (!string.IsNullOrEmpty(token))
+            {
+                request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", token);
+            }
+
+            var response = await _httpClient.SendAsync(request);
+            
+            if (!response.IsSuccessStatusCode)
+            {
+                var errorContent = await response.Content.ReadAsStringAsync();
+                _logger.LogWarning("Failed to get PR for branch {Branch} in repo {Owner}/{Repo}. Status: {StatusCode}, Error: {Error}", 
+                    branchName, owner, repo, response.StatusCode, errorContent);
+                return null;
+            }
+
+            var content = await response.Content.ReadAsStringAsync();
+            var prsArray = JsonSerializer.Deserialize<JsonElement>(content, new JsonSerializerOptions 
+            { 
+                PropertyNameCaseInsensitive = true 
+            });
+
+            if (prsArray.ValueKind != JsonValueKind.Array || prsArray.GetArrayLength() == 0)
+            {
+                _logger.LogInformation("📊 [GITHUB PR] No open PR found for branch {Branch}", branchName);
+                return null;
+            }
+
+            // Get the first PR (should be only one for a branch)
+            var prData = prsArray[0];
+            
+            var pr = new GitHubPullRequest
+            {
+                Number = prData.TryGetProperty("number", out var numProp) ? numProp.GetInt32() : 0,
+                State = prData.TryGetProperty("state", out var stateProp) ? stateProp.GetString() ?? "" : "",
+                Mergeable = prData.TryGetProperty("mergeable", out var mergeableProp) && mergeableProp.ValueKind != JsonValueKind.Null ? mergeableProp.GetBoolean() : null,
+                Merged = prData.TryGetProperty("merged", out var mergedProp) && mergedProp.ValueKind != JsonValueKind.Null ? mergedProp.GetBoolean() : false
+            };
+
+            // Get head SHA
+            if (prData.TryGetProperty("head", out var headProp))
+            {
+                if (headProp.TryGetProperty("sha", out var shaProp))
+                {
+                    pr.HeadSha = shaProp.GetString() ?? "";
+                }
+            }
+
+            _logger.LogInformation("✅ [GITHUB PR] Found PR #{Number} for branch {Branch}, Mergeable: {Mergeable}", pr.Number, branchName, pr.Mergeable);
+            return pr;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error getting PR for branch {Branch} in repo {Owner}/{Repo}", branchName, owner, repo);
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Creates a pull request from headBranch to baseBranch
+    /// Uses POST /repos/{owner}/{repo}/pulls
+    /// </summary>
+    public async Task<GitHubPullRequest?> CreatePullRequestAsync(string owner, string repo, string headBranch, string baseBranch, string title, string body, string? accessToken = null)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(owner) || string.IsNullOrWhiteSpace(repo) || string.IsNullOrWhiteSpace(headBranch) || string.IsNullOrWhiteSpace(baseBranch))
+            {
+                _logger.LogWarning("CreatePullRequestAsync: Invalid parameters");
+                return null;
+            }
+
+            var token = accessToken ?? _configuration["GitHub:AccessToken"];
+            if (string.IsNullOrEmpty(token))
+            {
+                _logger.LogWarning("CreatePullRequestAsync: GitHub access token not configured");
+                return null;
+            }
+
+            var url = $"{GitHubApiBaseUrl}/repos/{owner}/{repo}/pulls";
+            
+            _logger.LogInformation("📊 [GITHUB PR] Creating PR from {HeadBranch} to {BaseBranch} in {Owner}/{Repo}", headBranch, baseBranch, owner, repo);
+            
+            var prPayload = new
+            {
+                title = title,
+                body = body,
+                head = headBranch,
+                @base = baseBranch
+            };
+
+            var jsonContent = JsonSerializer.Serialize(prPayload);
+            var content = new StringContent(jsonContent, System.Text.Encoding.UTF8, "application/json");
+
+            var request = new HttpRequestMessage(HttpMethod.Post, url);
+            request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", token);
+            request.Content = content;
+
+            var response = await _httpClient.SendAsync(request);
+            
+            if (!response.IsSuccessStatusCode)
+            {
+                var errorContent = await response.Content.ReadAsStringAsync();
+                _logger.LogWarning("Failed to create PR from {HeadBranch} to {BaseBranch} in repo {Owner}/{Repo}. Status: {StatusCode}, Error: {Error}", 
+                    headBranch, baseBranch, owner, repo, response.StatusCode, errorContent);
+                return null;
+            }
+
+            var responseContent = await response.Content.ReadAsStringAsync();
+            var prData = JsonSerializer.Deserialize<JsonElement>(responseContent, new JsonSerializerOptions 
+            { 
+                PropertyNameCaseInsensitive = true 
+            });
+
+            var pr = new GitHubPullRequest
+            {
+                Number = prData.TryGetProperty("number", out var numProp) ? numProp.GetInt32() : 0,
+                State = prData.TryGetProperty("state", out var stateProp) ? stateProp.GetString() ?? "" : "",
+                Mergeable = prData.TryGetProperty("mergeable", out var mergeableProp) && mergeableProp.ValueKind != JsonValueKind.Null ? mergeableProp.GetBoolean() : null,
+                Merged = prData.TryGetProperty("merged", out var mergedProp) && mergedProp.ValueKind != JsonValueKind.Null ? mergedProp.GetBoolean() : false
+            };
+
+            // Get head SHA
+            if (prData.TryGetProperty("head", out var headProp))
+            {
+                if (headProp.TryGetProperty("sha", out var shaProp))
+                {
+                    pr.HeadSha = shaProp.GetString() ?? "";
+                }
+            }
+
+            _logger.LogInformation("✅ [GITHUB PR] Created PR #{Number} from {HeadBranch} to {BaseBranch}, Mergeable: {Mergeable}", 
+                pr.Number, headBranch, baseBranch, pr.Mergeable);
+            return pr;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error creating PR from {HeadBranch} to {BaseBranch} in repo {Owner}/{Repo}", headBranch, baseBranch, owner, repo);
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Gets commit status for a specific SHA and context
+    /// Uses GET /repos/{owner}/{repo}/commits/{sha}/statuses
+    /// </summary>
+    public async Task<GitHubCommitStatus?> GetCommitStatusAsync(string owner, string repo, string sha, string context, string? accessToken = null)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(owner) || string.IsNullOrWhiteSpace(repo) || string.IsNullOrWhiteSpace(sha) || string.IsNullOrWhiteSpace(context))
+            {
+                _logger.LogWarning("GetCommitStatusAsync: Invalid parameters");
+                return null;
+            }
+
+            var token = accessToken ?? _configuration["GitHub:AccessToken"];
+            var url = $"{GitHubApiBaseUrl}/repos/{owner}/{repo}/commits/{sha}/statuses";
+            
+            _logger.LogInformation("📊 [GITHUB STATUS] Getting commit status for SHA {Sha} with context {Context} in {Owner}/{Repo}", sha, context, owner, repo);
+            
+            var request = new HttpRequestMessage(HttpMethod.Get, url);
+            if (!string.IsNullOrEmpty(token))
+            {
+                request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", token);
+            }
+
+            var response = await _httpClient.SendAsync(request);
+            
+            if (!response.IsSuccessStatusCode)
+            {
+                var errorContent = await response.Content.ReadAsStringAsync();
+                _logger.LogWarning("Failed to get commit status for {Sha} in repo {Owner}/{Repo}. Status: {StatusCode}, Error: {Error}", 
+                    sha, owner, repo, response.StatusCode, errorContent);
+                return null;
+            }
+
+            var content = await response.Content.ReadAsStringAsync();
+            var statusesArray = JsonSerializer.Deserialize<JsonElement>(content, new JsonSerializerOptions 
+            { 
+                PropertyNameCaseInsensitive = true 
+            });
+
+            if (statusesArray.ValueKind != JsonValueKind.Array)
+            {
+                return null;
+            }
+
+            // Find status with matching context
+            foreach (var statusElement in statusesArray.EnumerateArray())
+            {
+                var statusContext = statusElement.TryGetProperty("context", out var ctxProp) ? ctxProp.GetString() ?? "" : "";
+                if (statusContext.Equals(context, StringComparison.OrdinalIgnoreCase))
+                {
+                    var status = new GitHubCommitStatus
+                    {
+                        State = statusElement.TryGetProperty("state", out var stateProp) ? stateProp.GetString() ?? "" : "",
+                        Context = statusContext,
+                        Description = statusElement.TryGetProperty("description", out var descProp) ? descProp.GetString() ?? "" : ""
+                    };
+
+                    _logger.LogInformation("✅ [GITHUB STATUS] Found status for context {Context}: {State}", context, status.State);
+                    return status;
+                }
+            }
+
+            _logger.LogInformation("📊 [GITHUB STATUS] No status found for context {Context}", context);
+            return null;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error getting commit status for {Sha} with context {Context} in repo {Owner}/{Repo}", sha, context, owner, repo);
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Merges a pull request
+    /// Uses PUT /repos/{owner}/{repo}/pulls/{number}/merge
+    /// </summary>
+    public async Task<bool> MergePullRequestAsync(string owner, string repo, int pullRequestNumber, string commitTitle, string? accessToken = null)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(owner) || string.IsNullOrWhiteSpace(repo) || pullRequestNumber <= 0)
+            {
+                _logger.LogWarning("MergePullRequestAsync: Invalid parameters");
+                return false;
+            }
+
+            var token = accessToken ?? _configuration["GitHub:AccessToken"];
+            if (string.IsNullOrEmpty(token))
+            {
+                _logger.LogWarning("MergePullRequestAsync: GitHub access token not configured");
+                return false;
+            }
+
+            var url = $"{GitHubApiBaseUrl}/repos/{owner}/{repo}/pulls/{pullRequestNumber}/merge";
+            
+            _logger.LogInformation("📊 [GITHUB MERGE] Merging PR #{PRNumber} in {Owner}/{Repo} with title: {Title}", 
+                pullRequestNumber, owner, repo, commitTitle);
+            
+            var mergePayload = new
+            {
+                commit_title = commitTitle,
+                merge_method = "merge"
+            };
+
+            var jsonContent = JsonSerializer.Serialize(mergePayload);
+            var content = new StringContent(jsonContent, System.Text.Encoding.UTF8, "application/json");
+
+            var request = new HttpRequestMessage(HttpMethod.Put, url);
+            request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", token);
+            request.Content = content;
+
+            var response = await _httpClient.SendAsync(request);
+            
+            if (response.IsSuccessStatusCode)
+            {
+                var responseContent = await response.Content.ReadAsStringAsync();
+                var mergeData = JsonSerializer.Deserialize<JsonElement>(responseContent, new JsonSerializerOptions 
+                { 
+                    PropertyNameCaseInsensitive = true 
+                });
+
+                var merged = mergeData.TryGetProperty("merged", out var mergedProp) ? mergedProp.GetBoolean() : false;
+                if (merged)
+                {
+                    _logger.LogInformation("✅ [GITHUB MERGE] Successfully merged PR #{PRNumber}", pullRequestNumber);
+                    return true;
+                }
+                else
+                {
+                    _logger.LogWarning("⚠️ [GITHUB MERGE] PR #{PRNumber} merge request returned success but merged=false", pullRequestNumber);
+                    return false;
+                }
+            }
+            else
+            {
+                var errorContent = await response.Content.ReadAsStringAsync();
+                _logger.LogWarning("Failed to merge PR #{PRNumber} in repo {Owner}/{Repo}. Status: {StatusCode}, Error: {Error}", 
+                    pullRequestNumber, owner, repo, response.StatusCode, errorContent);
+                return false;
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error merging PR #{PRNumber} in repo {Owner}/{Repo}", pullRequestNumber, owner, repo);
+            return false;
         }
     }
 
@@ -9284,8 +9859,24 @@ release.properties
                 return true;
             }
 
+            // Always add RepositoryRole "admin" (actor_id = 5) as bypass actor
+            // This allows repository admins to create branches while blocking other collaborators
+            // Works for both user-owned and org-owned repositories
+            var bypassActors = new List<object>
+            {
+                new
+                {
+                    actor_id = 5,  // Built-in "admin" repository role ID
+                    actor_type = "RepositoryRole",
+                    bypass_mode = "always"  // Admins can always bypass the rule
+                }
+            };
+            
+            _logger.LogInformation("🔒 [GITHUB RULESET] Adding RepositoryRole admin (actor_id=5) as bypass actor. " +
+                "Repository admins will be able to create branches, other collaborators will be blocked.");
+
             // Create ruleset payload to block branch creation for non-admins
-            // The owner (PAT holder) is an implicit bypass actor, so they can still create branches
+            // The owner (PAT holder) is added as a bypass actor so they can still create branches
             var rulesetPayload = new
             {
                 name = $"Restrict Branch Creation - {repoType}",
@@ -9306,7 +9897,7 @@ release.properties
                         type = "creation"
                     }
                 },
-                bypass_actors = new object[] { }
+                bypass_actors = bypassActors.ToArray()
             };
 
             var jsonContent = JsonSerializer.Serialize(rulesetPayload);
@@ -9465,18 +10056,20 @@ release.properties
                 return true;
             }
 
-            // Create branch protection payload
+            // Get validation context from configuration
+            var validationContext = _configuration["GitHub:ValidationContext"] ?? "Mentor-Validation";
+
+            // Create branch protection payload with required_status_checks
+            // Set required_pull_request_reviews to null as per Step C requirements
             var protectionPayload = new
             {
-                required_status_checks = (object?)null,
-                enforce_admins = false,
-                required_pull_request_reviews = new
+                required_status_checks = new
                 {
-                    required_approving_review_count = 1,
-                    dismiss_stale_reviews = false,
-                    require_code_owner_reviews = false,
-                    require_last_push_approval = false
+                    strict = true,
+                    contexts = new[] { validationContext }
                 },
+                enforce_admins = false,
+                required_pull_request_reviews = (object?)null,
                 restrictions = (object?)null,
                 allow_force_pushes = false,
                 allow_deletions = false,
@@ -9519,6 +10112,272 @@ release.properties
                 owner, repo, branchName, ex.Message);
             return false;
         }
+    }
+
+    /// <summary>
+    /// Creates a webhook for a GitHub repository
+    /// </summary>
+    public async Task<bool> CreateWebhookAsync(string owner, string repo, string webhookUrl, string webhookSecret, string accessToken)
+    {
+        try
+        {
+            _logger.LogInformation("🔗 [GITHUB WEBHOOK] Creating webhook for {Owner}/{Repo}", owner, repo);
+
+            // Step B: Create webhook with pull_request events only
+            var webhookPayload = new
+            {
+                name = "web",
+                active = true,
+                events = new[] { "pull_request" },
+                config = new
+                {
+                    url = webhookUrl,
+                    content_type = "json",
+                    secret = webhookSecret
+                }
+            };
+
+            var jsonContent = JsonSerializer.Serialize(webhookPayload);
+            var content = new StringContent(jsonContent, System.Text.Encoding.UTF8, "application/json");
+
+            var endpoint = $"{GitHubApiBaseUrl}/repos/{owner}/{repo}/hooks";
+            var httpRequest = new HttpRequestMessage(HttpMethod.Post, endpoint);
+            httpRequest.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", accessToken);
+            httpRequest.Content = content;
+
+            var response = await _httpClient.SendAsync(httpRequest);
+
+            if (response.IsSuccessStatusCode)
+            {
+                _logger.LogInformation("✅ [GITHUB WEBHOOK] Successfully created webhook for {Owner}/{Repo}", owner, repo);
+                return true;
+            }
+            else
+            {
+                var errorContent = await response.Content.ReadAsStringAsync();
+                _logger.LogWarning("⚠️ [GITHUB WEBHOOK] Failed to create webhook for {Owner}/{Repo}. Status: {StatusCode}, Error: {Error}", 
+                    owner, repo, response.StatusCode, errorContent);
+                return false;
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "❌ [GITHUB WEBHOOK] Error creating webhook for {Owner}/{Repo}: {Message}", owner, repo, ex.Message);
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Updates the commit status on GitHub
+    /// </summary>
+    public async Task<bool> UpdateCommitStatusAsync(string owner, string repo, string sha, string state, string context, string description, string accessToken)
+    {
+        try
+        {
+            _logger.LogInformation("📊 [GITHUB STATUS] Updating commit status for {Owner}/{Repo}@{Sha}: {State} - {Context}", owner, repo, sha, state, context);
+
+            var statusPayload = new
+            {
+                state = state, // "pending", "success", "failure", "error"
+                target_url = (string?)null,
+                description = description,
+                context = context
+            };
+
+            var jsonContent = JsonSerializer.Serialize(statusPayload);
+            var content = new StringContent(jsonContent, System.Text.Encoding.UTF8, "application/json");
+
+            var endpoint = $"{GitHubApiBaseUrl}/repos/{owner}/{repo}/statuses/{sha}";
+            var httpRequest = new HttpRequestMessage(HttpMethod.Post, endpoint);
+            httpRequest.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", accessToken);
+            httpRequest.Content = content;
+
+            var response = await _httpClient.SendAsync(httpRequest);
+
+            if (response.IsSuccessStatusCode)
+            {
+                _logger.LogInformation("✅ [GITHUB STATUS] Successfully updated commit status for {Owner}/{Repo}@{Sha}", owner, repo, sha);
+                return true;
+            }
+            else
+            {
+                var errorContent = await response.Content.ReadAsStringAsync();
+                _logger.LogWarning("⚠️ [GITHUB STATUS] Failed to update commit status for {Owner}/{Repo}@{Sha}. Status: {StatusCode}, Error: {Error}", 
+                    owner, repo, sha, response.StatusCode, errorContent);
+                return false;
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "❌ [GITHUB STATUS] Error updating commit status for {Owner}/{Repo}@{Sha}: {Message}", owner, repo, sha, ex.Message);
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Adds a comment to a pull request (issue)
+    /// </summary>
+    public async Task<bool> AddPullRequestCommentAsync(string owner, string repo, int issueNumber, string comment, string accessToken)
+    {
+        try
+        {
+            _logger.LogInformation("💬 [GITHUB COMMENT] Adding comment to PR #{IssueNumber} in {Owner}/{Repo}", issueNumber, owner, repo);
+
+            var commentPayload = new
+            {
+                body = comment
+            };
+
+            var jsonContent = JsonSerializer.Serialize(commentPayload);
+            var content = new StringContent(jsonContent, System.Text.Encoding.UTF8, "application/json");
+
+            var endpoint = $"{GitHubApiBaseUrl}/repos/{owner}/{repo}/issues/{issueNumber}/comments";
+            var httpRequest = new HttpRequestMessage(HttpMethod.Post, endpoint);
+            httpRequest.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", accessToken);
+            httpRequest.Content = content;
+
+            var response = await _httpClient.SendAsync(httpRequest);
+
+            if (response.IsSuccessStatusCode)
+            {
+                _logger.LogInformation("✅ [GITHUB COMMENT] Successfully added comment to PR #{IssueNumber} in {Owner}/{Repo}", issueNumber, owner, repo);
+                return true;
+            }
+            else
+            {
+                var errorContent = await response.Content.ReadAsStringAsync();
+                _logger.LogWarning("⚠️ [GITHUB COMMENT] Failed to add comment to PR #{IssueNumber} in {Owner}/{Repo}. Status: {StatusCode}, Error: {Error}", 
+                    issueNumber, owner, repo, response.StatusCode, errorContent);
+                return false;
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "❌ [GITHUB COMMENT] Error adding comment to PR #{IssueNumber} in {Owner}/{Repo}: {Message}", issueNumber, owner, repo, ex.Message);
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Gets all files in a branch
+    /// </summary>
+    public async Task<List<string>> GetBranchFilesAsync(string owner, string repo, string branch, string? accessToken = null)
+    {
+        var files = new List<string>();
+        try
+        {
+            _logger.LogInformation("📁 [GITHUB] Getting files from branch {Branch} in {Owner}/{Repo}", branch, owner, repo);
+
+            var token = accessToken ?? _configuration["GitHub:AccessToken"];
+            if (string.IsNullOrEmpty(token))
+            {
+                _logger.LogWarning("GetBranchFilesAsync: GitHub access token not configured");
+                return files;
+            }
+
+            // Get the tree recursively for the branch
+            var endpoint = $"{GitHubApiBaseUrl}/repos/{owner}/{repo}/git/trees/{branch}?recursive=1";
+            var httpRequest = new HttpRequestMessage(HttpMethod.Get, endpoint);
+            httpRequest.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", token);
+
+            var response = await _httpClient.SendAsync(httpRequest);
+
+            if (response.IsSuccessStatusCode)
+            {
+                var content = await response.Content.ReadAsStringAsync();
+                var treeData = JsonSerializer.Deserialize<JsonElement>(content, new JsonSerializerOptions
+                {
+                    PropertyNameCaseInsensitive = true
+                });
+
+                if (treeData.TryGetProperty("tree", out var treeArray))
+                {
+                    foreach (var item in treeArray.EnumerateArray())
+                    {
+                        if (item.TryGetProperty("type", out var typeProp) && typeProp.GetString() == "blob")
+                        {
+                            if (item.TryGetProperty("path", out var pathProp))
+                            {
+                                var path = pathProp.GetString();
+                                if (!string.IsNullOrEmpty(path))
+                                {
+                                    files.Add(path);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                _logger.LogInformation("✅ [GITHUB] Found {Count} files in branch {Branch}", files.Count, branch);
+            }
+            else
+            {
+                var errorContent = await response.Content.ReadAsStringAsync();
+                _logger.LogWarning("⚠️ [GITHUB] Failed to get files from branch {Branch}. Status: {StatusCode}, Error: {Error}", 
+                    branch, response.StatusCode, errorContent);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "❌ [GITHUB] Error getting files from branch {Branch}: {Message}", branch, ex.Message);
+        }
+
+        return files;
+    }
+
+    /// <summary>
+    /// Gets the branch name from a pull request
+    /// </summary>
+    public async Task<string?> GetPullRequestBranchAsync(string owner, string repo, int pullRequestNumber, string? accessToken = null)
+    {
+        try
+        {
+            _logger.LogInformation("🔍 [GITHUB] Getting branch for PR #{PRNumber} in {Owner}/{Repo}", pullRequestNumber, owner, repo);
+
+            var token = accessToken ?? _configuration["GitHub:AccessToken"];
+            if (string.IsNullOrEmpty(token))
+            {
+                _logger.LogWarning("GetPullRequestBranchAsync: GitHub access token not configured");
+                return null;
+            }
+
+            var endpoint = $"{GitHubApiBaseUrl}/repos/{owner}/{repo}/pulls/{pullRequestNumber}";
+            var httpRequest = new HttpRequestMessage(HttpMethod.Get, endpoint);
+            httpRequest.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", token);
+
+            var response = await _httpClient.SendAsync(httpRequest);
+
+            if (response.IsSuccessStatusCode)
+            {
+                var content = await response.Content.ReadAsStringAsync();
+                var prData = JsonSerializer.Deserialize<JsonElement>(content, new JsonSerializerOptions
+                {
+                    PropertyNameCaseInsensitive = true
+                });
+
+                if (prData.TryGetProperty("head", out var headProp))
+                {
+                    if (headProp.TryGetProperty("ref", out var refProp))
+                    {
+                        var branchName = refProp.GetString();
+                        _logger.LogInformation("✅ [GITHUB] Found branch {Branch} for PR #{PRNumber}", branchName, pullRequestNumber);
+                        return branchName;
+                    }
+                }
+            }
+            else
+            {
+                var errorContent = await response.Content.ReadAsStringAsync();
+                _logger.LogWarning("⚠️ [GITHUB] Failed to get PR #{PRNumber}. Status: {StatusCode}, Error: {Error}", 
+                    pullRequestNumber, response.StatusCode, errorContent);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "❌ [GITHUB] Error getting branch for PR #{PRNumber}: {Message}", pullRequestNumber, ex.Message);
+        }
+
+        return null;
     }
 }
 
@@ -9606,6 +10465,22 @@ public class GitHubCommitDiff
     public int TotalAdditions { get; set; }
     public int TotalDeletions { get; set; }
     public int TotalFilesChanged { get; set; }
+}
+
+public class GitHubPullRequest
+{
+    public int Number { get; set; }
+    public string State { get; set; } = string.Empty;
+    public bool? Mergeable { get; set; }
+    public bool Merged { get; set; }
+    public string HeadSha { get; set; } = string.Empty;
+}
+
+public class GitHubCommitStatus
+{
+    public string State { get; set; } = string.Empty; // "pending", "success", "failure", "error"
+    public string Context { get; set; } = string.Empty;
+    public string Description { get; set; } = string.Empty;
 }
 
 /// <summary>

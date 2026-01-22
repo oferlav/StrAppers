@@ -1882,26 +1882,51 @@ public class BoardsController : ControllerBase
                             var frontendOwner = frontendPathParts[0];
                             var frontendRepoNameFromUrl = frontendPathParts[1];
                             
-                            // Create GitHub ruleset and branch protection
-                            _logger.LogInformation("🔒 [GITHUB] Setting up rulesets and branch protection for frontend repository {Owner}/{Repo}", frontendOwner, frontendRepoNameFromUrl);
-                            var rulesetSuccess = await _gitHubService.CreateRepositoryRulesetAsync(frontendOwner, frontendRepoNameFromUrl, "Frontend", githubToken);
-                            if (rulesetSuccess)
+                            // Step A: Create README.md immediately after repo creation (before branch protection)
+                            _logger.LogInformation("📝 [GITHUB] Step A: Creating initial README.md for frontend repository {Owner}/{Repo}", frontendOwner, frontendRepoNameFromUrl);
+                            var readmeSuccess = await _gitHubService.CreateInitialReadmeAsync(frontendOwner, frontendRepoNameFromUrl, project.Title, githubToken, isFrontend: true, webApiUrl: webApiUrl);
+                            if (readmeSuccess)
                             {
-                                _logger.LogInformation("✅ [GITHUB] Frontend repository ruleset created successfully");
+                                _logger.LogInformation("✅ [GITHUB] Step A: Frontend repository README.md created successfully");
                             }
                             else
                             {
-                                // CRITICAL: Frontend repository ruleset creation failed - board creation cannot proceed
-                                _logger.LogError("❌ [GITHUB] CRITICAL: Failed to create frontend repository ruleset");
+                                // CRITICAL: README creation failed - board creation cannot proceed
+                                _logger.LogError("❌ [GITHUB] CRITICAL: Failed to create frontend repository README.md");
                                 throw new InvalidOperationException(
-                                    "Failed to create frontend repository ruleset. " +
-                                    "GitHub ruleset creation is required - board creation cannot proceed.");
+                                    "Failed to create frontend repository README.md. " +
+                                    "Repository initialization is required - board creation cannot proceed.");
+                            }
+
+                            // Step B: Create webhook for frontend repository
+                            var webhookSecret = _configuration["GitHub:WebhookSecret"];
+                            var apiBaseUrl = _configuration["ApiBaseUrl"] ?? "https://dev.skill-in.com";
+                            var webhookUrl = $"{apiBaseUrl}/api/Mentor/github-webhook";
+                            
+                            if (!string.IsNullOrEmpty(webhookSecret))
+                            {
+                                _logger.LogInformation("🔗 [GITHUB] Step B: Creating webhook for frontend repository {Owner}/{Repo}", frontendOwner, frontendRepoNameFromUrl);
+                                var webhookSuccess = await _gitHubService.CreateWebhookAsync(frontendOwner, frontendRepoNameFromUrl, webhookUrl, webhookSecret, githubToken);
+                                if (webhookSuccess)
+                                {
+                                    _logger.LogInformation("✅ [GITHUB] Step B: Frontend repository webhook created successfully");
+                                }
+                                else
+                                {
+                                    _logger.LogWarning("⚠️ [GITHUB] Step B: Failed to create frontend repository webhook (non-critical)");
+                                }
+                            }
+                            else
+                            {
+                                _logger.LogWarning("⚠️ [GITHUB] Step B: WebhookSecret not configured, skipping webhook creation");
                             }
                             
+                            // Step C: Create branch protection (after README and webhook)
+                            _logger.LogInformation("🛡️ [GITHUB] Step C: Creating branch protection for frontend repository {Owner}/{Repo}", frontendOwner, frontendRepoNameFromUrl);
                             var branchProtectionSuccess = await _gitHubService.CreateBranchProtectionAsync(frontendOwner, frontendRepoNameFromUrl, "main", githubToken);
                             if (branchProtectionSuccess)
                             {
-                                _logger.LogInformation("✅ [GITHUB] Frontend repository branch protection created successfully");
+                                _logger.LogInformation("✅ [GITHUB] Step C: Frontend repository branch protection created successfully");
                             }
                             else
                             {
@@ -1910,6 +1935,19 @@ public class BoardsController : ControllerBase
                                 throw new InvalidOperationException(
                                     "Failed to create frontend repository branch protection. " +
                                     "GitHub branch protection is required - board creation cannot proceed.");
+                            }
+                            
+                            // Create GitHub ruleset AFTER branch protection (to avoid blocking branch creation during initialization)
+                            _logger.LogInformation("🔒 [GITHUB] Creating ruleset for frontend repository {Owner}/{Repo} (after branch protection)", frontendOwner, frontendRepoNameFromUrl);
+                            var rulesetSuccess = await _gitHubService.CreateRepositoryRulesetAsync(frontendOwner, frontendRepoNameFromUrl, "Frontend", githubToken);
+                            if (rulesetSuccess)
+                            {
+                                _logger.LogInformation("✅ [GITHUB] Frontend repository ruleset created successfully");
+                            }
+                            else
+                            {
+                                // Ruleset creation failure is not critical - log warning but continue
+                                _logger.LogWarning("⚠️ [GITHUB] Failed to create frontend repository ruleset (non-critical)");
                             }
                             
                             // Create frontend-only commit (files at root, no workflows)
@@ -2005,26 +2043,51 @@ public class BoardsController : ControllerBase
                             var backendOwner = backendPathParts[0];
                             var backendRepoNameFromUrl = backendPathParts[1];
                             
-                            // Create GitHub ruleset and branch protection
-                            _logger.LogInformation("🔒 [GITHUB] Setting up rulesets and branch protection for backend repository {Owner}/{Repo}", backendOwner, backendRepoNameFromUrl);
-                            var rulesetSuccess = await _gitHubService.CreateRepositoryRulesetAsync(backendOwner, backendRepoNameFromUrl, "Backend", githubToken);
-                            if (rulesetSuccess)
+                            // Step A: Create README.md immediately after repo creation (before branch protection)
+                            _logger.LogInformation("📝 [GITHUB] Step A: Creating initial README.md for backend repository {Owner}/{Repo}", backendOwner, backendRepoNameFromUrl);
+                            var readmeSuccess = await _gitHubService.CreateInitialReadmeAsync(backendOwner, backendRepoNameFromUrl, project.Title, githubToken, isFrontend: false, webApiUrl: webApiUrl, databaseConnectionString: dbConnectionString, swaggerUrl: swaggerUrl);
+                            if (readmeSuccess)
                             {
-                                _logger.LogInformation("✅ [GITHUB] Backend repository ruleset created successfully");
+                                _logger.LogInformation("✅ [GITHUB] Step A: Backend repository README.md created successfully");
                             }
                             else
                             {
-                                // CRITICAL: Backend repository ruleset creation failed - board creation cannot proceed
-                                _logger.LogError("❌ [GITHUB] CRITICAL: Failed to create backend repository ruleset");
+                                // CRITICAL: README creation failed - board creation cannot proceed
+                                _logger.LogError("❌ [GITHUB] CRITICAL: Failed to create backend repository README.md");
                                 throw new InvalidOperationException(
-                                    "Failed to create backend repository ruleset. " +
-                                    "GitHub ruleset creation is required - board creation cannot proceed.");
+                                    "Failed to create backend repository README.md. " +
+                                    "Repository initialization is required - board creation cannot proceed.");
+                            }
+
+                            // Step B: Create webhook for backend repository
+                            var webhookSecretBackend = _configuration["GitHub:WebhookSecret"];
+                            var apiBaseUrlBackend = _configuration["ApiBaseUrl"] ?? "https://dev.skill-in.com";
+                            var webhookUrlBackend = $"{apiBaseUrlBackend}/api/Mentor/github-webhook";
+                            
+                            if (!string.IsNullOrEmpty(webhookSecretBackend))
+                            {
+                                _logger.LogInformation("🔗 [GITHUB] Step B: Creating webhook for backend repository {Owner}/{Repo}", backendOwner, backendRepoNameFromUrl);
+                                var webhookSuccessBackend = await _gitHubService.CreateWebhookAsync(backendOwner, backendRepoNameFromUrl, webhookUrlBackend, webhookSecretBackend, githubToken);
+                                if (webhookSuccessBackend)
+                                {
+                                    _logger.LogInformation("✅ [GITHUB] Step B: Backend repository webhook created successfully");
+                                }
+                                else
+                                {
+                                    _logger.LogWarning("⚠️ [GITHUB] Step B: Failed to create backend repository webhook (non-critical)");
+                                }
+                            }
+                            else
+                            {
+                                _logger.LogWarning("⚠️ [GITHUB] Step B: WebhookSecret not configured, skipping webhook creation");
                             }
                             
+                            // Step C: Create branch protection (after README and webhook)
+                            _logger.LogInformation("🛡️ [GITHUB] Step C: Creating branch protection for backend repository {Owner}/{Repo}", backendOwner, backendRepoNameFromUrl);
                             var branchProtectionSuccess = await _gitHubService.CreateBranchProtectionAsync(backendOwner, backendRepoNameFromUrl, "main", githubToken);
                             if (branchProtectionSuccess)
                             {
-                                _logger.LogInformation("✅ [GITHUB] Backend repository branch protection created successfully");
+                                _logger.LogInformation("✅ [GITHUB] Step C: Backend repository branch protection created successfully");
                             }
                             else
                             {
@@ -2033,6 +2096,19 @@ public class BoardsController : ControllerBase
                                 throw new InvalidOperationException(
                                     "Failed to create backend repository branch protection. " +
                                     "GitHub branch protection is required - board creation cannot proceed.");
+                            }
+                            
+                            // Create GitHub ruleset AFTER branch protection (to avoid blocking branch creation during initialization)
+                            _logger.LogInformation("🔒 [GITHUB] Creating ruleset for backend repository {Owner}/{Repo} (after branch protection)", backendOwner, backendRepoNameFromUrl);
+                            var rulesetSuccess = await _gitHubService.CreateRepositoryRulesetAsync(backendOwner, backendRepoNameFromUrl, "Backend", githubToken);
+                            if (rulesetSuccess)
+                            {
+                                _logger.LogInformation("✅ [GITHUB] Backend repository ruleset created successfully");
+                            }
+                            else
+                            {
+                                // Ruleset creation failure is not critical - log warning but continue
+                                _logger.LogWarning("⚠️ [GITHUB] Failed to create backend repository ruleset (non-critical)");
                             }
                             
                             // Create backend-only commit (files at root, no workflows)

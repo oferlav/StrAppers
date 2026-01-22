@@ -169,6 +169,18 @@ namespace strAppersBackend.Models
         public string? BranchStatus { get; set; }
 
         /// <summary>
+        /// Mentor feedback for the board state
+        /// </summary>
+        [Column(TypeName = "text")]
+        public string? MentorFeedback { get; set; }
+
+        /// <summary>
+        /// Developer role (Frontend or Backend)
+        /// </summary>
+        [MaxLength(50)]
+        public string? DevRole { get; set; }
+
+        /// <summary>
         /// Record creation timestamp
         /// </summary>
         [Required]
