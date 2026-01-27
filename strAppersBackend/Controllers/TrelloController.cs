@@ -388,5 +388,64 @@ public class TrelloController : ControllerBase
                 });
             }
         }
+
+        /// <summary>
+        /// Toggle the state of the checklist item at checkIndex on the Trello card (complete &lt;-&gt; incomplete).
+        /// </summary>
+        /// <param name="request">BoardId, CardId (custom field e.g. "1-B"), and 0-based checkIndex.</param>
+        /// <returns>Success, optional error message, and new state ("complete" or "incomplete").</returns>
+        [HttpPost("use/set-done")]
+        public async Task<ActionResult<object>> SetDone([FromBody] TrelloSetDoneRequest request)
+        {
+            try
+            {
+                if (request == null)
+                {
+                    return BadRequest(new { Success = false, Message = "Request body is required." });
+                }
+                if (string.IsNullOrWhiteSpace(request.BoardId))
+                {
+                    return BadRequest(new { Success = false, Message = "BoardId is required." });
+                }
+                if (string.IsNullOrWhiteSpace(request.CardId))
+                {
+                    return BadRequest(new { Success = false, Message = "CardId is required." });
+                }
+
+                _logger.LogInformation("📥 [TRELLO] set-done: BoardId={BoardId}, CardId={CardId}, CheckIndex={CheckIndex}",
+                    request.BoardId, request.CardId, request.CheckIndex);
+
+                var (success, error, newState) = await _trelloService.ToggleCheckItemByIndexAsync(
+                    request.BoardId, request.CardId, request.CheckIndex);
+
+                if (!success)
+                {
+                    return BadRequest(new
+                    {
+                        Success = false,
+                        Message = error ?? "Failed to toggle check item.",
+                        NewState = (string?)null
+                    });
+                }
+
+                return Ok(new
+                {
+                    Success = true,
+                    Message = "Check item toggled.",
+                    NewState = newState
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "❌ [TRELLO] Error in set-done for BoardId={BoardId}, CardId={CardId}",
+                    request?.BoardId, request?.CardId);
+                return StatusCode(500, new
+                {
+                    Success = false,
+                    Message = $"Internal server error: {ex.Message}",
+                    NewState = (string?)null
+                });
+            }
+        }
     }
 }

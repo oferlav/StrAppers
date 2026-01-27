@@ -57,6 +57,7 @@ public interface IGitHubService
     Task<GitHubCommitDiff?> GetCompareDiffAsync(string owner, string repo, string baseBranch, string headBranch, string? accessToken = null);
     Task<string?> GetBranchShaAsync(string owner, string repo, string branchName, string? accessToken = null);
     Task<GitHubPullRequest?> GetPullRequestByBranchAsync(string owner, string repo, string branchName, string? accessToken = null);
+    Task<List<GitHubPullRequest>> GetOpenPullRequestsAsync(string owner, string repo, string? accessToken = null);
     Task<GitHubPullRequest?> CreatePullRequestAsync(string owner, string repo, string headBranch, string baseBranch, string title, string body, string? accessToken = null);
     Task<GitHubCommitStatus?> GetCommitStatusAsync(string owner, string repo, string sha, string context, string? accessToken = null);
     Task<bool> MergePullRequestAsync(string owner, string repo, int pullRequestNumber, string commitTitle, string? accessToken = null);
@@ -2392,6 +2393,96 @@ public class GitHubService : IGitHubService
         {
             _logger.LogError(ex, "Error getting PR for branch {Branch} in repo {Owner}/{Repo}", branchName, owner, repo);
             return null;
+        }
+    }
+
+    /// <summary>
+    /// Gets all open pull requests for a repository
+    /// </summary>
+    public async Task<List<GitHubPullRequest>> GetOpenPullRequestsAsync(string owner, string repo, string? accessToken = null)
+    {
+        var openPRs = new List<GitHubPullRequest>();
+        
+        try
+        {
+            if (string.IsNullOrWhiteSpace(owner) || string.IsNullOrWhiteSpace(repo))
+            {
+                _logger.LogWarning("GetOpenPullRequestsAsync: Invalid parameters");
+                return openPRs;
+            }
+
+            var token = accessToken ?? _configuration["GitHub:AccessToken"];
+            var url = $"{GitHubApiBaseUrl}/repos/{owner}/{repo}/pulls?state=open";
+            
+            _logger.LogInformation("📊 [GITHUB PR] Getting all open PRs in {Owner}/{Repo}", owner, repo);
+            
+            var request = new HttpRequestMessage(HttpMethod.Get, url);
+            if (!string.IsNullOrEmpty(token))
+            {
+                request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", token);
+            }
+
+            var response = await _httpClient.SendAsync(request);
+            
+            if (!response.IsSuccessStatusCode)
+            {
+                var errorContent = await response.Content.ReadAsStringAsync();
+                _logger.LogWarning("Failed to get open PRs in repo {Owner}/{Repo}. Status: {StatusCode}, Error: {Error}", 
+                    owner, repo, response.StatusCode, errorContent);
+                return openPRs;
+            }
+
+            var content = await response.Content.ReadAsStringAsync();
+            var prsArray = JsonSerializer.Deserialize<JsonElement>(content, new JsonSerializerOptions 
+            { 
+                PropertyNameCaseInsensitive = true 
+            });
+
+            if (prsArray.ValueKind != JsonValueKind.Array)
+            {
+                _logger.LogInformation("📊 [GITHUB PR] No open PRs found in {Owner}/{Repo}", owner, repo);
+                return openPRs;
+            }
+
+            foreach (var prData in prsArray.EnumerateArray())
+            {
+                var pr = new GitHubPullRequest
+                {
+                    Number = prData.TryGetProperty("number", out var numProp) ? numProp.GetInt32() : 0,
+                    State = prData.TryGetProperty("state", out var stateProp) ? stateProp.GetString() ?? "" : "",
+                    Mergeable = prData.TryGetProperty("mergeable", out var mergeableProp) && mergeableProp.ValueKind != JsonValueKind.Null ? mergeableProp.GetBoolean() : null,
+                    Merged = prData.TryGetProperty("merged", out var mergedProp) && mergedProp.ValueKind != JsonValueKind.Null ? mergedProp.GetBoolean() : false
+                };
+
+                // Get head branch name
+                if (prData.TryGetProperty("head", out var headProp))
+                {
+                    if (headProp.TryGetProperty("ref", out var refProp))
+                    {
+                        pr.HeadBranch = refProp.GetString() ?? "";
+                    }
+                    if (headProp.TryGetProperty("sha", out var shaProp))
+                    {
+                        pr.HeadSha = shaProp.GetString() ?? "";
+                    }
+                }
+
+                // Get title
+                if (prData.TryGetProperty("title", out var titleProp))
+                {
+                    pr.Title = titleProp.GetString() ?? "";
+                }
+
+                openPRs.Add(pr);
+            }
+
+            _logger.LogInformation("✅ [GITHUB PR] Found {Count} open PR(s) in {Owner}/{Repo}", openPRs.Count, owner, repo);
+            return openPRs;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error getting open PRs in repo {Owner}/{Repo}", owner, repo);
+            return openPRs;
         }
     }
 
@@ -10474,6 +10565,8 @@ public class GitHubPullRequest
     public bool? Mergeable { get; set; }
     public bool Merged { get; set; }
     public string HeadSha { get; set; } = string.Empty;
+    public string HeadBranch { get; set; } = string.Empty;
+    public string Title { get; set; } = string.Empty;
 }
 
 public class GitHubCommitStatus

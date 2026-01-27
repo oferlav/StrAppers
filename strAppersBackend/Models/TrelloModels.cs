@@ -148,4 +148,21 @@ namespace strAppersBackend.Models
         public string Name { get; set; } = string.Empty;
         public string Status { get; set; } = string.Empty;
     }
+
+    /// <summary>
+    /// Request for POST /api/Trello/use/set-done — toggle a checklist item at checkIndex.
+    /// </summary>
+    public class TrelloSetDoneRequest
+    {
+        [Required]
+        public string BoardId { get; set; } = string.Empty;
+
+        [Required]
+        public string CardId { get; set; } = string.Empty;
+
+        /// <summary>
+        /// 0-based index of the check item within the card's checklists (flattened: first checklist, then second, etc.).
+        /// </summary>
+        public int CheckIndex { get; set; }
+    }
 }

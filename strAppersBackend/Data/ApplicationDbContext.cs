@@ -35,6 +35,8 @@ public class ApplicationDbContext : DbContext
     public DbSet<AIModel> AIModels { get; set; }
     public DbSet<MentorChatHistory> MentorChatHistory { get; set; }
     public DbSet<BoardState> BoardStates { get; set; }
+    public DbSet<MarketingImages> MarketingImages { get; set; }
+    public DbSet<EarlyBirds> EarlyBirds { get; set; }
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {

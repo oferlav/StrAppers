@@ -15,6 +15,14 @@ namespace strAppersBackend.Services
         Task<object> GetBoardMembersWithEmailResolutionAsync(string trelloBoardId);
         Task<object> GetCardsAndListsByLabelAsync(string trelloBoardId, string labelName);
         Task<JsonElement?> GetCardByCardIdAsync(string trelloBoardId, string cardId);
+        /// <summary>
+        /// Toggles the state of the checklist item at checkIndex on the card (complete &lt;-&gt; incomplete).
+        /// </summary>
+        /// <param name="boardId">Trello board ID.</param>
+        /// <param name="cardId">CardId custom field value (e.g. "1-B", "2-F").</param>
+        /// <param name="checkIndex">0-based index of the check item (flattened across all checklists).</param>
+        /// <returns>Success, error message if any, and new state ("complete" or "incomplete").</returns>
+        Task<(bool Success, string? Error, string? NewState)> ToggleCheckItemByIndexAsync(string boardId, string cardId, int checkIndex);
     }
 
     public class TrelloService : ITrelloService
@@ -1083,8 +1091,37 @@ namespace strAppersBackend.Services
                     }).Cast<object>().ToList();
                 }
 
-                // Step 3: Get all cards for the board and filter by label name (include checklists)
-                var cardsUrl = $"https://api.trello.com/1/boards/{trelloBoardId}/cards?checklists=all&key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
+                // Step 2.5: Get custom field definitions for the board to map field IDs to names
+                var customFieldNameMap = new Dictionary<string, string>();
+                try
+                {
+                    var customFieldsUrl = $"https://api.trello.com/1/boards/{trelloBoardId}/customFields?key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
+                    var customFieldsResponse = await _httpClient.GetAsync(customFieldsUrl);
+                    
+                    if (customFieldsResponse.IsSuccessStatusCode)
+                    {
+                        var customFieldsContent = await customFieldsResponse.Content.ReadAsStringAsync();
+                        var customFieldsData = JsonSerializer.Deserialize<JsonElement[]>(customFieldsContent);
+                        
+                        foreach (var fieldDef in customFieldsData ?? Array.Empty<JsonElement>())
+                        {
+                            var fieldId = fieldDef.TryGetProperty("id", out var idProp) ? idProp.GetString() : "";
+                            var fieldName = fieldDef.TryGetProperty("name", out var nameProp) ? nameProp.GetString() : "";
+                            
+                            if (!string.IsNullOrEmpty(fieldId) && !string.IsNullOrEmpty(fieldName))
+                            {
+                                customFieldNameMap[fieldId] = fieldName;
+                            }
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning("Failed to fetch custom field definitions for board {BoardId}: {Error}", trelloBoardId, ex.Message);
+                }
+
+                // Step 3: Get all cards for the board and filter by label name (include checklists and custom fields)
+                var cardsUrl = $"https://api.trello.com/1/boards/{trelloBoardId}/cards?checklists=all&customFieldItems=true&key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
                 var cardsResponse = await _httpClient.GetAsync(cardsUrl);
                 var cards = new List<object>();
 
@@ -1166,6 +1203,83 @@ namespace strAppersBackend.Services
                             }
                         }
 
+                        // Process custom fields from the card
+                        var customFields = new Dictionary<string, object>();
+                        if (cardElement.TryGetProperty("customFieldItems", out var customFieldItemsProp))
+                        {
+                            foreach (var fieldItem in customFieldItemsProp.EnumerateArray())
+                            {
+                                var idCustomField = fieldItem.TryGetProperty("idCustomField", out var customFieldIdProp) ? customFieldIdProp.GetString() : "";
+                                
+                                // Get field name from the mapping we created
+                                var fieldName = !string.IsNullOrEmpty(idCustomField) && customFieldNameMap.TryGetValue(idCustomField, out var name) 
+                                    ? name 
+                                    : idCustomField ?? "Unknown";
+                                
+                                object? fieldValue = null;
+                                
+                                // Handle different custom field types
+                                if (fieldItem.TryGetProperty("value", out var valueProp))
+                                {
+                                    if (valueProp.ValueKind == JsonValueKind.String)
+                                    {
+                                        var stringValue = valueProp.GetString() ?? "";
+                                        // Handle double-encoded strings (e.g., "\"12345\"")
+                                        if (stringValue.StartsWith("\"") && stringValue.EndsWith("\""))
+                                        {
+                                            try
+                                            {
+                                                // Try to unescape JSON string
+                                                stringValue = JsonSerializer.Deserialize<string>(stringValue) ?? stringValue;
+                                            }
+                                            catch
+                                            {
+                                                // If deserialization fails, just remove surrounding quotes
+                                                stringValue = stringValue.Trim('"');
+                                            }
+                                        }
+                                        fieldValue = stringValue;
+                                    }
+                                    else if (valueProp.ValueKind == JsonValueKind.Object)
+                                    {
+                                        // For dropdown/select fields - check for text property
+                                        if (valueProp.TryGetProperty("text", out var textProp))
+                                        {
+                                            fieldValue = textProp.GetString() ?? "";
+                                        }
+                                        // For number fields stored as object
+                                        else if (valueProp.TryGetProperty("number", out var numberProp))
+                                        {
+                                            fieldValue = numberProp.GetRawText();
+                                        }
+                                        // For date fields
+                                        else if (valueProp.TryGetProperty("date", out var dateProp))
+                                        {
+                                            fieldValue = dateProp.GetString() ?? "";
+                                        }
+                                        // For checkbox fields
+                                        else if (valueProp.TryGetProperty("checked", out var checkedProp))
+                                        {
+                                            fieldValue = checkedProp.GetBoolean();
+                                        }
+                                    }
+                                    else if (valueProp.ValueKind == JsonValueKind.Number)
+                                    {
+                                        fieldValue = valueProp.GetRawText();
+                                    }
+                                    else if (valueProp.ValueKind == JsonValueKind.True || valueProp.ValueKind == JsonValueKind.False)
+                                    {
+                                        fieldValue = valueProp.GetBoolean();
+                                    }
+                                }
+                                
+                                if (!string.IsNullOrEmpty(fieldName) && fieldValue != null)
+                                {
+                                    customFields[fieldName] = fieldValue;
+                                }
+                            }
+                        }
+
                         cards.Add(new
                         {
                             Id = cardId,
@@ -1184,6 +1298,7 @@ namespace strAppersBackend.Services
                                     Color = l.TryGetProperty("color", out var labelColorProp) ? labelColorProp.GetString() : ""
                                 }).ToArray() : new object[0],
                             Checklists = checklists,
+                            CustomFields = customFields,
                             DateLastActivity = cardElement.TryGetProperty("dateLastActivity", out var activityProp) ? activityProp.GetString() : null
                         });
                     }
@@ -1624,6 +1739,110 @@ namespace strAppersBackend.Services
             {
                 _logger.LogError(ex, "❌ [TRELLO] Error getting card by CardId '{CardId}': {Message}", cardId, ex.Message);
                 return null;
+            }
+        }
+
+        /// <summary>
+        /// Toggles the state of the checklist item at checkIndex on the card (complete &lt;-&gt; incomplete).
+        /// </summary>
+        public async Task<(bool Success, string? Error, string? NewState)> ToggleCheckItemByIndexAsync(string boardId, string cardId, int checkIndex)
+        {
+            try
+            {
+                if (checkIndex < 0)
+                {
+                    return (false, "checkIndex must be >= 0", null);
+                }
+
+                var card = await GetCardByCardIdAsync(boardId, cardId);
+                if (card == null)
+                {
+                    return (false, $"Trello card with CardId '{cardId}' not found in board {boardId}", null);
+                }
+
+                var cardVal = card.Value;
+                if (!cardVal.TryGetProperty("id", out var idProp))
+                {
+                    return (false, "Card has no id.", null);
+                }
+                var trelloCardId = idProp.GetString();
+                if (string.IsNullOrEmpty(trelloCardId))
+                {
+                    return (false, "Card id is null or empty.", null);
+                }
+
+                var checklistsUrl = $"https://api.trello.com/1/cards/{trelloCardId}/checklists?checkItems=all&key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
+                var checklistsResponse = await _httpClient.GetAsync(checklistsUrl);
+                if (!checklistsResponse.IsSuccessStatusCode)
+                {
+                    var err = await checklistsResponse.Content.ReadAsStringAsync();
+                    _logger.LogWarning("Failed to get checklists for card {CardId}: {Error}", trelloCardId, err);
+                    return (false, $"Failed to get checklists for card: {err}", null);
+                }
+
+                var checklistsJson = await checklistsResponse.Content.ReadAsStringAsync();
+                var checklists = JsonSerializer.Deserialize<JsonElement[]>(checklistsJson);
+                if (checklists == null || checklists.Length == 0)
+                {
+                    return (false, "Card has no checklists.", null);
+                }
+
+                string? idCheckItem = null;
+                string? currentState = null;
+                int idx = 0;
+                foreach (var cl in checklists)
+                {
+                    if (!cl.TryGetProperty("checkItems", out var itemsProp) || itemsProp.ValueKind != JsonValueKind.Array)
+                    {
+                        continue;
+                    }
+                    foreach (var item in itemsProp.EnumerateArray())
+                    {
+                        if (idx == checkIndex)
+                        {
+                            if (item.TryGetProperty("id", out var itemIdProp))
+                            {
+                                idCheckItem = itemIdProp.GetString();
+                            }
+                            if (item.TryGetProperty("state", out var stateProp))
+                            {
+                                currentState = stateProp.GetString();
+                            }
+                            break;
+                        }
+                        idx++;
+                    }
+                    if (idCheckItem != null)
+                    {
+                        break;
+                    }
+                }
+
+                if (string.IsNullOrEmpty(idCheckItem))
+                {
+                    return (false, $"Check item at index {checkIndex} not found. Card has fewer than {checkIndex + 1} check items.", null);
+                }
+
+                var newState = string.Equals(currentState, "complete", StringComparison.OrdinalIgnoreCase)
+                    ? "incomplete"
+                    : "complete";
+
+                var updateUrl = $"https://api.trello.com/1/cards/{trelloCardId}/checkItem/{idCheckItem}?state={Uri.EscapeDataString(newState)}&key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
+                var updateResponse = await _httpClient.PutAsync(updateUrl, null);
+                if (!updateResponse.IsSuccessStatusCode)
+                {
+                    var err = await updateResponse.Content.ReadAsStringAsync();
+                    _logger.LogWarning("Failed to update check item {CheckItemId} on card {CardId}: {Error}", idCheckItem, trelloCardId, err);
+                    return (false, $"Failed to toggle check item: {err}", null);
+                }
+
+                _logger.LogInformation("✅ [TRELLO] Toggled check item at index {CheckIndex} on card {CardId} to {State}", checkIndex, cardId, newState);
+                return (true, null, newState);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "❌ [TRELLO] Error toggling check item at index {CheckIndex} for CardId '{CardId}': {Message}", checkIndex, cardId, ex.Message);
+                return (false, ex.Message, null);
             }
         }
     }

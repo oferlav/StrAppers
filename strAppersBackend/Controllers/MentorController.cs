@@ -112,31 +112,60 @@ namespace strAppersBackend.Controllers
                 string? sprintListId = null;
                 string? sprintListName = null;
                 
-                // Find the sprint list by matching sprint number
-                foreach (var listObj in listsResult)
+                // Special handling for sprintId=0 (Bugs sprint)
+                if (sprintId == 0)
                 {
-                    var listJson = JsonSerializer.Serialize(listObj);
-                    var listElement = JsonSerializer.Deserialize<JsonElement>(listJson);
-                    
-                    var name = listElement.TryGetProperty("Name", out var nameProp) ? nameProp.GetString() : "";
-                    var id = listElement.TryGetProperty("Id", out var idProp) ? idProp.GetString() : "";
-                    
-                    // Sprint lists are typically named "Sprint 1", "Sprint 2", etc.
-                    if (!string.IsNullOrEmpty(name) && 
-                        (name.Equals($"Sprint {sprintId}", StringComparison.OrdinalIgnoreCase) ||
-                         name.Equals($"Sprint{sprintId}", StringComparison.OrdinalIgnoreCase) ||
-                         name.Contains($"Sprint {sprintId}", StringComparison.OrdinalIgnoreCase)))
+                    // Look for "Bugs" list
+                    foreach (var listObj in listsResult)
                     {
-                        sprintListId = id;
-                        sprintListName = name;
-                        break;
+                        var listJson = JsonSerializer.Serialize(listObj);
+                        var listElement = JsonSerializer.Deserialize<JsonElement>(listJson);
+                        
+                        var name = listElement.TryGetProperty("Name", out var nameProp) ? nameProp.GetString() : "";
+                        var id = listElement.TryGetProperty("Id", out var idProp) ? idProp.GetString() : "";
+                        
+                        if (!string.IsNullOrEmpty(name) && name.Equals("Bugs", StringComparison.OrdinalIgnoreCase))
+                        {
+                            sprintListId = id;
+                            sprintListName = name;
+                            break;
+                        }
+                    }
+                    
+                    if (string.IsNullOrEmpty(sprintListId))
+                    {
+                        _logger.LogWarning("Bugs list not found for board {BoardId}", student.BoardId);
+                        return BadRequest(new { Success = false, Message = "Bugs list not found on Trello board" });
                     }
                 }
-
-                if (string.IsNullOrEmpty(sprintListId))
+                else
                 {
-                    _logger.LogWarning("Sprint {SprintId} list not found for board {BoardId}", sprintId, student.BoardId);
-                    return BadRequest(new { Success = false, Message = $"Sprint {sprintId} not found on Trello board" });
+                    // Find the sprint list by matching sprint number
+                    foreach (var listObj in listsResult)
+                    {
+                        var listJson = JsonSerializer.Serialize(listObj);
+                        var listElement = JsonSerializer.Deserialize<JsonElement>(listJson);
+                        
+                        var name = listElement.TryGetProperty("Name", out var nameProp) ? nameProp.GetString() : "";
+                        var id = listElement.TryGetProperty("Id", out var idProp) ? idProp.GetString() : "";
+                        
+                        // Sprint lists are typically named "Sprint 1", "Sprint 2", etc.
+                        if (!string.IsNullOrEmpty(name) && 
+                            (name.Equals($"Sprint {sprintId}", StringComparison.OrdinalIgnoreCase) ||
+                             name.Equals($"Sprint{sprintId}", StringComparison.OrdinalIgnoreCase) ||
+                             name.Contains($"Sprint {sprintId}", StringComparison.OrdinalIgnoreCase)))
+                        {
+                            sprintListId = id;
+                            sprintListName = name;
+                            break;
+                        }
+                    }
+
+                    if (string.IsNullOrEmpty(sprintListId))
+                    {
+                        _logger.LogWarning("Sprint {SprintId} list not found for board {BoardId}", sprintId, student.BoardId);
+                        return BadRequest(new { Success = false, Message = $"Sprint {sprintId} not found on Trello board" });
+                    }
                 }
 
                 // B. Fetch Current Trello Tasks for current sprint (filtered by role label)
@@ -412,12 +441,16 @@ namespace strAppersBackend.Controllers
                 var teamMemberTasksList = FormatTeamMemberTasks(teamMemberTasks);
                 var githubFilesList = string.Join("\n", githubFiles);
 
+                // Format sprint identifier for prompt (show "Bugs" when sprintId=0)
+                var sprintIdentifier = sprintId == 0 ? "Bugs" : sprintId.ToString();
+                var sprintDisplayName = sprintId == 0 ? "Bugs" : (sprintListName ?? $"Sprint {sprintId}");
+                
                 var formattedPrompt = string.Format(
                     _promptConfig.Mentor.UserPromptTemplate,
                     student.FirstName,                    // {0} - User's first name
                     roleName,                              // {1} - Role
-                    sprintId,                              // {2} - Sprint number
-                    sprintListName ?? $"Sprint {sprintId}", // {3} - Module name (using sprint name as module context)
+                    sprintIdentifier,                      // {2} - Sprint number (or "Bugs" for sprintId=0)
+                    sprintDisplayName,                     // {3} - Module name (using sprint name as module context)
                     currentTaskDetails,                    // {4} - Task name/description
                     programmingLanguage,                   // {5} - Programming language
                     FormatTaskDetails(userTasks),          // {6} - Current task details
@@ -2289,11 +2322,18 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                     return BadRequest(new { Success = false, Message = $"Unknown log type: {request.Type}" });
                 }
 
+                // Use empty string instead of NULL for GithubBranch to ensure ON CONFLICT works correctly
+                // PostgreSQL treats NULL values as DISTINCT in unique constraints, so multiple NULLs don't conflict
+                // Empty string ensures proper conflict detection (same approach as Railway records)
+                var githubPagesGithubBranch = ""; // Use empty string instead of NULL for GithubPages records
+                
                 // Check if record exists for logging
+                // GithubPages records use empty string '' for GithubBranch (not NULL) to ensure ON CONFLICT works
                 var existingState = await _context.BoardStates
                     .FirstOrDefaultAsync(bs => bs.BoardId == request.BoardId && 
                                                bs.Source == source && 
-                                               bs.Webhook == webhook);
+                                               bs.Webhook == webhook &&
+                                               (bs.GithubBranch == "" || bs.GithubBranch == null)); // Check both for backward compatibility
 
                 if (existingState != null)
                 {
@@ -2318,7 +2358,7 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                         {request.BoardId}, {source}, {webhook}, 
                         {buildStatus}, {errorOutput}, {errorMessage}, 
                         {request.File}, {request.Line}, {request.Stack}, {latestErrorSummary}, {timestamp}, 
-                        {"Frontend"}, {(string?)null},
+                        {"Frontend"}, {githubPagesGithubBranch},
                         {createdAt}, {updatedAt}
                     )
                     ON CONFLICT (""BoardId"", ""Source"", ""Webhook"", ""GithubBranch"") 
@@ -2357,6 +2397,106 @@ Your intelligence is strictly tethered to the Current Project Context and the us
             public int? Column { get; set; }
             public string? Stack { get; set; }
             public string Message { get; set; } = string.Empty;
+        }
+
+        /// <summary>
+        /// Updates BoardStates table with GitHub Pages deployment status
+        /// Called after deployment and from webhooks to track Pages build status
+        /// </summary>
+        private async Task UpdateGithubPagesBoardStateAsync(string boardId, string owner, string repositoryName, string accessToken)
+        {
+            try
+            {
+                _logger.LogInformation("[GithubPages] Updating BoardState for BoardId: {BoardId}, Repo: {Owner}/{Repo}", boardId, owner, repositoryName);
+
+                // Get detailed status information from GitHub Pages API
+                var request = new HttpRequestMessage(HttpMethod.Get, 
+                    $"https://api.github.com/repos/{owner}/{repositoryName}/pages");
+                request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", accessToken);
+
+                using var httpClient = _httpClientFactory.CreateClient();
+                var response = await httpClient.SendAsync(request);
+                string? buildStatus = null;
+                string? statusMessage = null;
+
+                if (response.IsSuccessStatusCode)
+                {
+                    var responseContent = await response.Content.ReadAsStringAsync();
+                    var pagesInfo = System.Text.Json.JsonSerializer.Deserialize<System.Text.Json.JsonElement>(responseContent, new System.Text.Json.JsonSerializerOptions
+                    {
+                        PropertyNameCaseInsensitive = true
+                    });
+
+                    var status = pagesInfo.TryGetProperty("status", out var statusProp) ? statusProp.GetString() : null;
+                    
+                    // Map GitHub Pages status to build status
+                    if (status == "built")
+                    {
+                        buildStatus = "SUCCESS";
+                        statusMessage = "GitHub Pages deployment completed successfully";
+                    }
+                    else if (status == "building" || status == "queued")
+                    {
+                        buildStatus = "IN_PROGRESS";
+                        statusMessage = $"GitHub Pages deployment {status}";
+                    }
+                    else if (status == "errored")
+                    {
+                        buildStatus = "FAILED";
+                        statusMessage = "GitHub Pages deployment failed";
+                    }
+                    else if (status != null)
+                    {
+                        buildStatus = "UNKNOWN";
+                        statusMessage = $"GitHub Pages status: {status}";
+                    }
+                }
+                else if (response.StatusCode == System.Net.HttpStatusCode.NotFound)
+                {
+                    buildStatus = "NOT_ENABLED";
+                    statusMessage = "GitHub Pages is not enabled for this repository";
+                }
+
+                // Only update if we got a status
+                if (buildStatus != null)
+                {
+                    var source = "GithubPages";
+                    var webhook = false; // API-triggered, not webhook
+                    var githubPagesGithubBranch = ""; // Use empty string instead of NULL
+                    var timestamp = DateTime.UtcNow;
+                    var createdAt = DateTime.UtcNow;
+                    var updatedAt = DateTime.UtcNow;
+
+                    FormattableString sql = $@"
+                        INSERT INTO ""BoardStates"" (
+                            ""BoardId"", ""Source"", ""Webhook"", 
+                            ""LastBuildStatus"", ""LastBuildOutput"", ""ErrorMessage"", 
+                            ""Timestamp"", 
+                            ""DevRole"", ""GithubBranch"",
+                            ""CreatedAt"", ""UpdatedAt""
+                        ) VALUES (
+                            {boardId}, {source}, {webhook}, 
+                            {buildStatus}, {statusMessage}, NULL, 
+                            {timestamp}, 
+                            {"Frontend"}, {githubPagesGithubBranch},
+                            {createdAt}, {updatedAt}
+                        )
+                        ON CONFLICT (""BoardId"", ""Source"", ""Webhook"", ""GithubBranch"") 
+                        DO UPDATE SET
+                            ""LastBuildStatus"" = EXCLUDED.""LastBuildStatus"",
+                            ""LastBuildOutput"" = EXCLUDED.""LastBuildOutput"",
+                            ""Timestamp"" = EXCLUDED.""Timestamp"",
+                            ""UpdatedAt"" = EXCLUDED.""UpdatedAt""
+                    ";
+
+                    await _context.Database.ExecuteSqlInterpolatedAsync(sql);
+                    _logger.LogInformation("[GithubPages] ✅ Updated BoardState for BoardId: {BoardId}, Status: {Status}", boardId, buildStatus);
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "[GithubPages] ❌ Error updating BoardState for BoardId: {BoardId}", boardId);
+            }
         }
         
         /// <summary>
@@ -4953,27 +5093,51 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                     return null;
                 }
 
-                // Get sprint list
+                // Get sprint list (or Bugs list if sprintId=0)
                 var listsResult = await GetBoardListsAsync(student.BoardId);
                 string? sprintListId = null;
                 string? sprintListName = null;
 
-                foreach (var listObj in listsResult)
+                // Special handling for sprintId=0 (Bugs sprint)
+                if (sprintId == 0)
                 {
-                    var listJson = JsonSerializer.Serialize(listObj);
-                    var listElement = JsonSerializer.Deserialize<JsonElement>(listJson);
-
-                    var name = listElement.TryGetProperty("Name", out var nameProp) ? nameProp.GetString() : "";
-                    var id = listElement.TryGetProperty("Id", out var idProp) ? idProp.GetString() : "";
-
-                    if (!string.IsNullOrEmpty(name) &&
-                        (name.Equals($"Sprint {sprintId}", StringComparison.OrdinalIgnoreCase) ||
-                         name.Equals($"Sprint{sprintId}", StringComparison.OrdinalIgnoreCase) ||
-                         name.Contains($"Sprint {sprintId}", StringComparison.OrdinalIgnoreCase)))
+                    // Look for "Bugs" list
+                    foreach (var listObj in listsResult)
                     {
-                        sprintListId = id;
-                        sprintListName = name;
-                        break;
+                        var listJson = JsonSerializer.Serialize(listObj);
+                        var listElement = JsonSerializer.Deserialize<JsonElement>(listJson);
+
+                        var name = listElement.TryGetProperty("Name", out var nameProp) ? nameProp.GetString() : "";
+                        var id = listElement.TryGetProperty("Id", out var idProp) ? idProp.GetString() : "";
+
+                        if (!string.IsNullOrEmpty(name) && name.Equals("Bugs", StringComparison.OrdinalIgnoreCase))
+                        {
+                            sprintListId = id;
+                            sprintListName = name;
+                            break;
+                        }
+                    }
+                }
+                else
+                {
+                    // Find the sprint list by matching sprint number
+                    foreach (var listObj in listsResult)
+                    {
+                        var listJson = JsonSerializer.Serialize(listObj);
+                        var listElement = JsonSerializer.Deserialize<JsonElement>(listJson);
+
+                        var name = listElement.TryGetProperty("Name", out var nameProp) ? nameProp.GetString() : "";
+                        var id = listElement.TryGetProperty("Id", out var idProp) ? idProp.GetString() : "";
+
+                        if (!string.IsNullOrEmpty(name) &&
+                            (name.Equals($"Sprint {sprintId}", StringComparison.OrdinalIgnoreCase) ||
+                             name.Equals($"Sprint{sprintId}", StringComparison.OrdinalIgnoreCase) ||
+                             name.Contains($"Sprint {sprintId}", StringComparison.OrdinalIgnoreCase)))
+                        {
+                            sprintListId = id;
+                            sprintListName = name;
+                            break;
+                        }
                     }
                 }
 
@@ -5203,12 +5367,16 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                 var teamMemberTasksList = FormatTeamMemberTasks(teamMemberTasks);
                 var githubFilesList = string.Join("\n", githubFiles);
 
+                // Format sprint identifier for prompt (show "Bugs" when sprintId=0)
+                var sprintIdentifier = sprintId == 0 ? "Bugs" : sprintId.ToString();
+                var sprintDisplayName = sprintId == 0 ? "Bugs" : (sprintListName ?? $"Sprint {sprintId}");
+                
                 var formattedPrompt = string.Format(
                     _promptConfig.Mentor.UserPromptTemplate,
                     student.FirstName,
                     roleName,
-                    sprintId,
-                    sprintListName ?? $"Sprint {sprintId}",
+                    sprintIdentifier,
+                    sprintDisplayName,
                     currentTaskDetails,
                     programmingLanguage,
                     FormatTaskDetails(userTasks),
@@ -5672,9 +5840,9 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                     return BadRequest("Request body is required");
                 }
 
-                if (request.SprintNumber < 1 || request.SprintNumber > 20)
+                if (request.SprintNumber < 0 || request.SprintNumber > 20)
                 {
-                    return BadRequest("Sprint number must be between 1 and 20");
+                    return BadRequest("Sprint number must be between 0 and 20 (0 for Bugs branch)");
                 }
 
                 var board = await _context.ProjectBoards
@@ -5702,11 +5870,21 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                 var owner = pathParts[0];
                 var repo = pathParts[1];
 
-                var patternKey = request.IsBackend ? "GitHub:BranchNamingPatterns:Backend" : "GitHub:BranchNamingPatterns:Frontend";
-                var pattern = _configuration[patternKey] ?? (request.IsBackend ? "^([1-9]|1[0-9]|20)-B$" : "^([1-9]|1[0-9]|20)-F$");
+                string branchName;
+                if (request.SprintNumber == 0)
+                {
+                    // Special case: sprintNumber 0 creates a "Bugs" branch
+                    branchName = "Bugs";
+                }
+                else
+                {
+                    // Normal case: use sprint number and repo type letter
+                    var patternKey = request.IsBackend ? "GitHub:BranchNamingPatterns:Backend" : "GitHub:BranchNamingPatterns:Frontend";
+                    var pattern = _configuration[patternKey] ?? (request.IsBackend ? "^([1-9]|1[0-9]|20)-B$" : "^([1-9]|1[0-9]|20)-F$");
 
-                var repoTypeLetter = request.IsBackend ? "B" : "F";
-                var branchName = $"{request.SprintNumber}-{repoTypeLetter}";
+                    var repoTypeLetter = request.IsBackend ? "B" : "F";
+                    branchName = $"{request.SprintNumber}-{repoTypeLetter}";
+                }
 
                 var accessToken = _configuration["GitHub:AccessToken"];
                 if (string.IsNullOrEmpty(accessToken))
@@ -5714,7 +5892,61 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                     return StatusCode(500, "GitHub access token is not configured");
                 }
 
-                _logger.LogInformation("🌿 [GITHUB BRANCH] Creating branch '{BranchName}' in {Owner}/{Repo} for sprint {SprintNumber}",
+                // Check for unmerged branches (all branches excluding main)
+                _logger.LogInformation("🔍 [GITHUB BRANCH] Checking for unmerged branches in {Owner}/{Repo}", owner, repo);
+                
+                // Get all branches from the repository
+                var branchesUrl = $"https://api.github.com/repos/{owner}/{repo}/branches";
+                using var httpClient = _httpClientFactory.CreateClient("DeploymentController");
+                var branchesRequest = new HttpRequestMessage(HttpMethod.Get, branchesUrl);
+                branchesRequest.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", accessToken);
+                branchesRequest.Headers.Add("User-Agent", "StrAppersBackend/1.0");
+                branchesRequest.Headers.Accept.Add(new System.Net.Http.Headers.MediaTypeWithQualityHeaderValue("application/vnd.github.v3+json"));
+                
+                var branchesResponse = await httpClient.SendAsync(branchesRequest);
+                var unmergedBranches = new List<string>();
+                
+                if (branchesResponse.IsSuccessStatusCode)
+                {
+                    var branchesContent = await branchesResponse.Content.ReadAsStringAsync();
+                    var branchesData = System.Text.Json.JsonSerializer.Deserialize<System.Text.Json.JsonElement[]>(branchesContent, new System.Text.Json.JsonSerializerOptions
+                    {
+                        PropertyNameCaseInsensitive = true
+                    });
+                    
+                    // Filter out "main" branch - all other branches are considered unmerged
+                    foreach (var branch in branchesData ?? Array.Empty<System.Text.Json.JsonElement>())
+                    {
+                        var branchNameFromApi = branch.TryGetProperty("name", out var nameProp) ? nameProp.GetString() : "";
+                        if (!string.IsNullOrEmpty(branchNameFromApi) && 
+                            !branchNameFromApi.Equals("main", StringComparison.OrdinalIgnoreCase) &&
+                            !branchNameFromApi.Equals("master", StringComparison.OrdinalIgnoreCase))
+                        {
+                            unmergedBranches.Add(branchNameFromApi);
+                        }
+                    }
+                }
+                else
+                {
+                    _logger.LogWarning("⚠️ [GITHUB BRANCH] Failed to get branches list. Status: {StatusCode}", branchesResponse.StatusCode);
+                }
+                
+                if (unmergedBranches.Count > 0)
+                {
+                    var branchesList = string.Join(", ", unmergedBranches);
+                    
+                    _logger.LogWarning("❌ [GITHUB BRANCH] Cannot create branch '{BranchName}'. Found {Count} unmerged branch(es): {Branches}", 
+                        branchName, unmergedBranches.Count, branchesList);
+                    
+                    return BadRequest(new CreateGitHubBranchResponse
+                    {
+                        Success = false,
+                        ErrorMessage = $"Cannot create branch '{branchName}'. There are {unmergedBranches.Count} unmerged branch(es): {branchesList}. Please merge or delete the existing branches before creating a new branch.",
+                        StatusCode = 400
+                    });
+                }
+
+                _logger.LogInformation("✅ [GITHUB BRANCH] No unmerged branches found. Creating branch '{BranchName}' in {Owner}/{Repo} for sprint {SprintNumber}",
                     branchName, owner, repo, request.SprintNumber);
 
                 var branchResponse = await _githubService.CreateBranchAsync(owner, repo, branchName, "main", accessToken);
@@ -8747,6 +8979,37 @@ Focus on the actual changes made (the diff), not the entire codebase.";
                         }
                     }
 
+                    // Handle deployment_status events for GitHub Pages
+                    if (eventType == "deployment_status" && !string.IsNullOrEmpty(boardId) && !string.IsNullOrEmpty(owner) && !string.IsNullOrEmpty(repo))
+                    {
+                        try
+                        {
+                            // Check if this is a GitHub Pages deployment
+                            if (payload.TryGetProperty("deployment_status", out var deploymentStatusProp))
+                            {
+                                var state = deploymentStatusProp.TryGetProperty("state", out var stateProp) ? stateProp.GetString() : null;
+                                var environment = deploymentStatusProp.TryGetProperty("environment", out var envProp) ? envProp.GetString() : null;
+                                
+                                // GitHub Pages deployments typically have environment "github-pages"
+                                if (environment == "github-pages" || (environment == null && state != null))
+                                {
+                                    _logger.LogInformation("📥 [WEBHOOK] GitHub Pages deployment status: {State}, Environment: {Environment}", state, environment ?? "N/A");
+                                    
+                                    // Update BoardState with deployment status
+                                    var accessToken = _configuration["GitHub:AccessToken"];
+                                    if (!string.IsNullOrEmpty(accessToken))
+                                    {
+                                        await UpdateGithubPagesBoardStateAsync(boardId, owner, repo, accessToken);
+                                    }
+                                }
+                            }
+                        }
+                        catch (Exception deployEx)
+                        {
+                            _logger.LogWarning(deployEx, "⚠️ [WEBHOOK] Failed to process deployment_status event (non-critical)");
+                        }
+                    }
+
                     // Append webhook record (constraint now includes GithubBranch, allowing multiple PRs for different branches)
                     // The unique constraint on (BoardId, Source, Webhook, GithubBranch) allows:
                     // - Multiple PRs for different branches (different GithubBranch values)
@@ -10175,6 +10438,233 @@ Focus on the actual changes made (the diff), not the entire codebase.";
                 _logger.LogError(ex, "❌ [GITHUB-MERGE] Error processing platform-triggered merge");
                 return StatusCode(500, new { Success = false, Message = $"Error merging PR: {ex.Message}" });
             }
+        }
+
+        /// <summary>
+        /// Checks if a branch exists and is unmerged (has commits not in main)
+        /// </summary>
+        [HttpGet("use/is-open-branch")]
+        public async Task<ActionResult<object>> IsOpenBranch([FromQuery] string boardId, [FromQuery] string branchName, [FromQuery] bool isBackend)
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace(boardId))
+                {
+                    return BadRequest(new { Success = false, Message = "boardId is required" });
+                }
+
+                if (string.IsNullOrWhiteSpace(branchName))
+                {
+                    return BadRequest(new { Success = false, Message = "branchName is required" });
+                }
+
+                _logger.LogInformation("🔍 [IS-OPEN-BRANCH] Checking if branch '{BranchName}' is unmerged for BoardId: {BoardId}, IsBackend: {IsBackend}", 
+                    branchName, boardId, isBackend);
+
+                // Get board to find GitHub repo info
+                var board = await _context.ProjectBoards
+                    .FirstOrDefaultAsync(pb => pb.Id == boardId);
+
+                if (board == null)
+                {
+                    return NotFound(new { Success = false, Message = $"Board with ID {boardId} not found" });
+                }
+
+                // Determine GitHub URL based on isBackend
+                var githubUrl = isBackend ? board.GithubBackendUrl : board.GithubFrontendUrl;
+                if (string.IsNullOrEmpty(githubUrl))
+                {
+                    return BadRequest(new { Success = false, Message = $"GitHub {(isBackend ? "backend" : "frontend")} URL not found for board" });
+                }
+
+                // Extract owner and repo from GitHub URL
+                var uri = new Uri(githubUrl);
+                var pathParts = uri.AbsolutePath.TrimStart('/').Split('/');
+                if (pathParts.Length < 2)
+                {
+                    return BadRequest(new { Success = false, Message = $"Invalid GitHub URL format: {githubUrl}" });
+                }
+
+                var owner = pathParts[0];
+                var repo = pathParts[1];
+                var accessToken = _configuration["GitHub:AccessToken"];
+
+                if (string.IsNullOrEmpty(accessToken))
+                {
+                    return StatusCode(500, new { Success = false, Message = "GitHub access token is not configured" });
+                }
+
+                // Check if branch is main/master - these are considered merged (they are the base branch)
+                if (branchName.Equals("main", StringComparison.OrdinalIgnoreCase) || 
+                    branchName.Equals("master", StringComparison.OrdinalIgnoreCase))
+                {
+                    _logger.LogInformation("ℹ️ [IS-OPEN-BRANCH] Branch '{BranchName}' is the default branch, considered merged", branchName);
+                    return Ok(new 
+                    { 
+                        Success = true, 
+                        BranchExists = true,
+                        BranchMerged = true,
+                        Message = "Branch is the default branch (main/master)" 
+                    });
+                }
+
+                // Check if branch exists by getting its SHA
+                var branchSha = await _githubService.GetBranchShaAsync(owner, repo, branchName, accessToken);
+                
+                if (string.IsNullOrEmpty(branchSha))
+                {
+                    _logger.LogInformation("ℹ️ [IS-OPEN-BRANCH] Branch '{BranchName}' does not exist", branchName);
+                    return Ok(new 
+                    { 
+                        Success = true, 
+                        BranchExists = false,
+                        BranchMerged = false,
+                        Message = "Branch does not exist" 
+                    });
+                }
+
+                _logger.LogInformation("✅ [IS-OPEN-BRANCH] Branch '{BranchName}' exists with SHA: {Sha}", branchName, branchSha);
+
+                // Check if branch is merged into main by comparing main...branch
+                // Use GitHub Compare API to get ahead_by and behind_by
+                var compareUrl = $"https://api.github.com/repos/{owner}/{repo}/compare/main...{branchName}";
+                using var httpClient = _httpClientFactory.CreateClient("DeploymentController");
+                var compareRequest = new HttpRequestMessage(HttpMethod.Get, compareUrl);
+                compareRequest.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", accessToken);
+                compareRequest.Headers.Add("User-Agent", "StrAppersBackend/1.0");
+                compareRequest.Headers.Accept.Add(new System.Net.Http.Headers.MediaTypeWithQualityHeaderValue("application/vnd.github.v3+json"));
+                
+                var compareResponse = await httpClient.SendAsync(compareRequest);
+                int aheadBy = 0;
+                int behindBy = 0;
+                bool branchMerged = false;
+                
+                if (compareResponse.IsSuccessStatusCode)
+                {
+                    var compareContent = await compareResponse.Content.ReadAsStringAsync();
+                    var compareData = System.Text.Json.JsonSerializer.Deserialize<System.Text.Json.JsonElement>(compareContent, new System.Text.Json.JsonSerializerOptions
+                    {
+                        PropertyNameCaseInsensitive = true
+                    });
+                    
+                    // Extract ahead_by and behind_by from compare response
+                    aheadBy = compareData.TryGetProperty("ahead_by", out var aheadProp) ? aheadProp.GetInt32() : 0;
+                    behindBy = compareData.TryGetProperty("behind_by", out var behindProp) ? behindProp.GetInt32() : 0;
+                    
+                    // IMPORTANT: If a branch exists (and is not main/master), it is considered "unmerged" 
+                    // even if its commits are in main, because the branch itself still exists and needs cleanup.
+                    // This matches the logic in POST /api/Mentor/use/github-branch which blocks creation
+                    // if ANY branch exists (except main/master).
+                    // A branch is only "merged" if it doesn't exist OR if it's the main/master branch.
+                    // Since we already checked that the branch exists and is not main/master, it's unmerged.
+                    branchMerged = false;
+                    
+                    _logger.LogInformation("📊 [IS-OPEN-BRANCH] Branch '{BranchName}' comparison: AheadBy={AheadBy}, BehindBy={BehindBy}, BranchMerged={BranchMerged} (branch exists, so considered unmerged)", 
+                        branchName, aheadBy, behindBy, branchMerged);
+                }
+                else
+                {
+                    // If compare fails, assume unmerged since branch exists and is not main
+                    _logger.LogWarning("⚠️ [IS-OPEN-BRANCH] Could not compare main...{BranchName} (Status: {StatusCode}), assuming unmerged since branch exists", 
+                        branchName, compareResponse.StatusCode);
+                    branchMerged = false;
+                }
+
+                return Ok(new 
+                { 
+                    Success = true, 
+                    BranchExists = true,
+                    BranchMerged = branchMerged,
+                    AheadBy = aheadBy,
+                    BehindBy = behindBy,
+                    Message = branchMerged 
+                        ? $"Branch '{branchName}' is fully merged into main" 
+                        : $"Branch '{branchName}' exists and is unmerged (has {aheadBy} commit(s) ahead of main)"
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "❌ [IS-OPEN-BRANCH] Error checking if branch is unmerged: {Message}", ex.Message);
+                return StatusCode(500, new { Success = false, Message = $"Error checking branch: {ex.Message}" });
+            }
+        }
+
+        /// <summary>
+        /// Pushes a system message to MentorChatHistory table
+        /// </summary>
+        [HttpPost("use/push-mentor-system-message")]
+        public async Task<ActionResult<object>> PushMentorSystemMessage([FromBody] PushMentorSystemMessageRequest request)
+        {
+            try
+            {
+                if (request.StudentId <= 0)
+                {
+                    return BadRequest(new { Success = false, Message = "StudentId is required and must be greater than 0" });
+                }
+
+                if (request.SprintId < 0)
+                {
+                    return BadRequest(new { Success = false, Message = "SprintId is required and must be greater than or equal to 0" });
+                }
+
+                if (string.IsNullOrWhiteSpace(request.Message))
+                {
+                    return BadRequest(new { Success = false, Message = "Message is required" });
+                }
+
+                _logger.LogInformation("💬 [PUSH-MENTOR-SYSTEM-MESSAGE] Pushing system message for StudentId: {StudentId}, SprintId: {SprintId}", 
+                    request.StudentId, request.SprintId);
+
+                // Verify student exists
+                var student = await _context.Students
+                    .FirstOrDefaultAsync(s => s.Id == request.StudentId);
+
+                if (student == null)
+                {
+                    return NotFound(new { Success = false, Message = $"Student with ID {request.StudentId} not found" });
+                }
+
+                // Create and save the system message
+                var systemMessage = new MentorChatHistory
+                {
+                    StudentId = request.StudentId,
+                    SprintId = request.SprintId,
+                    Role = "assistant", // System messages are stored as assistant role
+                    Message = request.Message.Trim(),
+                    CreatedAt = DateTime.UtcNow
+                };
+
+                _context.MentorChatHistory.Add(systemMessage);
+                await _context.SaveChangesAsync();
+
+                _logger.LogInformation("✅ [PUSH-MENTOR-SYSTEM-MESSAGE] Successfully saved system message with Id: {MessageId} for StudentId: {StudentId}, SprintId: {SprintId}", 
+                    systemMessage.Id, request.StudentId, request.SprintId);
+
+                return Ok(new
+                {
+                    Success = true,
+                    MessageId = systemMessage.Id,
+                    StudentId = systemMessage.StudentId,
+                    SprintId = systemMessage.SprintId,
+                    Message = "System message successfully saved to chat history",
+                    CreatedAt = systemMessage.CreatedAt
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "❌ [PUSH-MENTOR-SYSTEM-MESSAGE] Error pushing system message: {Message}", ex.Message);
+                return StatusCode(500, new { Success = false, Message = $"Error pushing system message: {ex.Message}" });
+            }
+        }
+
+        /// <summary>
+        /// Request model for pushing a mentor system message
+        /// </summary>
+        public class PushMentorSystemMessageRequest
+        {
+            public int StudentId { get; set; }
+            public int SprintId { get; set; }
+            public string Message { get; set; } = string.Empty;
         }
     }
 }
