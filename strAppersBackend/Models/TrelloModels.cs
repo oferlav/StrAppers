@@ -7,6 +7,26 @@ namespace strAppersBackend.Models
         public string ApiKey { get; set; } = string.Empty;
         public string ApiSecret { get; set; } = string.Empty;
         public string ApiToken { get; set; } = string.Empty;
+        public bool SendInvitationToPMOnly { get; set; } = true;
+        public bool CreatePMEmptyBoard { get; set; } = true;
+        /// <summary>
+        /// When true and Project.TrelloBoardJson has data, board creation uses the saved JSON instead of calling AI.
+        /// </summary>
+        public bool UseDBProjectBoard { get; set; } = true;
+        /// <summary>
+        /// First day of the week for kickoff and sprint boundaries (e.g. "Sunday", "Monday"). Default "Sunday".
+        /// </summary>
+        public string FirstDayOfWeek { get; set; } = "Sunday";
+        /// <summary>
+        /// Local timezone for meetings and sprint dates (e.g. "GMT+2", "UTC"). Default "GMT+2".
+        /// Used in email invitations and NextMeetingTime.
+        /// </summary>
+        public string LocalTime { get; set; } = "GMT+2";
+        /// <summary>
+        /// AI prompt for merging a live sprint with the SystemBoard sprint (POST /api/Trello/use/merge-sprint).
+        /// Placeholders: {{LiveSprintJson}} and {{SystemSprintJson}} are replaced with the live and system sprint card JSON.
+        /// </summary>
+        public string? SprintMergePrompt { get; set; }
     }
 
     public class TrelloUserRegistrationRequest
@@ -98,6 +118,10 @@ namespace strAppersBackend.Models
         public int Position { get; set; }
         public DateTime? StartDate { get; set; }
         public DateTime? EndDate { get; set; }
+        /// <summary>Sprint/list-level description (stored in JSON; not sent to Trello list API).</summary>
+        public string? Description { get; set; }
+        /// <summary>Sprint-level checklist items (stored in JSON; can be used when creating a sprint card or for display).</summary>
+        public List<string> ChecklistItems { get; set; } = new List<string>();
     }
 
     public class TrelloCard
@@ -126,8 +150,10 @@ namespace strAppersBackend.Models
         public bool Success { get; set; }
         public string Message { get; set; } = string.Empty;
         public string? BoardUrl { get; set; }
-        public string? BoardId { get; set; }  // This will store the Trello-generated board ID
+        public string? BoardId { get; set; }  // This will store the Trello-generated board ID (empty board if CreatePMEmptyBoard is true)
         public string? BoardName { get; set; }  // This will store the board name
+        public string? SystemBoardId { get; set; }  // This will store the SystemBoard ID (full board) when CreatePMEmptyBoard is true
+        public string? SystemBoardUrl { get; set; }  // This will store the SystemBoard URL when CreatePMEmptyBoard is true
         public List<TrelloCreatedCard> CreatedCards { get; set; } = new List<TrelloCreatedCard>();
         public List<TrelloInvitedUser> InvitedUsers { get; set; } = new List<TrelloInvitedUser>();
         public List<string> Errors { get; set; } = new List<string>();
@@ -164,5 +190,37 @@ namespace strAppersBackend.Models
         /// 0-based index of the check item within the card's checklists (flattened: first checklist, then second, etc.).
         /// </summary>
         public int CheckIndex { get; set; }
+    }
+
+    /// <summary>
+    /// Request for POST /api/Trello/use/merge-sprint. Override live sprint with SystemBoard sprint; optionally merge via AI.
+    /// </summary>
+    public class MergeSprintRequest
+    {
+        public int ProjectId { get; set; }
+        [Required]
+        public string BoardId { get; set; } = string.Empty;
+        public int SprintNumber { get; set; }
+        /// <summary>If true (default), live and system sprints are merged via AI then override; if false, live sprint is completely overwritten with system sprint (no AI).</summary>
+        public bool Merge { get; set; } = true;
+    }
+
+    /// <summary>One card in a sprint snapshot (for get/override/merge).</summary>
+    public class SprintSnapshotCard
+    {
+        public string Name { get; set; } = string.Empty;
+        public string Description { get; set; } = string.Empty;
+        public DateTime? DueDate { get; set; }
+        public string RoleName { get; set; } = string.Empty;
+        public List<string> ChecklistItems { get; set; } = new List<string>();
+        public string? CardId { get; set; }
+    }
+
+    /// <summary>Snapshot of a sprint list on a board (list id/name + cards).</summary>
+    public class SprintSnapshot
+    {
+        public string ListId { get; set; } = string.Empty;
+        public string ListName { get; set; } = string.Empty;
+        public List<SprintSnapshotCard> Cards { get; set; } = new List<SprintSnapshotCard>();
     }
 }

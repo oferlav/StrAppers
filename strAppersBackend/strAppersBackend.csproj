@@ -27,6 +27,11 @@
     <None Include="appsettings.Development.json">
       <CopyToPublishDirectory>Never</CopyToPublishDirectory>
     </None>
+    <!-- Referenced prompt data: Prompts/Mentor/*.txt (no large inline strings in code) -->
+    <Content Include="Prompts\**\*">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </Content>
   </ItemGroup>
 	
 </Project>

@@ -21,8 +21,12 @@ namespace strAppersBackend.Services
         /// <param name="boardId">Trello board ID.</param>
         /// <param name="cardId">CardId custom field value (e.g. "1-B", "2-F").</param>
         /// <param name="checkIndex">0-based index of the check item (flattened across all checklists).</param>
-        /// <returns>Success, error message if any, and new state ("complete" or "incomplete").</returns>
-        Task<(bool Success, string? Error, string? NewState)> ToggleCheckItemByIndexAsync(string boardId, string cardId, int checkIndex);
+        /// <returns>Success, error message if any, new state ("complete" or "incomplete"), and whether the card was auto-marked complete (all items complete).</returns>
+        Task<(bool Success, string? Error, string? NewState, bool CardClosed)> ToggleCheckItemByIndexAsync(string boardId, string cardId, int checkIndex);
+        /// <summary>Gets a sprint list and its cards (with checklists) from a board. Tries list name "Sprint{N}" and "Sprint {N}".</summary>
+        Task<SprintSnapshot?> GetSprintFromBoardAsync(string boardId, string sprintListName);
+        /// <summary>Overrides a list on a board: archives existing cards, then creates cards from the given snapshot (with checklists and CardId custom field).</summary>
+        Task<(bool Success, string? Error)> OverrideSprintOnBoardAsync(string boardId, string listId, IReadOnlyList<SprintSnapshotCard> cards);
     }
 
     public class TrelloService : ITrelloService
@@ -191,24 +195,38 @@ namespace strAppersBackend.Services
             }
         }
 
-        public async Task<TrelloProjectCreationResponse> CreateProjectWithSprintsAsync(TrelloProjectCreationRequest request, string projectTitle)
+        /// <summary>
+        /// Returns a user-friendly message when Trello returns "Must reactivate user first" (403) for a previously deleted Atlassian user.
+        /// </summary>
+        private static string GetInviteErrorMessage(string apiErrorResponse)
         {
-            var response = new TrelloProjectCreationResponse();
+            if (string.IsNullOrWhiteSpace(apiErrorResponse))
+                return apiErrorResponse ?? "Unknown error";
+            if (apiErrorResponse.Contains("reactivate", StringComparison.OrdinalIgnoreCase))
+                return "This email was previously an Atlassian user who was deleted. They must be reactivated in Atlassian admin (admin.atlassian.com) before they can be re-invited to boards.";
+            return apiErrorResponse;
+        }
+
+        /// <summary>
+        /// Creates a Trello board with lists, cards, labels, and optionally invites members
+        /// </summary>
+        private async Task<(string? BoardId, string? BoardUrl, string? BoardName, Dictionary<string, string> RoleLabelIds, Dictionary<string, string> ListIds, Dictionary<string, string> CustomFieldIds, List<string> Errors)> CreateBoardWithContentAsync(
+            TrelloProjectCreationRequest request, 
+            string boardName, 
+            string? organizationId, 
+            bool sendEmails)
+        {
             var errors = new List<string>();
+            string? trelloBoardId = null;
+            string? boardUrl = null;
+            string? trelloBoardName = null;
+            var roleLabelIds = new Dictionary<string, string>();
+            var listIds = new Dictionary<string, string>();
+            var customFieldIds = new Dictionary<string, string>();
 
             try
             {
-                // Generate board name from project ID and title
-                var boardName = GenerateBoardId(request.ProjectId, projectTitle);
-                _logger.LogInformation("Creating Trello project with BoardName {BoardName} for ProjectId {ProjectId}", boardName, request.ProjectId);
-
-                // Get user's organizations to use with Standard plan
-                var organizationId = await GetUserOrganizationIdAsync();
-                
-                // Step 1: Create the main board using the generated board name
-                // Add defaultLists=false to avoid creating default lists initially
-                // Use organization ID for Standard plan
-                // Set prefs_permissionLevel=public to make the board public (not private)
+                // Step 1: Create the board
                 var createBoardUrl = $"https://api.trello.com/1/boards?name={Uri.EscapeDataString(boardName)}&desc={Uri.EscapeDataString(request.ProjectDescription ?? "")}&defaultLists=false&prefs_permissionLevel=public&key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
                 
                 if (!string.IsNullOrEmpty(organizationId))
@@ -222,7 +240,7 @@ namespace strAppersBackend.Services
                 }
 
                 _logger.LogInformation("Creating Trello board with URL: {CreateBoardUrl}", createBoardUrl);
-                _logger.LogInformation("Board name: {BoardName}, Description: {Description}", boardName, request.ProjectDescription);
+                _logger.LogInformation("Board name: {BoardName}, Description: {Description}, SendEmails: {SendEmails}", boardName, request.ProjectDescription, sendEmails);
 
                 var createBoardResponse = await _httpClient.PostAsync(createBoardUrl, null);
                 
@@ -231,119 +249,78 @@ namespace strAppersBackend.Services
                     var errorContent = await createBoardResponse.Content.ReadAsStringAsync();
                     _logger.LogError("Trello board creation failed with status {StatusCode}: {ErrorContent}", 
                         createBoardResponse.StatusCode, errorContent);
-                    response.Success = false;
-                    response.Message = $"Failed to create Trello board: {createBoardResponse.StatusCode} - {errorContent}";
-                    return response;
+                    errors.Add($"Failed to create Trello board: {createBoardResponse.StatusCode} - {errorContent}");
+                    return (null, null, null, roleLabelIds, listIds, customFieldIds, errors);
                 }
 
                 var boardJson = await createBoardResponse.Content.ReadAsStringAsync();
                 var boardData = JsonSerializer.Deserialize<JsonElement>(boardJson);
-                var trelloBoardId = boardData.GetProperty("id").GetString();
-                var boardUrl = boardData.GetProperty("url").GetString();
-                var trelloBoardName = boardData.GetProperty("name").GetString();
+                trelloBoardId = boardData.GetProperty("id").GetString();
+                boardUrl = boardData.GetProperty("url").GetString();
+                trelloBoardName = boardData.GetProperty("name").GetString();
 
-                response.BoardId = trelloBoardId;  // Store the actual Trello board ID
-                response.BoardName = trelloBoardName;    // Store the board name
-                response.BoardUrl = boardUrl;
-
-                // Step 2: Invite team members to the board
-                _logger.LogInformation("Starting member invitation process for {MemberCount} members", request.TeamMembers.Count);
-                
-                foreach (var member in request.TeamMembers)
+                // Step 2: Invite team members (only if sendEmails is true)
+                if (sendEmails)
                 {
-                    try
+                    var membersToInvite = request.TeamMembers;
+                    if (_trelloConfig.SendInvitationToPMOnly)
                     {
-                        _logger.LogInformation("=== TRELLO MEMBER INVITATION DEBUG ===");
-                        _logger.LogInformation("Attempting to invite Trello member: {Email} ({Name}) to board: {BoardId}", member.Email, $"{member.FirstName} {member.LastName}", trelloBoardId);
-                        _logger.LogInformation("Trello API Key (first 10 chars): {ApiKey}", _trelloConfig.ApiKey.Substring(0, 10));
-                        _logger.LogInformation("Trello Token (first 10 chars): {Token}", _trelloConfig.ApiToken.Substring(0, 10));
+                        membersToInvite = request.TeamMembers
+                            .Where(m => !string.IsNullOrWhiteSpace(m.RoleName) && 
+                                (m.RoleName.Contains("Product Manager", StringComparison.OrdinalIgnoreCase) || 
+                                 m.RoleName.Contains("PM", StringComparison.OrdinalIgnoreCase)))
+                            .ToList();
                         
-                        // Check if user exists in Trello first
-                        _logger.LogInformation("🔍 Checking if user {Email} exists in Trello...", member.Email);
-                        var userCheckUrl = $"https://api.trello.com/1/members/{Uri.EscapeDataString(member.Email)}?key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
-                        var userCheckResponse = await _httpClient.GetAsync(userCheckUrl);
-                        var userCheckContent = await userCheckResponse.Content.ReadAsStringAsync();
-                        
-                        _logger.LogInformation("User check response - Status: {Status}, Content: {Content}", userCheckResponse.StatusCode, userCheckContent);
-                        
-                        if (userCheckResponse.IsSuccessStatusCode)
+                        _logger.LogInformation("📧 [TRELLO INVITATION] SendInvitationToPMOnly is enabled. Filtered from {TotalCount} to {PMCount} Product Manager(s) only", 
+                            request.TeamMembers.Count, membersToInvite.Count);
+                    }
+                    
+                    _logger.LogInformation("Starting member invitation process for {MemberCount} members", membersToInvite.Count);
+                    
+                    foreach (var member in membersToInvite)
+                    {
+                        try
                         {
-                            _logger.LogInformation("✅ User {Email} exists in Trello", member.Email);
-                        }
-                        else
-                        {
-                            _logger.LogWarning("⚠️ User {Email} does not exist in Trello (Status: {Status}). This might be why no email is sent.", member.Email, userCheckResponse.StatusCode);
-                            _logger.LogInformation("💡 SOLUTION: User needs to create a Trello account with email {Email} first, then they can be added to the board", member.Email);
-                        }
-                        
-                        var inviteUrl = $"https://api.trello.com/1/boards/{trelloBoardId}/members?email={Uri.EscapeDataString(member.Email)}&type=normal&allowBillableGuest=true&key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
-                        _logger.LogInformation("Trello invitation URL: {Url}", inviteUrl);
-                        
-                        var inviteResponse = await _httpClient.PutAsync(inviteUrl, null);
-                        var responseContent = await inviteResponse.Content.ReadAsStringAsync();
-                        
-                        _logger.LogInformation("Trello API Response - Status: {Status}, Content: {Content}", inviteResponse.StatusCode, responseContent);
-                        
-                        if (inviteResponse.IsSuccessStatusCode)
-                        {
-                            _logger.LogInformation("✅ Successfully invited {Email} to Trello board. Response: {Response}", member.Email, responseContent);
-                            response.InvitedUsers.Add(new TrelloInvitedUser
-                            {
-                                Email = member.Email,
-                                Name = $"{member.FirstName} {member.LastName}",
-                                Status = "Invited"
-                            });
+                            // Add as Single-Board Guest: type=normal (board member permission), allowBillableGuest=false (prevent multi-board guest billing)
+                            // If user is not already a workspace member, they will automatically become a Single-Board Guest
+                            // Single-Board Guests are free and can only see the board(s) they're invited to
+                            var inviteUrl = $"https://api.trello.com/1/boards/{trelloBoardId}/members?email={Uri.EscapeDataString(member.Email)}&type=normal&allowBillableGuest=false&key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
+                            var inviteResponse = await _httpClient.PutAsync(inviteUrl, null);
+                            var responseContent = await inviteResponse.Content.ReadAsStringAsync();
                             
-                            // Additional logging for successful invitations
-                            _logger.LogInformation("📧 Email invitation should have been sent to {Email}. If not received, check: 1) Spam folder, 2) Email address is correct, 3) User has Trello account, 4) Email notifications enabled", member.Email);
+                            if (!inviteResponse.IsSuccessStatusCode)
+                            {
+                                var inviteError = GetInviteErrorMessage(responseContent);
+                                _logger.LogWarning("Failed to invite {Email} to Trello board: {Error}", member.Email, inviteError);
+                                errors.Add($"Failed to invite {member.Email}: {inviteError}");
+                            }
+                            else
+                            {
+                                _logger.LogInformation("✅ Successfully invited {Email} to Trello board", member.Email);
+                            }
                         }
-                        else
+                        catch (Exception ex)
                         {
-                            _logger.LogError("❌ Failed to invite {Email} to Trello board. Status: {Status}, Error: {Error}", member.Email, inviteResponse.StatusCode, responseContent);
-                            
-                            // Specific error analysis
-                            if (inviteResponse.StatusCode == System.Net.HttpStatusCode.Forbidden)
-                            {
-                                _logger.LogError("🔒 FORBIDDEN (403) - Possible causes: 1) API token lacks permissions, 2) Board permissions don't allow member addition, 3) User has blocked invitations");
-                            }
-                            else if (inviteResponse.StatusCode == System.Net.HttpStatusCode.NotFound)
-                            {
-                                _logger.LogError("🔍 NOT FOUND (404) - Possible causes: 1) Board ID is invalid, 2) API endpoint changed, 3) Board was deleted");
-                            }
-                            else if (inviteResponse.StatusCode == System.Net.HttpStatusCode.BadRequest)
-                            {
-                                _logger.LogError("⚠️ BAD REQUEST (400) - Possible causes: 1) Invalid email format, 2) Missing required parameters, 3) Invalid member type");
-                            }
-                            
-                            response.InvitedUsers.Add(new TrelloInvitedUser
-                            {
-                                Email = member.Email,
-                                Name = $"{member.FirstName} {member.LastName}",
-                                Status = "Failed"
-                            });
-                            errors.Add($"Failed to invite {member.Email}: {responseContent}");
+                            _logger.LogError(ex, "Error inviting member {Email}", member.Email);
+                            errors.Add($"Error inviting {member.Email}: {ex.Message}");
                         }
                     }
-                    catch (Exception ex)
-                    {
-                        _logger.LogError(ex, "Error inviting member {Email}", member.Email);
-                        errors.Add($"Error inviting {member.Email}: {ex.Message}");
-                    }
+                }
+                else
+                {
+                    _logger.LogInformation("📧 [TRELLO INVITATION] Skipping member invitations (sendEmails=false)");
                 }
 
                 // Step 3: Create role labels
-                // Get unique roles from BOTH team members AND cards (to handle cases where AI generates tasks for roles not in team)
                 var teamMemberRoles = request.TeamMembers.Select(m => m.RoleName).Where(r => !string.IsNullOrEmpty(r)).Distinct().ToList();
                 var cardRoles = request.SprintPlan.Cards.Select(c => c.RoleName).Where(r => !string.IsNullOrEmpty(r)).Distinct().ToList();
                 var uniqueRoles = teamMemberRoles.Union(cardRoles).Distinct().ToList();
                 
-                var roleLabelIds = new Dictionary<string, string>();
                 foreach (var roleName in uniqueRoles)
                 {
                     try
                     {
                         var createLabelUrl = $"https://api.trello.com/1/boards/{trelloBoardId}/labels?name={Uri.EscapeDataString(roleName)}&color=blue&key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
-                        
                         var createLabelResponse = await _httpClient.PostAsync(createLabelUrl, null);
                         
                         if (createLabelResponse.IsSuccessStatusCode)
@@ -352,7 +329,6 @@ namespace strAppersBackend.Services
                             var labelData = JsonSerializer.Deserialize<JsonElement>(labelJson);
                             var labelId = labelData.GetProperty("id").GetString();
                             roleLabelIds[roleName] = labelId;
-                            
                             _logger.LogInformation("Created role label '{RoleName}' with ID '{LabelId}'", roleName, labelId);
                         }
                         else
@@ -368,13 +344,11 @@ namespace strAppersBackend.Services
                 }
 
                 // Step 4: Create lists (sprints)
-                var listIds = new Dictionary<string, string>();
                 foreach (var list in request.SprintPlan.Lists)
                 {
                     try
                     {
                         var createListUrl = $"https://api.trello.com/1/boards/{trelloBoardId}/lists?name={Uri.EscapeDataString(list.Name)}&pos={list.Position}&key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
-                        
                         var createListResponse = await _httpClient.PostAsync(createListUrl, null);
                         
                         if (createListResponse.IsSuccessStatusCode)
@@ -397,10 +371,240 @@ namespace strAppersBackend.Services
                 }
 
                 // Step 5: Ensure custom fields exist on the board
-                var customFieldIds = await EnsureCustomFieldsExistAsync(trelloBoardId, errors);
+                customFieldIds = await EnsureCustomFieldsExistAsync(trelloBoardId, errors);
 
-                // Step 6: Create cards (tasks)
-                foreach (var card in request.SprintPlan.Cards)
+                return (trelloBoardId, boardUrl, trelloBoardName, roleLabelIds, listIds, customFieldIds, errors);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error creating board with content");
+                errors.Add($"Error creating board: {ex.Message}");
+                return (trelloBoardId, boardUrl, trelloBoardName, roleLabelIds, listIds, customFieldIds, errors);
+            }
+        }
+
+        public async Task<TrelloProjectCreationResponse> CreateProjectWithSprintsAsync(TrelloProjectCreationRequest request, string projectTitle)
+        {
+            var response = new TrelloProjectCreationResponse();
+            var errors = new List<string>();
+
+            try
+            {
+                // Generate board name from project ID and title
+                var boardName = GenerateBoardId(request.ProjectId, projectTitle);
+                _logger.LogInformation("Creating Trello project with BoardName {BoardName} for ProjectId {ProjectId}", boardName, request.ProjectId);
+
+                // Get user's organizations to use with Standard plan
+                var organizationId = await GetUserOrganizationIdAsync();
+                
+                // Check if we should create PM Empty Board (SystemBoard + EmptyBoard)
+                if (_trelloConfig.CreatePMEmptyBoard)
+                {
+                    _logger.LogInformation("📋 [TRELLO] CreatePMEmptyBoard is enabled. Creating SystemBoard first (no emails), then EmptyBoard (with emails)");
+                    
+                    // Step 1: Create SystemBoard (full board, NO emails)
+                    var systemBoardName = $"{boardName}_System";
+                    var (systemBoardId, systemBoardUrl, systemBoardNameResult, systemRoleLabelIds, systemListIds, systemCustomFieldIds, systemErrors) = 
+                        await CreateBoardWithContentAsync(request, systemBoardName, organizationId, sendEmails: false);
+                    
+                    if (string.IsNullOrEmpty(systemBoardId))
+                    {
+                        response.Success = false;
+                        response.Message = "Failed to create SystemBoard";
+                        response.Errors = systemErrors;
+                        return response;
+                    }
+                    
+                    response.SystemBoardId = systemBoardId;
+                    response.SystemBoardUrl = systemBoardUrl;
+                    errors.AddRange(systemErrors);
+                    
+                    // Create all cards on SystemBoard (full content)
+                    await CreateCardsOnBoardAsync(systemBoardId, request, systemRoleLabelIds, systemListIds, systemCustomFieldIds, errors);
+                    
+                    _logger.LogInformation("✅ [TRELLO] SystemBoard created successfully: {SystemBoardId}", systemBoardId);
+                    
+                    // Step 2: Create EmptyBoard (simplified board, WITH emails)
+                    var (emptyBoardId, emptyBoardUrl, emptyBoardName, emptyRoleLabelIds, emptyListIds, emptyCustomFieldIds, emptyErrors) = 
+                        await CreateBoardWithContentAsync(request, boardName, organizationId, sendEmails: true);
+                    
+                    if (string.IsNullOrEmpty(emptyBoardId))
+                    {
+                        response.Success = false;
+                        response.Message = "Failed to create EmptyBoard";
+                        response.Errors.AddRange(emptyErrors);
+                        return response;
+                    }
+                    
+                    response.BoardId = emptyBoardId;
+                    response.BoardUrl = emptyBoardUrl;
+                    response.BoardName = emptyBoardName;
+                    errors.AddRange(emptyErrors);
+                    
+                    // Invite members and track invitations
+                    var membersToInvite = request.TeamMembers;
+                    if (_trelloConfig.SendInvitationToPMOnly)
+                    {
+                        membersToInvite = request.TeamMembers
+                            .Where(m => !string.IsNullOrWhiteSpace(m.RoleName) && 
+                                (m.RoleName.Contains("Product Manager", StringComparison.OrdinalIgnoreCase) || 
+                                 m.RoleName.Contains("PM", StringComparison.OrdinalIgnoreCase)))
+                            .ToList();
+                    }
+                    
+                    foreach (var member in membersToInvite)
+                    {
+                        try
+                        {
+                            // Add as Single-Board Guest: type=normal (board member permission), allowBillableGuest=false (prevent multi-board guest billing)
+                            // If user is not already a workspace member, they will automatically become a Single-Board Guest
+                            // Single-Board Guests are free and can only see the board(s) they're invited to
+                            var inviteUrl = $"https://api.trello.com/1/boards/{emptyBoardId}/members?email={Uri.EscapeDataString(member.Email)}&type=normal&allowBillableGuest=false&key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
+                            var inviteResponse = await _httpClient.PutAsync(inviteUrl, null);
+                            var inviteResponseContent = inviteResponse.IsSuccessStatusCode ? null : await inviteResponse.Content.ReadAsStringAsync();
+                            
+                            if (inviteResponse.IsSuccessStatusCode)
+                            {
+                                response.InvitedUsers.Add(new TrelloInvitedUser
+                                {
+                                    Email = member.Email,
+                                    Name = $"{member.FirstName} {member.LastName}",
+                                    Status = "Invited"
+                                });
+                            }
+                            else
+                            {
+                                var inviteError = GetInviteErrorMessage(inviteResponseContent ?? "");
+                                _logger.LogWarning("Failed to invite {Email} to EmptyBoard: {Error}", member.Email, inviteError);
+                                errors.Add($"Failed to invite {member.Email}: {inviteError}");
+                                response.InvitedUsers.Add(new TrelloInvitedUser
+                                {
+                                    Email = member.Email,
+                                    Name = $"{member.FirstName} {member.LastName}",
+                                    Status = "Failed"
+                                });
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            _logger.LogError(ex, "Error inviting member {Email}", member.Email);
+                            errors.Add($"Error inviting {member.Email}: {ex.Message}");
+                        }
+                    }
+                    
+                    // Create simplified cards on EmptyBoard
+                    await CreateEmptyBoardCardsAsync(emptyBoardId, request, systemBoardId, emptyRoleLabelIds, emptyListIds, emptyCustomFieldIds, errors);
+                    
+                    _logger.LogInformation("✅ [TRELLO] EmptyBoard created successfully: {EmptyBoardId}", emptyBoardId);
+                    
+                    response.Success = true;
+                    response.Message = "Trello project created successfully with SystemBoard and EmptyBoard";
+                    response.Errors = errors;
+                    
+                    return response;
+                }
+                else
+                {
+                    // Original behavior: Create single board with emails
+                    var (trelloBoardId, boardUrl, trelloBoardName, roleLabelIds, listIds, customFieldIds, boardErrors) = 
+                        await CreateBoardWithContentAsync(request, boardName, organizationId, sendEmails: true);
+                    
+                    if (string.IsNullOrEmpty(trelloBoardId))
+                    {
+                        response.Success = false;
+                        response.Message = "Failed to create Trello board";
+                        response.Errors = boardErrors;
+                        return response;
+                    }
+                    
+                    response.BoardId = trelloBoardId;
+                    response.BoardUrl = boardUrl;
+                    response.BoardName = trelloBoardName;
+                    errors.AddRange(boardErrors);
+                    
+                    // Invite members and track invitations
+                    var membersToInvite = request.TeamMembers;
+                    if (_trelloConfig.SendInvitationToPMOnly)
+                    {
+                        membersToInvite = request.TeamMembers
+                            .Where(m => !string.IsNullOrWhiteSpace(m.RoleName) && 
+                                (m.RoleName.Contains("Product Manager", StringComparison.OrdinalIgnoreCase) || 
+                                 m.RoleName.Contains("PM", StringComparison.OrdinalIgnoreCase)))
+                            .ToList();
+                    }
+                    
+                    foreach (var member in membersToInvite)
+                    {
+                        try
+                        {
+                            // Add as Single-Board Guest: type=normal (board member permission), allowBillableGuest=false (prevent multi-board guest billing)
+                            // If user is not already a workspace member, they will automatically become a Single-Board Guest
+                            // Single-Board Guests are free and can only see the board(s) they're invited to
+                            var inviteUrl = $"https://api.trello.com/1/boards/{trelloBoardId}/members?email={Uri.EscapeDataString(member.Email)}&type=normal&allowBillableGuest=false&key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
+                            var inviteResponse = await _httpClient.PutAsync(inviteUrl, null);
+                            var inviteResponseContent = inviteResponse.IsSuccessStatusCode ? null : await inviteResponse.Content.ReadAsStringAsync();
+                            
+                            if (inviteResponse.IsSuccessStatusCode)
+                            {
+                                response.InvitedUsers.Add(new TrelloInvitedUser
+                                {
+                                    Email = member.Email,
+                                    Name = $"{member.FirstName} {member.LastName}",
+                                    Status = "Invited"
+                                });
+                            }
+                            else
+                            {
+                                var inviteError = GetInviteErrorMessage(inviteResponseContent ?? "");
+                                _logger.LogWarning("Failed to invite {Email} to Trello board: {Error}", member.Email, inviteError);
+                                errors.Add($"Failed to invite {member.Email}: {inviteError}");
+                                response.InvitedUsers.Add(new TrelloInvitedUser
+                                {
+                                    Email = member.Email,
+                                    Name = $"{member.FirstName} {member.LastName}",
+                                    Status = "Failed"
+                                });
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            _logger.LogError(ex, "Error inviting member {Email}", member.Email);
+                            errors.Add($"Error inviting {member.Email}: {ex.Message}");
+                        }
+                    }
+
+                    // Create all cards on the board
+                    await CreateCardsOnBoardAsync(trelloBoardId, request, roleLabelIds, listIds, customFieldIds, errors);
+                    
+                    response.Success = true;
+                    response.Message = "Trello project created successfully";
+                    response.Errors = errors;
+                    
+                    _logger.LogInformation("Successfully created Trello project with BoardName {BoardName} and Trello BoardId {TrelloBoardId} with {LabelCount} role labels", 
+                        boardName, response.BoardId, roleLabelIds.Count);
+                    
+                    return response;
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error creating Trello project for ProjectId {ProjectId}", request.ProjectId);
+                response.Success = false;
+                response.Message = $"Error creating Trello project: {ex.Message}";
+                response.Errors = errors;
+                return response;
+            }
+        }
+
+        /// <summary>
+        /// Creates all cards on a board with full content
+        /// </summary>
+        private async Task CreateCardsOnBoardAsync(string trelloBoardId, TrelloProjectCreationRequest request, 
+            Dictionary<string, string> roleLabelIds, Dictionary<string, string> listIds, 
+            Dictionary<string, string> customFieldIds, List<string> errors)
+        {
+            // Create cards (tasks)
+            foreach (var card in request.SprintPlan.Cards)
                 {
                     try
                     {
@@ -503,15 +707,6 @@ namespace strAppersBackend.Services
 
                             // Set custom fields on the card
                             await SetCardCustomFieldsAsync(trelloBoardId, cardId, card, customFieldIds, errors);
-
-                            response.CreatedCards.Add(new TrelloCreatedCard
-                            {
-                                CardId = cardId,
-                                Name = card.Name,
-                                AssignedToEmail = card.AssignedToEmail,
-                                ListName = card.ListName,
-                                CardUrl = cardUrl
-                            });
                         }
                         else
                         {
@@ -526,23 +721,131 @@ namespace strAppersBackend.Services
                         errors.Add($"Error creating card {card.Name}: {ex.Message}");
                     }
                 }
+        }
 
-                response.Success = true;
-                response.Message = "Trello project created successfully";
-                response.Errors = errors;
-
-                _logger.LogInformation("Successfully created Trello project with BoardName {BoardName} and Trello BoardId {TrelloBoardId} with {CardCount} cards and {LabelCount} role labels", 
-                    boardName, response.BoardId, response.CreatedCards.Count, roleLabelIds.Count);
-
-                return response;
-            }
-            catch (Exception ex)
+        /// <summary>
+        /// Creates simplified cards on EmptyBoard based on SprintPlan structure
+        /// Sprint1 stays exactly the same, other sprints are simplified
+        /// </summary>
+        private async Task CreateEmptyBoardCardsAsync(string emptyBoardId, TrelloProjectCreationRequest request, 
+            string systemBoardId, Dictionary<string, string> roleLabelIds, Dictionary<string, string> listIds, 
+            Dictionary<string, string> customFieldIds, List<string> errors)
+        {
+            foreach (var card in request.SprintPlan.Cards)
             {
-                _logger.LogError(ex, "Error creating Trello project for ProjectId {ProjectId}", request.ProjectId);
-                response.Success = false;
-                response.Message = $"Error creating Trello project: {ex.Message}";
-                response.Errors = errors;
-                return response;
+                try
+                {
+                    if (!listIds.ContainsKey(card.ListName))
+                    {
+                        errors.Add($"List not found for card: {card.Name}");
+                        continue;
+                    }
+                    
+                    var emptyListId = listIds[card.ListName];
+                    
+                    // Determine if this is Sprint1 (keep exactly the same) or other sprint (simplify)
+                    var isSprint1 = card.ListName.Equals("Sprint1", StringComparison.OrdinalIgnoreCase);
+                    
+                    // Determine description based on list and role
+                    string finalDescription;
+                    string checklistItem;
+                    
+                    if (isSprint1)
+                    {
+                        // Sprint1 stays exactly the same
+                        finalDescription = card.Description ?? "";
+                        checklistItem = "Create a Checklist..."; // Will be replaced with actual items if needed
+                    }
+                    else
+                    {
+                        // Other sprints: simplified
+                        // Check if card has Product Manager role
+                        bool isPMCard = !string.IsNullOrEmpty(card.RoleName) && 
+                            (card.RoleName.Contains("Product Manager", StringComparison.OrdinalIgnoreCase) || 
+                             card.RoleName.Contains("PM", StringComparison.OrdinalIgnoreCase));
+                        
+                        finalDescription = isPMCard ? "Add a User Story here..." : "To be filled...";
+                        checklistItem = "Create a Checklist...";
+                    }
+                    
+                    // Create card on EmptyBoard (keep due date from original/system board)
+                    var createCardUrl = $"https://api.trello.com/1/cards?name={Uri.EscapeDataString(card.Name)}&desc={Uri.EscapeDataString(finalDescription)}&idList={emptyListId}&key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
+                    if (card.DueDate.HasValue)
+                    {
+                        createCardUrl += $"&due={card.DueDate.Value:yyyy-MM-dd}";
+                    }
+                    
+                    // Add role label to card
+                    if (!string.IsNullOrEmpty(card.RoleName) && roleLabelIds.ContainsKey(card.RoleName))
+                    {
+                        createCardUrl += $"&idLabels={roleLabelIds[card.RoleName]}";
+                    }
+                    
+                    var createCardResponse = await _httpClient.PostAsync(createCardUrl, null);
+                    
+                    if (createCardResponse.IsSuccessStatusCode)
+                    {
+                        var cardJson = await createCardResponse.Content.ReadAsStringAsync();
+                        var cardData = JsonSerializer.Deserialize<JsonElement>(cardJson);
+                        var emptyCardId = cardData.GetProperty("id").GetString();
+                        
+                        // Create checklist
+                        try
+                        {
+                            var createChecklistUrl = $"https://api.trello.com/1/checklists?name=Checklist&idCard={emptyCardId}&key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
+                            var createChecklistResponse = await _httpClient.PostAsync(createChecklistUrl, null);
+                            
+                            if (createChecklistResponse.IsSuccessStatusCode)
+                            {
+                                var checklistJson = await createChecklistResponse.Content.ReadAsStringAsync();
+                                var checklistData = JsonSerializer.Deserialize<JsonElement>(checklistJson);
+                                var checklistId = checklistData.GetProperty("id").GetString();
+                                
+                                if (isSprint1 && card.ChecklistItems != null && card.ChecklistItems.Count > 0)
+                                {
+                                    // Sprint1: Add all checklist items
+                                    int position = 1;
+                                    foreach (var item in card.ChecklistItems)
+                                    {
+                                        var addItemUrl = $"https://api.trello.com/1/checklists/{checklistId}/checkItems?name={Uri.EscapeDataString(item)}&pos={position}&key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
+                                        await _httpClient.PostAsync(addItemUrl, null);
+                                        position++;
+                                    }
+                                }
+                                else
+                                {
+                                    // Other sprints: Add single checklist item
+                                    var addItemUrl = $"https://api.trello.com/1/checklists/{checklistId}/checkItems?name={Uri.EscapeDataString(checklistItem)}&pos=1&key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
+                                    await _httpClient.PostAsync(addItemUrl, null);
+                                }
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            _logger.LogWarning(ex, "Failed to create checklist for empty board card {CardName}", card.Name);
+                        }
+                        
+                        // Set custom fields: only CardId is populated, rest are empty
+                        if (!string.IsNullOrEmpty(card.CardId) && customFieldIds.ContainsKey("CardId"))
+                        {
+                            await SetCustomFieldValueAsync(emptyCardId, customFieldIds["CardId"], "text", card.CardId, errors);
+                        }
+                        
+                        // Set other custom fields as empty (Priority, Status, Risk, ModuleId, Dependencies, Branched)
+                        // These will remain unset/empty as per requirements
+                    }
+                    else
+                    {
+                        var errorContent = await createCardResponse.Content.ReadAsStringAsync();
+                        _logger.LogWarning("Failed to create empty board card {CardName}: {Error}", card.Name, errorContent);
+                        errors.Add($"Failed to create empty board card: {card.Name}");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "Error creating empty board card {CardName}", card.Name);
+                    errors.Add($"Error creating empty board card {card.Name}: {ex.Message}");
+                }
             }
         }
 
@@ -1744,31 +2047,32 @@ namespace strAppersBackend.Services
 
         /// <summary>
         /// Toggles the state of the checklist item at checkIndex on the card (complete &lt;-&gt; incomplete).
+        /// If the item is set to complete and all checklist items are then complete, the card is marked complete (dueComplete=true) via Trello API.
         /// </summary>
-        public async Task<(bool Success, string? Error, string? NewState)> ToggleCheckItemByIndexAsync(string boardId, string cardId, int checkIndex)
+        public async Task<(bool Success, string? Error, string? NewState, bool CardClosed)> ToggleCheckItemByIndexAsync(string boardId, string cardId, int checkIndex)
         {
             try
             {
                 if (checkIndex < 0)
                 {
-                    return (false, "checkIndex must be >= 0", null);
+                    return (false, "checkIndex must be >= 0", null, false);
                 }
 
                 var card = await GetCardByCardIdAsync(boardId, cardId);
                 if (card == null)
                 {
-                    return (false, $"Trello card with CardId '{cardId}' not found in board {boardId}", null);
+                    return (false, $"Trello card with CardId '{cardId}' not found in board {boardId}", null, false);
                 }
 
                 var cardVal = card.Value;
                 if (!cardVal.TryGetProperty("id", out var idProp))
                 {
-                    return (false, "Card has no id.", null);
+                    return (false, "Card has no id.", null, false);
                 }
                 var trelloCardId = idProp.GetString();
                 if (string.IsNullOrEmpty(trelloCardId))
                 {
-                    return (false, "Card id is null or empty.", null);
+                    return (false, "Card id is null or empty.", null, false);
                 }
 
                 var checklistsUrl = $"https://api.trello.com/1/cards/{trelloCardId}/checklists?checkItems=all&key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
@@ -1777,14 +2081,14 @@ namespace strAppersBackend.Services
                 {
                     var err = await checklistsResponse.Content.ReadAsStringAsync();
                     _logger.LogWarning("Failed to get checklists for card {CardId}: {Error}", trelloCardId, err);
-                    return (false, $"Failed to get checklists for card: {err}", null);
+                    return (false, $"Failed to get checklists for card: {err}", null, false);
                 }
 
                 var checklistsJson = await checklistsResponse.Content.ReadAsStringAsync();
                 var checklists = JsonSerializer.Deserialize<JsonElement[]>(checklistsJson);
                 if (checklists == null || checklists.Length == 0)
                 {
-                    return (false, "Card has no checklists.", null);
+                    return (false, "Card has no checklists.", null, false);
                 }
 
                 string? idCheckItem = null;
@@ -1820,7 +2124,7 @@ namespace strAppersBackend.Services
 
                 if (string.IsNullOrEmpty(idCheckItem))
                 {
-                    return (false, $"Check item at index {checkIndex} not found. Card has fewer than {checkIndex + 1} check items.", null);
+                    return (false, $"Check item at index {checkIndex} not found. Card has fewer than {checkIndex + 1} check items.", null, false);
                 }
 
                 var newState = string.Equals(currentState, "complete", StringComparison.OrdinalIgnoreCase)
@@ -1833,16 +2137,358 @@ namespace strAppersBackend.Services
                 {
                     var err = await updateResponse.Content.ReadAsStringAsync();
                     _logger.LogWarning("Failed to update check item {CheckItemId} on card {CardId}: {Error}", idCheckItem, trelloCardId, err);
-                    return (false, $"Failed to toggle check item: {err}", null);
+                    return (false, $"Failed to toggle check item: {err}", null, false);
                 }
 
                 _logger.LogInformation("✅ [TRELLO] Toggled check item at index {CheckIndex} on card {CardId} to {State}", checkIndex, cardId, newState);
-                return (true, null, newState);
+
+                var cardMarkedComplete = false;
+                if (string.Equals(newState, "complete", StringComparison.OrdinalIgnoreCase))
+                {
+                    var allComplete = await AreAllCheckItemsCompleteAsync(trelloCardId);
+                    if (allComplete)
+                    {
+                        cardMarkedComplete = await MarkCardCompleteAsync(trelloCardId);
+                        if (cardMarkedComplete)
+                        {
+                            _logger.LogInformation("✅ [TRELLO] All checklist items complete; card {CardId} marked complete (dueComplete).", cardId);
+                        }
+                        else
+                        {
+                            _logger.LogWarning("⚠️ [TRELLO] All checklist items complete but failed to mark card {CardId} complete.", cardId);
+                        }
+                    }
+                }
+                else
+                {
+                    // User unchecked an item; clear dueComplete so the card is no longer shown as complete
+                    var cleared = await MarkCardIncompleteAsync(trelloCardId);
+                    if (cleared)
+                        _logger.LogInformation("✅ [TRELLO] Checklist item unchecked; card {CardId} set to dueComplete=false.", cardId);
+                }
+
+                return (true, null, newState, cardMarkedComplete);
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "❌ [TRELLO] Error toggling check item at index {CheckIndex} for CardId '{CardId}': {Message}", checkIndex, cardId, ex.Message);
-                return (false, ex.Message, null);
+                return (false, ex.Message, null, false);
+            }
+        }
+
+        /// <summary>
+        /// Returns true if the card has at least one check item and all check items are in "complete" state.
+        /// </summary>
+        private async Task<bool> AreAllCheckItemsCompleteAsync(string trelloCardId)
+        {
+            try
+            {
+                var checklistsUrl = $"https://api.trello.com/1/cards/{trelloCardId}/checklists?checkItems=all&key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
+                var response = await _httpClient.GetAsync(checklistsUrl);
+                if (!response.IsSuccessStatusCode)
+                    return false;
+
+                var json = await response.Content.ReadAsStringAsync();
+                var checklists = JsonSerializer.Deserialize<JsonElement[]>(json);
+                if (checklists == null || checklists.Length == 0)
+                    return false;
+
+                int totalItems = 0;
+                int completeCount = 0;
+                foreach (var cl in checklists)
+                {
+                    if (!cl.TryGetProperty("checkItems", out var itemsProp) || itemsProp.ValueKind != JsonValueKind.Array)
+                        continue;
+                    foreach (var item in itemsProp.EnumerateArray())
+                    {
+                        totalItems++;
+                        if (item.TryGetProperty("state", out var stateProp) && string.Equals(stateProp.GetString(), "complete", StringComparison.OrdinalIgnoreCase))
+                            completeCount++;
+                    }
+                }
+                return totalItems > 0 && totalItems == completeCount;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to check if all items complete for card {CardId}", trelloCardId);
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// Marks the Trello card as complete via PUT /1/cards/{id}?dueComplete=true. Card stays on the board (not closed/archived).
+        /// </summary>
+        private async Task<bool> MarkCardCompleteAsync(string trelloCardId)
+        {
+            try
+            {
+                var url = $"https://api.trello.com/1/cards/{trelloCardId}?dueComplete=true&key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
+                var response = await _httpClient.PutAsync(url, null);
+                if (response.IsSuccessStatusCode)
+                {
+                    _logger.LogInformation("Card {CardId} marked complete (dueComplete) via Trello API.", trelloCardId);
+                    return true;
+                }
+                var err = await response.Content.ReadAsStringAsync();
+                _logger.LogWarning("Failed to mark card {CardId} complete: {Error}", trelloCardId, err);
+                return false;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error marking card {CardId} complete", trelloCardId);
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// Sets the Trello card to dueComplete=false via PUT /1/cards/{id}?dueComplete=false. Used when user unchecks an item on a previously complete card.
+        /// </summary>
+        private async Task<bool> MarkCardIncompleteAsync(string trelloCardId)
+        {
+            try
+            {
+                var url = $"https://api.trello.com/1/cards/{trelloCardId}?dueComplete=false&key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
+                var response = await _httpClient.PutAsync(url, null);
+                if (response.IsSuccessStatusCode)
+                {
+                    _logger.LogInformation("Card {CardId} set dueComplete=false via Trello API.", trelloCardId);
+                    return true;
+                }
+                var err = await response.Content.ReadAsStringAsync();
+                _logger.LogWarning("Failed to set card {CardId} dueComplete=false: {Error}", trelloCardId, err);
+                return false;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error setting card {CardId} dueComplete=false", trelloCardId);
+                return false;
+            }
+        }
+
+        /// <inheritdoc />
+        public async Task<SprintSnapshot?> GetSprintFromBoardAsync(string boardId, string sprintListName)
+        {
+            try
+            {
+                var listsUrl = $"https://api.trello.com/1/boards/{boardId}/lists?key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
+                var listsResponse = await _httpClient.GetAsync(listsUrl);
+                if (!listsResponse.IsSuccessStatusCode)
+                {
+                    _logger.LogWarning("Failed to get lists for board {BoardId}: {Status}", boardId, listsResponse.StatusCode);
+                    return null;
+                }
+                var listsJson = await listsResponse.Content.ReadAsStringAsync();
+                var lists = JsonSerializer.Deserialize<JsonElement[]>(listsJson);
+                if (lists == null || lists.Length == 0)
+                    return null;
+                string? listId = null;
+                string? listName = null;
+                foreach (var list in lists)
+                {
+                    var name = list.TryGetProperty("name", out var n) ? n.GetString() : "";
+                    if (string.Equals(name, sprintListName, StringComparison.OrdinalIgnoreCase))
+                    {
+                        listId = list.TryGetProperty("id", out var idProp) ? idProp.GetString() : null;
+                        listName = name ?? sprintListName;
+                        break;
+                    }
+                }
+                if (string.IsNullOrEmpty(listId))
+                    return null;
+                string? cardIdFieldId = null;
+                var cfUrl = $"https://api.trello.com/1/boards/{boardId}/customFields?key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
+                var cfRes = await _httpClient.GetAsync(cfUrl);
+                if (cfRes.IsSuccessStatusCode)
+                {
+                    var cfContent = await cfRes.Content.ReadAsStringAsync();
+                    var cfArr = JsonSerializer.Deserialize<JsonElement[]>(cfContent);
+                    if (cfArr != null)
+                        foreach (var f in cfArr)
+                            if (f.TryGetProperty("name", out var fn) && fn.GetString() == "CardId" && f.TryGetProperty("id", out var fi))
+                            { cardIdFieldId = fi.GetString(); break; }
+                }
+                var cardsUrl = $"https://api.trello.com/1/lists/{listId}/cards?checklists=all&customFieldItems=true&key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
+                var cardsResponse = await _httpClient.GetAsync(cardsUrl);
+                if (!cardsResponse.IsSuccessStatusCode)
+                {
+                    _logger.LogWarning("Failed to get cards for list {ListId}: {Status}", listId, cardsResponse.StatusCode);
+                    return new SprintSnapshot { ListId = listId, ListName = listName ?? sprintListName, Cards = new List<SprintSnapshotCard>() };
+                }
+                var cardsJson = await cardsResponse.Content.ReadAsStringAsync();
+                var cardsData = JsonSerializer.Deserialize<JsonElement[]>(cardsJson);
+                var cards = new List<SprintSnapshotCard>();
+                if (cardsData != null)
+                {
+                    foreach (var c in cardsData)
+                    {
+                        var name = c.TryGetProperty("name", out var np) ? np.GetString() ?? "" : "";
+                        var desc = c.TryGetProperty("desc", out var dp) ? dp.GetString() ?? "" : "";
+                        DateTime? due = null;
+                        if (c.TryGetProperty("due", out var dueProp))
+                        {
+                            var dueStr = dueProp.GetString();
+                            if (!string.IsNullOrEmpty(dueStr) && DateTime.TryParse(dueStr, out var d))
+                                due = d;
+                        }
+                        var roleName = "";
+                        if (c.TryGetProperty("labels", out var labelsProp) && labelsProp.ValueKind == JsonValueKind.Array && labelsProp.GetArrayLength() > 0)
+                        {
+                            var first = labelsProp[0];
+                            roleName = first.TryGetProperty("name", out var ln) ? ln.GetString() ?? "" : "";
+                        }
+                        var cardId = "";
+                        if (!string.IsNullOrEmpty(cardIdFieldId) && c.TryGetProperty("customFieldItems", out var cfProp) && cfProp.ValueKind == JsonValueKind.Array)
+                        {
+                            foreach (var cf in cfProp.EnumerateArray())
+                            {
+                                var idField = cf.TryGetProperty("idCustomField", out var idf) ? idf.GetString() : null;
+                                if (idField != cardIdFieldId) continue;
+                                if (cf.TryGetProperty("value", out var vProp) && vProp.TryGetProperty("text", out var textProp))
+                                    cardId = textProp.GetString() ?? "";
+                                break;
+                            }
+                        }
+                        var checklistItems = new List<string>();
+                        if (c.TryGetProperty("checklists", out var clProp) && clProp.ValueKind == JsonValueKind.Array)
+                        {
+                            foreach (var cl in clProp.EnumerateArray())
+                            {
+                                if (!cl.TryGetProperty("checkItems", out var itemsProp) || itemsProp.ValueKind != JsonValueKind.Array)
+                                    continue;
+                                foreach (var item in itemsProp.EnumerateArray())
+                                {
+                                    var itemName = item.TryGetProperty("name", out var inProp) ? inProp.GetString() : null;
+                                    if (!string.IsNullOrEmpty(itemName))
+                                        checklistItems.Add(itemName);
+                                }
+                            }
+                        }
+                        cards.Add(new SprintSnapshotCard
+                        {
+                            Name = name ?? "",
+                            Description = desc ?? "",
+                            DueDate = due,
+                            RoleName = roleName ?? "",
+                            ChecklistItems = checklistItems,
+                            CardId = string.IsNullOrEmpty(cardId) ? null : cardId
+                        });
+                    }
+                }
+                return new SprintSnapshot { ListId = listId, ListName = listName ?? sprintListName, Cards = cards };
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error getting sprint {SprintName} from board {BoardId}", sprintListName, boardId);
+                return null;
+            }
+        }
+
+        /// <inheritdoc />
+        public async Task<(bool Success, string? Error)> OverrideSprintOnBoardAsync(string boardId, string listId, IReadOnlyList<SprintSnapshotCard> cards)
+        {
+            var errors = new List<string>();
+            try
+            {
+                var listCardsUrl = $"https://api.trello.com/1/lists/{listId}/cards?key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
+                var listCardsResponse = await _httpClient.GetAsync(listCardsUrl);
+                if (listCardsResponse.IsSuccessStatusCode)
+                {
+                    var listCardsJson = await listCardsResponse.Content.ReadAsStringAsync();
+                    var existingCards = JsonSerializer.Deserialize<JsonElement[]>(listCardsJson);
+                    if (existingCards != null)
+                    {
+                        foreach (var ec in existingCards)
+                        {
+                            var cardId = ec.TryGetProperty("id", out var idProp) ? idProp.GetString() : null;
+                            if (string.IsNullOrEmpty(cardId)) continue;
+                            var closeUrl = $"https://api.trello.com/1/cards/{cardId}?closed=true&key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
+                            await _httpClient.PutAsync(closeUrl, null);
+                        }
+                    }
+                }
+                var labelsUrl = $"https://api.trello.com/1/boards/{boardId}/labels?key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
+                var roleLabelIds = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                var labelsResponse = await _httpClient.GetAsync(labelsUrl);
+                if (labelsResponse.IsSuccessStatusCode)
+                {
+                    var labelsJson = await labelsResponse.Content.ReadAsStringAsync();
+                    var labelsData = JsonSerializer.Deserialize<JsonElement[]>(labelsJson);
+                    if (labelsData != null)
+                    {
+                        foreach (var lb in labelsData)
+                        {
+                            var name = lb.TryGetProperty("name", out var n) ? n.GetString() : null;
+                            var id = lb.TryGetProperty("id", out var i) ? i.GetString() : null;
+                            if (!string.IsNullOrEmpty(name) && !string.IsNullOrEmpty(id))
+                                roleLabelIds[name] = id;
+                        }
+                    }
+                }
+                var customFieldsUrl = $"https://api.trello.com/1/boards/{boardId}/customFields?key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
+                string? cardIdFieldId = null;
+                var cfResponse = await _httpClient.GetAsync(customFieldsUrl);
+                if (cfResponse.IsSuccessStatusCode)
+                {
+                    var cfJson = await cfResponse.Content.ReadAsStringAsync();
+                    var cfData = JsonSerializer.Deserialize<JsonElement[]>(cfJson);
+                    if (cfData != null)
+                    {
+                        foreach (var f in cfData)
+                        {
+                            if (f.TryGetProperty("name", out var fn) && fn.GetString() == "CardId" && f.TryGetProperty("id", out var fi))
+                            {
+                                cardIdFieldId = fi.GetString();
+                                break;
+                            }
+                        }
+                    }
+                }
+                foreach (var card in cards)
+                {
+                    var createCardUrl = $"https://api.trello.com/1/cards?name={Uri.EscapeDataString(card.Name)}&desc={Uri.EscapeDataString(card.Description ?? "")}&idList={listId}&key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
+                    if (card.DueDate.HasValue)
+                        createCardUrl += $"&due={card.DueDate.Value:yyyy-MM-dd}";
+                    if (!string.IsNullOrEmpty(card.RoleName) && roleLabelIds.TryGetValue(card.RoleName, out var labelId))
+                        createCardUrl += $"&idLabels={labelId}";
+                    var createResponse = await _httpClient.PostAsync(createCardUrl, null);
+                    if (!createResponse.IsSuccessStatusCode)
+                    {
+                        var err = await createResponse.Content.ReadAsStringAsync();
+                        errors.Add($"Failed to create card '{card.Name}': {err}");
+                        continue;
+                    }
+                    var cardJson = await createResponse.Content.ReadAsStringAsync();
+                    var cardData = JsonSerializer.Deserialize<JsonElement>(cardJson);
+                    var newCardId = cardData.GetProperty("id").GetString();
+                    if (card.ChecklistItems != null && card.ChecklistItems.Count > 0)
+                    {
+                        var createClUrl = $"https://api.trello.com/1/checklists?name=Checklist&idCard={newCardId}&key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
+                        var clResponse = await _httpClient.PostAsync(createClUrl, null);
+                        if (clResponse.IsSuccessStatusCode)
+                        {
+                            var clJson = await clResponse.Content.ReadAsStringAsync();
+                            var clData = JsonSerializer.Deserialize<JsonElement>(clJson);
+                            var checklistId = clData.GetProperty("id").GetString();
+                            int pos = 1;
+                            foreach (var item in card.ChecklistItems)
+                            {
+                                var addItemUrl = $"https://api.trello.com/1/checklists/{checklistId}/checkItems?name={Uri.EscapeDataString(item)}&pos={pos}&key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
+                                await _httpClient.PostAsync(addItemUrl, null);
+                                pos++;
+                            }
+                        }
+                    }
+                    if (!string.IsNullOrEmpty(card.CardId) && !string.IsNullOrEmpty(cardIdFieldId))
+                        await SetCustomFieldValueAsync(newCardId, cardIdFieldId, "text", card.CardId, errors);
+                }
+                if (errors.Count > 0)
+                    return (false, string.Join("; ", errors));
+                return (true, null);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error overriding sprint on board {BoardId} list {ListId}", boardId, listId);
+                return (false, ex.Message);
             }
         }
     }

@@ -20,8 +20,8 @@ public class Program
         var builder = Host.CreateApplicationBuilder(args);
         
         // Determine which config file to use based on command-line argument
-        // Dev service should pass "Dev", Prod service should pass "Prod"
-        string configFile = "appsettings.Dev.json"; // Default to Dev
+        // Dev: appsettings.json only. Prod: appsettings.Prod.json only.
+        string configFile = "appsettings.json"; // Default to Dev (base appsettings)
         
         if (args.Length > 0 && args[0].Equals("Prod", StringComparison.OrdinalIgnoreCase))
         {
@@ -29,7 +29,7 @@ public class Program
         }
         else if (args.Length > 0 && args[0].Equals("Dev", StringComparison.OrdinalIgnoreCase))
         {
-            configFile = "appsettings.Dev.json";
+            configFile = "appsettings.json";
         }
         else
         {
@@ -41,7 +41,7 @@ public class Program
             }
             else
             {
-                configFile = "appsettings.Dev.json";
+                configFile = "appsettings.json";
             }
         }
         

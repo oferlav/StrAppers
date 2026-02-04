@@ -16,14 +16,20 @@ public class TrelloController : ControllerBase
         private readonly ApplicationDbContext _context;
         private readonly TrelloConfig _trelloConfig;
         private readonly BusinessLogicConfig _businessLogicConfig;
+        private readonly IAIService _aiService;
+        private readonly ITrelloSprintMergeService _sprintMergeService;
+        private readonly IStudentTeamBuilderService _studentTeamBuilderService;
         private readonly ILogger<TrelloController> _logger;
 
-        public TrelloController(ITrelloService trelloService, ApplicationDbContext context, IOptions<TrelloConfig> trelloConfig, IOptions<BusinessLogicConfig> businessLogicConfig, ILogger<TrelloController> logger)
+        public TrelloController(ITrelloService trelloService, ApplicationDbContext context, IOptions<TrelloConfig> trelloConfig, IOptions<BusinessLogicConfig> businessLogicConfig, IAIService aiService, ITrelloSprintMergeService sprintMergeService, IStudentTeamBuilderService studentTeamBuilderService, ILogger<TrelloController> logger)
         {
             _trelloService = trelloService;
             _context = context;
             _trelloConfig = trelloConfig.Value;
             _businessLogicConfig = businessLogicConfig.Value;
+            _aiService = aiService;
+            _sprintMergeService = sprintMergeService;
+            _studentTeamBuilderService = studentTeamBuilderService;
             _logger = logger;
         }
 
@@ -247,6 +253,38 @@ public class TrelloController : ControllerBase
         }
 
         /// <summary>
+        /// Returns the stored Trello board template (Projects.TrelloBoardJson) for a project as JSON.
+        /// </summary>
+        [HttpGet("use/get-board-template/{projectId:int}")]
+        public async Task<ActionResult<object>> GetBoardTemplate(int projectId)
+        {
+            try
+            {
+                if (projectId <= 0)
+                {
+                    return BadRequest(new { Success = false, Message = "ProjectId is required and must be greater than 0." });
+                }
+
+                var project = await _context.Projects.FirstOrDefaultAsync(p => p.Id == projectId);
+                if (project == null)
+                {
+                    return NotFound(new { Success = false, Message = $"Project {projectId} not found." });
+                }
+                if (string.IsNullOrWhiteSpace(project.TrelloBoardJson))
+                {
+                    return NotFound(new { Success = false, Message = "Project has no stored Trello board template. Use POST api/Utilities/trello/store-board-json first." });
+                }
+
+                return Content(project.TrelloBoardJson, "application/json");
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error getting board template for project {ProjectId}", projectId);
+                return StatusCode(500, new { Success = false, Message = ex.Message });
+            }
+        }
+
+        /// <summary>
         /// List all boards in the Trello workspace (helper method for debugging)
         /// </summary>
         /// <returns>List of all boards with their details</returns>
@@ -415,7 +453,7 @@ public class TrelloController : ControllerBase
                 _logger.LogInformation("📥 [TRELLO] set-done: BoardId={BoardId}, CardId={CardId}, CheckIndex={CheckIndex}",
                     request.BoardId, request.CardId, request.CheckIndex);
 
-                var (success, error, newState) = await _trelloService.ToggleCheckItemByIndexAsync(
+                var (success, error, newState, cardClosed) = await _trelloService.ToggleCheckItemByIndexAsync(
                     request.BoardId, request.CardId, request.CheckIndex);
 
                 if (!success)
@@ -424,15 +462,17 @@ public class TrelloController : ControllerBase
                     {
                         Success = false,
                         Message = error ?? "Failed to toggle check item.",
-                        NewState = (string?)null
+                        NewState = (string?)null,
+                        CardClosed = false
                     });
                 }
 
                 return Ok(new
                 {
                     Success = true,
-                    Message = "Check item toggled.",
-                    NewState = newState
+                    Message = cardClosed ? "Check item toggled; all items complete — card marked complete." : "Check item toggled.",
+                    NewState = newState,
+                    CardClosed = cardClosed
                 });
             }
             catch (Exception ex)
@@ -443,8 +483,83 @@ public class TrelloController : ControllerBase
                 {
                     Success = false,
                     Message = $"Internal server error: {ex.Message}",
-                    NewState = (string?)null
+                    NewState = (string?)null,
+                    CardClosed = false
                 });
+            }
+        }
+
+        /// <summary>
+        /// Merge a live board sprint with the SystemBoard sprint via AI and override the live sprint.
+        /// Callable from POST /api/Boards/use/create (e.g. after board creation to sync Sprint1).
+        /// </summary>
+        /// <param name="request">ProjectId, BoardId (live board Trello ID), SprintNumber (e.g. 1 for Sprint1).</param>
+        [HttpPost("use/merge-sprint")]
+        public async Task<ActionResult<object>> MergeSprint([FromBody] MergeSprintRequest request)
+        {
+            try
+            {
+                if (request == null)
+                    return BadRequest(new { Success = false, Message = "Request body is required." });
+                if (request.ProjectId <= 0)
+                    return BadRequest(new { Success = false, Message = "ProjectId is required and must be greater than 0." });
+                if (string.IsNullOrWhiteSpace(request.BoardId))
+                    return BadRequest(new { Success = false, Message = "BoardId is required." });
+                if (request.SprintNumber <= 0)
+                    return BadRequest(new { Success = false, Message = "SprintNumber is required and must be greater than 0." });
+
+                var (success, error, cardsCount) = await _sprintMergeService.ExecuteMergeSprintAsync(request.ProjectId, request.BoardId, request.SprintNumber, request.Merge);
+                if (!success)
+                {
+                    if (error != null && (error.Contains("not found") || error.Contains("BoardId is required")))
+                        return NotFound(new { Success = false, Message = error });
+                    if (error != null && error.Contains("no linked SystemBoard"))
+                        return BadRequest(new { Success = false, Message = error });
+                    return StatusCode(500, new { Success = false, Message = error ?? "Merge-sprint failed." });
+                }
+
+                var message = request.Merge
+                    ? $"Sprint {request.SprintNumber} merged with SystemBoard and overridden on live board."
+                    : $"Sprint {request.SprintNumber} overwritten with SystemBoard sprint on live board.";
+                return Ok(new
+                {
+                    Success = true,
+                    Message = message,
+                    SprintNumber = request.SprintNumber,
+                    CardsCount = cardsCount,
+                    Merge = request.Merge
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "❌ [TRELLO] Error in merge-sprint for ProjectId={ProjectId}, BoardId={BoardId}, SprintNumber={SprintNumber}",
+                    request?.ProjectId, request?.BoardId, request?.SprintNumber);
+                return StatusCode(500, new { Success = false, Message = ex.Message });
+            }
+        }
+
+        /// <summary>
+        /// Run due sprint merges for all boards with students in status=3: for each unique BoardId, merge any sprint where DueDate has passed and MergedAt is null (merge=true).
+        /// </summary>
+        [HttpPost("use/run-due-sprint-merges")]
+        public async Task<ActionResult<object>> RunDueSprintMerges()
+        {
+            try
+            {
+                var (mergedCount, errorCount, errors) = await _studentTeamBuilderService.RunDueSprintMergesAsync();
+                return Ok(new
+                {
+                    Success = true,
+                    Message = $"Due sprint merges completed. Merged: {mergedCount}, Errors: {errorCount}.",
+                    MergedCount = mergedCount,
+                    ErrorCount = errorCount,
+                    Errors = errors
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "❌ [TRELLO] Error in run-due-sprint-merges");
+                return StatusCode(500, new { Success = false, Message = ex.Message });
             }
         }
     }

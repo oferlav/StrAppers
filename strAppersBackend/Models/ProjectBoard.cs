@@ -196,6 +196,19 @@ namespace strAppersBackend.Models
         [Column("NeonBranchId")]
         public string? NeonBranchId { get; set; }
 
+        /// <summary>
+        /// System board ID - references another ProjectBoard (self-referencing foreign key)
+        /// </summary>
+        [MaxLength(50)]
+        [Column("SystemBoardId")]
+        public string? SystemBoardId { get; set; }
+
+        /// <summary>
+        /// True when this record is the SystemBoard (full template board); false for the EmptyBoard or single board.
+        /// </summary>
+        [Column("IsSystemBoard")]
+        public bool IsSystemBoard { get; set; }
+
         // Navigation properties
         /// <summary>
         /// Navigation property to the associated project
@@ -214,5 +227,16 @@ namespace strAppersBackend.Models
         /// </summary>
         [ForeignKey(nameof(AdminId))]
         public virtual Student? Admin { get; set; }
+
+        /// <summary>
+        /// Navigation property to the system board (self-referencing)
+        /// </summary>
+        [ForeignKey(nameof(SystemBoardId))]
+        public virtual ProjectBoard? SystemBoard { get; set; }
+
+        /// <summary>
+        /// Sprint merge state records (one per sprint when merged).
+        /// </summary>
+        public virtual ICollection<ProjectBoardSprintMerge> SprintMerges { get; set; } = new List<ProjectBoardSprintMerge>();
     }
 }

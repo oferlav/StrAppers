@@ -1,25 +1,52 @@
 namespace strAppersBackend.Models
 {
     /// <summary>
-    /// Configuration for AI prompts used in the application
+    /// Configuration for AI prompts used in the application.
+    /// PromptType: Mentor = General; CodeReview = Developers; SprintPlanning / ProjectModules = SprintPlanning; Customer = Customer.
+    /// Refactor To DB: only non-fragmented, non-variant prompt text (see REFACTOR_PROMPT_LIST.md).
     /// </summary>
     public class PromptConfig
     {
+        // PromptType: SprintPlanning — Keep (config); Refactor To DB possible for single-block prompts only
         public ProjectModulesPrompts ProjectModules { get; set; } = new();
+        // PromptType: General — Refactor To DB for SystemPrompt (base + Trello); Keep for EnhancedPrompt/UserPromptTemplate (variants)
         public MentorPrompts Mentor { get; set; } = new();
+        // PromptType: Customer — Keep (config); single block with placeholders
+        public CustomerPrompts Customer { get; set; } = new();
+        // PromptType: SprintPlanning — Keep (config); templates with placeholders
         public SprintPlanningPrompts SprintPlanning { get; set; } = new();
     }
 
     /// <summary>
-    /// AI prompts specifically for Mentor chatbot functionality
+    /// AI prompts for Customer chatbot (context from ProjectModules; chat history from CustomerChatHistory).
+    /// </summary>
+    public class CustomerPrompts
+    {
+        public string SystemPrompt { get; set; } = string.Empty;
+        public int ChatHistoryLength { get; set; } = 5; // Number of previous message pairs to include in context
+    }
+
+    /// <summary>
+    /// AI prompts specifically for Mentor chatbot functionality.
+    /// PromptType: General. SystemPrompt = Refactor To DB (base + Trello). UserPromptTemplate / EnhancedPrompt / CodeReview = Keep (variants or dynamic).
     /// </summary>
     public class MentorPrompts
     {
         public string SystemPrompt { get; set; } = string.Empty;
         public string UserPromptTemplate { get; set; } = string.Empty;
         public int ChatHistoryLength { get; set; } = 5; // Number of previous messages to include in context
+        /// <summary>When true, log full system + user prompt with &lt;&lt;File line N&gt;&gt; source markers for debugging duplications/reordering.</summary>
+        public bool DebugSystemPrompt { get; set; } = false;
         public CodeReviewPrompts CodeReview { get; set; } = new();
         public EnhancedPromptPrompts EnhancedPrompt { get; set; } = new();
+        /// <summary>Instructions added to mentor context ONLY for non-developer roles (Product Manager, UI/UX Designer).</summary>
+        public string NonDeveloperInstructions { get; set; } = string.Empty;
+        /// <summary>Board States awareness block (full JSON variant). Load from config to avoid large inline strings in code; see REFACTOR_PROMPT_LIST.md.</summary>
+        public string BoardStatesAwareness { get; set; } = string.Empty;
+        /// <summary>Board States awareness when JSON is excluded (FULL STACK line only). Load from config.</summary>
+        public string BoardStatesAwarenessWithoutJson { get; set; } = string.Empty;
+        /// <summary>Last instruction appended when board states are in prompt: report board health first when user reports issues/help.</summary>
+        public string BoardHealthFirstLastInstruction { get; set; } = string.Empty;
     }
 
     /// <summary>
@@ -32,10 +59,12 @@ namespace strAppersBackend.Models
         public string ReviewSystemPrompt { get; set; } = string.Empty;
         public string ReviewUserPromptHeader { get; set; } = string.Empty;
         public string ReviewInstructions { get; set; } = string.Empty;
+        /// <summary>When true, AI code review approval (yes/no) affects the Mentor-Validation GitHub status: "no" sets status to failure.</summary>
+        public bool ApprovalAffectsValidation { get; set; } = true;
     }
 
     /// <summary>
-    /// Enhanced prompt configuration for context-aware system prompts
+    /// Enhanced prompt configuration for context-aware system prompts. PromptType: General — Keep (variants: developer/non-developer, context reminder).
     /// </summary>
     public class EnhancedPromptPrompts
     {
@@ -46,7 +75,7 @@ namespace strAppersBackend.Models
     }
 
     /// <summary>
-    /// AI prompts specifically for ProjectModules functionality
+    /// AI prompts specifically for ProjectModules functionality. PromptType: SprintPlanning — Keep (config; single-block prompts).
     /// </summary>
     public class ProjectModulesPrompts
     {
@@ -56,7 +85,7 @@ namespace strAppersBackend.Models
     }
 
     /// <summary>
-    /// AI prompts for Sprint Planning functionality
+    /// AI prompts for Sprint Planning functionality. PromptType: SprintPlanning — Keep (config; templates with placeholders).
     /// </summary>
     public class SprintPlanningPrompts
     {

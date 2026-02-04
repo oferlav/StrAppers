@@ -494,6 +494,565 @@ namespace strAppersBackend.Controllers
 
         #endregion
 
+        #region Railway Test Methods
+
+        /// <summary>
+        /// Test method: set the deployment trigger branch for a Railway service by name.
+        /// Uses Railway API (serviceConnect) to connect the service to the same repo with the new target branch.
+        /// POST /api/Test/Railway-set-trigger-branch
+        /// Body: { "railwayServiceName": "webapi_xxx", "targetBranchName": "1-B", "repo": "owner/repo-name" }
+        /// Optional: projectId (defaults to Railway:SharedProjectId from config).
+        /// </summary>
+        [HttpPost("Railway-set-trigger-branch")]
+        public async Task<ActionResult> RailwaySetTriggerBranch([FromBody] RailwaySetTriggerBranchRequest request)
+        {
+            if (request == null || string.IsNullOrWhiteSpace(request.RailwayServiceName) || string.IsNullOrWhiteSpace(request.TargetBranchName))
+            {
+                return BadRequest(new
+                {
+                    success = false,
+                    message = "RailwayServiceName and TargetBranchName are required.",
+                    example = new { railwayServiceName = "webapi_697e00d2f9cb8d26a7271afa", targetBranchName = "1-B", repo = "skill-in-projects/backend_697e00d2f9cb8d26a7271afa" }
+                });
+            }
+
+            var railwayApiToken = _configuration["Railway:ApiToken"];
+            var railwayApiUrl = _configuration["Railway:ApiUrl"] ?? "https://backboard.railway.com/graphql/v2";
+            var projectId = request.ProjectId ?? _configuration["Railway:SharedProjectId"];
+
+            if (string.IsNullOrWhiteSpace(railwayApiToken) || railwayApiToken == "your-railway-api-token-here")
+            {
+                return BadRequest(new { success = false, message = "Railway:ApiToken is not configured." });
+            }
+            if (string.IsNullOrWhiteSpace(projectId))
+            {
+                return BadRequest(new { success = false, message = "ProjectId is required (provide in body or set Railway:SharedProjectId)." });
+            }
+
+            var repo = request.Repo?.Trim();
+            if (string.IsNullOrWhiteSpace(repo))
+            {
+                return BadRequest(new { success = false, message = "Repo is required (owner/repo-name) for serviceConnect." });
+            }
+            if (repo.Contains("https://github.com/", StringComparison.OrdinalIgnoreCase))
+            {
+                repo = repo.Replace("https://github.com/", "", StringComparison.OrdinalIgnoreCase).TrimEnd('/');
+            }
+
+            using var httpClient = _httpClientFactory.CreateClient();
+            httpClient.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", railwayApiToken);
+            httpClient.DefaultRequestHeaders.Accept.Add(new System.Net.Http.Headers.MediaTypeWithQualityHeaderValue("application/json"));
+
+            // 1. Get project with services to find service ID by name
+            var projectQuery = new
+            {
+                query = @"query project($id: String!) {
+  project(id: $id) {
+    id
+    name
+    services {
+      edges {
+        node {
+          id
+          name
+        }
+      }
+    }
+    environments {
+      edges {
+        node {
+          id
+          name
+        }
+      }
+    }
+  }
+}",
+                variables = new { id = projectId }
+            };
+            var projectQueryBody = JsonSerializer.Serialize(projectQuery);
+            var projectResponse = await httpClient.PostAsync(railwayApiUrl, new StringContent(projectQueryBody, System.Text.Encoding.UTF8, "application/json"));
+            var projectResponseContent = await projectResponse.Content.ReadAsStringAsync();
+
+            if (!projectResponse.IsSuccessStatusCode)
+            {
+                _logger.LogWarning("Railway project query failed: {StatusCode} {Content}", projectResponse.StatusCode, projectResponseContent);
+                return StatusCode((int)projectResponse.StatusCode, new { success = false, message = "Railway API project query failed", detail = projectResponseContent });
+            }
+
+            string? serviceId = null;
+            string? environmentId = null;
+            using (var projectDoc = JsonDocument.Parse(projectResponseContent))
+            {
+                var root = projectDoc.RootElement;
+                if (root.TryGetProperty("data", out var data) && data.TryGetProperty("project", out var project))
+                {
+                    if (project.TryGetProperty("services", out var services) && services.TryGetProperty("edges", out var edges))
+                    {
+                        foreach (var edge in edges.EnumerateArray())
+                        {
+                            if (edge.TryGetProperty("node", out var node) &&
+                                node.TryGetProperty("name", out var nameProp) &&
+                                string.Equals(nameProp.GetString(), request.RailwayServiceName.Trim(), StringComparison.OrdinalIgnoreCase))
+                            {
+                                if (node.TryGetProperty("id", out var idProp))
+                                {
+                                    serviceId = idProp.GetString();
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    if (project.TryGetProperty("environments", out var envs) && envs.TryGetProperty("edges", out var envEdges) && envEdges.GetArrayLength() > 0)
+                    {
+                        var firstEnv = envEdges[0];
+                        if (firstEnv.TryGetProperty("node", out var envNode) && envNode.TryGetProperty("id", out var envIdProp))
+                        {
+                            environmentId = envIdProp.GetString();
+                        }
+                    }
+                }
+                if (root.TryGetProperty("errors", out var errors))
+                {
+                    _logger.LogWarning("Railway API returned errors: {Errors}", errors.GetRawText());
+                    return Ok(new { success = false, message = "Railway API returned errors", errors = errors.GetRawText() });
+                }
+            }
+
+            if (string.IsNullOrEmpty(serviceId))
+            {
+                return NotFound(new
+                {
+                    success = false,
+                    message = $"No Railway service found with name '{request.RailwayServiceName}' in project {projectId}.",
+                    projectId
+                });
+            }
+
+            // 2. serviceConnect(id, { repo, branch }) to set the target branch
+            var connectInput = new { repo = repo, branch = request.TargetBranchName.Trim() };
+            var connectMutation = new
+            {
+                query = @"mutation serviceConnect($id: String!, $input: ServiceConnectInput!) {
+  serviceConnect(id: $id, input: $input) {
+    id
+  }
+}",
+                variables = new { id = serviceId, input = connectInput }
+            };
+            var connectBody = JsonSerializer.Serialize(connectMutation);
+            _logger.LogInformation("Railway serviceConnect request: url={Url} serviceId={ServiceId} input={Input}", railwayApiUrl, serviceId, JsonSerializer.Serialize(connectInput));
+
+            var connectResponse = await httpClient.PostAsync(railwayApiUrl, new StringContent(connectBody, System.Text.Encoding.UTF8, "application/json"));
+            var connectContent = await connectResponse.Content.ReadAsStringAsync();
+
+            _logger.LogInformation("Railway serviceConnect response: statusCode={StatusCode} body={Body}", (int)connectResponse.StatusCode, connectContent);
+
+            if (!connectResponse.IsSuccessStatusCode)
+            {
+                _logger.LogWarning("Railway serviceConnect failed: {StatusCode} {Content}", connectResponse.StatusCode, connectContent);
+                return StatusCode((int)connectResponse.StatusCode, new { success = false, message = "Railway serviceConnect failed", detail = connectContent, railwayResponse = connectContent });
+            }
+
+            bool hasGraphQLErrors = false;
+            string? graphqlErrors = null;
+            bool hasDataConnect = false;
+            using (var connectDoc = JsonDocument.Parse(connectContent))
+            {
+                var root = connectDoc.RootElement;
+                if (root.TryGetProperty("errors", out var errs))
+                {
+                    hasGraphQLErrors = true;
+                    graphqlErrors = errs.GetRawText();
+                    _logger.LogWarning("Railway serviceConnect returned GraphQL errors: {Errors}", graphqlErrors);
+                }
+                if (root.TryGetProperty("data", out var data) && data.TryGetProperty("serviceConnect", out var sc))
+                {
+                    hasDataConnect = sc.ValueKind != JsonValueKind.Null;
+                    if (!hasDataConnect)
+                        _logger.LogWarning("Railway serviceConnect returned data.serviceConnect null. Full response: {Body}", connectContent);
+                }
+                else
+                {
+                    _logger.LogWarning("Railway serviceConnect response has no data.serviceConnect. Full response: {Body}", connectContent);
+                }
+            }
+
+            if (hasGraphQLErrors)
+            {
+                return Ok(new
+                {
+                    success = false,
+                    message = "Railway serviceConnect returned errors (check errors and railwayResponse).",
+                    errors = graphqlErrors,
+                    railwayResponse = connectContent
+                });
+            }
+
+            if (!hasDataConnect)
+            {
+                return Ok(new
+                {
+                    success = false,
+                    message = "Railway returned 200 but no data.serviceConnect (mutation may not have applied). Check railwayResponse.",
+                    railwayResponse = connectContent,
+                    serviceId,
+                    serviceName = request.RailwayServiceName,
+                    targetBranch = request.TargetBranchName.Trim(),
+                    repo
+                });
+            }
+
+            _logger.LogInformation("Railway service '{ServiceName}' (id={ServiceId}) trigger branch set to '{Branch}' (repo={Repo})", request.RailwayServiceName, serviceId, request.TargetBranchName, repo);
+            return Ok(new
+            {
+                success = true,
+                message = $"Trigger branch for service '{request.RailwayServiceName}' set to '{request.TargetBranchName}'.",
+                serviceId,
+                serviceName = request.RailwayServiceName,
+                targetBranch = request.TargetBranchName.Trim(),
+                repo,
+                environmentId,
+                railwayResponse = connectContent
+            });
+        }
+
+        /// <summary>
+        /// Test method: get the current deployment trigger branch (and repo) for a Railway service by name.
+        /// GET /api/Test/Railway-get-trigger-branch?railwayServiceName=webapi_xxx&amp;projectId=optional
+        /// Returns service id, name, and current repo/branch if exposed by Railway API.
+        /// </summary>
+        [HttpGet("Railway-get-trigger-branch")]
+        public async Task<ActionResult> RailwayGetTriggerBranch(
+            [FromQuery] string railwayServiceName,
+            [FromQuery] string? projectId = null)
+        {
+            if (string.IsNullOrWhiteSpace(railwayServiceName))
+            {
+                return BadRequest(new
+                {
+                    success = false,
+                    message = "railwayServiceName query parameter is required.",
+                    example = "/api/Test/Railway-get-trigger-branch?railwayServiceName=webapi_697e00d2f9cb8d26a7271afa"
+                });
+            }
+
+            var railwayApiToken = _configuration["Railway:ApiToken"];
+            var railwayApiUrl = _configuration["Railway:ApiUrl"] ?? "https://backboard.railway.com/graphql/v2";
+            var resolvedProjectId = projectId ?? _configuration["Railway:SharedProjectId"];
+
+            if (string.IsNullOrWhiteSpace(railwayApiToken) || railwayApiToken == "your-railway-api-token-here")
+            {
+                return BadRequest(new { success = false, message = "Railway:ApiToken is not configured." });
+            }
+            if (string.IsNullOrWhiteSpace(resolvedProjectId))
+            {
+                return BadRequest(new { success = false, message = "projectId is required (query param or Railway:SharedProjectId)." });
+            }
+
+            using var httpClient = _httpClientFactory.CreateClient();
+            httpClient.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", railwayApiToken);
+            httpClient.DefaultRequestHeaders.Accept.Add(new System.Net.Http.Headers.MediaTypeWithQualityHeaderValue("application/json"));
+
+            // 1. Get project with services to find service ID by name
+            var projectQuery = new
+            {
+                query = @"query project($id: String!) {
+  project(id: $id) {
+    id
+    name
+    services {
+      edges {
+        node {
+          id
+          name
+        }
+      }
+    }
+  }
+}",
+                variables = new { id = resolvedProjectId }
+            };
+            var projectQueryBody = JsonSerializer.Serialize(projectQuery);
+            var projectResponse = await httpClient.PostAsync(railwayApiUrl, new StringContent(projectQueryBody, System.Text.Encoding.UTF8, "application/json"));
+            var projectResponseContent = await projectResponse.Content.ReadAsStringAsync();
+
+            if (!projectResponse.IsSuccessStatusCode)
+            {
+                _logger.LogWarning("Railway project query failed: {StatusCode} {Content}", projectResponse.StatusCode, projectResponseContent);
+                return StatusCode((int)projectResponse.StatusCode, new { success = false, message = "Railway API project query failed", detail = projectResponseContent });
+            }
+
+            string? serviceId = null;
+            using (var projectDoc = JsonDocument.Parse(projectResponseContent))
+            {
+                var root = projectDoc.RootElement;
+                if (root.TryGetProperty("errors", out var errs))
+                {
+                    return Ok(new { success = false, message = "Railway API returned errors", errors = errs.GetRawText() });
+                }
+                if (root.TryGetProperty("data", out var data) && data.TryGetProperty("project", out var project))
+                {
+                    if (project.TryGetProperty("services", out var services) && services.TryGetProperty("edges", out var edges))
+                    {
+                        foreach (var edge in edges.EnumerateArray())
+                        {
+                            if (edge.TryGetProperty("node", out var node) &&
+                                node.TryGetProperty("name", out var nameProp) &&
+                                string.Equals(nameProp.GetString(), railwayServiceName.Trim(), StringComparison.OrdinalIgnoreCase))
+                            {
+                                if (node.TryGetProperty("id", out var idProp))
+                                {
+                                    serviceId = idProp.GetString();
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (string.IsNullOrEmpty(serviceId))
+            {
+                return NotFound(new
+                {
+                    success = false,
+                    message = $"No Railway service found with name '{railwayServiceName}' in project {resolvedProjectId}.",
+                    projectId = resolvedProjectId
+                });
+            }
+
+            // 2. Query service by ID (Railway Service type does not expose source.repo/branch in the public schema)
+            var serviceQuery = new
+            {
+                query = @"query service($id: String!) {
+  service(id: $id) {
+    id
+    name
+    projectId
+  }
+}",
+                variables = new { id = serviceId }
+            };
+            var serviceQueryBody = JsonSerializer.Serialize(serviceQuery);
+            var serviceResponse = await httpClient.PostAsync(railwayApiUrl, new StringContent(serviceQueryBody, System.Text.Encoding.UTF8, "application/json"));
+            var serviceResponseContent = await serviceResponse.Content.ReadAsStringAsync();
+
+            if (!serviceResponse.IsSuccessStatusCode)
+            {
+                _logger.LogWarning("Railway service query failed: {StatusCode} {Content}", serviceResponse.StatusCode, serviceResponseContent);
+                return StatusCode((int)serviceResponse.StatusCode, new { success = false, message = "Railway API service query failed", detail = serviceResponseContent });
+            }
+
+            using (var serviceDoc = JsonDocument.Parse(serviceResponseContent))
+            {
+                var root = serviceDoc.RootElement;
+                if (root.TryGetProperty("errors", out var serviceErrs))
+                {
+                    return Ok(new
+                    {
+                        success = false,
+                        serviceId,
+                        serviceName = railwayServiceName.Trim(),
+                        currentBranch = (string?)null,
+                        currentRepo = (string?)null,
+                        branchSet = false,
+                        message = "Railway API returned errors.",
+                        errors = serviceErrs.GetRawText()
+                    });
+                }
+            }
+
+            return Ok(new
+            {
+                success = true,
+                serviceId,
+                serviceName = railwayServiceName.Trim(),
+                currentBranch = (string?)null,
+                currentRepo = (string?)null,
+                branchSet = false,
+                message = "Service found. Railway API does not expose trigger branch/repo on Service type; use set-trigger-branch to set, then verify via deployments or UI."
+            });
+        }
+
+        /// <summary>
+        /// Test method: query the same Railway service to verify if the deployment trigger branch was actually set.
+        /// GET /api/Test/Railway-branch-was-set?railwayServiceName=webapi_xxx&amp;expectedBranch=1-B&amp;projectId=optional
+        /// Returns branchWasSet (true if API reports a branch), currentBranch, and optionally matchesExpected when expectedBranch is provided.
+        /// </summary>
+        [HttpGet("Railway-branch-was-set")]
+        public async Task<ActionResult> RailwayBranchWasSet(
+            [FromQuery] string railwayServiceName,
+            [FromQuery] string? expectedBranch = null,
+            [FromQuery] string? projectId = null)
+        {
+            if (string.IsNullOrWhiteSpace(railwayServiceName))
+            {
+                return BadRequest(new
+                {
+                    success = false,
+                    message = "railwayServiceName query parameter is required.",
+                    example = "/api/Test/Railway-branch-was-set?railwayServiceName=webapi_xxx&expectedBranch=1-B"
+                });
+            }
+
+            var railwayApiToken = _configuration["Railway:ApiToken"];
+            var railwayApiUrl = _configuration["Railway:ApiUrl"] ?? "https://backboard.railway.com/graphql/v2";
+            var resolvedProjectId = projectId ?? _configuration["Railway:SharedProjectId"];
+
+            if (string.IsNullOrWhiteSpace(railwayApiToken) || railwayApiToken == "your-railway-api-token-here")
+            {
+                return BadRequest(new { success = false, message = "Railway:ApiToken is not configured." });
+            }
+            if (string.IsNullOrWhiteSpace(resolvedProjectId))
+            {
+                return BadRequest(new { success = false, message = "projectId is required (query param or Railway:SharedProjectId)." });
+            }
+
+            using var httpClient = _httpClientFactory.CreateClient();
+            httpClient.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", railwayApiToken);
+            httpClient.DefaultRequestHeaders.Accept.Add(new System.Net.Http.Headers.MediaTypeWithQualityHeaderValue("application/json"));
+
+            // 1. Get project with services to find service ID by name
+            var projectQuery = new
+            {
+                query = @"query project($id: String!) {
+  project(id: $id) {
+    id
+    name
+    services {
+      edges {
+        node {
+          id
+          name
+        }
+      }
+    }
+  }
+}",
+                variables = new { id = resolvedProjectId }
+            };
+            var projectQueryBody = JsonSerializer.Serialize(projectQuery);
+            var projectResponse = await httpClient.PostAsync(railwayApiUrl, new StringContent(projectQueryBody, System.Text.Encoding.UTF8, "application/json"));
+            var projectResponseContent = await projectResponse.Content.ReadAsStringAsync();
+
+            if (!projectResponse.IsSuccessStatusCode)
+            {
+                _logger.LogWarning("Railway project query failed: {StatusCode} {Content}", projectResponse.StatusCode, projectResponseContent);
+                return StatusCode((int)projectResponse.StatusCode, new { success = false, message = "Railway API project query failed", detail = projectResponseContent });
+            }
+
+            string? serviceId = null;
+            using (var projectDoc = JsonDocument.Parse(projectResponseContent))
+            {
+                var root = projectDoc.RootElement;
+                if (root.TryGetProperty("errors", out var errs))
+                {
+                    return Ok(new { success = false, message = "Railway API returned errors", errors = errs.GetRawText() });
+                }
+                if (root.TryGetProperty("data", out var data) && data.TryGetProperty("project", out var project))
+                {
+                    if (project.TryGetProperty("services", out var services) && services.TryGetProperty("edges", out var edges))
+                    {
+                        foreach (var edge in edges.EnumerateArray())
+                        {
+                            if (edge.TryGetProperty("node", out var node) &&
+                                node.TryGetProperty("name", out var nameProp) &&
+                                string.Equals(nameProp.GetString(), railwayServiceName.Trim(), StringComparison.OrdinalIgnoreCase))
+                            {
+                                if (node.TryGetProperty("id", out var idProp))
+                                {
+                                    serviceId = idProp.GetString();
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (string.IsNullOrEmpty(serviceId))
+            {
+                return NotFound(new
+                {
+                    success = false,
+                    message = $"No Railway service found with name '{railwayServiceName}' in project {resolvedProjectId}.",
+                    projectId = resolvedProjectId
+                });
+            }
+
+            // 2. Query service by ID (Railway Service type does not expose source.repo/branch in the public schema)
+            var serviceQuery = new
+            {
+                query = @"query service($id: String!) {
+  service(id: $id) {
+    id
+    name
+    projectId
+  }
+}",
+                variables = new { id = serviceId }
+            };
+            var serviceQueryBody = JsonSerializer.Serialize(serviceQuery);
+            var serviceResponse = await httpClient.PostAsync(railwayApiUrl, new StringContent(serviceQueryBody, System.Text.Encoding.UTF8, "application/json"));
+            var serviceResponseContent = await serviceResponse.Content.ReadAsStringAsync();
+
+            if (!serviceResponse.IsSuccessStatusCode)
+            {
+                _logger.LogWarning("Railway service query failed: {StatusCode} {Content}", serviceResponse.StatusCode, serviceResponseContent);
+                return StatusCode((int)serviceResponse.StatusCode, new { success = false, message = "Railway API service query failed", detail = serviceResponseContent });
+            }
+
+            using (var serviceDoc = JsonDocument.Parse(serviceResponseContent))
+            {
+                var root = serviceDoc.RootElement;
+                if (root.TryGetProperty("errors", out var serviceErrs))
+                {
+                    return Ok(new
+                    {
+                        success = true,
+                        serviceId,
+                        serviceName = railwayServiceName.Trim(),
+                        branchWasSet = false,
+                        currentBranch = (string?)null,
+                        currentRepo = (string?)null,
+                        matchesExpected = (bool?)null,
+                        message = "Railway API returned errors; cannot read branch.",
+                        errors = serviceErrs.GetRawText()
+                    });
+                }
+            }
+
+            return Ok(new
+            {
+                success = true,
+                serviceId,
+                serviceName = railwayServiceName.Trim(),
+                branchWasSet = false,
+                currentBranch = (string?)null,
+                currentRepo = (string?)null,
+                matchesExpected = (bool?)null,
+                message = "Service found. Railway API does not expose trigger branch on Service type; verify via Railway UI or deployments."
+            });
+        }
+
+        /// <summary>
+        /// Request body for Railway-set-trigger-branch test endpoint.
+        /// </summary>
+        public class RailwaySetTriggerBranchRequest
+        {
+            /// <summary>Railway service name (e.g. webapi_697e00d2f9cb8d26a7271afa).</summary>
+            public string RailwayServiceName { get; set; } = string.Empty;
+            /// <summary>Target branch name to set as deployment trigger (e.g. 1-B).</summary>
+            public string TargetBranchName { get; set; } = string.Empty;
+            /// <summary>GitHub repo in form owner/repo (required for serviceConnect).</summary>
+            public string? Repo { get; set; }
+            /// <summary>Optional Railway project ID; defaults to Railway:SharedProjectId.</summary>
+            public string? ProjectId { get; set; }
+        }
+
+        #endregion
+
         #region Data Validation Test Methods
 
         /// <summary>

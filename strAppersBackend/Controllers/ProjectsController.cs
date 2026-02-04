@@ -251,8 +251,9 @@ public class ProjectsController : ControllerBase
             {
                 _logger.LogInformation("Classifying project criteria for project {ProjectId}", project.Id);
                 
-                // Get available project criteria (excluding Criteria 8)
+                // Get available project criteria (only active; used for classification)
                 var availableCriteria = await _context.ProjectCriterias
+                    .Where(c => c.Active)
                     .OrderBy(c => c.Id)
                     .ToListAsync();
 
@@ -554,6 +555,7 @@ public class ProjectsController : ControllerBase
         try
         {
             var criteria = await _context.ProjectCriterias
+                .Where(c => c.Active)
                 .OrderBy(c => c.Id)
                 .ToListAsync();
 

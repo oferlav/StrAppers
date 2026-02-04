@@ -1,5 +1,6 @@
 using System.Net;
 using System.Net.Mail;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Options;
 using strAppersBackend.Models;
 
@@ -18,11 +19,24 @@ public class SmtpEmailService : ISmtpEmailService
 {
     private readonly SmtpConfig _config;
     private readonly ILogger<SmtpEmailService> _logger;
+    private readonly IConfiguration? _configuration;
 
-    public SmtpEmailService(IOptions<SmtpConfig> config, ILogger<SmtpEmailService> logger)
+    public SmtpEmailService(IOptions<SmtpConfig> config, ILogger<SmtpEmailService> logger, IConfiguration? configuration = null)
     {
         _config = config.Value;
         _logger = logger;
+        _configuration = configuration;
+    }
+
+    /// <summary>Parse Trello:LocalTime (e.g. GMT+2) to offset minutes from UTC for display in emails.</summary>
+    private static int GetLocalTimeOffsetMinutes(string? localTime)
+    {
+        if (string.IsNullOrWhiteSpace(localTime)) return 0;
+        if (localTime.Equals("UTC", StringComparison.OrdinalIgnoreCase)) return 0;
+        var m = System.Text.RegularExpressions.Regex.Match(localTime.Trim(), @"^GMT([+-])(\d+)$", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        if (m.Success && int.TryParse(m.Groups[2].Value, out var hours))
+            return (m.Groups[1].Value == "-" ? -1 : 1) * (hours * 60);
+        return 0;
     }
 
     public async Task<bool> SendMeetingEmailAsync(string recipientEmail, string meetingTitle, DateTime startTime, DateTime endTime, string meetingLink, string meetingDescription = "")
@@ -34,6 +48,9 @@ public class SmtpEmailService : ISmtpEmailService
                 _config.Host, _config.Port, _config.FromEmail, _config.Security);
 
             using var client = CreateSmtpClient();
+            _logger.LogInformation("SMTP client - EnableSsl: {EnableSsl}, UseDefaultCredentials: {UseDefaultCredentials}",
+                client.EnableSsl, client.UseDefaultCredentials);
+
             using var message = CreateEmailMessage(recipientEmail, meetingTitle, startTime, endTime, meetingLink, meetingDescription);
 
             _logger.LogInformation("SMTP email details - To: {To}, Subject: {Subject}, Meeting Link: {Link}", 
@@ -46,7 +63,13 @@ public class SmtpEmailService : ISmtpEmailService
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Error sending SMTP meeting email to {Email}: {Message}. Check: 1) SMTP server configuration, 2) Email credentials, 3) Network connectivity, 4) Email server status", recipientEmail, ex.Message);
+            var hint = _config.Host?.Contains("gmail.com", StringComparison.OrdinalIgnoreCase) == true
+                ? " For Gmail: ensure Smtp:User is the full Gmail/Workspace address and Smtp:Pass is an App Password (not account password). Create one at https://myaccount.google.com/apppasswords"
+                : "";
+            _logger.LogError(ex, "Error sending SMTP meeting email to {Email}: {Message}. Check: 1) SMTP server configuration, 2) Email credentials, 3) Network connectivity, 4) Email server status.{Hint}", recipientEmail, ex.Message, hint);
+            _logger.LogDebug("SMTP exception full: {ExToString}", ex.ToString());
+            if (ex.InnerException != null)
+                _logger.LogDebug("SMTP inner exception: {InnerMessage}", ex.InnerException.Message);
             return false;
         }
     }
@@ -78,11 +101,32 @@ public class SmtpEmailService : ISmtpEmailService
 
     private SmtpClient CreateSmtpClient()
     {
+        if (string.IsNullOrWhiteSpace(_config.User) || string.IsNullOrWhiteSpace(_config.Pass))
+        {
+            _logger.LogError(
+                "SMTP credentials are not configured. Set Smtp:User and Smtp:Pass in appsettings (e.g. appsettings.Production.json) or environment variables. " +
+                "For Gmail (smtp.gmail.com) use the account email and an App Password: https://support.google.com/accounts/answer/185833");
+            throw new InvalidOperationException(
+                "SMTP credentials are not configured. Set Smtp:User and Smtp:Pass. For Gmail use an App Password.");
+        }
+
+        // Safe diagnostics: do not log actual password
+        var userDomain = _config.User?.Contains("@", StringComparison.Ordinal) == true
+            ? "***" + _config.User.Substring(_config.User.IndexOf("@", StringComparison.Ordinal))
+            : "(no @)";
+        var passLen = _config.Pass?.Length ?? 0;
+        var passHasSpaces = _config.Pass?.Contains(' ') ?? false;
+        _logger.LogInformation(
+            "SMTP credentials configured - User: {UserDomain}, Pass length: {PassLen}, Pass contains spaces: {PassHasSpaces}",
+            userDomain, passLen, passHasSpaces);
+
         var client = new SmtpClient(_config.Host, _config.Port)
         {
-            EnableSsl = _config.Security.Equals("StartTls", StringComparison.OrdinalIgnoreCase) || 
+            EnableSsl = _config.Security.Equals("StartTls", StringComparison.OrdinalIgnoreCase) ||
                         _config.Security.Equals("Ssl", StringComparison.OrdinalIgnoreCase),
-            Credentials = new NetworkCredential(_config.User, _config.Pass)
+            UseDefaultCredentials = false,
+            DeliveryMethod = SmtpDeliveryMethod.Network,
+            Credentials = new NetworkCredential(_config.User, _config.Pass?.Trim() ?? string.Empty)
         };
 
         return client;
@@ -187,15 +231,19 @@ END:VCALENDAR";
 
     private string CreateEmailBody(string meetingTitle, DateTime startTime, DateTime endTime, string meetingLink, string meetingDescription)
     {
-        var startTimeFormatted = startTime.ToString("MMMM dd, yyyy 'at' h:mm tt");
-        var endTimeFormatted = endTime.ToString("MMMM dd, yyyy 'at' h:mm tt");
+        // Display in local time (Trello:LocalTime) when configured
+        var offsetMin = _configuration != null ? GetLocalTimeOffsetMinutes(_configuration["Trello:LocalTime"]) : 0;
+        var startLocal = startTime.Kind == DateTimeKind.Utc ? startTime.AddMinutes(offsetMin) : startTime;
+        var endLocal = endTime.Kind == DateTimeKind.Utc ? endTime.AddMinutes(offsetMin) : endTime;
+        var startTimeFormatted = startLocal.ToString("MMMM dd, yyyy 'at' h:mm tt");
+        var endTimeFormatted = endLocal.ToString("MMMM dd, yyyy 'at' h:mm tt");
         var duration = (endTime - startTime).TotalMinutes;
         
-        // Generate Google Calendar link
+        // Generate Google Calendar link (use local time for link)
         var googleCalendarLink = BuildGoogleCalendarLink(
             title: meetingTitle,
-            startLocal: startTime,
-            endLocal: endTime,
+            startLocal: startLocal,
+            endLocal: endLocal,
             description: $"{meetingDescription}\n\nMeeting Link: {meetingLink}",
             location: meetingLink,
             timeZoneId: "Asia/Jerusalem"
@@ -349,6 +397,9 @@ END:VCALENDAR";
                 _config.Host, _config.Port, _config.FromEmail, _config.Security);
 
             using var client = CreateSmtpClient();
+            _logger.LogInformation("SMTP client - EnableSsl: {EnableSsl}, UseDefaultCredentials: {UseDefaultCredentials}",
+                client.EnableSsl, client.UseDefaultCredentials);
+
             using var message = CreateEmailMessageWithSender(recipientEmail, meetingTitle, startTime, endTime, meetingLink, senderEmail, senderName, customMessage, organizationName);
 
             _logger.LogInformation("SMTP email details - To: {To}, Subject: {Subject}, Meeting Link: {Link}, From: {SenderName} <{SenderEmail}>", 
@@ -362,6 +413,9 @@ END:VCALENDAR";
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error sending SMTP meeting email to {Email} from {SenderName}: {Message}", recipientEmail, senderName, ex.Message);
+            _logger.LogDebug("SMTP exception full: {ExToString}", ex.ToString());
+            if (ex.InnerException != null)
+                _logger.LogDebug("SMTP inner exception: {InnerMessage}", ex.InnerException.Message);
             return false;
         }
     }
@@ -408,15 +462,18 @@ END:VCALENDAR";
 
     private string CreateEmailBodyWithSender(string meetingTitle, DateTime startTime, DateTime endTime, string meetingLink, string senderName, string? customMessage, string? organizationName)
     {
-        var startTimeFormatted = startTime.ToString("MMMM dd, yyyy 'at' h:mm tt");
-        var endTimeFormatted = endTime.ToString("MMMM dd, yyyy 'at' h:mm tt");
+        var offsetMin = _configuration != null ? GetLocalTimeOffsetMinutes(_configuration["Trello:LocalTime"]) : 0;
+        var startLocal = startTime.Kind == DateTimeKind.Utc ? startTime.AddMinutes(offsetMin) : startTime;
+        var endLocal = endTime.Kind == DateTimeKind.Utc ? endTime.AddMinutes(offsetMin) : endTime;
+        var startTimeFormatted = startLocal.ToString("MMMM dd, yyyy 'at' h:mm tt");
+        var endTimeFormatted = endLocal.ToString("MMMM dd, yyyy 'at' h:mm tt");
         var duration = (endTime - startTime).TotalMinutes;
         
         // Generate Google Calendar link
         var googleCalendarLink = BuildGoogleCalendarLink(
             title: meetingTitle,
-            startLocal: startTime,
-            endLocal: endTime,
+            startLocal: startLocal,
+            endLocal: endLocal,
             description: customMessage ?? "",
             location: meetingLink,
             timeZoneId: "Asia/Jerusalem"

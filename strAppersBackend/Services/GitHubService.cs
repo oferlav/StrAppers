@@ -25,10 +25,20 @@ public interface IGitHubService
     Task<GitHubUserInfo?> GetGitHubUserInfoAsync(string accessToken);
     Task<CreateRepositoryResponse> CreateRepositoryAsync(CreateRepositoryRequest request);
     Task<bool> AddCollaboratorAsync(string owner, string repositoryName, string collaboratorUsername, string accessToken);
+    /// <summary>Lists pending repository invitations (admin). Each item has Id and InviteeLogin.</summary>
+    Task<List<GitHubRepoInvitation>> ListRepositoryInvitationsAsync(string owner, string repo, string accessToken);
+    /// <summary>Deletes a pending repository invitation (admin).</summary>
+    Task<bool> DeleteRepositoryInvitationAsync(string owner, string repo, long invitationId, string accessToken);
+    /// <summary>Resends collaborator invite: cancels any pending invite for the user then re-adds them so GitHub sends a new email.</summary>
+    Task<ResendInvitationResult> ResendCollaboratorInvitationAsync(string owner, string repo, string collaboratorUsername, string accessToken);
     Task<bool> CreateInitialCommitAsync(string owner, string repositoryName, string projectTitle, string accessToken, string? databaseConnectionString = null, string? webApiUrl = null, string? swaggerUrl = null, string? programmingLanguage = null);
     Task<bool> CreateFrontendOnlyCommitAsync(string owner, string repositoryName, string projectTitle, string accessToken, string? webApiUrl = null);
     Task<bool> CreateBackendOnlyCommitAsync(string owner, string repositoryName, string projectTitle, string accessToken, string programmingLanguage, string? databaseConnectionString = null, string? webApiUrl = null, string? swaggerUrl = null);
     Task<bool> CreateInitialReadmeAsync(string owner, string repositoryName, string projectTitle, string accessToken, bool isFrontend = false, string? webApiUrl = null, string? databaseConnectionString = null, string? swaggerUrl = null);
+    /// <summary>Updates backend README.md with full Web API and Swagger URLs (e.g. after Railway domain is created).</summary>
+    Task<bool> UpdateBackendReadmeWithWebApiUrlsAsync(string owner, string repositoryName, string projectTitle, string? databaseConnectionString, string? webApiUrl, string? swaggerUrl, string accessToken);
+    /// <summary>Updates frontend README.md with full Backend API URL (e.g. after Railway domain is created).</summary>
+    Task<bool> UpdateFrontendReadmeWithWebApiUrlsAsync(string owner, string repositoryName, string projectTitle, string? webApiUrl, string accessToken);
     Task<bool> EnableGitHubPagesAsync(string owner, string repositoryName, string accessToken);
     Task<bool> CheckGitHubPagesStatusAsync(string owner, string repositoryName, string accessToken);
     Task<bool> TriggerWorkflowDispatchAsync(string owner, string repositoryName, string workflowFileName, string accessToken);
@@ -39,7 +49,9 @@ public interface IGitHubService
     Task<GitHubCommitInfo?> GetLastCommitInfoByUserAsync(string owner, string repo, string username, string? accessToken = null);
     
     // Code Review Agent methods
-    Task<List<GitHubCommit>> GetRecentCommitsAsync(string owner, string repo, string username, int count = 10, string? accessToken = null);
+    Task<List<GitHubCommit>> GetRecentCommitsAsync(string owner, string repo, string username, int count = 10, string? accessToken = null, string? branch = null);
+    /// <summary>Gets recent commits on a branch without filtering by author. Used when author-filtered request returns 0 (e.g. author name mismatch).</summary>
+    Task<List<GitHubCommit>> GetRecentCommitsOnBranchAsync(string owner, string repo, string branch, int count = 10, string? accessToken = null);
     Task<GitHubCommitDiff?> GetCommitDiffAsync(string owner, string repo, string commitSha, string? accessToken = null);
     Task<List<GitHubFileChange>> GetFileChangesAsync(string owner, string repo, string commitSha, string? accessToken = null);
     Task<bool> HasRecentCommitsAsync(string owner, string repo, string username, int hours = 24, string? accessToken = null);
@@ -627,6 +639,104 @@ public class GitHubService : IGitHubService
     }
 
     /// <summary>
+    /// Lists pending repository invitations. Requires repo admin (or token with repo scope).
+    /// </summary>
+    public async Task<List<GitHubRepoInvitation>> ListRepositoryInvitationsAsync(string owner, string repo, string accessToken)
+    {
+        var list = new List<GitHubRepoInvitation>();
+        try
+        {
+            var request = new HttpRequestMessage(HttpMethod.Get,
+                $"{GitHubApiBaseUrl}/repos/{owner}/{repo}/invitations?per_page=100");
+            request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", accessToken);
+            request.Headers.Add("Accept", "application/vnd.github+json");
+            request.Headers.Add("X-GitHub-Api-Version", "2022-11-28");
+
+            var response = await _httpClient.SendAsync(request);
+            if (!response.IsSuccessStatusCode)
+            {
+                _logger.LogWarning("List repository invitations failed: {StatusCode} for {Owner}/{Repo}", response.StatusCode, owner, repo);
+                return list;
+            }
+
+            var json = await response.Content.ReadAsStringAsync();
+            using var doc = JsonDocument.Parse(json);
+            foreach (var inv in doc.RootElement.EnumerateArray())
+            {
+                var id = inv.TryGetProperty("id", out var idProp) ? idProp.GetInt64() : 0L;
+                var inviteeLogin = "";
+                if (inv.TryGetProperty("invitee", out var invitee) && invitee.TryGetProperty("login", out var loginProp))
+                    inviteeLogin = loginProp.GetString() ?? "";
+                if (id > 0)
+                    list.Add(new GitHubRepoInvitation { Id = id, InviteeLogin = inviteeLogin });
+            }
+            return list;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error listing repository invitations for {Owner}/{Repo}", owner, repo);
+            return list;
+        }
+    }
+
+    /// <summary>
+    /// Deletes a pending repository invitation. Returns true if 204 No Content.
+    /// </summary>
+    public async Task<bool> DeleteRepositoryInvitationAsync(string owner, string repo, long invitationId, string accessToken)
+    {
+        try
+        {
+            var request = new HttpRequestMessage(HttpMethod.Delete,
+                $"{GitHubApiBaseUrl}/repos/{owner}/{repo}/invitations/{invitationId}");
+            request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", accessToken);
+            request.Headers.Add("Accept", "application/vnd.github+json");
+            request.Headers.Add("X-GitHub-Api-Version", "2022-11-28");
+
+            var response = await _httpClient.SendAsync(request);
+            if (response.StatusCode == System.Net.HttpStatusCode.NoContent)
+            {
+                _logger.LogInformation("Deleted repository invitation {InvitationId} for {Owner}/{Repo}", invitationId, owner, repo);
+                return true;
+            }
+            _logger.LogWarning("Delete repository invitation returned {StatusCode}", response.StatusCode);
+            return false;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error deleting repository invitation {InvitationId}", invitationId);
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Resends collaborator invitation: cancels any pending invite for the user, then re-adds them so GitHub sends a new email.
+    /// </summary>
+    public async Task<ResendInvitationResult> ResendCollaboratorInvitationAsync(string owner, string repo, string collaboratorUsername, string accessToken)
+    {
+        var result = new ResendInvitationResult();
+
+        // 1) List pending invitations and delete any for this user
+        var invitations = await ListRepositoryInvitationsAsync(owner, repo, accessToken);
+        foreach (var inv in invitations.Where(i => string.Equals(i.InviteeLogin, collaboratorUsername, StringComparison.OrdinalIgnoreCase)))
+        {
+            var deleted = await DeleteRepositoryInvitationAsync(owner, repo, inv.Id, accessToken);
+            if (deleted)
+                result.InvitationDeleted = true;
+        }
+
+        // 2) Re-add collaborator (GitHub sends a new invitation email)
+        var added = await AddCollaboratorAsync(owner, repo, collaboratorUsername, accessToken);
+        result.NewInvitationSent = added;
+        result.Success = result.InvitationDeleted || result.NewInvitationSent;
+        result.Message = result.NewInvitationSent
+            ? "A new invitation has been sent. Check the email for the GitHub account and accept the invitation."
+            : (result.InvitationDeleted
+                ? "Previous pending invitation was cancelled, but adding the collaborator again failed. Check repo permissions and token."
+                : "No pending invitation found and adding collaborator failed (user may already be a collaborator, or check repo/token).");
+        return result;
+    }
+
+    /// <summary>
     /// Creates initial commit with index.html file
     /// </summary>
     public async Task<bool> CreateInitialCommitAsync(string owner, string repositoryName, string projectTitle, string accessToken, string? databaseConnectionString = null, string? webApiUrl = null, string? swaggerUrl = null, string? programmingLanguage = null)
@@ -1169,6 +1279,65 @@ public class GitHubService : IGitHubService
         {
             _logger.LogError(ex, "❌ [GITHUB INITIAL README] Error creating initial README.md for {Owner}/{Repository}: {Message}", 
                 owner, repositoryName, ex.Message);
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Updates backend README.md with full Web API URL and Swagger URL. Call after Railway domain is created so the README (and mentor prompt) have the actual URLs.
+    /// </summary>
+    public async Task<bool> UpdateBackendReadmeWithWebApiUrlsAsync(string owner, string repositoryName, string projectTitle, string? databaseConnectionString, string? webApiUrl, string? swaggerUrl, string accessToken)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(webApiUrl) && string.IsNullOrWhiteSpace(swaggerUrl))
+            {
+                _logger.LogWarning("[GITHUB] UpdateBackendReadmeWithWebApiUrls: No WebApi or Swagger URL provided, skipping");
+                return false;
+            }
+            _logger.LogInformation("📝 [GITHUB] Updating backend README with WebApi URL for {Owner}/{Repo}", owner, repositoryName);
+            var readmeContent = GenerateBackendReadmeContent(projectTitle, databaseConnectionString, webApiUrl, swaggerUrl);
+            var success = await UpdateFileAsync(owner, repositoryName, "README.md", readmeContent,
+                "Update README with Railway Web API and Swagger URLs", accessToken, "main");
+            if (success)
+                _logger.LogInformation("✅ [GITHUB] Backend README updated with WebApi/Swagger URLs");
+            else
+                _logger.LogWarning("⚠️ [GITHUB] Failed to update backend README");
+            return success;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "❌ [GITHUB] Error updating backend README with WebApi URLs for {Owner}/{Repo}: {Message}", owner, repositoryName, ex.Message);
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Updates frontend README.md with full Backend API URL. Call after Railway domain is created so the frontend README has the actual API URL.
+    /// </summary>
+    public async Task<bool> UpdateFrontendReadmeWithWebApiUrlsAsync(string owner, string repositoryName, string projectTitle, string? webApiUrl, string accessToken)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(webApiUrl))
+            {
+                _logger.LogWarning("[GITHUB] UpdateFrontendReadmeWithWebApiUrls: No WebApi URL provided, skipping");
+                return false;
+            }
+            _logger.LogInformation("📝 [GITHUB] Updating frontend README with API URL for {Owner}/{Repo}", owner, repositoryName);
+            var pagesUrl = GetGitHubPagesUrl(owner, repositoryName);
+            var readmeContent = GenerateFrontendReadmeContent(projectTitle, pagesUrl, webApiUrl);
+            var success = await UpdateFileAsync(owner, repositoryName, "README.md", readmeContent,
+                "Update README with Railway Backend API URL", accessToken, "main");
+            if (success)
+                _logger.LogInformation("✅ [GITHUB] Frontend README updated with API URL");
+            else
+                _logger.LogWarning("⚠️ [GITHUB] Failed to update frontend README");
+            return success;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "❌ [GITHUB] Error updating frontend README with API URL for {Owner}/{Repo}: {Message}", owner, repositoryName, ex.Message);
             return false;
         }
     }
@@ -1827,7 +1996,7 @@ public class GitHubService : IGitHubService
     /// <summary>
     /// Gets recent commits by a specific user in a repository
     /// </summary>
-    public async Task<List<GitHubCommit>> GetRecentCommitsAsync(string owner, string repo, string username, int count = 10, string? accessToken = null)
+    public async Task<List<GitHubCommit>> GetRecentCommitsAsync(string owner, string repo, string username, int count = 10, string? accessToken = null, string? branch = null)
     {
         try
         {
@@ -1838,6 +2007,10 @@ public class GitHubService : IGitHubService
             }
 
             var url = $"{GitHubApiBaseUrl}/repos/{owner}/{repo}/commits?author={username}&per_page={count}";
+            if (!string.IsNullOrWhiteSpace(branch))
+            {
+                url += $"&sha={Uri.EscapeDataString(branch)}";
+            }
             var request = new HttpRequestMessage(HttpMethod.Get, url);
             
             if (!string.IsNullOrEmpty(accessToken))
@@ -1845,13 +2018,14 @@ public class GitHubService : IGitHubService
                 request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", accessToken);
             }
 
-            _logger.LogInformation("Fetching recent commits for user {Username} in repo {Owner}/{Repo}", username, owner, repo);
+            _logger.LogInformation("Fetching recent commits for user {Username} in repo {Owner}/{Repo}{Branch}", username, owner, repo, string.IsNullOrEmpty(branch) ? "" : $" (branch {branch})");
             var response = await _httpClient.SendAsync(request);
             
             if (!response.IsSuccessStatusCode)
             {
-                _logger.LogWarning("Failed to get commits for user {Username} in repo {Owner}/{Repo}. Status: {StatusCode}", 
-                    username, owner, repo, response.StatusCode);
+                var body = await response.Content.ReadAsStringAsync();
+                _logger.LogWarning("Failed to get commits for user {Username} in repo {Owner}/{Repo} branch {Branch}. Status: {StatusCode}, Response: {ResponseBody}", 
+                    username, owner, repo, branch ?? "(default)", response.StatusCode, body.Length > 500 ? body.Substring(0, 500) + "..." : body);
                 return new List<GitHubCommit>();
             }
 
@@ -1914,6 +2088,77 @@ public class GitHubService : IGitHubService
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error getting recent commits for user {Username} in repo {Owner}/{Repo}", username, owner, repo);
+            return new List<GitHubCommit>();
+        }
+    }
+
+    /// <summary>
+    /// Gets recent commits on a branch without filtering by author.
+    /// Used when author-filtered request returns 0 (e.g. commit author name vs login mismatch).
+    /// </summary>
+    public async Task<List<GitHubCommit>> GetRecentCommitsOnBranchAsync(string owner, string repo, string branch, int count = 10, string? accessToken = null)
+    {
+        if (string.IsNullOrWhiteSpace(owner) || string.IsNullOrWhiteSpace(repo) || string.IsNullOrWhiteSpace(branch))
+        {
+            _logger.LogWarning("GetRecentCommitsOnBranchAsync: Invalid parameters");
+            return new List<GitHubCommit>();
+        }
+        try
+        {
+            var url = $"{GitHubApiBaseUrl}/repos/{owner}/{repo}/commits?sha={Uri.EscapeDataString(branch)}&per_page={count}";
+            var request = new HttpRequestMessage(HttpMethod.Get, url);
+            if (!string.IsNullOrEmpty(accessToken))
+            {
+                request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", accessToken);
+            }
+            _logger.LogInformation("Fetching recent commits on branch {Branch} in repo {Owner}/{Repo} (no author filter)", branch, owner, repo);
+            var response = await _httpClient.SendAsync(request);
+            if (!response.IsSuccessStatusCode)
+            {
+                var body = await response.Content.ReadAsStringAsync();
+                _logger.LogWarning("Failed to get commits on branch {Branch} for repo {Owner}/{Repo}. Status: {StatusCode}, Response: {ResponseBody}", branch, owner, repo, response.StatusCode, body.Length > 500 ? body.Substring(0, 500) + "..." : body);
+                return new List<GitHubCommit>();
+            }
+            var content = await response.Content.ReadAsStringAsync();
+            var commits = JsonSerializer.Deserialize<List<JsonElement>>(content, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+            if (commits == null || !commits.Any())
+            {
+                _logger.LogInformation("No commits found on branch {Branch} in repo {Owner}/{Repo}", branch, owner, repo);
+                return new List<GitHubCommit>();
+            }
+            var result = new List<GitHubCommit>();
+            foreach (var commit in commits)
+            {
+                var sha = commit.TryGetProperty("sha", out var shaProp) ? shaProp.GetString() ?? "" : "";
+                var htmlUrl = commit.TryGetProperty("html_url", out var urlProp) ? urlProp.GetString() ?? "" : "";
+                string message = "";
+                DateTime commitDate = DateTime.UtcNow;
+                string author = "";
+                if (commit.TryGetProperty("commit", out var commitProp))
+                {
+                    message = commitProp.TryGetProperty("message", out var msgProp) ? msgProp.GetString() ?? "" : "";
+                    if (commitProp.TryGetProperty("author", out var authorProp))
+                    {
+                        author = authorProp.TryGetProperty("name", out var nameProp) ? nameProp.GetString() ?? "" : "";
+                        if (authorProp.TryGetProperty("date", out var dateProp))
+                        {
+                            var dateStr = dateProp.GetString();
+                            if (!string.IsNullOrEmpty(dateStr) && DateTime.TryParse(dateStr, out var parsedDate))
+                                commitDate = parsedDate;
+                        }
+                    }
+                }
+                if (!string.IsNullOrEmpty(sha))
+                {
+                    result.Add(new GitHubCommit { Sha = sha, Message = message, CommitDate = commitDate, Author = author, Url = htmlUrl });
+                }
+            }
+            _logger.LogInformation("Found {Count} commits on branch {Branch} in repo {Owner}/{Repo}", result.Count, branch, owner, repo);
+            return result;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error getting recent commits on branch {Branch} in repo {Owner}/{Repo}", branch, owner, repo);
             return new List<GitHubCommit>();
         }
     }
@@ -10214,12 +10459,12 @@ release.properties
         {
             _logger.LogInformation("🔗 [GITHUB WEBHOOK] Creating webhook for {Owner}/{Repo}", owner, repo);
 
-            // Step B: Create webhook with pull_request events only
+            // Step B: Create webhook with pull_request, push, and deployment_status events
             var webhookPayload = new
             {
                 name = "web",
                 active = true,
-                events = new[] { "pull_request" },
+                events = new[] { "pull_request", "push", "deployment_status" },
                 config = new
                 {
                     url = webhookUrl,
@@ -10606,6 +10851,22 @@ public class CreateRepositoryResponse
     public string? GitHubPagesUrl { get; set; }
     public bool GitHubPagesEnabled { get; set; }
     public bool InitialCommitCreated { get; set; }
+}
+
+/// <summary>Repository invitation (pending) from GET /repos/{owner}/{repo}/invitations</summary>
+public class GitHubRepoInvitation
+{
+    public long Id { get; set; }
+    public string InviteeLogin { get; set; } = string.Empty;
+}
+
+/// <summary>Result of resending a collaborator invitation</summary>
+public class ResendInvitationResult
+{
+    public bool Success { get; set; }
+    public bool InvitationDeleted { get; set; }
+    public bool NewInvitationSent { get; set; }
+    public string? Message { get; set; }
 }
 
 /// <summary>

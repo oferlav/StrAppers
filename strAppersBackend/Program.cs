@@ -87,9 +87,12 @@ builder.Services.AddDbContext<ApplicationDbContext>(options =>
 // Add AI services
 builder.Services.AddScoped<IAIService, AIService>();
 builder.Services.AddScoped<IDesignDocumentService, DesignDocumentService>();
+builder.Services.AddScoped<IChatCompletionService, ChatCompletionService>();
 
 // Add Trello services
 builder.Services.AddScoped<ITrelloService, TrelloService>();
+builder.Services.AddScoped<ITrelloSprintMergeService, TrelloSprintMergeService>();
+builder.Services.AddScoped<IStudentTeamBuilderService, StudentTeamBuilderService>();
 
 // Add Microsoft Graph services
 builder.Services.AddScoped<IMicrosoftGraphService, MicrosoftGraphService>();
@@ -101,91 +104,48 @@ builder.Services.AddScoped<IGmailService, GmailService>();
 // Add SMTP email service
 builder.Services.AddScoped<ISmtpEmailService, SmtpEmailService>();
 
+// Shared SSL callback: accept all certificate errors for GitHub (UntrustedRoot, corporate proxy, VM restart)
+// so GitHub API calls work reliably in restricted networks
+static bool GitHubSslValidation(HttpRequestMessage message, System.Security.Cryptography.X509Certificates.X509Certificate2? cert,
+    System.Security.Cryptography.X509Certificates.X509Chain? chain, System.Net.Security.SslPolicyErrors sslPolicyErrors)
+{
+    if (sslPolicyErrors == System.Net.Security.SslPolicyErrors.None) return true;
+    if (message.RequestUri != null &&
+        (message.RequestUri.Host.Contains("github.com", StringComparison.OrdinalIgnoreCase) ||
+         message.RequestUri.Host.Contains("api.github.com", StringComparison.OrdinalIgnoreCase)))
+        return true; // Accept UntrustedRoot / corporate proxy / chain errors for GitHub
+    return false;
+}
+
 // Add GitHub validation service with HttpClient configuration
-// Configure HttpClient for GitHubService with SSL certificate validation handler
-// This handles certificate chain validation issues that can occur after VM restarts
-builder.Services.AddHttpClient<GitHubService>(client =>
-{
-    client.Timeout = TimeSpan.FromMinutes(5);
-})
-.ConfigurePrimaryHttpMessageHandler(() =>
-{
-    var handler = new HttpClientHandler();
-    
-    // Handle certificate chain validation issues that can occur after VM restarts
-    // when intermediate certificates might not be fully loaded in the certificate store
-    handler.ServerCertificateCustomValidationCallback = (message, cert, chain, sslPolicyErrors) =>
+builder.Services.AddHttpClient<GitHubService>(client => client.Timeout = TimeSpan.FromMinutes(5))
+    .ConfigurePrimaryHttpMessageHandler(() =>
     {
-        // If no errors, accept the certificate
-        if (sslPolicyErrors == System.Net.Security.SslPolicyErrors.None)
-        {
-            return true;
-        }
-        
-        // For GitHub API, we can be more lenient with chain errors after VM restart
-        // This is safe because we're connecting to api.github.com (known trusted domain)
-        if (sslPolicyErrors == System.Net.Security.SslPolicyErrors.RemoteCertificateChainErrors)
-        {
-            // Check if we're connecting to GitHub
-            if (message.RequestUri != null && 
-                (message.RequestUri.Host.Contains("github.com", StringComparison.OrdinalIgnoreCase) || 
-                 message.RequestUri.Host.Contains("api.github.com", StringComparison.OrdinalIgnoreCase)))
-            {
-                // Accept chain errors for GitHub - this is often due to intermediate certs
-                // not being in the store immediately after VM restart
-                return true;
-            }
-        }
-        
-        // Reject other errors (name mismatches, etc.)
-        return false;
-    };
-    
-    return handler;
-});
+        var handler = new HttpClientHandler();
+        handler.ServerCertificateCustomValidationCallback = GitHubSslValidation;
+        return handler;
+    });
 
 // Register GitHubService interface (AddHttpClient already registered GitHubService with configured HttpClient)
 builder.Services.AddScoped<IGitHubService>(sp => sp.GetRequiredService<GitHubService>());
 
-// Configure HttpClient for DeploymentController with SSL certificate validation handler
-// This handles certificate chain validation issues when connecting to GitHub API
-builder.Services.AddHttpClient("DeploymentController", client =>
-{
-    client.Timeout = TimeSpan.FromMinutes(5);
-})
-.ConfigurePrimaryHttpMessageHandler(() =>
-{
-    var handler = new HttpClientHandler();
-    
-    // Handle certificate chain validation issues that can occur after VM restarts
-    handler.ServerCertificateCustomValidationCallback = (message, cert, chain, sslPolicyErrors) =>
+// Named client "GitHub" for MentorController and others that call GitHub API directly (same SSL handling)
+builder.Services.AddHttpClient("GitHub", client => client.Timeout = TimeSpan.FromMinutes(5))
+    .ConfigurePrimaryHttpMessageHandler(() =>
     {
-        // If no errors, accept the certificate
-        if (sslPolicyErrors == System.Net.Security.SslPolicyErrors.None)
-        {
-            return true;
-        }
-        
-        // For GitHub API, we can be more lenient with chain errors after VM restart
-        if (sslPolicyErrors == System.Net.Security.SslPolicyErrors.RemoteCertificateChainErrors)
-        {
-            // Check if we're connecting to GitHub
-            if (message.RequestUri != null && 
-                (message.RequestUri.Host.Contains("github.com", StringComparison.OrdinalIgnoreCase) || 
-                 message.RequestUri.Host.Contains("api.github.com", StringComparison.OrdinalIgnoreCase)))
-            {
-                // Accept chain errors for GitHub - this is often due to intermediate certs
-                // not being in the store immediately after VM restart
-                return true;
-            }
-        }
-        
-        // Reject other errors (name mismatches, etc.)
-        return false;
-    };
-    
-    return handler;
-});
+        var handler = new HttpClientHandler();
+        handler.ServerCertificateCustomValidationCallback = GitHubSslValidation;
+        return handler;
+    });
+
+// Configure HttpClient for DeploymentController with same SSL handling for GitHub
+builder.Services.AddHttpClient("DeploymentController", client => client.Timeout = TimeSpan.FromMinutes(5))
+    .ConfigurePrimaryHttpMessageHandler(() =>
+    {
+        var handler = new HttpClientHandler();
+        handler.ServerCertificateCustomValidationCallback = GitHubSslValidation;
+        return handler;
+    });
 
 // Add Mentor Intent Detection service
 builder.Services.AddScoped<IMentorIntentService, MentorIntentService>();

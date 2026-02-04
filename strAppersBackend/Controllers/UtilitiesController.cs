@@ -2,6 +2,7 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Storage;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Options;
 using strAppersBackend.Data;
 using strAppersBackend.Models;
 using strAppersBackend.Services;
@@ -21,6 +22,9 @@ public class UtilitiesController : ControllerBase
     private readonly IConfiguration _configuration;
     private readonly IHttpClientFactory _httpClientFactory;
     private readonly IGitHubService _gitHubService;
+    private readonly ITrelloService _trelloService;
+    private readonly IAIService _aiService;
+    private readonly IOptions<TestingConfig> _testingConfig;
 
     public UtilitiesController(
         ApplicationDbContext context, 
@@ -28,7 +32,10 @@ public class UtilitiesController : ControllerBase
         IPasswordHasherService passwordHasher, 
         IConfiguration configuration,
         IHttpClientFactory httpClientFactory,
-        IGitHubService gitHubService)
+        IGitHubService gitHubService,
+        ITrelloService trelloService,
+        IAIService aiService,
+        IOptions<TestingConfig> testingConfig)
     {
         _context = context;
         _logger = logger;
@@ -36,6 +43,9 @@ public class UtilitiesController : ControllerBase
         _configuration = configuration;
         _httpClientFactory = httpClientFactory;
         _gitHubService = gitHubService;
+        _trelloService = trelloService;
+        _aiService = aiService;
+        _testingConfig = testingConfig;
     }
 
     /// <summary>
@@ -971,6 +981,85 @@ public class UtilitiesController : ControllerBase
         }
     }
 
+    /// <summary>
+    /// Force GitHub to send a new collaborator invitation email (e.g. when the user never approved the original).
+    /// Cancels any pending invitation for the user, then re-adds them so GitHub sends a fresh email.
+    /// </summary>
+    [HttpPost("github/resend-invitation")]
+    public async Task<ActionResult<object>> ResendGitHubInvitation([FromBody] ResendGitHubInvitationRequest request)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(request.GitHubUsername))
+            {
+                return BadRequest(new { Success = false, Message = "GitHubUsername is required (e.g. oferlav)" });
+            }
+
+            string owner;
+            string repo;
+            const string defaultOwner = "skill-in-projects";
+
+            if (!string.IsNullOrWhiteSpace(request.BoardId) && !string.IsNullOrWhiteSpace(request.RepoType))
+            {
+                // BoardId + RepoType: frontend repo = {boardId}, backend repo = backend_{boardId}
+                var boardId = request.BoardId.Trim();
+                var repoType = request.RepoType.Trim().ToLowerInvariant();
+                owner = defaultOwner;
+                repo = repoType == "frontend"
+                    ? boardId
+                    : (repoType == "backend" ? "backend_" + boardId : boardId);
+                if (repoType != "frontend" && repoType != "backend")
+                {
+                    return BadRequest(new { Success = false, Message = "RepoType must be 'Frontend' or 'Backend' when using BoardId." });
+                }
+            }
+            else if (!string.IsNullOrWhiteSpace(request.RepositoryUrl))
+            {
+                var uri = new Uri(request.RepositoryUrl);
+                var pathParts = uri.AbsolutePath.TrimStart('/').Split('/');
+                if (pathParts.Length < 2)
+                {
+                    return BadRequest(new { Success = false, Message = "RepositoryUrl must be a valid GitHub URL (e.g. https://github.com/skill-in-projects/697e00d2f9cb8d26a7271afa for frontend or .../backend_697e00d2f9cb8d26a7271afa for backend)" });
+                }
+                owner = pathParts[0];
+                repo = pathParts[1].Replace(".git", "");
+            }
+            else if (!string.IsNullOrWhiteSpace(request.Owner) && !string.IsNullOrWhiteSpace(request.Repository))
+            {
+                owner = request.Owner.Trim();
+                repo = request.Repository.Trim();
+            }
+            else
+            {
+                return BadRequest(new { Success = false, Message = "Provide one of: (1) BoardId + RepoType (e.g. BoardId: 697e00d2f9cb8d26a7271afa, RepoType: Frontend), (2) RepositoryUrl, or (3) Owner + Repository." });
+            }
+
+            var accessToken = _configuration["GitHub:AccessToken"];
+            if (string.IsNullOrEmpty(accessToken))
+            {
+                return StatusCode(500, new { Success = false, Message = "GitHub access token not configured" });
+            }
+
+            _logger.LogInformation("[UTILITY] Resending GitHub invitation for {User} to {Owner}/{Repo}", request.GitHubUsername, owner, repo);
+
+            var result = await _gitHubService.ResendCollaboratorInvitationAsync(owner, repo, request.GitHubUsername.Trim(), accessToken);
+
+            return Ok(new
+            {
+                Success = result.Success,
+                Message = result.Message,
+                InvitationDeleted = result.InvitationDeleted,
+                NewInvitationSent = result.NewInvitationSent,
+                Repository = $"{owner}/{repo}"
+            });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "[UTILITY] Error resending GitHub invitation: {Message}", ex.Message);
+            return StatusCode(500, new { Success = false, Message = $"Error: {ex.Message}" });
+        }
+    }
+
     private string GenerateRailwayDeploymentWorkflowAtRoot(string programmingLanguage)
     {
         // Build commands vary by programming language (files are at root, no backend/ directory)
@@ -1454,6 +1543,688 @@ jobs:
             });
         }
     }
+
+    /// <summary>
+    /// Generates Trello board creation JSON using the AI service (same flow as POST api/Boards/use/create) and stores it in Projects.TrelloBoardJson.
+    /// When Trello:UseDBProjectBoard is true, board create will use this saved JSON instead of calling AI.
+    /// </summary>
+    [HttpPost("trello/store-board-json")]
+    public async Task<ActionResult<object>> StoreTrelloBoardJson([FromBody] StoreTrelloBoardJsonRequest request)
+    {
+        try
+        {
+            if (request == null || request.ProjectId <= 0)
+            {
+                return BadRequest(new { Success = false, Message = "ProjectId is required and must be greater than 0." });
+            }
+
+            var project = await _context.Projects.FirstOrDefaultAsync(p => p.Id == request.ProjectId);
+            if (project == null)
+            {
+                return NotFound(new { Success = false, Message = $"Project {request.ProjectId} not found." });
+            }
+
+            var projectLengthWeeks = _configuration.GetValue<int>("BusinessLogicConfig:ProjectLengthInWeeks", 12);
+            var sprintLengthWeeks = _configuration.GetValue<int>("BusinessLogicConfig:SprintLengthInWeeks", 1);
+
+            List<RoleInfo> roleGroups;
+            List<StudentInfo> studentsForAi;
+
+            if (request.StudentIds != null && request.StudentIds.Any())
+            {
+                var students = await _context.Students
+                    .Include(s => s.StudentRoles)
+                    .ThenInclude(sr => sr.Role)
+                    .Where(s => request.StudentIds.Contains(s.Id) && s.IsAvailable)
+                    .ToListAsync();
+
+                if (students.Count != request.StudentIds.Count)
+                {
+                    return BadRequest(new
+                    {
+                        Success = false,
+                        Message = "One or more students not found or not available.",
+                        Hint = "To generate a board JSON template for all roles (PM, Backend, Frontend, UI/UX, Marketing), omit studentIds or send studentIds: []."
+                    });
+                }
+
+                roleGroups = students
+                    .Where(s => s.StudentRoles != null)
+                    .SelectMany(s => s.StudentRoles!)
+                    .Where(sr => sr?.Role != null)
+                    .GroupBy(sr => new { sr!.RoleId, sr.Role!.Name })
+                    .Select(g => new RoleInfo
+                    {
+                        RoleId = g.Key.RoleId,
+                        RoleName = g.Key.Name,
+                        StudentCount = g.Count()
+                    })
+                    .ToList();
+
+                studentsForAi = students.Select(s => new StudentInfo
+                {
+                    Id = s.Id,
+                    Name = $"{s.FirstName} {s.LastName}",
+                    Email = s.Email,
+                    Roles = s.StudentRoles?.Where(sr => sr?.Role != null).Select(sr => sr!.Role!.Name).ToList() ?? new List<string>()
+                }).ToList();
+            }
+            else
+            {
+                // Generate template for ALL roles (FE, BE, UI/UX, PM, Marketing) - no studentIds
+                var allRoleNames = new[] { "Product Manager", "Backend Developer", "Frontend Developer", "UI/UX Designer", "Marketing" };
+                var roles = await _context.Roles
+                    .Where(r => r.IsActive && allRoleNames.Contains(r.Name))
+                    .ToListAsync();
+
+                roleGroups = roles.Select(r => new RoleInfo { RoleId = r.Id, RoleName = r.Name, StudentCount = 1 }).ToList();
+                studentsForAi = roles.Select((r, i) => new StudentInfo
+                {
+                    Id = -(i + 1),
+                    Name = $"Template {r.Name}",
+                    Email = $"template-{r.Id}@template.local",
+                    Roles = new List<string> { r.Name }
+                }).ToList();
+
+                if (roleGroups.Count == 0)
+                {
+                    return BadRequest(new { Success = false, Message = "No template roles found in database. Ensure Roles exist for: Product Manager, Backend Developer, Frontend Developer, UI/UX Designer, Marketing." });
+                }
+
+                _logger.LogInformation("Generating Trello board JSON template for all roles: {Roles}", string.Join(", ", roleGroups.Select(r => r.RoleName)));
+            }
+
+            var projectModules = await _context.ProjectModules
+                .Where(pm => pm.ProjectId == request.ProjectId && pm.ModuleType != 3)
+                .OrderBy(pm => pm.Sequence)
+                .Select(pm => new ProjectModuleInfo
+                {
+                    Id = pm.Id,
+                    Title = pm.Title,
+                    Description = pm.Description
+                })
+                .ToListAsync();
+
+            var sprintPlanRequest = new SprintPlanningRequest
+            {
+                ProjectId = request.ProjectId,
+                ProjectLengthWeeks = projectLengthWeeks,
+                SprintLengthWeeks = sprintLengthWeeks,
+                StartDate = DateTime.UtcNow,
+                SystemDesign = project.SystemDesign,
+                TeamRoles = roleGroups,
+                ProjectModules = projectModules,
+                Students = studentsForAi
+            };
+
+            SprintPlanningResponse? sprintPlanResponse;
+            if (_testingConfig.Value.SkipAIService)
+            {
+                return BadRequest(new { Success = false, Message = "Testing:SkipAIService is true. Set it to false to generate Trello board JSON via AI." });
+            }
+
+            sprintPlanResponse = await _aiService.GenerateSprintPlanAsync(sprintPlanRequest);
+            if (sprintPlanResponse == null || sprintPlanResponse.SprintPlan == null)
+            {
+                _logger.LogWarning("AI returned null sprint plan for project {ProjectId}", request.ProjectId);
+                return StatusCode(500, new { Success = false, Message = "AI service did not return a valid sprint plan." });
+            }
+
+            var trelloSprintPlan = new TrelloSprintPlan
+            {
+                Lists = sprintPlanResponse.SprintPlan.Sprints?.Select(s => new TrelloList
+                {
+                    Name = s.Name,
+                    Position = s.SprintNumber
+                }).ToList() ?? new List<TrelloList>(),
+                Cards = sprintPlanResponse.SprintPlan.Sprints?.SelectMany(s => s.Tasks?.Select(t => new TrelloCard
+                {
+                    Name = t.Title,
+                    Description = t.Description,
+                    ListName = s.Name,
+                    RoleName = t.RoleName,
+                    DueDate = s.EndDate,
+                    Priority = t.Priority,
+                    EstimatedHours = t.EstimatedHours,
+                    Status = t.Status ?? "To Do",
+                    Risk = t.Risk ?? "Medium",
+                    ModuleId = t.ModuleId ?? string.Empty,
+                    CardId = t.CardId ?? string.Empty,
+                    Dependencies = t.Dependencies ?? new List<string>(),
+                    Branched = t.Branched,
+                    ChecklistItems = t.ChecklistItems ?? new List<string>()
+                }) ?? new List<TrelloCard>()).ToList() ?? new List<TrelloCard>(),
+                TotalSprints = sprintPlanResponse.SprintPlan.TotalSprints,
+                TotalTasks = sprintPlanResponse.SprintPlan.TotalTasks,
+                EstimatedWeeks = sprintPlanResponse.SprintPlan.EstimatedWeeks
+            };
+
+            var teamMembers = request.StudentIds != null && request.StudentIds.Any()
+                ? (await _context.Students
+                    .Include(s => s.StudentRoles)
+                    .ThenInclude(sr => sr.Role)
+                    .Where(s => request.StudentIds.Contains(s.Id))
+                    .ToListAsync())
+                    .Select(s => new TrelloTeamMember
+                    {
+                        Email = s.Email,
+                        FirstName = s.FirstName,
+                        LastName = s.LastName,
+                        RoleId = s.StudentRoles?.FirstOrDefault()?.RoleId ?? 0,
+                        RoleName = s.StudentRoles?.FirstOrDefault()?.Role?.Name ?? "Team Member"
+                    }).ToList()
+                : roleGroups.Select(r => new TrelloTeamMember
+                {
+                    Email = $"template-{r.RoleId}@template.local",
+                    FirstName = "Template",
+                    LastName = r.RoleName,
+                    RoleId = r.RoleId,
+                    RoleName = r.RoleName
+                }).ToList();
+
+            var trelloRequest = new TrelloProjectCreationRequest
+            {
+                ProjectId = request.ProjectId,
+                ProjectTitle = project.Title,
+                ProjectDescription = project.Description,
+                StudentEmails = teamMembers.Select(m => m.Email).ToList(),
+                ProjectLengthWeeks = projectLengthWeeks,
+                SprintLengthWeeks = sprintLengthWeeks,
+                TeamMembers = teamMembers,
+                SprintPlan = trelloSprintPlan
+            };
+
+            var json = JsonSerializer.Serialize(trelloRequest);
+            project.TrelloBoardJson = json;
+            project.UpdatedAt = DateTime.UtcNow;
+            await _context.SaveChangesAsync();
+
+            _logger.LogInformation("Stored TrelloBoardJson for project {ProjectId} ({Length} chars)", request.ProjectId, json.Length);
+            return Ok(new
+            {
+                Success = true,
+                Message = $"Trello board JSON stored for project {request.ProjectId}. Use POST api/Boards/use/create with ProjectId and StudentIds to create the board (when Trello:UseDBProjectBoard is true). Cards for roles not in the team are filtered out automatically.",
+                ProjectId = request.ProjectId,
+                JsonLength = json.Length
+            });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error storing TrelloBoardJson for project {ProjectId}", request?.ProjectId);
+            return StatusCode(500, new { Success = false, Message = ex.Message });
+        }
+    }
+
+    /// <summary>
+    /// Override a sprint (Trello list) in the stored Projects.TrelloBoardJson: set Description and Checklist for the target sprint, then save JSON back to DB.
+    /// Optionally uses AI to parse/normalize checklist text into Trello-friendly items.
+    /// Use CheckListText (one string with newlines) to avoid JSON escaping: in JSON use \n; or use POST trello/sprint-override-form for literal line breaks.
+    /// </summary>
+    [HttpPost("trello/sprint-override")]
+    public async Task<ActionResult<object>> TrelloSprintOverride([FromBody] SprintOverrideRequest? request)
+    {
+        try
+        {
+            if (request == null)
+            {
+                return BadRequest(new
+                {
+                    Success = false,
+                    Message = "Request body is required. For checklist with line breaks use checkListText (escape newlines as \\n in JSON) or POST api/Utilities/trello/sprint-override-form with form-data."
+                });
+            }
+            if (request.ProjectId <= 0)
+            {
+                return BadRequest(new { Success = false, Message = "ProjectId is required and must be greater than 0." });
+            }
+            if (request.SprintNumber <= 0)
+            {
+                return BadRequest(new { Success = false, Message = "SprintNumber is required and must be greater than 0." });
+            }
+
+            _logger.LogInformation("[SprintOverride] Request: ProjectId={ProjectId}, SprintNumber={SprintNumber}, CheckListText length={CheckListTextLen}, CheckList count={CheckListCount}, RoleName={RoleName}, Description length={DescLen}",
+                request.ProjectId, request.SprintNumber,
+                request.CheckListText?.Length ?? 0,
+                request.CheckList?.Count ?? 0,
+                request.RoleName ?? "(null)",
+                request.Description?.Length ?? 0);
+
+            var project = await _context.Projects.FirstOrDefaultAsync(p => p.Id == request.ProjectId);
+            if (project == null)
+            {
+                return NotFound(new { Success = false, Message = $"Project {request.ProjectId} not found." });
+            }
+            if (string.IsNullOrWhiteSpace(project.TrelloBoardJson))
+            {
+                return BadRequest(new { Success = false, Message = "Project has no TrelloBoardJson. Use POST api/Utilities/trello/store-board-json first." });
+            }
+
+            TrelloProjectCreationRequest? trelloRequest;
+            try
+            {
+                trelloRequest = JsonSerializer.Deserialize<TrelloProjectCreationRequest>(project.TrelloBoardJson);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to deserialize TrelloBoardJson for project {ProjectId}", request.ProjectId);
+                return BadRequest(new { Success = false, Message = "Invalid TrelloBoardJson in project." });
+            }
+
+            if (trelloRequest?.SprintPlan?.Lists == null || !trelloRequest.SprintPlan.Lists.Any())
+            {
+                return BadRequest(new { Success = false, Message = "TrelloBoardJson has no Lists." });
+            }
+
+            var list = trelloRequest.SprintPlan.Lists.FirstOrDefault(l =>
+                l.Position == request.SprintNumber ||
+                string.Equals(l.Name, $"Sprint {request.SprintNumber}", StringComparison.OrdinalIgnoreCase));
+            if (list == null)
+            {
+                list = trelloRequest.SprintPlan.Lists.ElementAtOrDefault(request.SprintNumber - 1);
+            }
+            if (list == null)
+            {
+                return NotFound(new { Success = false, Message = $"Sprint {request.SprintNumber} not found in TrelloBoardJson (Lists count: {trelloRequest.SprintPlan.Lists.Count})." });
+            }
+
+            _logger.LogInformation("[SprintOverride] Resolved list: Name={ListName}, Position={Position}", list.Name, list.Position);
+
+            List<string>? checklistItems = null;
+            if (request.CheckList != null && request.CheckList.Any())
+            {
+                checklistItems = new List<string>(request.CheckList);
+                _logger.LogInformation("[SprintOverride] Built checklist from CheckList: {Count} items (first: {First})", checklistItems.Count, checklistItems.FirstOrDefault() ?? "(none)");
+            }
+            else if (!string.IsNullOrWhiteSpace(request.CheckListText))
+            {
+                checklistItems = request.CheckListText!
+                    .Split(new[] { "\r\n", "\n", "\r" }, StringSplitOptions.RemoveEmptyEntries)
+                    .Select(s => s.Trim())
+                    .Where(s => s.Length > 0)
+                    .ToList();
+                _logger.LogInformation("[SprintOverride] Built checklist from CheckListText: {Count} items (first: {First})", checklistItems.Count, checklistItems.FirstOrDefault() ?? "(none)");
+            }
+            if (checklistItems == null || !checklistItems.Any())
+            {
+                _logger.LogWarning("[SprintOverride] No checklist items to apply (CheckListText empty/null and CheckList empty/null or empty).");
+            }
+            if (checklistItems != null && checklistItems.Any())
+            {
+                var useAi = request.UseAiToParseCheckList ?? true;
+                if (useAi && checklistItems.Count == 1 && (checklistItems[0].Length > 150 || checklistItems[0].Contains('\n')))
+                {
+                    var parsed = await ParseChecklistWithAiAsync(checklistItems[0]);
+                    if (parsed != null && parsed.Any())
+                    {
+                        checklistItems = parsed;
+                        _logger.LogInformation("AI parsed checklist into {Count} items for Sprint {SprintNumber}", checklistItems.Count, request.SprintNumber);
+                    }
+                }
+                else if (useAi && checklistItems.Any(s => s.Length > 100))
+                {
+                    var normalized = await NormalizeChecklistWithAiAsync(checklistItems);
+                    if (normalized != null && normalized.Any())
+                    {
+                        checklistItems = normalized;
+                        _logger.LogInformation("AI normalized checklist to {Count} Trello-friendly items for Sprint {SprintNumber}", checklistItems.Count, request.SprintNumber);
+                    }
+                }
+            }
+
+            var hasChecklist = checklistItems != null && checklistItems.Any();
+            var roleNameProvided = !string.IsNullOrWhiteSpace(request.RoleName);
+            int cardsUpdated = 0;
+
+            _logger.LogInformation("[SprintOverride] hasChecklist={HasChecklist}, roleNameProvided={RoleNameProvided}, updating {Target}", hasChecklist, roleNameProvided, roleNameProvided ? "cards" : "list");
+
+            if (roleNameProvided)
+            {
+                var cards = trelloRequest.SprintPlan.Cards ?? new List<TrelloCard>();
+                var matchingCards = cards.Where(c =>
+                    string.Equals(c.ListName, list.Name, StringComparison.OrdinalIgnoreCase) &&
+                    (string.Equals(c.RoleName, request.RoleName, StringComparison.OrdinalIgnoreCase) ||
+                     (c.Labels != null && c.Labels.Any(l => string.Equals(l, request.RoleName, StringComparison.OrdinalIgnoreCase))))).ToList();
+                _logger.LogInformation("[SprintOverride] Matching cards for ListName={ListName}, RoleName={RoleName}: {Count} of {Total}", list.Name, request.RoleName, matchingCards.Count, cards.Count);
+                foreach (var card in matchingCards)
+                {
+                    if (!string.IsNullOrEmpty(request.Name))
+                    {
+                        card.Name = request.Name;
+                    }
+                    if (request.Description != null)
+                    {
+                        card.Description = request.Description;
+                    }
+                    if (checklistItems != null)
+                    {
+                        card.ChecklistItems = new List<string>(checklistItems);
+                    }
+                    cardsUpdated++;
+                }
+                _logger.LogInformation("[SprintOverride] Updated {Count} cards with RoleName/label '{RoleName}' in Sprint {SprintNumber}", cardsUpdated, request.RoleName, request.SprintNumber);
+            }
+            else
+            {
+                if (request.Description != null)
+                {
+                    list.Description = request.Description;
+                    _logger.LogInformation("[SprintOverride] Set list Description for Sprint {SprintNumber} (list: {ListName})", request.SprintNumber, list.Name);
+                }
+                if (checklistItems != null)
+                {
+                    list.ChecklistItems = checklistItems;
+                    _logger.LogInformation("[SprintOverride] Set list ChecklistItems for Sprint {SprintNumber} (list: {ListName}), count={Count}", request.SprintNumber, list.Name, checklistItems.Count);
+                }
+            }
+
+            var newJson = JsonSerializer.Serialize(trelloRequest);
+            _logger.LogInformation("[SprintOverride] Serialized TrelloBoardJson length: {Len} (before save)", newJson.Length);
+            project.TrelloBoardJson = newJson;
+            project.UpdatedAt = DateTime.UtcNow;
+            await _context.SaveChangesAsync();
+            _logger.LogInformation("[SprintOverride] SaveChangesAsync completed. Sprint override saved for project {ProjectId}, sprint {SprintNumber}", request.ProjectId, request.SprintNumber);
+            return Ok(new
+            {
+                Success = true,
+                Message = roleNameProvided
+                    ? $"Sprint {request.SprintNumber}: updated {cardsUpdated} card(s) with role/label '{request.RoleName}'."
+                    : $"Sprint {request.SprintNumber} updated in TrelloBoardJson.",
+                ProjectId = request.ProjectId,
+                SprintNumber = request.SprintNumber,
+                ListName = list.Name,
+                RoleName = request.RoleName,
+                CardsUpdated = roleNameProvided ? cardsUpdated : (int?)null,
+                NameUpdated = !string.IsNullOrEmpty(request.Name),
+                DescriptionUpdated = request.Description != null,
+                ChecklistUpdated = hasChecklist,
+                ChecklistItemCount = checklistItems?.Count ?? (roleNameProvided ? null : list.ChecklistItems?.Count)
+            });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error in sprint-override for project {ProjectId}", request?.ProjectId);
+            return StatusCode(500, new { Success = false, Message = ex.Message });
+        }
+    }
+
+    /// <summary>
+    /// Same as sprint-override but accepts application/x-www-form-urlencoded or multipart/form-data.
+    /// Use this when CheckListText contains literal line breaks (e.g. from a textarea); no JSON escaping needed.
+    /// </summary>
+    [HttpPost("trello/sprint-override-form")]
+    [Consumes("application/x-www-form-urlencoded", "multipart/form-data")]
+    public async Task<ActionResult<object>> TrelloSprintOverrideForm([FromForm] SprintOverrideFormRequest? form)
+    {
+        if (form == null)
+        {
+            return BadRequest(new { Success = false, Message = "Form data is required." });
+        }
+        var request = new SprintOverrideRequest
+        {
+            ProjectId = form.ProjectId,
+            SprintNumber = form.SprintNumber,
+            Name = form.Name,
+            Description = form.Description,
+            CheckListText = form.CheckListText,
+            RoleName = form.RoleName,
+            UseAiToParseCheckList = form.UseAiToParseCheckList
+        };
+        return await TrelloSprintOverride(request);
+    }
+
+    // PromptType: SprintPlanning — Keep (inline; small single-block prompt for checklist parsing)
+    private async Task<List<string>?> ParseChecklistWithAiAsync(string text)
+    {
+        var prompt = $@"Convert the following into a JSON array of short checklist item names suitable for Trello (each under 100 characters).
+Return ONLY a valid JSON array of strings, e.g. [""Item 1"", ""Item 2""]. No other text.
+
+Text:
+{text}";
+        var response = await _aiService.GenerateTextResponseAsync(prompt);
+        if (string.IsNullOrWhiteSpace(response)) return null;
+        try
+        {
+            var cleaned = response.Trim();
+            if (cleaned.StartsWith("```")) cleaned = cleaned.Replace("```json", "").Replace("```", "").Trim();
+            var list = JsonSerializer.Deserialize<List<string>>(cleaned);
+            return list?.Where(s => !string.IsNullOrWhiteSpace(s)).Select(s => s.Trim().Length > 100 ? s.Trim().Substring(0, 97) + "..." : s.Trim()).ToList();
+        }
+        catch { return null; }
+    }
+
+    // PromptType: SprintPlanning — Keep (inline; small single-block prompt for checklist normalization)
+    private async Task<List<string>?> NormalizeChecklistWithAiAsync(List<string> items)
+    {
+        var input = JsonSerializer.Serialize(items);
+        var prompt = $@"Normalize these checklist items into a JSON array of short Trello check item names (each under 100 characters). Keep the same meaning and order. Return ONLY a valid JSON array of strings.
+
+Items: {input}";
+        var response = await _aiService.GenerateTextResponseAsync(prompt);
+        if (string.IsNullOrWhiteSpace(response)) return null;
+        try
+        {
+            var cleaned = response.Trim();
+            if (cleaned.StartsWith("```")) cleaned = cleaned.Replace("```json", "").Replace("```", "").Trim();
+            var list = JsonSerializer.Deserialize<List<string>>(cleaned);
+            return list?.Where(s => !string.IsNullOrWhiteSpace(s)).Select(s => s.Trim().Length > 100 ? s.Trim().Substring(0, 97) + "..." : s.Trim()).ToList();
+        }
+        catch { return null; }
+    }
+
+    /// <summary>
+    /// Utility endpoint to remove all guests from ALL Trello boards in the workspace.
+    /// This identifies guests by comparing board members with workspace members.
+    /// Anyone on a board who is NOT a workspace member is considered a guest.
+    /// WARNING: This is a destructive operation that will remove guests from all boards.
+    /// </summary>
+    [HttpPost("trello/remove-all-guests")]
+    public async Task<ActionResult<object>> RemoveAllTrelloGuests([FromBody] RemoveAllGuestsRequest? request = null)
+    {
+        try
+        {
+            var confirmation = request?.Confirmation ?? false;
+            if (!confirmation)
+            {
+                return BadRequest(new
+                {
+                    Success = false,
+                    Message = "Confirmation required. Set 'confirmation' to true in the request body to proceed with removing all guests."
+                });
+            }
+
+            _logger.LogWarning("🗑️ [TRELLO] Starting removal of all guests from all boards. This is a destructive operation!");
+
+            var trelloApiKey = _configuration["Trello:ApiKey"];
+            var trelloApiToken = _configuration["Trello:ApiToken"];
+
+            if (string.IsNullOrWhiteSpace(trelloApiKey) || string.IsNullOrWhiteSpace(trelloApiToken))
+            {
+                return BadRequest(new { Success = false, Message = "Trello API credentials not configured" });
+            }
+
+            using var httpClient = _httpClientFactory.CreateClient();
+            var stats = new RemoveAllGuestsStats();
+            var errors = new List<string>();
+
+            // Step 1: Get all boards in the workspace
+            _logger.LogInformation("📋 [TRELLO] Getting all boards");
+            var boardsResult = await _trelloService.ListAllBoardsAsync();
+            var boardsJson = JsonSerializer.Serialize(boardsResult);
+            var boardsElement = JsonSerializer.Deserialize<JsonElement>(boardsJson);
+
+            var boards = new List<(string Id, string Name)>();
+            if (boardsElement.TryGetProperty("Boards", out var boardsProp) && boardsProp.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var board in boardsProp.EnumerateArray())
+                {
+                    var boardId = board.TryGetProperty("Id", out var idProp) ? idProp.GetString() : null;
+                    var boardName = board.TryGetProperty("Name", out var nameProp) ? nameProp.GetString() : null;
+                    if (!string.IsNullOrEmpty(boardId) && !string.IsNullOrEmpty(boardName))
+                    {
+                        boards.Add((boardId, boardName));
+                    }
+                }
+            }
+
+            _logger.LogInformation("📋 [TRELLO] Found {Count} boards", boards.Count);
+            stats.TotalBoards = boards.Count;
+
+            // Step 2: Get all workspace members
+            _logger.LogInformation("👥 [TRELLO] Getting workspace members");
+            var workspaceMembers = new HashSet<string>(); // Set of member IDs who are workspace members
+
+            // Get user's organizations
+            var orgsUrl = $"https://api.trello.com/1/members/me/organizations?key={trelloApiKey}&token={trelloApiToken}";
+            var orgsResponse = await httpClient.GetAsync(orgsUrl);
+
+            if (orgsResponse.IsSuccessStatusCode)
+            {
+                var orgsContent = await orgsResponse.Content.ReadAsStringAsync();
+                var orgsData = JsonSerializer.Deserialize<JsonElement[]>(orgsContent);
+
+                foreach (var org in orgsData ?? Array.Empty<JsonElement>())
+                {
+                    var orgId = org.TryGetProperty("id", out var orgIdProp) ? orgIdProp.GetString() : null;
+                    if (string.IsNullOrEmpty(orgId))
+                        continue;
+
+                    // Get members of this organization/workspace
+                    var orgMembersUrl = $"https://api.trello.com/1/organizations/{orgId}/members?key={trelloApiKey}&token={trelloApiToken}";
+                    var orgMembersResponse = await httpClient.GetAsync(orgMembersUrl);
+
+                    if (orgMembersResponse.IsSuccessStatusCode)
+                    {
+                        var orgMembersContent = await orgMembersResponse.Content.ReadAsStringAsync();
+                        var orgMembersData = JsonSerializer.Deserialize<JsonElement[]>(orgMembersContent);
+
+                        foreach (var member in orgMembersData ?? Array.Empty<JsonElement>())
+                        {
+                            var memberId = member.TryGetProperty("id", out var memberIdProp) ? memberIdProp.GetString() : null;
+                            if (!string.IsNullOrEmpty(memberId))
+                            {
+                                workspaceMembers.Add(memberId);
+                            }
+                        }
+                    }
+                }
+            }
+
+            _logger.LogInformation("👥 [TRELLO] Found {Count} workspace members", workspaceMembers.Count);
+            stats.WorkspaceMembersCount = workspaceMembers.Count;
+
+            // Step 3: For each board, get members and remove guests
+            foreach (var (boardId, boardName) in boards)
+            {
+                try
+                {
+                    _logger.LogInformation("🔍 [TRELLO] Processing board: {BoardName} ({BoardId})", boardName, boardId);
+
+                    // Get board members
+                    var boardMembersUrl = $"https://api.trello.com/1/boards/{boardId}/members?key={trelloApiKey}&token={trelloApiToken}";
+                    var boardMembersResponse = await httpClient.GetAsync(boardMembersUrl);
+
+                    if (!boardMembersResponse.IsSuccessStatusCode)
+                    {
+                        var errorContent = await boardMembersResponse.Content.ReadAsStringAsync();
+                        var errorMsg = $"Failed to get members for board {boardName} ({boardId}): {boardMembersResponse.StatusCode} - {errorContent}";
+                        _logger.LogError("❌ [TRELLO] {Error}", errorMsg);
+                        errors.Add(errorMsg);
+                        stats.Errors++;
+                        continue;
+                    }
+
+                    var boardMembersContent = await boardMembersResponse.Content.ReadAsStringAsync();
+                    var boardMembersData = JsonSerializer.Deserialize<JsonElement[]>(boardMembersContent);
+
+                    var guestsToRemove = new List<(string MemberId, string Email, string FullName)>();
+
+                    foreach (var member in boardMembersData ?? Array.Empty<JsonElement>())
+                    {
+                        var memberId = member.TryGetProperty("id", out var memberIdProp) ? memberIdProp.GetString() : null;
+                        var email = member.TryGetProperty("email", out var emailProp) ? emailProp.GetString() : null;
+                        var fullName = member.TryGetProperty("fullName", out var nameProp) ? nameProp.GetString() : null;
+
+                        if (string.IsNullOrEmpty(memberId))
+                            continue;
+
+                        // If member is NOT in workspace members set, they are a guest
+                        if (!workspaceMembers.Contains(memberId))
+                        {
+                            guestsToRemove.Add((memberId, email ?? "unknown", fullName ?? "unknown"));
+                        }
+                    }
+
+                    _logger.LogInformation("👤 [TRELLO] Found {Count} guests on board {BoardName}", guestsToRemove.Count, boardName);
+                    stats.TotalGuestsFound += guestsToRemove.Count;
+
+                    // Step 4: Remove each guest from the board
+                    foreach (var (memberId, email, fullName) in guestsToRemove)
+                    {
+                        try
+                        {
+                            var removeUrl = $"https://api.trello.com/1/boards/{boardId}/members/{memberId}?key={trelloApiKey}&token={trelloApiToken}";
+                            _logger.LogWarning("🗑️ [TRELLO] Removing guest {FullName} ({Email}) from board {BoardName}", fullName, email, boardName);
+
+                            var removeResponse = await httpClient.DeleteAsync(removeUrl);
+
+                            if (removeResponse.IsSuccessStatusCode)
+                            {
+                                _logger.LogInformation("✅ [TRELLO] Successfully removed guest {FullName} ({Email}) from board {BoardName}", fullName, email, boardName);
+                                stats.GuestsRemoved++;
+                            }
+                            else
+                            {
+                                var errorContent = await removeResponse.Content.ReadAsStringAsync();
+                                var errorMsg = $"Failed to remove guest {fullName} ({email}) from board {boardName}: {removeResponse.StatusCode} - {errorContent}";
+                                _logger.LogError("❌ [TRELLO] {Error}", errorMsg);
+                                errors.Add(errorMsg);
+                                stats.Errors++;
+                            }
+
+                            // Small delay to avoid rate limiting
+                            await Task.Delay(200);
+                        }
+                        catch (Exception ex)
+                        {
+                            var errorMsg = $"Error removing guest {fullName} ({email}) from board {boardName}: {ex.Message}";
+                            _logger.LogError(ex, "❌ [TRELLO] {Error}", errorMsg);
+                            errors.Add(errorMsg);
+                            stats.Errors++;
+                        }
+                    }
+
+                    stats.BoardsProcessed++;
+                }
+                catch (Exception ex)
+                {
+                    var errorMsg = $"Error processing board {boardName} ({boardId}): {ex.Message}";
+                    _logger.LogError(ex, "❌ [TRELLO] {Error}", errorMsg);
+                    errors.Add(errorMsg);
+                    stats.Errors++;
+                }
+            }
+
+            _logger.LogWarning("✅ [TRELLO] Guest removal process completed. Guests removed: {Removed}, Errors: {Errors}", stats.GuestsRemoved, stats.Errors);
+
+            return Ok(new
+            {
+                Success = true,
+                Message = $"Guest removal process completed. {stats.GuestsRemoved} guest(s) removed from {stats.BoardsProcessed} board(s).",
+                Stats = stats,
+                Errors = errors.Any() ? errors : null
+            });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "❌ [TRELLO] Error during guest removal process");
+            return StatusCode(500, new
+            {
+                Success = false,
+                Message = $"An error occurred: {ex.Message}",
+                Error = ex.ToString()
+            });
+        }
+    }
 }
 
 public class SetPasswordForAllRequest
@@ -1521,4 +2292,80 @@ public class DeleteAllNeonDatabasesRequest
     public int DatabasesDeleted { get; set; }
     public int DatabasesSkipped { get; set; }
     public int Errors { get; set; }
+}
+
+public class StoreTrelloBoardJsonRequest
+{
+    public int ProjectId { get; set; }
+    public List<int> StudentIds { get; set; } = new();
+}
+
+/// <summary>Request for POST /api/Utilities/trello/sprint-override</summary>
+public class SprintOverrideRequest
+{
+    public int ProjectId { get; set; }
+    public int SprintNumber { get; set; }
+    public string? Name { get; set; }
+    public string? Description { get; set; }
+    /// <summary>Checklist as array of items (use CheckListText for one string with line breaks).</summary>
+    public List<string>? CheckList { get; set; }
+    /// <summary>Checklist as a single string: items separated by newlines. In JSON use \n; when sending form-data, literal line breaks are allowed.</summary>
+    public string? CheckListText { get; set; }
+    /// <summary>When set, only cards in the sprint that have this role as a label (Labels or RoleName) are updated; otherwise the list (sprint) is updated.</summary>
+    public string? RoleName { get; set; }
+    /// <summary>When true (default), use AI to parse/normalize checklist text into Trello-friendly items.</summary>
+    public bool? UseAiToParseCheckList { get; set; }
+}
+
+/// <summary>Form request for POST /api/Utilities/trello/sprint-override-form (allows literal newlines in CheckListText).</summary>
+public class SprintOverrideFormRequest
+{
+    public int ProjectId { get; set; }
+    public int SprintNumber { get; set; }
+    public string? Name { get; set; }
+    public string? Description { get; set; }
+    public string? CheckListText { get; set; }
+    public string? RoleName { get; set; }
+    public bool? UseAiToParseCheckList { get; set; }
+}
+
+public class RemoveAllGuestsRequest
+{
+    /// <summary>
+    /// Must be set to true to confirm removal. This is a safety measure.
+    /// </summary>
+    [Required]
+    public bool Confirmation { get; set; } = false;
+}
+
+public class RemoveAllGuestsStats
+{
+    public int TotalBoards { get; set; }
+    public int BoardsProcessed { get; set; }
+    public int WorkspaceMembersCount { get; set; }
+    public int TotalGuestsFound { get; set; }
+    public int GuestsRemoved { get; set; }
+    public int Errors { get; set; }
+}
+
+/// <summary>Request for POST api/Utilities/github/resend-invitation</summary>
+public class ResendGitHubInvitationRequest
+{
+    /// <summary>GitHub username to resend the invite to (e.g. oferlav).</summary>
+    public string? GitHubUsername { get; set; }
+
+    /// <summary>Full repo URL. For frontend use .../697e00d2f9cb8d26a7271afa; for backend use .../backend_697e00d2f9cb8d26a7271afa. Use this OR (Owner + Repository) OR (BoardId + RepoType).</summary>
+    public string? RepositoryUrl { get; set; }
+
+    /// <summary>Repo owner (e.g. skill-in-projects). Use with Repository if not using RepositoryUrl or BoardId.</summary>
+    public string? Owner { get; set; }
+
+    /// <summary>Repo name without .git. For frontend = board ID (e.g. 697e00d2f9cb8d26a7271afa); for backend = backend_{boardId}. Use with Owner, or use BoardId + RepoType instead.</summary>
+    public string? Repository { get; set; }
+
+    /// <summary>Trello board ID (e.g. 697e00d2f9cb8d26a7271afa). Use with RepoType to target frontend or backend repo.</summary>
+    public string? BoardId { get; set; }
+
+    /// <summary>Must be "Frontend" or "Backend" when using BoardId. Frontend repo = BoardId; backend repo = backend_{BoardId}.</summary>
+    public string? RepoType { get; set; }
 }

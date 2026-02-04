@@ -45,6 +45,12 @@ public class Project
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
     public DateTime? UpdatedAt { get; set; }
     
+    /// <summary>
+    /// Cached JSON for Trello board creation (TrelloProjectCreationRequest). When UseDBProjectBoard is true and this has data, create board uses it instead of calling AI.
+    /// </summary>
+    [Column("TrelloBoardJson", TypeName = "TEXT")]
+    public string? TrelloBoardJson { get; set; }
+
     // IDE Generation fields
     [Column("deployment_manifest", TypeName = "TEXT")]
     public string? DeploymentManifest { get; set; }

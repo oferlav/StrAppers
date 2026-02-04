@@ -8,6 +8,7 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Options;
 using System.Text.RegularExpressions;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Net.Http;
 using System.Net;
 using Npgsql;
@@ -205,6 +206,94 @@ public class BoardsController : ControllerBase
             _logger.LogInformation("Using configuration: ProjectLength={ProjectLength} weeks, SprintLength={SprintLength} weeks", 
                 projectLengthWeeks, sprintLengthWeeks);
 
+            var firstDayOfWeekStr = _configuration["Trello:FirstDayOfWeek"] ?? "Sunday";
+            var localTimeStr = _configuration["Trello:LocalTime"] ?? "GMT+2";
+            var firstDayOfWeek = strAppersBackend.Services.TrelloBoardScheduleHelper.ParseFirstDayOfWeek(firstDayOfWeekStr);
+            var localOffset = strAppersBackend.Services.TrelloBoardScheduleHelper.ParseLocalTimeOffset(localTimeStr);
+            var kickoffUtc = strAppersBackend.Services.TrelloBoardScheduleHelper.GetNextKickoffUtc(firstDayOfWeek, localOffset);
+            var kickoffDateTimeIso = kickoffUtc.ToString("yyyy-MM-ddTHH:mm:ssZ");
+            _logger.LogInformation("Trello schedule: FirstDayOfWeek={FirstDayOfWeek}, LocalTime={LocalTime}, Kickoff (first day of week 10:00 local) UTC={KickoffUtc}", firstDayOfWeekStr, localTimeStr, kickoffUtc);
+
+            var useDBProjectBoard = _configuration.GetValue<bool>("Trello:UseDBProjectBoard", true);
+            string? sprint1OverrideListId = null;
+            DateTime? sprint1OverrideDueDateUtc = null;
+            TrelloProjectCreationRequest? trelloRequest = null;
+            object? sprintPlanForStorage = null;
+            var useSavedTrelloJson = false;
+            if (useDBProjectBoard && !string.IsNullOrWhiteSpace(project.TrelloBoardJson))
+            {
+                try
+                {
+                    var saved = System.Text.Json.JsonSerializer.Deserialize<TrelloProjectCreationRequest>(project.TrelloBoardJson);
+                    if (saved != null && saved.SprintPlan != null)
+                    {
+                        useSavedTrelloJson = true;
+                        trelloRequest = saved;
+                        trelloRequest.ProjectId = request.ProjectId;
+                        trelloRequest.ProjectTitle = project.Title ?? trelloRequest.ProjectTitle;
+                        trelloRequest.ProjectDescription = project.Description ?? trelloRequest.ProjectDescription;
+                        trelloRequest.StudentEmails = students.Select(s => s.Email).ToList();
+                        trelloRequest.ProjectLengthWeeks = projectLengthWeeks;
+                        trelloRequest.SprintLengthWeeks = sprintLengthWeeks;
+                        trelloRequest.TeamMembers = students.Select(s => new TrelloTeamMember
+                        {
+                            Email = s.Email,
+                            FirstName = s.FirstName,
+                            LastName = s.LastName,
+                            RoleId = s.StudentRoles?.FirstOrDefault()?.RoleId ?? 0,
+                            RoleName = s.StudentRoles?.FirstOrDefault()?.Role?.Name ?? "Team Member"
+                        }).ToList();
+                        sprintPlanForStorage = trelloRequest.SprintPlan;
+                        // Filter out cards for roles not in the current team (full template may have all roles)
+                        var teamRoleNames = students
+                            .SelectMany(s => s.StudentRoles ?? Array.Empty<StudentRole>())
+                            .Where(sr => sr?.Role != null)
+                            .Select(sr => sr!.Role!.Name)
+                            .Distinct(StringComparer.OrdinalIgnoreCase)
+                            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+                        // When team has Full Stack Developer, include both Frontend and Backend developer cards from template
+                        if (teamRoleNames.Any(r => r.Contains("Fullstack", StringComparison.OrdinalIgnoreCase) || r.Contains("Full Stack", StringComparison.OrdinalIgnoreCase)))
+                        {
+                            teamRoleNames.Add("Frontend Developer");
+                            teamRoleNames.Add("Backend Developer");
+                        }
+                        if (trelloRequest.SprintPlan?.Cards != null && teamRoleNames.Count > 0)
+                        {
+                            var before = trelloRequest.SprintPlan.Cards.Count;
+                            trelloRequest.SprintPlan.Cards = trelloRequest.SprintPlan.Cards
+                                .Where(c => !string.IsNullOrEmpty(c.RoleName) && teamRoleNames.Contains(c.RoleName))
+                                .ToList();
+                            var removed = before - trelloRequest.SprintPlan.Cards.Count;
+                            if (removed > 0)
+                                _logger.LogInformation("Filtered {Removed} cards for roles not in team (template had all roles). Sending {Count} cards to Trello.", removed, trelloRequest.SprintPlan.Cards.Count);
+                        }
+                        // UseDBProjectBoard: override saved sprint due dates (first day of week = sprint start, last day of weekend = due)
+                        if (useDBProjectBoard && trelloRequest.SprintPlan?.Cards != null)
+                        {
+                            var sprintWeeks = _configuration.GetValue<int>("BusinessLogicConfig:SprintLengthInWeeks", 1);
+                            var offsetMin = (int)localOffset.TotalMinutes;
+                            foreach (var card in trelloRequest.SprintPlan.Cards)
+                            {
+                                var listName = card.ListName ?? "";
+                                var sprintMatch = Regex.Match(listName, @"Sprint\s*(\d+)", RegexOptions.IgnoreCase);
+                                if (sprintMatch.Success && int.TryParse(sprintMatch.Groups[1].Value, out var sprintNum) && sprintNum >= 1)
+                                {
+                                    card.DueDate = GetSprintDueDateUtc(kickoffUtc, sprintNum, firstDayOfWeek, offsetMin, sprintWeeks);
+                                }
+                            }
+                            _logger.LogInformation("[BOARD-CREATE] Overrode sprint due dates from Trello:FirstDayOfWeek={FirstDay}, LocalTime={LocalTime}", firstDayOfWeekStr, localTimeStr);
+                        }
+                        _logger.LogInformation("Using saved TrelloBoardJson for project {ProjectId} instead of AI", request.ProjectId);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Failed to deserialize Project.TrelloBoardJson, falling back to AI");
+                }
+            }
+
+            if (!useSavedTrelloJson)
+            {
             // Generate sprint plan using AI
             _logger.LogInformation("Generating sprint plan using AI service");
             
@@ -394,25 +483,52 @@ public class BoardsController : ControllerBase
             };
 
             _logger.LogInformation("Creating TrelloProjectCreationRequest");
-            var trelloRequest = new TrelloProjectCreationRequest
-            {
-                ProjectId = request.ProjectId,
-                ProjectTitle = project.Title,
-                ProjectDescription = project.Description,
-                StudentEmails = students.Select(s => s.Email).ToList(),
-                ProjectLengthWeeks = projectLengthWeeks,
-                SprintLengthWeeks = sprintLengthWeeks,
-                TeamMembers = students.Select(s => new TrelloTeamMember
+                trelloRequest = new TrelloProjectCreationRequest
                 {
-                    Email = s.Email,
-                    FirstName = s.FirstName,
-                    LastName = s.LastName,
-                    RoleId = s.StudentRoles?.FirstOrDefault()?.RoleId ?? 0,
-                    RoleName = s.StudentRoles?.FirstOrDefault()?.Role?.Name ?? "Team Member"
-                }).ToList(),
-                SprintPlan = trelloSprintPlan
-            };
-            
+                    ProjectId = request.ProjectId,
+                    ProjectTitle = project.Title,
+                    ProjectDescription = project.Description,
+                    StudentEmails = students.Select(s => s.Email).ToList(),
+                    ProjectLengthWeeks = projectLengthWeeks,
+                    SprintLengthWeeks = sprintLengthWeeks,
+                    TeamMembers = students.Select(s => new TrelloTeamMember
+                    {
+                        Email = s.Email,
+                        FirstName = s.FirstName,
+                        LastName = s.LastName,
+                        RoleId = s.StudentRoles?.FirstOrDefault()?.RoleId ?? 0,
+                        RoleName = s.StudentRoles?.FirstOrDefault()?.Role?.Name ?? "Team Member"
+                    }).ToList(),
+                    SprintPlan = trelloSprintPlan
+                };
+                sprintPlanForStorage = sprintPlanResponse.SprintPlan;
+            }
+
+            if (trelloRequest == null)
+            {
+                _logger.LogError("TrelloProjectCreationRequest is null (neither saved JSON nor AI path produced a request)");
+                return StatusCode(500, "Failed to build Trello board request");
+            }
+
+            // Override sprint due dates: sprint starts first day of week, due = last day of weekend (and when UseDBProjectBoard, override saved JSON dates)
+            if (trelloRequest.SprintPlan?.Lists != null && trelloRequest.SprintPlan.Cards != null)
+            {
+                foreach (var list in trelloRequest.SprintPlan.Lists)
+                {
+                    var sprintNum = ParseSprintNumberFromListName(list.Name);
+                    if (sprintNum.HasValue && sprintNum.Value >= 1)
+                    {
+                        var (startUtc, dueUtc) = strAppersBackend.Services.TrelloBoardScheduleHelper.GetSprintStartAndDueUtc(sprintNum.Value, kickoffUtc, firstDayOfWeek, localOffset);
+                        list.EndDate = dueUtc;
+                        foreach (var card in trelloRequest.SprintPlan.Cards.Where(c => string.Equals(c.ListName, list.Name, StringComparison.OrdinalIgnoreCase)))
+                        {
+                            card.DueDate = dueUtc;
+                        }
+                        _logger.LogDebug("Sprint {SprintNum} list '{ListName}': DueDate set to {DueUtc}", sprintNum.Value, list.Name, dueUtc);
+                    }
+                }
+            }
+
             TrelloProjectCreationResponse? trelloResponse;
             string trelloBoardId;
             
@@ -465,7 +581,54 @@ public class BoardsController : ControllerBase
                 }
                 
                 _logger.LogInformation("Trello board created with ID: {BoardId}, URL: {BoardUrl}", trelloResponse.BoardId, trelloResponse.BoardUrl);
+                if (!string.IsNullOrEmpty(trelloResponse.SystemBoardId))
+                {
+                    _logger.LogInformation("SystemBoard created with ID: {SystemBoardId}, URL: {SystemBoardUrl}", trelloResponse.SystemBoardId, trelloResponse.SystemBoardUrl);
+                }
                 trelloBoardId = trelloResponse.BoardId;
+
+                // When CreatePMEmptyBoard and UseDBProjectBoard: override Sprint1 on EmptyBoard with SystemBoard Sprint1 (no merge)
+                if (useDBProjectBoard && !string.IsNullOrEmpty(trelloResponse.SystemBoardId))
+                {
+                    _logger.LogInformation("[BOARD-CREATE] Overriding Sprint1 on EmptyBoard (BoardId={BoardId}, ProjectId={ProjectId})", trelloResponse.BoardId, request.ProjectId);
+                    var systemSprint = await _trelloService.GetSprintFromBoardAsync(trelloResponse.SystemBoardId, "Sprint1")
+                        ?? await _trelloService.GetSprintFromBoardAsync(trelloResponse.SystemBoardId, "Sprint 1");
+                    if (systemSprint?.Cards == null || systemSprint.Cards.Count == 0)
+                    {
+                        _logger.LogWarning("[BOARD-CREATE] SystemBoard Sprint1 not found or has no cards (SystemBoardId={SystemBoardId}). Skipping override and ProjectBoardSprintMerge.", trelloResponse.SystemBoardId);
+                    }
+                    else
+                    {
+                        var liveSprint = await _trelloService.GetSprintFromBoardAsync(trelloResponse.BoardId, "Sprint1")
+                            ?? await _trelloService.GetSprintFromBoardAsync(trelloResponse.BoardId, "Sprint 1");
+                        if (liveSprint == null)
+                        {
+                            _logger.LogWarning("[BOARD-CREATE] Live board Sprint1 list not found (BoardId={BoardId}). Skipping override and ProjectBoardSprintMerge.", trelloResponse.BoardId);
+                        }
+                        else
+                        {
+                            var (overrideSuccess, overrideError) = await _trelloService.OverrideSprintOnBoardAsync(trelloResponse.BoardId, liveSprint.ListId, systemSprint.Cards);
+                            if (!overrideSuccess)
+                            {
+                                _logger.LogWarning("[BOARD-CREATE] Failed to override Sprint1 on EmptyBoard: {Error}", overrideError);
+                            }
+                            else
+                            {
+                                _logger.LogInformation("[BOARD-CREATE] Sprint1 on EmptyBoard overridden with SystemBoard Sprint1. Will upsert ProjectBoardSprintMerge after ProjectBoard is saved.");
+                                var dueDateRaw = systemSprint.Cards.Count > 0 ? systemSprint.Cards[0].DueDate : null;
+                                sprint1OverrideListId = liveSprint.ListId;
+                                sprint1OverrideDueDateUtc = dueDateRaw.HasValue ? ToUtcForDb(dueDateRaw.Value) : (DateTime?)null;
+                            }
+                        }
+                    }
+                }
+                else
+                {
+                    if (!useDBProjectBoard)
+                        _logger.LogInformation("[BOARD-CREATE] UseDBProjectBoard is false; skipping Sprint1 override and ProjectBoardSprintMerge.");
+                    else if (string.IsNullOrEmpty(trelloResponse.SystemBoardId))
+                        _logger.LogInformation("[BOARD-CREATE] No SystemBoardId (CreatePMEmptyBoard may be false or single board); skipping Sprint1 override and ProjectBoardSprintMerge.");
+                }
             }
 
             // Create Neon database for the project
@@ -2199,6 +2362,42 @@ public class BoardsController : ControllerBase
                                                 webApiUrl = domainUrl;
                                                 swaggerUrl = $"{domainUrl}/swagger";
                                                 
+                                                // Update backend and frontend READMEs with full Web API URL so mentor and students see the actual URL
+                                                _ = Task.Run(async () =>
+                                                {
+                                                    try
+                                                    {
+                                                        var updated = await _gitHubService.UpdateBackendReadmeWithWebApiUrlsAsync(
+                                                            backendOwner, backendRepoNameFromUrl, project.Title, dbConnectionString, webApiUrl, swaggerUrl, githubToken);
+                                                        if (updated)
+                                                            _logger.LogInformation("✅ [BACKEND] README updated with Web API URL for mentor and students");
+                                                    }
+                                                    catch (Exception readmeEx)
+                                                    {
+                                                        _logger.LogWarning(readmeEx, "⚠️ [BACKEND] Failed to update README with Web API URL (non-blocking)");
+                                                    }
+                                                    if (!string.IsNullOrEmpty(frontendRepositoryUrl))
+                                                    {
+                                                        try
+                                                        {
+                                                            var frontendUri = new Uri(frontendRepositoryUrl);
+                                                            var frontendPathParts = frontendUri.AbsolutePath.TrimStart('/').Split('/');
+                                                            if (frontendPathParts.Length >= 2)
+                                                            {
+                                                                var frontendOwner = frontendPathParts[0];
+                                                                var frontendRepoNameFromUrl = frontendPathParts[1];
+                                                                var frontendUpdated = await _gitHubService.UpdateFrontendReadmeWithWebApiUrlsAsync(frontendOwner, frontendRepoNameFromUrl, project.Title, webApiUrl, githubToken);
+                                                                if (frontendUpdated)
+                                                                    _logger.LogInformation("✅ [FRONTEND] README updated with Backend API URL");
+                                                            }
+                                                        }
+                                                        catch (Exception feEx)
+                                                        {
+                                                            _logger.LogWarning(feEx, "⚠️ [FRONTEND] Failed to update README with Backend API URL (non-blocking)");
+                                                        }
+                                                    }
+                                                });
+                                                
                                                 // Update ProjectBoard with the backend URL (if it was already created)
                                                 try
                                                 {
@@ -2375,29 +2574,9 @@ public class BoardsController : ControllerBase
             var adminStudent = students.FirstOrDefault(s => s.IsAdmin);
             _logger.LogInformation("Admin student: {AdminId}", adminStudent?.Id);
 
-            // Parse meeting time for NextMeetingTime field
-            DateTime? nextMeetingTime = null;
-            if (!string.IsNullOrEmpty(request.DateTime) && System.DateTime.TryParse(request.DateTime, out var parsedMeetingTime))
-            {
-                // Ensure the DateTime is UTC for PostgreSQL compatibility
-                if (parsedMeetingTime.Kind == DateTimeKind.Unspecified)
-                {
-                    // Assume the input is in local time and convert to UTC
-                    nextMeetingTime = DateTime.SpecifyKind(parsedMeetingTime, DateTimeKind.Utc);
-                }
-                else if (parsedMeetingTime.Kind == DateTimeKind.Local)
-                {
-                    // Convert from local time to UTC
-                    nextMeetingTime = parsedMeetingTime.ToUniversalTime();
-                }
-                else
-                {
-                    // Already UTC
-                    nextMeetingTime = parsedMeetingTime;
-                }
-                
-                _logger.LogInformation("Setting NextMeetingTime to: {MeetingTime} (UTC)", nextMeetingTime);
-            }
+            // Kickoff meeting: use precomputed first day of week at 10:00 local (from top of method)
+            var nextMeetingTime = kickoffUtc;
+            _logger.LogInformation("Setting NextMeetingTime to first day of week ({FirstDay}) at 10:00 local ({LocalTime}): {MeetingTime} (UTC)", firstDayOfWeekStr, localTimeStr, nextMeetingTime);
 
             // Set project Kickoff flag to false when board is created
             project.Kickoff = false;
@@ -2406,17 +2585,54 @@ public class BoardsController : ControllerBase
             // Initialize meetingUrl variable (will be set after ProjectBoard is created)
             string? meetingUrl = null;
 
-            // Create ProjectBoard record
+            // If SystemBoard was created, create a ProjectBoard record for it first
+            if (!string.IsNullOrEmpty(trelloResponse.SystemBoardId))
+            {
+                _logger.LogInformation("Creating ProjectBoard record for SystemBoard: {SystemBoardId}", trelloResponse.SystemBoardId);
+                var systemProjectBoard = new ProjectBoard
+                {
+                    Id = trelloResponse.SystemBoardId,
+                    ProjectId = request.ProjectId,
+                    StartDate = DateTime.UtcNow,
+                    DueDate = DateTime.UtcNow.AddDays(projectLengthWeeks * 7),
+                    StatusId = 1, // New status
+                    AdminId = adminStudent?.Id,
+                    SprintPlan = sprintPlanForStorage != null ? System.Text.Json.JsonSerializer.Serialize(sprintPlanForStorage) : null,
+                    BoardUrl = trelloResponse.SystemBoardUrl,
+                    IsSystemBoard = true, // This record is the SystemBoard (full template board)
+                    // SystemBoardId is null for the SystemBoard itself (it's the reference board)
+                    NextMeetingTime = null, // SystemBoard doesn't need meeting info
+                    NextMeetingUrl = null,
+                    GithubBackendUrl = null, // SystemBoard doesn't need these URLs
+                    GithubFrontendUrl = null,
+                    WebApiUrl = null,
+                    PublishUrl = null,
+                    DBPassword = null, // SystemBoard doesn't need database info
+                    NeonProjectId = null,
+                    NeonBranchId = null,
+                    CreatedAt = DateTime.UtcNow,
+                    UpdatedAt = DateTime.UtcNow
+                };
+                _context.ProjectBoards.Add(systemProjectBoard);
+                
+                // Save SystemBoard first so it exists when we reference it
+                await _context.SaveChangesAsync();
+                _logger.LogInformation("SystemBoard ProjectBoard record created and saved");
+            }
+
+            // Create ProjectBoard record for EmptyBoard (or regular board if CreatePMEmptyBoard is false)
             var projectBoard = new ProjectBoard
             {
                 Id = trelloBoardId,
                 ProjectId = request.ProjectId,
+                IsSystemBoard = false, // EmptyBoard or single board
                 StartDate = DateTime.UtcNow,
                 DueDate = DateTime.UtcNow.AddDays(projectLengthWeeks * 7),
                 StatusId = 1, // New status
                 AdminId = adminStudent?.Id,
-                SprintPlan = System.Text.Json.JsonSerializer.Serialize(sprintPlanResponse.SprintPlan),
+                SprintPlan = sprintPlanForStorage != null ? System.Text.Json.JsonSerializer.Serialize(sprintPlanForStorage) : null,
                 BoardUrl = trelloResponse.BoardUrl,
+                SystemBoardId = trelloResponse.SystemBoardId, // Store SystemBoardId if CreatePMEmptyBoard is enabled
                 NextMeetingTime = nextMeetingTime,
                 NextMeetingUrl = meetingUrl, // Will be updated after Teams meeting is created
                 GithubBackendUrl = backendRepositoryUrl,
@@ -2430,7 +2646,7 @@ public class BoardsController : ControllerBase
                 UpdatedAt = DateTime.UtcNow
             };
 
-            _logger.LogInformation("Creating ProjectBoard record");
+            _logger.LogInformation("Creating ProjectBoard record for board: {BoardId}", trelloBoardId);
             _context.ProjectBoards.Add(projectBoard);
 
             // Update students with BoardId
@@ -2447,11 +2663,76 @@ public class BoardsController : ControllerBase
             {
                 await _context.SaveChangesAsync();
                 _logger.LogInformation("Database changes saved successfully");
+                // Do NOT delete the SystemBoard ProjectBoard record: EmptyBoard.SystemBoardId references it (FK).
+                // Deleting it would set EmptyBoard.SystemBoardId to NULL due to ON DELETE SET NULL.
             }
             catch (Exception saveEx)
             {
                 _logger.LogError(saveEx, "Error saving changes to database: {SaveException}", saveEx.Message);
                 throw;
+            }
+
+            // Upsert ProjectBoardSprintMerge for ALL sprints on the board; only Sprint1 gets MergedAt set (FK requires ProjectBoard to exist first)
+            var sprintCount = trelloRequest?.SprintPlan?.Lists?.Count ?? 0;
+            if (sprintCount <= 0 && !string.IsNullOrEmpty(sprint1OverrideListId))
+                sprintCount = 1;
+            if (sprintCount > 0)
+            {
+                try
+                {
+                    for (var sprintNum = 1; sprintNum <= sprintCount; sprintNum++)
+                    {
+                        string? listId = null;
+                        DateTime? dueDateUtc = null;
+                        DateTime? mergedAt = null;
+                        if (sprintNum == 1 && !string.IsNullOrEmpty(sprint1OverrideListId))
+                        {
+                            listId = sprint1OverrideListId;
+                            dueDateUtc = sprint1OverrideDueDateUtc;
+                            mergedAt = DateTime.UtcNow;
+                        }
+                        else
+                        {
+                            var snapshot = await _trelloService.GetSprintFromBoardAsync(trelloBoardId, $"Sprint{sprintNum}")
+                                ?? await _trelloService.GetSprintFromBoardAsync(trelloBoardId, $"Sprint {sprintNum}");
+                            if (snapshot == null)
+                                continue;
+                            listId = snapshot.ListId;
+                            dueDateUtc = snapshot.Cards?.Count > 0 && snapshot.Cards[0].DueDate.HasValue
+                                ? ToUtcForDb(snapshot.Cards[0].DueDate.Value)
+                                : (DateTime?)null;
+                        }
+                        var mergeRecord = await _context.ProjectBoardSprintMerges
+                            .FirstOrDefaultAsync(m => m.ProjectBoardId == trelloBoardId && m.SprintNumber == sprintNum);
+                        if (mergeRecord == null)
+                        {
+                            mergeRecord = new ProjectBoardSprintMerge
+                            {
+                                ProjectBoardId = trelloBoardId,
+                                SprintNumber = sprintNum,
+                                MergedAt = mergedAt,
+                                ListId = listId,
+                                DueDate = dueDateUtc
+                            };
+                            _context.ProjectBoardSprintMerges.Add(mergeRecord);
+                            _logger.LogInformation("[BOARD-CREATE] ProjectBoardSprintMerge added for BoardId={BoardId}, SprintNumber={SprintNumber}, MergedAt={MergedAt}", trelloBoardId, sprintNum, mergedAt != null ? "set" : "null");
+                        }
+                        else
+                        {
+                            mergeRecord.ListId = listId ?? mergeRecord.ListId;
+                            mergeRecord.DueDate = dueDateUtc ?? mergeRecord.DueDate;
+                            if (sprintNum == 1 && !string.IsNullOrEmpty(sprint1OverrideListId))
+                                mergeRecord.MergedAt = DateTime.UtcNow;
+                            _logger.LogInformation("[BOARD-CREATE] ProjectBoardSprintMerge updated for BoardId={BoardId}, SprintNumber={SprintNumber}", trelloBoardId, sprintNum);
+                        }
+                    }
+                    await _context.SaveChangesAsync();
+                    _logger.LogInformation("[BOARD-CREATE] ProjectBoardSprintMerge saved for all {Count} sprints, BoardId={BoardId}.", sprintCount, trelloBoardId);
+                }
+                catch (Exception exDb)
+                {
+                    _logger.LogError(exDb, "[BOARD-CREATE] Failed to upsert ProjectBoardSprintMerge for BoardId={BoardId}: {Message}", trelloBoardId, exDb.Message);
+                }
             }
             
             // Commit transaction BEFORE calling Teams endpoint so TeamsController can see the ProjectBoard
@@ -2468,12 +2749,12 @@ public class BoardsController : ControllerBase
             
             // Create Teams meeting AFTER ProjectBoard is committed (so TeamsController can find it)
             // Use the create-meeting-smtp-for-board-auth endpoint which handles custom URLs and tracking
-            if (!string.IsNullOrEmpty(request.Title) && !string.IsNullOrEmpty(request.DateTime) && request.DurationMinutes.HasValue)
+            if (!string.IsNullOrEmpty(request.Title) && request.DurationMinutes.HasValue)
             {
                 try
                 {
-                    _logger.LogInformation("Creating Teams meeting via create-meeting-smtp-for-board-auth: {Title} at {DateTime} for {DurationMinutes} minutes", 
-                        request.Title, request.DateTime, request.DurationMinutes);
+                    _logger.LogInformation("Creating Teams meeting via create-meeting-smtp-for-board-auth: {Title} at {DateTime} (kickoff first day of week 10:00 local) for {DurationMinutes} minutes", 
+                        request.Title, nextMeetingTime.ToString("yyyy-MM-ddTHH:mm:ssZ"), request.DurationMinutes);
 
                     // Get student emails for attendees
                     var attendeeEmails = students
@@ -2489,7 +2770,7 @@ public class BoardsController : ControllerBase
                         {
                             BoardId = trelloBoardId,
                             Title = request.Title,
-                            DateTime = request.DateTime,
+                            DateTime = nextMeetingTime.ToString("yyyy-MM-ddTHH:mm:ssZ"),
                             DurationMinutes = request.DurationMinutes.Value,
                             Attendees = attendeeEmails
                         };
@@ -2834,6 +3115,89 @@ public class BoardsController : ControllerBase
     }
 
     /// <summary>
+    /// Recursively clone a JsonNode with all object property names converted to camelCase.
+    /// System.Text.Json does not apply PropertyNamingPolicy to JsonNode when serializing.
+    /// </summary>
+    private static JsonNode? ToCamelCaseKeys(JsonNode? node)
+    {
+        if (node == null) return null;
+        if (node is JsonObject obj)
+        {
+            var result = new JsonObject();
+            foreach (var prop in obj)
+            {
+                var key = string.IsNullOrEmpty(prop.Key) ? prop.Key : char.ToLowerInvariant(prop.Key[0]) + prop.Key.Substring(1);
+                result[key] = ToCamelCaseKeys(prop.Value);
+            }
+            return result;
+        }
+        if (node is JsonArray arr)
+        {
+            var result = new JsonArray();
+            foreach (var item in arr)
+                result.Add(ToCamelCaseKeys(item));
+            return result;
+        }
+        return node.DeepClone();
+    }
+
+    /// <summary>Converts DateTime to UTC for PostgreSQL timestamp with time zone (Npgsql rejects Local/Unspecified).</summary>
+    private static DateTime ToUtcForDb(DateTime value)
+    {
+        if (value.Kind == DateTimeKind.Utc) return value;
+        if (value.Kind == DateTimeKind.Local) return value.ToUniversalTime();
+        return DateTime.SpecifyKind(value, DateTimeKind.Utc);
+    }
+
+    /// <summary>Parse Trello:LocalTime (e.g. "GMT+2", "UTC") to offset in minutes from UTC.</summary>
+    private static int GetLocalTimeOffsetMinutes(string? localTime)
+    {
+        if (string.IsNullOrWhiteSpace(localTime)) return 0;
+        if (localTime.Equals("UTC", StringComparison.OrdinalIgnoreCase)) return 0;
+        var m = Regex.Match(localTime.Trim(), @"^GMT([+-])(\d+)$", RegexOptions.IgnoreCase);
+        if (m.Success && int.TryParse(m.Groups[2].Value, out var hours))
+            return (m.Groups[1].Value == "-" ? -1 : 1) * (hours * 60);
+        return 0;
+    }
+
+    /// <summary>Parse Trello:FirstDayOfWeek (e.g. "Sunday", "Monday") to DayOfWeek.</summary>
+    private static DayOfWeek GetFirstDayOfWeek(string? firstDay)
+    {
+        if (string.IsNullOrWhiteSpace(firstDay)) return DayOfWeek.Sunday;
+        if (Enum.TryParse<DayOfWeek>(firstDay.Trim(), true, out var dow))
+            return dow;
+        return DayOfWeek.Sunday;
+    }
+
+    /// <summary>Next occurrence of firstDayOfWeek at 10:00 in local time (offsetMinutes from UTC), returned as UTC.</summary>
+    private static DateTime GetNextKickoffUtc(DateTime utcNow, DayOfWeek firstDayOfWeek, int localOffsetMinutes)
+    {
+        var localNow = utcNow.AddMinutes(localOffsetMinutes);
+        var daysUntilFirst = ((int)firstDayOfWeek - (int)localNow.DayOfWeek + 7) % 7;
+        if (daysUntilFirst == 0 && (localNow.Hour > 10 || (localNow.Hour == 10 && localNow.Minute > 0)))
+            daysUntilFirst = 7;
+        var nextFirstDayLocal = localNow.Date.AddDays(daysUntilFirst).AddHours(10).AddMinutes(0);
+        return nextFirstDayLocal.AddMinutes(-localOffsetMinutes);
+    }
+
+    /// <summary>Sprint N (1-based) due date: last day of that week in local (firstDayOfWeek = start, +6 = end), 23:59 local, as UTC.</summary>
+    private static DateTime GetSprintDueDateUtc(DateTime kickoffUtc, int sprintNumber1Based, DayOfWeek firstDayOfWeek, int localOffsetMinutes, int sprintLengthWeeks = 1)
+    {
+        var kickoffLocal = kickoffUtc.AddMinutes(localOffsetMinutes);
+        var sprintStartLocal = kickoffLocal.Date.AddDays((sprintNumber1Based - 1) * sprintLengthWeeks * 7);
+        var dueLocal = sprintStartLocal.AddDays(6).Date.AddHours(23).AddMinutes(59).AddSeconds(59);
+        return dueLocal.AddMinutes(-localOffsetMinutes);
+    }
+
+    /// <summary>Parse sprint number from list name (e.g. "Sprint1", "Sprint 2"). Returns null if not a sprint list.</summary>
+    private static int? ParseSprintNumberFromListName(string? listName)
+    {
+        if (string.IsNullOrWhiteSpace(listName)) return null;
+        var m = Regex.Match(listName, @"Sprint\s*(\d+)", RegexOptions.IgnoreCase);
+        return m.Success && int.TryParse(m.Groups[1].Value, out var n) ? n : null;
+    }
+
+    /// <summary>
     /// Get comprehensive Trello board statistics
     /// </summary>
     /// <param name="boardId">The Trello board ID to get stats for</param>
@@ -2863,19 +3227,98 @@ public class BoardsController : ControllerBase
             // Get Trello stats using the Trello board ID
             var stats = await _trelloService.GetProjectStatsAsync(boardId);
 
-            return Ok(new
+            // Enrich Members with roleName (and roleNames for Full Stack) from our DB so frontend can match tasks by label
+            var studentsOnBoard = await _context.Students
+                .Include(s => s.StudentRoles)
+                .ThenInclude(sr => sr.Role)
+                .Where(s => s.BoardId == boardId && s.IsAvailable)
+                .ToListAsync();
+
+            var statsJson = JsonSerializer.Serialize(stats);
+            var statsNode = JsonNode.Parse(statsJson);
+
+            // Collect all distinct card label names on the board (for unmatched members so they can match any task)
+            var cardLabelNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            if (statsNode?["Cards"] is JsonArray cardsArray)
             {
-                Success = true,
-                BoardId = boardId,
-                ProjectId = projectBoard.ProjectId,
-                ProjectName = projectBoard.Project.Title,
-                BoardUrl = projectBoard.BoardUrl,
-                Observed = projectBoard.Observed,
-                GithubBackendUrl = projectBoard.GithubBackendUrl,
-                GithubFrontendUrl = projectBoard.GithubFrontendUrl,
-                WebApiUrl = projectBoard.WebApiUrl,
-                Stats = stats
-            });
+                foreach (var cardNode in cardsArray.OfType<JsonObject>())
+                {
+                    var labels = cardNode["Labels"] ?? cardNode["labels"];
+                    if (labels is JsonArray labelsArr)
+                    {
+                        foreach (var labelNode in labelsArr.OfType<JsonObject>())
+                        {
+                            var name = labelNode["Name"]?.GetValue<string>() ?? labelNode["name"]?.GetValue<string>();
+                            if (!string.IsNullOrEmpty(name))
+                                cardLabelNames.Add(name);
+                        }
+                    }
+                }
+            }
+
+            if (statsNode != null && statsNode["Members"] is JsonArray membersArray)
+            {
+                foreach (var memberNode in membersArray.OfType<JsonObject>())
+                {
+                    var email = memberNode["Email"]?.GetValue<string>() ?? memberNode["email"]?.GetValue<string>();
+                    var fullName = memberNode["FullName"]?.GetValue<string>() ?? memberNode["fullName"]?.GetValue<string>();
+                    var displayName = memberNode["DisplayName"]?.GetValue<string>() ?? memberNode["displayName"]?.GetValue<string>();
+
+                    var student = (Student?)null;
+                    if (!string.IsNullOrEmpty(email))
+                        student = studentsOnBoard.FirstOrDefault(s => string.Equals(s.Email, email, StringComparison.OrdinalIgnoreCase));
+                    if (student == null && !string.IsNullOrEmpty(fullName))
+                        student = studentsOnBoard.FirstOrDefault(s => string.Equals((s.FirstName + " " + s.LastName).Trim(), fullName, StringComparison.OrdinalIgnoreCase));
+                    if (student == null && !string.IsNullOrEmpty(displayName) && displayName != fullName)
+                        student = studentsOnBoard.FirstOrDefault(s => string.Equals((s.FirstName + " " + s.LastName).Trim(), displayName, StringComparison.OrdinalIgnoreCase) || string.Equals(s.Email, displayName, StringComparison.OrdinalIgnoreCase));
+
+                    var roleName = student != null
+                        ? (student.StudentRoles?
+                            .Where(sr => sr.IsActive && sr.Role != null)
+                            .Select(sr => sr.Role!.Name)
+                            .FirstOrDefault() ?? "Team Member")
+                        : "Team Member";
+
+                    memberNode["RoleName"] = JsonValue.Create(roleName);
+
+                    // For Full Stack Developer, include Backend and Frontend so frontend can match cards with those labels
+                    if (roleName.Contains("Fullstack", StringComparison.OrdinalIgnoreCase) || roleName.Contains("Full Stack", StringComparison.OrdinalIgnoreCase))
+                    {
+                        memberNode["RoleNames"] = new JsonArray(JsonValue.Create(roleName), JsonValue.Create("Backend Developer"), JsonValue.Create("Frontend Developer"));
+                    }
+                    else if (student == null && cardLabelNames.Count > 0)
+                    {
+                        // Unmatched member (e.g. admin/facilitator): allow matching all card labels so they can be assigned any task
+                        memberNode["RoleNames"] = new JsonArray(cardLabelNames.Select(n => JsonValue.Create(n)).ToArray());
+                    }
+                    else
+                    {
+                        memberNode["RoleNames"] = new JsonArray(JsonValue.Create(roleName));
+                    }
+                }
+            }
+
+            var camelOptions = new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase };
+            // JsonNode property names are NOT renamed by PropertyNamingPolicy when serializing; convert keys manually.
+            var statsNodeCamel = statsNode != null
+                ? ToCamelCaseKeys(statsNode)
+                : JsonNode.Parse(JsonSerializer.Serialize(stats, camelOptions));
+
+            var responseNode = new JsonObject
+            {
+                ["success"] = true,
+                ["boardId"] = boardId,
+                ["projectId"] = projectBoard.ProjectId,
+                ["projectName"] = projectBoard.Project?.Title ?? "",
+                ["boardUrl"] = projectBoard.BoardUrl ?? "",
+                ["observed"] = projectBoard.Observed,
+                ["githubBackendUrl"] = projectBoard.GithubBackendUrl ?? "",
+                ["githubFrontendUrl"] = projectBoard.GithubFrontendUrl ?? "",
+                ["webApiUrl"] = projectBoard.WebApiUrl ?? "",
+                ["stats"] = statsNodeCamel
+            };
+
+            return Content(JsonSerializer.Serialize(responseNode, camelOptions), "application/json");
         }
         catch (Exception ex)
         {
@@ -2918,15 +3361,88 @@ public class BoardsController : ControllerBase
             // Get enhanced member information with email resolution
             var membersResult = await _trelloService.GetBoardMembersWithEmailResolutionAsync(boardId);
 
-            return Ok(new
+            // Enrich each member with roleName and roleNames (same as stats) so frontend can match tasks by label
+            var studentsOnBoard = await _context.Students
+                .Include(s => s.StudentRoles)
+                .ThenInclude(sr => sr.Role)
+                .Where(s => s.BoardId == boardId && s.IsAvailable)
+                .ToListAsync();
+
+            var stats = await _trelloService.GetProjectStatsAsync(boardId);
+            var statsJson = JsonSerializer.Serialize(stats);
+            var statsNode = JsonNode.Parse(statsJson);
+            var cardLabelNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            if (statsNode?["Cards"] is JsonArray cardsArray)
             {
-                Success = true,
-                BoardId = boardId,
-                ProjectId = projectBoard.ProjectId,
-                ProjectName = projectBoard.Project.Title,
-                BoardUrl = projectBoard.BoardUrl,
-                Members = membersResult
-            });
+                foreach (var cardNode in cardsArray.OfType<JsonObject>())
+                {
+                    var labels = cardNode["Labels"] ?? cardNode["labels"];
+                    if (labels is JsonArray labelsArr)
+                    {
+                        foreach (var labelNode in labelsArr.OfType<JsonObject>())
+                        {
+                            var name = labelNode["Name"]?.GetValue<string>() ?? labelNode["name"]?.GetValue<string>();
+                            if (!string.IsNullOrEmpty(name))
+                                cardLabelNames.Add(name);
+                        }
+                    }
+                }
+            }
+
+            var membersResultJson = JsonSerializer.Serialize(membersResult);
+            var membersResultNode = JsonNode.Parse(membersResultJson);
+            if (membersResultNode?["Members"] is JsonArray membersArray)
+            {
+                foreach (var memberNode in membersArray.OfType<JsonObject>())
+                {
+                    var email = memberNode["Email"]?.GetValue<string>() ?? memberNode["email"]?.GetValue<string>();
+                    var fullName = memberNode["FullName"]?.GetValue<string>() ?? memberNode["fullName"]?.GetValue<string>();
+                    var displayName = memberNode["DisplayName"]?.GetValue<string>() ?? memberNode["displayName"]?.GetValue<string>();
+
+                    var student = (Student?)null;
+                    if (!string.IsNullOrEmpty(email))
+                        student = studentsOnBoard.FirstOrDefault(s => string.Equals(s.Email, email, StringComparison.OrdinalIgnoreCase));
+                    if (student == null && !string.IsNullOrEmpty(fullName))
+                        student = studentsOnBoard.FirstOrDefault(s => string.Equals((s.FirstName + " " + s.LastName).Trim(), fullName, StringComparison.OrdinalIgnoreCase));
+                    if (student == null && !string.IsNullOrEmpty(displayName) && displayName != fullName)
+                        student = studentsOnBoard.FirstOrDefault(s => string.Equals((s.FirstName + " " + s.LastName).Trim(), displayName, StringComparison.OrdinalIgnoreCase) || string.Equals(s.Email, displayName, StringComparison.OrdinalIgnoreCase));
+
+                    var roleName = student != null
+                        ? (student.StudentRoles?
+                            .Where(sr => sr.IsActive && sr.Role != null)
+                            .Select(sr => sr.Role!.Name)
+                            .FirstOrDefault() ?? "Team Member")
+                        : "Team Member";
+
+                    memberNode["RoleName"] = JsonValue.Create(roleName);
+
+                    if (roleName.Contains("Fullstack", StringComparison.OrdinalIgnoreCase) || roleName.Contains("Full Stack", StringComparison.OrdinalIgnoreCase))
+                    {
+                        memberNode["RoleNames"] = new JsonArray(JsonValue.Create(roleName), JsonValue.Create("Backend Developer"), JsonValue.Create("Frontend Developer"));
+                    }
+                    else if (student == null && cardLabelNames.Count > 0)
+                    {
+                        memberNode["RoleNames"] = new JsonArray(cardLabelNames.Select(n => JsonValue.Create(n)).ToArray());
+                    }
+                    else
+                    {
+                        memberNode["RoleNames"] = new JsonArray(JsonValue.Create(roleName));
+                    }
+                }
+            }
+
+            var camelOptions = new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase };
+            var responseNode = new JsonObject
+            {
+                ["success"] = true,
+                ["boardId"] = boardId,
+                ["projectId"] = projectBoard.ProjectId,
+                ["projectName"] = projectBoard.Project?.Title ?? "",
+                ["boardUrl"] = projectBoard.BoardUrl ?? "",
+                ["members"] = ToCamelCaseKeys(membersResultNode) ?? membersResultNode
+            };
+
+            return Content(JsonSerializer.Serialize(responseNode, camelOptions), "application/json");
         }
         catch (Exception ex)
         {
@@ -3066,6 +3582,7 @@ public class BoardsController : ControllerBase
     /// <summary>
     /// Test endpoint to debug AI prompt generation (for debugging use)
     /// </summary>
+    // PromptType: SprintPlanning — Keep (debug-only; test prompt)
     [HttpPost("debug-prompt")]
     public async Task<ActionResult<object>> DebugAIPrompt(DebugPromptRequest request)
     {

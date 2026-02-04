@@ -49,6 +49,8 @@ public class Worker : BackgroundService
 
                 var created = await TryCreateBoardsAsync(connectionString, baseUrl, stoppingToken);
                 _logger.LogInformation("[ITERATION] Completed at {Time}. Boards created: {Created}", DateTime.UtcNow, created);
+
+                await CallRunDueSprintMergesAsync(baseUrl, stoppingToken);
             }
             catch (Exception ex)
             {
@@ -209,6 +211,30 @@ public class Worker : BackgroundService
         }
 
         return 0;
+    }
+
+    private async Task CallRunDueSprintMergesAsync(string baseUrl, CancellationToken ct)
+    {
+        try
+        {
+            var client = _httpClientFactory.CreateClient();
+            client.Timeout = TimeSpan.FromMinutes(5);
+            var resp = await client.PostAsync($"{baseUrl}/api/Trello/use/run-due-sprint-merges", content: null, ct);
+            if (resp.IsSuccessStatusCode)
+            {
+                var body = await resp.Content.ReadAsStringAsync(ct);
+                _logger.LogInformation("[RUN-DUE-SPRINT-MERGES] Success: {Response}", body);
+            }
+            else
+            {
+                var errorText = await resp.Content.ReadAsStringAsync(ct);
+                _logger.LogWarning("[RUN-DUE-SPRINT-MERGES] Failed. Status={Status}, Body={Body}", resp.StatusCode, errorText);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "[RUN-DUE-SPRINT-MERGES] Exception: {Message}", ex.Message);
+        }
     }
 
     private static DateTime NextDayNoonUtc()

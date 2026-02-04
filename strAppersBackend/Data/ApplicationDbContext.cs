@@ -37,6 +37,10 @@ public class ApplicationDbContext : DbContext
     public DbSet<BoardState> BoardStates { get; set; }
     public DbSet<MarketingImages> MarketingImages { get; set; }
     public DbSet<EarlyBirds> EarlyBirds { get; set; }
+    public DbSet<ProjectBoardSprintMerge> ProjectBoardSprintMerges { get; set; }
+    public DbSet<CustomerChatHistory> CustomerChatHistory { get; set; }
+    public DbSet<PromptCategory> PromptCategories { get; set; }
+    public DbSet<MentorPrompt> MentorPrompts { get; set; }
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -130,16 +134,17 @@ public class ApplicationDbContext : DbContext
         {
             entity.HasKey(e => e.Id);
             entity.Property(e => e.Name).IsRequired().HasMaxLength(100);
+            entity.Property(e => e.Active).IsRequired().HasDefaultValue(false);
 
-            // Seed initial data
+            // Seed initial data (existing criteria are active so they appear in GET and classification)
             entity.HasData(
-                new ProjectCriteria { Id = 1, Name = "Popular Projects" },
-                new ProjectCriteria { Id = 2, Name = "UI/UX Designer Needed" },
-                new ProjectCriteria { Id = 3, Name = "Backend Developer Needed" },
-                new ProjectCriteria { Id = 4, Name = "Frontend Developer Needed" },
-                new ProjectCriteria { Id = 5, Name = "Product manager Needed" },
-                new ProjectCriteria { Id = 6, Name = "Marketing Needed" },
-                new ProjectCriteria { Id = 7, Name = "New Projects" }
+                new ProjectCriteria { Id = 1, Name = "Popular Projects", Active = true },
+                new ProjectCriteria { Id = 2, Name = "UI/UX Designer Needed", Active = true },
+                new ProjectCriteria { Id = 3, Name = "Backend Developer Needed", Active = true },
+                new ProjectCriteria { Id = 4, Name = "Frontend Developer Needed", Active = true },
+                new ProjectCriteria { Id = 5, Name = "Product manager Needed", Active = true },
+                new ProjectCriteria { Id = 6, Name = "Marketing Needed", Active = true },
+                new ProjectCriteria { Id = 7, Name = "New Projects", Active = true }
             );
         });
 
@@ -237,6 +242,7 @@ public class ApplicationDbContext : DbContext
             entity.Property(e => e.IsAvailable).HasDefaultValue(true);
             entity.Property(e => e.Kickoff).HasColumnName("Kickoff").HasDefaultValue(false);
             entity.Property(e => e.CriteriaIds).HasColumnName("CriteriaIds").HasMaxLength(500);
+            entity.Property(e => e.TrelloBoardJson).HasColumnName("TrelloBoardJson").HasColumnType("TEXT");
 
             // Foreign key relationships
             entity.HasOne(e => e.Organization)
@@ -395,6 +401,8 @@ public class ApplicationDbContext : DbContext
             entity.Property(e => e.Observed).HasColumnName("Observed").HasDefaultValue(0);
             entity.Property(e => e.DBPassword).HasColumnName("DBPassword").HasMaxLength(200);
             entity.Property(e => e.NeonBranchId).HasColumnName("NeonBranchId").HasMaxLength(100);
+            entity.Property(e => e.SystemBoardId).HasColumnName("SystemBoardId").HasMaxLength(50);
+            entity.Property(e => e.IsSystemBoard).HasColumnName("IsSystemBoard").HasDefaultValue(false);
             
             // Foreign key relationships
             entity.HasOne(e => e.Project)
@@ -415,10 +423,94 @@ public class ApplicationDbContext : DbContext
             //       .HasForeignKey(e => e.AdminId)
             //       .OnDelete(DeleteBehavior.NoAction);
 
+            // Self-referencing foreign key relationship for SystemBoard
+            entity.HasOne(e => e.SystemBoard)
+                  .WithMany()
+                  .HasForeignKey(e => e.SystemBoardId)
+                  .HasPrincipalKey(pb => pb.Id)
+                  .OnDelete(DeleteBehavior.SetNull);
+
             // Indexes for better performance
             entity.HasIndex(e => e.ProjectId);
             entity.HasIndex(e => e.CreatedAt);
             entity.HasIndex(e => e.StatusId);
+            entity.HasIndex(e => e.SystemBoardId);
+
+            entity.HasMany(e => e.SprintMerges)
+                  .WithOne(s => s.ProjectBoard)
+                  .HasForeignKey(s => s.ProjectBoardId)
+                  .HasPrincipalKey(pb => pb.Id)
+                  .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        // Configure ProjectBoardSprintMerge entity
+        modelBuilder.Entity<ProjectBoardSprintMerge>(entity =>
+        {
+            entity.HasKey(e => new { e.ProjectBoardId, e.SprintNumber });
+            entity.ToTable("ProjectBoardSprintMerge");
+            entity.Property(e => e.ProjectBoardId).HasMaxLength(50).IsRequired();
+            entity.Property(e => e.MergedAt).HasColumnType("timestamp with time zone");
+            entity.Property(e => e.ListId).HasMaxLength(50);
+            entity.Property(e => e.DueDate).HasColumnType("timestamp with time zone");
+            entity.HasIndex(e => e.ProjectBoardId);
+            entity.HasIndex(e => e.SprintNumber);
+        });
+
+        // Configure CustomerChatHistory entity (same structure as MentorChatHistory; StudentId = student Id, SprintId = SprintNumber; no FK)
+        modelBuilder.Entity<CustomerChatHistory>(entity =>
+        {
+            entity.HasKey(e => e.Id);
+            entity.ToTable("CustomerChatHistory");
+            entity.Property(e => e.StudentId).IsRequired();
+            entity.Property(e => e.SprintId).IsRequired();
+            entity.Property(e => e.Role).IsRequired().HasMaxLength(50);
+            entity.Property(e => e.Message).IsRequired().HasColumnType("text");
+            entity.Property(e => e.AIModelName).HasMaxLength(100);
+            entity.Property(e => e.CreatedAt).HasColumnType("timestamp with time zone");
+            entity.HasIndex(e => e.StudentId);
+            entity.HasIndex(e => e.SprintId);
+        });
+
+        // Configure PromptCategory entity
+        modelBuilder.Entity<PromptCategory>(entity =>
+        {
+            entity.HasKey(e => e.CategoryId);
+            entity.ToTable("PromptCategories");
+            entity.Property(e => e.Name).IsRequired().HasMaxLength(200);
+            entity.Property(e => e.Description).HasMaxLength(500);
+            entity.Property(e => e.SortOrder).HasDefaultValue(0);
+        });
+
+        // Configure MentorPrompt entity
+        modelBuilder.Entity<MentorPrompt>(entity =>
+        {
+            entity.HasKey(e => e.Id);
+            entity.ToTable("MentorPrompt");
+            entity.Property(e => e.PromptString).IsRequired().HasColumnType("text");
+            entity.Property(e => e.SortOrder).HasDefaultValue(0);
+            entity.Property(e => e.IsActive).HasDefaultValue(true);
+            entity.Property(e => e.UpdatedAt).HasColumnType("timestamp with time zone");
+
+            entity.HasOne(e => e.Role)
+                .WithMany()
+                .HasForeignKey(e => e.RoleId)
+                .OnDelete(DeleteBehavior.SetNull);
+
+            entity.HasOne(e => e.Category)
+                .WithMany(p => p.MentorPrompts)
+                .HasForeignKey(e => e.CategoryId)
+                .OnDelete(DeleteBehavior.Restrict);
+
+            entity.HasIndex(e => e.RoleId);
+            entity.HasIndex(e => e.CategoryId);
+        });
+
+        // Configure MentorChatHistory entity (Id is identity; ensure value-generated on add to avoid duplicate key when sequence is out of sync)
+        modelBuilder.Entity<MentorChatHistory>(entity =>
+        {
+            entity.HasKey(e => e.Id);
+            entity.Property(e => e.Id).ValueGeneratedOnAdd();
+            entity.ToTable("MentorChatHistory");
         });
 
         // Configure BoardMeeting entity

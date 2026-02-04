@@ -1,4 +1,5 @@
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using strAppersBackend.Data;
@@ -27,6 +28,7 @@ namespace strAppersBackend.Controllers
         private readonly IConfiguration _configuration;
         private readonly IHttpClientFactory _httpClientFactory;
         private readonly IAIService _aiService;
+        private readonly IChatCompletionService _chatCompletionService;
         private readonly DeploymentsConfig _deploymentsConfig;
         private readonly IOptions<TestingConfig> _testingConfig;
         private readonly IServiceScopeFactory _serviceScopeFactory;
@@ -43,6 +45,7 @@ namespace strAppersBackend.Controllers
             IConfiguration configuration,
             IHttpClientFactory httpClientFactory,
             IAIService aiService,
+            IChatCompletionService chatCompletionService,
             IOptions<DeploymentsConfig> deploymentsConfig,
             IOptions<TestingConfig> testingConfig,
             IServiceScopeFactory serviceScopeFactory)
@@ -58,15 +61,165 @@ namespace strAppersBackend.Controllers
             _configuration = configuration;
             _httpClientFactory = httpClientFactory;
             _aiService = aiService;
+            _chatCompletionService = chatCompletionService;
             _deploymentsConfig = deploymentsConfig.Value;
             _testingConfig = testingConfig;
             _serviceScopeFactory = serviceScopeFactory;
+        }
+
+        /// <summary>When DebugSystemPrompt is true, returns a source marker for logging; otherwise empty.</summary>
+        private string Dbg(int line) => _promptConfig.Mentor.DebugSystemPrompt ? $"<<MentorController.cs line {line}>>" : "";
+
+        /// <summary>When DebugSystemPrompt is true, returns a config-path marker (e.g. &lt;&lt;PromptConfig.Mentor.SystemPrompt&gt;&gt;) for prompts from appsettings; otherwise empty.</summary>
+        private string DbgConfig(string configPath) => _promptConfig.Mentor.DebugSystemPrompt ? $"<<PromptConfig.Mentor.{configPath}>>" : "";
+
+        /// <summary>Strips &lt;&lt;...&gt;&gt; markers (code line and config path) from prompt before sending to API.</summary>
+        private static string StripDebugMarkers(string s) =>
+            System.Text.RegularExpressions.Regex.Replace(s, @"<<[^>]+>>\s*", "");
+
+        /// <summary>Load mentor prompt from Prompts/Mentor/{name}.txt (referenced data). Prefer PromptConfig in appsettings or these files; no large inline strings in code.</summary>
+        private static string? LoadMentorPromptFile(string name)
+        {
+            try
+            {
+                var path = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Prompts", "Mentor", name + ".txt");
+                return System.IO.File.Exists(path) ? System.IO.File.ReadAllText(path).Trim() : null;
+            }
+            catch { return null; }
+        }
+
+        /// <summary>Default when PromptConfig:Mentor:BoardStatesAwareness is not set. Uses Prompts/Mentor/BoardStatesAwareness.txt; minimal fallback if file missing.</summary>
+        private static string GetBoardStatesAwarenessDefault() =>
+            LoadMentorPromptFile("BoardStatesAwareness") ?? "?? For issue/help/broken: use board health first (BOARD STATES above); if it points to a cause, respond only to that. No generic checklists or long lists.";
+
+        /// <summary>Default when PromptConfig:Mentor:BoardStatesAwarenessWithoutJson is not set. Uses Prompts/Mentor/BoardStatesAwarenessWithoutJson.txt.</summary>
+        private static string GetBoardStatesAwarenessWithoutJsonDefault() =>
+            LoadMentorPromptFile("BoardStatesAwarenessWithoutJson") ?? "?? For broken/help/issues: the FULL STACK line above is your primary diagnostic. Lead with it (one sentence), then 1–2 actions. No 'Steps to Troubleshoot' or long lists.";
+
+        /// <summary>Default when PromptConfig:Mentor:BoardHealthFirstLastInstruction is not set. Uses Prompts/Mentor/BoardHealthFirstLastInstruction.txt.</summary>
+        private static string GetBoardHealthFirstLastInstructionDefault() =>
+            LoadMentorPromptFile("BoardHealthFirstLastInstruction") ?? "[LAST INSTRUCTION] For broken/help/issues: start your reply with the FULL STACK line above; then 1–2 actions. No checklists or long lists.";
+
+        /// <summary>
+        /// Normalize mentor response markdown so the frontend displays correctly. The UI only renders inline code
+        /// (single backticks), not fenced code blocks (```...```). So we: (1) normalize line endings; (2) remove
+        /// inline `main` in prose; (3) convert fenced code blocks and orphan command lines to inline code so full
+        /// commands like "git pull origin main" display formatted like "reset --hard" and "git stash".
+        /// </summary>
+        private static string NormalizeMentorResponseMarkdown(string response)
+        {
+            if (string.IsNullOrEmpty(response))
+                return response;
+            // Normalize line endings
+            var normalized = response.Replace("\r\n", "\n").Replace("\r", "\n");
+            var sb = new StringBuilder(normalized.Length + 512);
+            // Remove inline `main` in prose (avoid styling single word as code)
+            var noInlineMain = System.Text.RegularExpressions.Regex.Replace(normalized, @"\s`main`\s", " main ", System.Text.RegularExpressions.RegexOptions.None);
+            noInlineMain = System.Text.RegularExpressions.Regex.Replace(noInlineMain, @"\s`main`([,.:;!?]|\s|$)", " main$1", System.Text.RegularExpressions.RegexOptions.None);
+            // Strip backticks/code formatting around Sprint1 so it never appears in a terminal box; use correct naming
+            noInlineMain = System.Text.RegularExpressions.Regex.Replace(noInlineMain, @"`Sprint1`", "1-B and 1-F", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+            // Strip backticks around branch names (e.g. `1-B`, `1-F`) so they are never shown as terminal/code—only full commands should be formatted
+            noInlineMain = System.Text.RegularExpressions.Regex.Replace(noInlineMain, @"`(\d+-[BF])`", "$1", System.Text.RegularExpressions.RegexOptions.None);
+            var lines = noInlineMain.Split('\n');
+            var inFencedBlock = false;
+            var fullLineCommandRegex = new System.Text.RegularExpressions.Regex(
+                @"^(git\s+.+|cd\s+.+|npm\s+.+|dotnet\s+.+?)([.:]?)\s*$",
+                System.Text.RegularExpressions.RegexOptions.None);
+            var listThenCommandRegex = new System.Text.RegularExpressions.Regex(
+                @"^(\s*(?:\d+[.)]\s*|[-*•]\s*)+)(git\s+.+|cd\s+.+|npm\s+.+|dotnet\s+.+)([.:]?)\s*$",
+                System.Text.RegularExpressions.RegexOptions.None);
+            for (int i = 0; i < lines.Length; i++)
+            {
+                var line = lines[i];
+                var trimmed = line.Trim();
+                if (trimmed.StartsWith("```", StringComparison.Ordinal))
+                {
+                    inFencedBlock = !inFencedBlock;
+                    // Don't output fences — UI doesn't render them; we output inline code below for block content
+                    continue;
+                }
+                if (inFencedBlock)
+                {
+                    // Fenced block line: output as inline code so UI displays it formatted like `reset --hard`
+                    if (trimmed.Length > 0)
+                        sb.AppendLine("`" + trimmed.Replace("`", "\\`") + "`");
+                    continue;
+                }
+                if (trimmed.Length == 0 || trimmed.Length > 250)
+                {
+                    sb.AppendLine(line);
+                    continue;
+                }
+                var listMatch = listThenCommandRegex.Match(trimmed);
+                if (listMatch.Success)
+                {
+                    var prefix = listMatch.Groups[1].Value.TrimEnd();
+                    var command = listMatch.Groups[2].Value.Trim();
+                    sb.AppendLine(prefix);
+                    sb.AppendLine("`" + command.Replace("`", "\\`") + "`");
+                    continue;
+                }
+                var fullMatch = fullLineCommandRegex.Match(trimmed);
+                if (fullMatch.Success)
+                {
+                    var command = fullMatch.Groups[1].Value.Trim();
+                    sb.AppendLine("`" + command.Replace("`", "\\`") + "`");
+                    continue;
+                }
+                sb.AppendLine(line);
+            }
+            var result = sb.ToString().TrimEnd().Replace("\r\n", "\n").Replace("\r", "\n");
+            // Strip backticks around branch names in final output (e.g. from fenced blocks that became inline `1-B`); only full commands should stay as code
+            result = System.Text.RegularExpressions.Regex.Replace(result, @"`(\d+-[BF])`", "$1", System.Text.RegularExpressions.RegexOptions.None);
+            return result;
+        }
+
+        /// <summary>
+        /// Build the Mentor system prompt from DB (refactor preview).
+        /// Includes fragments where RoleId is null (all roles) and optionally fragments for the given RoleId.
+        /// Excludes the "User Message Templates" category (used for the user message, not the system prompt).
+        /// </summary>
+        /// <param name="roleId">Optional. When provided, includes fragments for this role; when null, only RoleId-null fragments are included.</param>
+        /// <param name="sortDirection">Optional. "asc" (default) or "desc" for category/prompt sort order.</param>
+        // PromptType: General — Refactor To DB (reads non-fragmented, non-variant prompts from MentorPrompt; exclude User Message Templates)
+        [HttpGet("use/system-prompt-refactor")]
+        public async Task<ActionResult<object>> GetSystemPromptRefactor([FromQuery] int? roleId, [FromQuery] string? sortDirection = "asc")
+        {
+            try
+            {
+                var isDesc = string.Equals(sortDirection, "desc", StringComparison.OrdinalIgnoreCase);
+                var baseQuery = _context.MentorPrompts
+                    .Include(m => m.Category)
+                    .Where(m => m.IsActive && (m.RoleId == null || m.RoleId == roleId) && m.Category!.Name != "User Message Templates");
+
+                var query = isDesc
+                    ? baseQuery.OrderByDescending(m => m.Category!.SortOrder).ThenByDescending(m => m.SortOrder)
+                    : baseQuery.OrderBy(m => m.Category!.SortOrder).ThenBy(m => m.SortOrder);
+
+                var fragments = await query.Select(m => m.PromptString).ToListAsync();
+                var systemPrompt = string.Join("\n\n", fragments);
+
+                return Ok(new
+                {
+                    Success = true,
+                    RoleId = roleId,
+                    SortDirection = isDesc ? "desc" : "asc",
+                    FragmentCount = fragments.Count,
+                    SystemPrompt = systemPrompt
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error building system prompt from DB for RoleId {RoleId}", roleId);
+                return StatusCode(500, new { Success = false, Message = "Failed to build system prompt from DB.", Error = ex.Message });
+            }
         }
 
         /// <summary>
         /// Get mentor context for a specific student and sprint
         /// Gathers all necessary information to construct a context-aware prompt for the mentor chatbot
         /// </summary>
+        // PromptType: General — Keep (user template + context; SystemPrompt/UserPromptTemplate from config; refactor base to DB later)
         [HttpGet("use/get-mentor-context/{studentId}/{sprintId}")]
         public async Task<ActionResult<object>> GetMentorContext(int studentId, int sprintId)
         {
@@ -168,15 +321,28 @@ namespace strAppersBackend.Controllers
                     }
                 }
 
-                // B. Fetch Current Trello Tasks for current sprint (filtered by role label)
-                var userTasksResult = await _trelloService.GetCardsAndListsByLabelAsync(student.BoardId, roleName);
-                var userTasksJson = JsonSerializer.Serialize(userTasksResult);
-                var userTasksElement = JsonSerializer.Deserialize<JsonElement>(userTasksJson);
+                // B. Fetch Current Trello Tasks for current sprint (filtered by role label(s); Full Stack Developer = Backend + Frontend labels)
+                var trelloLabelNames = GetTrelloLabelNamesForRole(roleName);
+                var seenCardIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                var mergedCards = new List<JsonElement>();
+                foreach (var labelName in trelloLabelNames)
+                {
+                    var labelResult = await _trelloService.GetCardsAndListsByLabelAsync(student.BoardId, labelName);
+                    var labelJson = JsonSerializer.Serialize(labelResult);
+                    var labelElement = JsonSerializer.Deserialize<JsonElement>(labelJson);
+                    if (labelElement.TryGetProperty("Cards", out var cardsProp) && cardsProp.ValueKind == JsonValueKind.Array)
+                    {
+                        foreach (var card in cardsProp.EnumerateArray())
+                        {
+                            var cardId = card.TryGetProperty("Id", out var idProp) ? idProp.GetString() : "";
+                            if (!string.IsNullOrEmpty(cardId) && seenCardIds.Add(cardId))
+                                mergedCards.Add(card);
+                        }
+                    }
+                }
 
                 var userTasks = new List<object>();
-                if (userTasksElement.TryGetProperty("Cards", out var cardsProp) && cardsProp.ValueKind == JsonValueKind.Array)
-                {
-                    foreach (var card in cardsProp.EnumerateArray())
+                foreach (var card in mergedCards)
                     {
                         var cardListId = card.TryGetProperty("ListId", out var listIdProp) ? listIdProp.GetString() : "";
                         // Only include cards from the current sprint list
@@ -187,7 +353,8 @@ namespace strAppersBackend.Controllers
                             // C. Fetch Trello card custom fields
                             var customFields = await GetTrelloCardCustomFieldsAsync(cardId, student.BoardId);
                             
-                            // Get checklist items
+                            // Get checklist items with completion state (so mentor can report sprint progress); normalize Branch Initialization text (1-B/1-F, buttons above chat)
+                            var cardIdForBranch = customFields.TryGetValue("CardId", out var cid) ? cid : null;
                             var checklistItems = new List<string>();
                             if (card.TryGetProperty("Checklists", out var checklistsProp) && checklistsProp.ValueKind == JsonValueKind.Array)
                             {
@@ -198,13 +365,19 @@ namespace strAppersBackend.Controllers
                                         foreach (var item in itemsProp.EnumerateArray())
                                         {
                                             var itemName = item.TryGetProperty("Name", out var itemNameProp) ? itemNameProp.GetString() : "";
-                                            if (!string.IsNullOrEmpty(itemName))
-                                            {
-                                                checklistItems.Add(itemName);
-                                            }
+                                            if (string.IsNullOrEmpty(itemName)) continue;
+                                            var state = item.TryGetProperty("State", out var stateProp) ? stateProp.GetString() : "incomplete";
+                                            var isComplete = string.Equals(state, "complete", StringComparison.OrdinalIgnoreCase);
+                                            checklistItems.Add(NormalizeBranchInitializationChecklistItem($"{(isComplete ? "[x]" : "[ ]")} {itemName}", cardIdForBranch));
                                         }
                                     }
                                 }
+                            }
+
+                            if (checklistItems.Count > 0)
+                            {
+                                var completed = checklistItems.Count(s => s.StartsWith("[x]", StringComparison.OrdinalIgnoreCase));
+                                _logger.LogInformation("[Mentor] Card '{CardName}' checklist: {Completed} of {Total} items completed", card.TryGetProperty("Name", out var n) ? n.GetString() : cardId, completed, checklistItems.Count);
                             }
 
                             userTasks.Add(new
@@ -219,7 +392,6 @@ namespace strAppersBackend.Controllers
                             });
                         }
                     }
-                }
 
                 // D. Fetch Project Module Description (for each task's ModuleId)
                 var moduleDescriptions = new Dictionary<string, string>();
@@ -304,6 +476,11 @@ namespace strAppersBackend.Controllers
                 if (!string.IsNullOrEmpty(backendRepoUrl))
                 {
                     reposToFetch.Add((backendRepoUrl, "backend"));
+                    // Only use backend URL for "frontend" when there is no separate frontend repo
+                    if (isFullstack && string.IsNullOrEmpty(frontendRepoUrl))
+                    {
+                        reposToFetch.Add((backendRepoUrl, "frontend"));
+                    }
                 }
                 
                 if (reposToFetch.Any())
@@ -312,33 +489,33 @@ namespace strAppersBackend.Controllers
                     {
                         var allFiles = new List<string>();
                         var allCommitSummaries = new List<object>();
+                        var seenRepoForFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                         
-                        // Fetch files and commits from each repository
                         foreach (var (repoUrl, repoType) in reposToFetch)
                         {
-                            // Extract repo name from GitHub URL (format: https://github.com/owner/repo)
                             var repoName = repoUrl.Replace("https://github.com/", "").Replace("http://github.com/", "").TrimEnd('/');
-                            var repoFiles = await GetGitHubRepositoryFilesAsync(repoName);
-                            
-                            // Prefix files with repo type for clarity
-                            if (isFullstack)
+                            if (seenRepoForFiles.Add(repoName))
                             {
-                                allFiles.AddRange(repoFiles.Select(f => $"[{repoType.ToUpper()}] {f}"));
-                            }
-                            else
-                            {
-                                allFiles.AddRange(repoFiles);
+                                var repoFiles = await GetGitHubRepositoryFilesAsync(repoName);
+                                if (isFullstack)
+                                {
+                                    allFiles.AddRange(repoFiles.Select(f => $"[{repoType.ToUpper()}] {f}"));
+                                }
+                                else
+                                {
+                                    allFiles.AddRange(repoFiles);
+                                }
                             }
                             
-                            // Fetch GitHub commit summary for developer roles only
-                            var isDeveloperRole = !string.IsNullOrEmpty(roleName) && 
+                            var fetchCommitsForRole = !string.IsNullOrEmpty(roleName) && 
                                 (roleName.Contains("Developer", StringComparison.OrdinalIgnoreCase) || 
                                  roleName.Contains("Programmer", StringComparison.OrdinalIgnoreCase) ||
                                  roleName.Contains("Engineer", StringComparison.OrdinalIgnoreCase));
-                            
-                            if (isDeveloperRole)
+                            if (fetchCommitsForRole)
                             {
-                                var commitSummary = await GetGitHubCommitSummaryAsync(repoUrl, student.GithubUser);
+                                var commitBranch = sprintId >= 1 ? (repoType == "frontend" ? $"{sprintId}-F" : $"{sprintId}-B") : null;
+                                _logger.LogInformation("[Mentor commits] GetMentorContext: repoType={RepoType} branch={Branch} repo={RepoUrl}", repoType, commitBranch ?? "(default)", repoUrl);
+                                var commitSummary = await GetGitHubCommitSummaryAsync(repoUrl, student.GithubUser, commitBranch);
                                 if (commitSummary != null)
                                 {
                                     allCommitSummaries.Add(commitSummary);
@@ -348,7 +525,8 @@ namespace strAppersBackend.Controllers
                         
                         githubFiles = allFiles;
                         
-                        // Combine commit summaries for fullstack developers
+                        if (isFullstack && !allCommitSummaries.Any())
+                            _logger.LogWarning("[Mentor commits] GetMentorContext Full Stack: no commit summaries from {Count} repo/branch queries.", reposToFetch.Count);
                         if (isFullstack && allCommitSummaries.Any())
                         {
                             githubCommitSummary = CombineCommitSummaries(allCommitSummaries);
@@ -392,7 +570,7 @@ namespace strAppersBackend.Controllers
                     }
                 }
 
-                // G. Fetch Team Member Tasks for current sprint
+                // G. Fetch Team Member Tasks for current sprint (Full Stack Developer = Backend + Frontend labels)
                 var teamMemberTasks = new List<object>();
                 foreach (var teamMember in teamMembers)
                 {
@@ -402,18 +580,22 @@ namespace strAppersBackend.Controllers
                     
                     if (!string.IsNullOrEmpty(memberRoleName))
                     {
-                        var memberTasksResult = await _trelloService.GetCardsAndListsByLabelAsync(student.BoardId, memberRoleName);
-                        var memberTasksJson = JsonSerializer.Serialize(memberTasksResult);
-                        var memberTasksElement = JsonSerializer.Deserialize<JsonElement>(memberTasksJson);
-
-                        if (memberTasksElement.TryGetProperty("Cards", out var memberCardsProp) && memberCardsProp.ValueKind == JsonValueKind.Array)
+                        var memberLabelNames = GetTrelloLabelNamesForRole(memberRoleName);
+                        var memberSeenIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                        foreach (var labelName in memberLabelNames)
                         {
-                            foreach (var card in memberCardsProp.EnumerateArray())
+                            var memberTasksResult = await _trelloService.GetCardsAndListsByLabelAsync(student.BoardId, labelName);
+                            var memberTasksJson = JsonSerializer.Serialize(memberTasksResult);
+                            var memberTasksElement = JsonSerializer.Deserialize<JsonElement>(memberTasksJson);
+
+                            if (memberTasksElement.TryGetProperty("Cards", out var memberCardsProp) && memberCardsProp.ValueKind == JsonValueKind.Array)
                             {
-                                var cardListId = card.TryGetProperty("ListId", out var listIdProp) ? listIdProp.GetString() : "";
-                                // Only include cards from the current sprint list
-                                if (cardListId == sprintListId)
+                                foreach (var card in memberCardsProp.EnumerateArray())
                                 {
+                                    var cardListId = card.TryGetProperty("ListId", out var listIdProp) ? listIdProp.GetString() : "";
+                                    if (cardListId != sprintListId) continue;
+                                    var cardId = card.TryGetProperty("Id", out var idProp) ? idProp.GetString() : "";
+                                    if (string.IsNullOrEmpty(cardId) || !memberSeenIds.Add(cardId)) continue;
                                     teamMemberTasks.Add(new
                                     {
                                         TeamMemberFirstName = memberElement.TryGetProperty("FirstName", out var fnProp) ? fnProp.GetString() : "",
@@ -439,7 +621,8 @@ namespace strAppersBackend.Controllers
                 
                 var teamMembersList = FormatTeamMembers(teamMembers);
                 var teamMemberTasksList = FormatTeamMemberTasks(teamMemberTasks);
-                var githubFilesList = string.Join("\n", githubFiles);
+                var isDeveloperRole = student.StudentRoles?.Any(sr => sr.IsActive && (sr.Role?.Type == 1 || sr.Role?.Type == 2)) ?? false;
+                var githubFilesListForPrompt = isDeveloperRole ? string.Join("\n", githubFiles) : "";
 
                 // Format sprint identifier for prompt (show "Bugs" when sprintId=0)
                 var sprintIdentifier = sprintId == 0 ? "Bugs" : sprintId.ToString();
@@ -451,13 +634,13 @@ namespace strAppersBackend.Controllers
                     roleName,                              // {1} - Role
                     sprintIdentifier,                      // {2} - Sprint number (or "Bugs" for sprintId=0)
                     sprintDisplayName,                     // {3} - Module name (using sprint name as module context)
-                    currentTaskDetails,                    // {4} - Task name/description
+                    GetTaskSummaryForContext(userTasks),   // {4} - Short task summary (full details only in {6} to avoid duplication)
                     programmingLanguage,                   // {5} - Programming language
-                    FormatTaskDetails(userTasks),          // {6} - Current task details
+                    FormatTaskDetails(userTasks),          // {6} - Current task details (full breakdown)
                     moduleDescription,                     // {7} - Project module description
                     teamMembersList,                       // {8} - Team members
                     teamMemberTasksList,                   // {9} - Team member tasks
-                    githubFilesList,                       // {10} - GitHub files
+                    githubFilesListForPrompt,             // {10} - Empty for non-developer to save tokens
                     ""                                     // {11} - User question (empty for context gathering)
                 );
 
@@ -468,6 +651,7 @@ namespace strAppersBackend.Controllers
                     {
                         StudentId = studentId,
                         SprintId = sprintId,
+                        ProjectDescription = project.Description,
                         UserProfile = new
                         {
                             FirstName = student.FirstName,
@@ -503,6 +687,7 @@ namespace strAppersBackend.Controllers
         /// Returns the base system prompt with Platform Context & Vision and Knowledge Limitations prepended
         /// Response includes formatted versions with proper line breaks for readability
         /// </summary>
+        // PromptType: General — Refactor To DB (base prompt + platform context from DB; exclude variant/context blocks)
         [HttpGet("use/system-prompt")]
         public ActionResult<object> GetSystemPrompt()
         {
@@ -576,9 +761,10 @@ namespace strAppersBackend.Controllers
         /// <summary>
         /// Get GitHub commit summary (recent commits with file changes summary) for mentor context
         /// Optimized to save tokens by summarizing instead of including full diffs
-        /// Supports multiple repositories for fullstack developers
+        /// Supports multiple repositories for fullstack developers.
+        /// When branch is set (e.g. 1-F, 1-B), fetches commits from that branch so sprint work is visible.
         /// </summary>
-        private async Task<object?> GetGitHubCommitSummaryAsync(string? githubRepoUrl, string? githubUsername)
+        private async Task<object?> GetGitHubCommitSummaryAsync(string? githubRepoUrl, string? githubUsername, string? branch = null)
         {
             if (string.IsNullOrEmpty(githubRepoUrl) || string.IsNullOrEmpty(githubUsername))
             {
@@ -600,10 +786,19 @@ namespace strAppersBackend.Controllers
                 // Get GitHub access token for API calls
                 var accessToken = _configuration["GitHub:AccessToken"];
 
-                // Get recent commits (limit to 5 for token efficiency)
-                var recentCommits = await _githubService.GetRecentCommitsAsync(owner, repo, githubUsername, 5, accessToken);
+                // Get recent commits (limit to 5 for token efficiency); use branch when provided so sprint branches (1-F, 1-B) are visible
+                _logger.LogInformation("[Mentor commits] Fetching repo={Owner}/{Repo} branch={Branch} author={Username}", owner, repo, branch ?? "(default)", githubUsername);
+                var recentCommits = await _githubService.GetRecentCommitsAsync(owner, repo, githubUsername, 5, accessToken, branch);
+                // When asking for a sprint branch and author filter returns 0, retry without author filter (e.g. commit author name vs login mismatch)
+                if (!recentCommits.Any() && !string.IsNullOrWhiteSpace(branch))
+                {
+                    recentCommits = await _githubService.GetRecentCommitsOnBranchAsync(owner, repo, branch, 5, accessToken);
+                    if (recentCommits.Any())
+                        _logger.LogInformation("[Mentor commits] Found {Count} on branch {Branch} (no author filter) repo {Owner}/{Repo}", recentCommits.Count, branch, owner, repo);
+                }
                 if (!recentCommits.Any())
                 {
+                    _logger.LogWarning("[Mentor commits] No commits for repo={Owner}/{Repo} branch={Branch} (author filter then fallback both returned 0)", owner, repo, branch ?? "(default)");
                     return new
                     {
                         HasCommits = false,
@@ -619,29 +814,34 @@ namespace strAppersBackend.Controllers
                 foreach (var commit in recentCommits.Take(5))
                 {
                     var diff = await _githubService.GetCommitDiffAsync(owner, repo, commit.Sha, accessToken);
+                    var filesInCommit = new List<string>();
+                    var totalAdditions = 0;
+                    var totalDeletions = 0;
                     if (diff?.FileChanges != null && diff.FileChanges.Any())
                     {
-                        var filesInCommit = diff.FileChanges
-                            .Where(f => f.Status != "removed" && (f.Additions > 0 || f.Deletions > 0))
-                            .Select(f => Path.GetFileName(f.FilePath))
+                        filesInCommit = diff.FileChanges
+                            .Where(f => !string.IsNullOrEmpty(f.FilePath) && f.Status != "removed" && (f.Additions > 0 || f.Deletions > 0))
+                            .Select(f => Path.GetFileName(f.FilePath)!)
                             .Distinct()
                             .ToList();
-
                         foreach (var file in filesInCommit)
                         {
                             allFilesChanged.Add(file);
                         }
-
-                        commitSummaries.Add(new
-                        {
-                            Sha = commit.Sha.Substring(0, Math.Min(7, commit.Sha.Length)),
-                            Message = commit.Message,
-                            Date = commit.CommitDate.ToString("yyyy-MM-dd HH:mm"),
-                            FilesChanged = filesInCommit,
-                            TotalAdditions = diff.TotalAdditions,
-                            TotalDeletions = diff.TotalDeletions
-                        });
+                        totalAdditions = diff.TotalAdditions;
+                        totalDeletions = diff.TotalDeletions;
                     }
+                    // Include every commit so frontend (e.g. empty/trigger commits) appears in mentor context
+                    var shaStr = commit.Sha ?? "";
+                    commitSummaries.Add(new
+                    {
+                        Sha = shaStr.Length >= 7 ? shaStr.Substring(0, 7) : shaStr,
+                        Message = commit.Message ?? "",
+                        Date = commit.CommitDate.ToString("yyyy-MM-dd HH:mm"),
+                        FilesChanged = filesInCommit,
+                        TotalAdditions = totalAdditions,
+                        TotalDeletions = totalDeletions
+                    });
                 }
 
                 return new
@@ -661,7 +861,8 @@ namespace strAppersBackend.Controllers
         }
 
         /// <summary>
-        /// Combines commit summaries from multiple repositories (for fullstack developers)
+        /// Combines commit summaries from multiple repositories (for fullstack developers).
+        /// Handles both JsonElement (from deserialized context) and anonymous objects (from GetGitHubCommitSummaryAsync).
         /// </summary>
         private object CombineCommitSummaries(List<object> commitSummaries)
         {
@@ -670,51 +871,78 @@ namespace strAppersBackend.Controllers
                 var combinedCommits = new List<object>();
                 var allFilesChanged = new HashSet<string>();
                 var totalCommitCount = 0;
+                string? firstRepositoryUrl = null;
 
                 foreach (var summary in commitSummaries)
                 {
-                    if (summary is System.Text.Json.JsonElement jsonElement)
+                    // Normalize to JsonElement so we can read properties (callers pass anonymous objects, not JsonElement)
+                    System.Text.Json.JsonElement element;
+                    if (summary is System.Text.Json.JsonElement je)
                     {
-                        if (jsonElement.TryGetProperty("RecentCommits", out var commitsProp) && 
-                            commitsProp.ValueKind == System.Text.Json.JsonValueKind.Array)
+                        element = je;
+                    }
+                    else
+                    {
+                        try
                         {
-                            foreach (var commit in commitsProp.EnumerateArray())
+                            var json = System.Text.Json.JsonSerializer.Serialize(summary);
+                            element = System.Text.Json.JsonSerializer.Deserialize<System.Text.Json.JsonElement>(json);
+                        }
+                        catch
+                        {
+                            continue;
+                        }
+                    }
+
+                    if (element.TryGetProperty("RecentCommits", out var commitsProp) && 
+                        commitsProp.ValueKind == System.Text.Json.JsonValueKind.Array)
+                    {
+                        foreach (var commit in commitsProp.EnumerateArray())
+                        {
+                            combinedCommits.Add(commit);
+                        }
+                    }
+
+                    if (element.TryGetProperty("AllFilesChanged", out var filesProp) && 
+                        filesProp.ValueKind == System.Text.Json.JsonValueKind.Array)
+                    {
+                        foreach (var file in filesProp.EnumerateArray())
+                        {
+                            if (file.ValueKind == System.Text.Json.JsonValueKind.String)
                             {
-                                combinedCommits.Add(commit);
+                                allFilesChanged.Add(file.GetString() ?? "");
                             }
                         }
+                    }
 
-                        if (jsonElement.TryGetProperty("AllFilesChanged", out var filesProp) && 
-                            filesProp.ValueKind == System.Text.Json.JsonValueKind.Array)
-                        {
-                            foreach (var file in filesProp.EnumerateArray())
-                            {
-                                if (file.ValueKind == System.Text.Json.JsonValueKind.String)
-                                {
-                                    allFilesChanged.Add(file.GetString() ?? "");
-                                }
-                            }
-                        }
+                    if (element.TryGetProperty("CommitCount", out var countProp))
+                    {
+                        totalCommitCount += countProp.GetInt32();
+                    }
 
-                        if (jsonElement.TryGetProperty("CommitCount", out var countProp))
-                        {
-                            totalCommitCount += countProp.GetInt32();
-                        }
+                    if (string.IsNullOrEmpty(firstRepositoryUrl) && element.TryGetProperty("RepositoryUrl", out var urlProp))
+                    {
+                        firstRepositoryUrl = urlProp.GetString();
                     }
                 }
 
                 // Sort commits by date (most recent first) - simplified for now
                 // In a real implementation, you'd parse and sort by actual commit date
 
-                return new
+                var result = new Dictionary<string, object>
                 {
-                    HasCommits = combinedCommits.Any(),
-                    CommitCount = totalCommitCount,
-                    RecentCommits = combinedCommits.Take(10).ToList(), // Limit to 10 most recent across all repos
-                    AllFilesChanged = allFilesChanged.ToList(),
-                    RepositoryCount = commitSummaries.Count,
-                    Message = "Combined commits from multiple repositories"
+                    ["HasCommits"] = combinedCommits.Any(),
+                    ["CommitCount"] = totalCommitCount,
+                    ["RecentCommits"] = combinedCommits.Take(10).ToList(),
+                    ["AllFilesChanged"] = allFilesChanged.ToList(),
+                    ["RepositoryCount"] = commitSummaries.Count,
+                    ["Message"] = "Combined commits from multiple repositories"
                 };
+                if (!string.IsNullOrEmpty(firstRepositoryUrl))
+                {
+                    result["RepositoryUrl"] = firstRepositoryUrl;
+                }
+                return result;
             }
             catch (Exception ex)
             {
@@ -882,9 +1110,9 @@ namespace strAppersBackend.Controllers
                     return files;
                 }
 
-                // Get repository tree (files)
+                // Get repository tree (files) - use configured "GitHub" client (SSL handling for corporate proxy/UntrustedRoot)
                 var treeUrl = $"https://api.github.com/repos/{owner}/{repo}/git/trees/main?recursive=1";
-                using var httpClient = new HttpClient();
+                using var httpClient = _httpClientFactory.CreateClient("GitHub");
                 httpClient.DefaultRequestHeaders.Add("User-Agent", "StrAppers-Backend");
                 httpClient.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", accessToken);
                 
@@ -958,6 +1186,35 @@ namespace strAppersBackend.Controllers
             return new List<object>();
         }
 
+        /// <summary>Normalizes the Branch Initialization checklist item from Trello so the prompt uses correct naming (1-B/1-F) and "action buttons above the chat input box" instead of "AI Mentor chat" / "Sprint1". Preserves [ ] or [x] prefix.</summary>
+        private static string NormalizeBranchInitializationChecklistItem(string item, string? cardId)
+        {
+            var trimmed = item.TrimStart();
+            string prefix;
+            string rest;
+            if (trimmed.StartsWith("[x]", StringComparison.OrdinalIgnoreCase) && trimmed.Length >= 4)
+            {
+                prefix = "[x] ";
+                rest = trimmed.Substring(4).TrimStart();
+            }
+            else if (trimmed.StartsWith("[ ]", StringComparison.OrdinalIgnoreCase) && trimmed.Length >= 4)
+            {
+                prefix = "[ ] ";
+                rest = trimmed.Substring(4).TrimStart();
+            }
+            else
+            {
+                prefix = "";
+                rest = trimmed;
+            }
+            if (!rest.StartsWith("Branch Initialization:", StringComparison.OrdinalIgnoreCase))
+                return item;
+            if (!rest.Contains("AI Mentor chat", StringComparison.OrdinalIgnoreCase) && !rest.Contains("Sprint1", StringComparison.OrdinalIgnoreCase))
+                return item;
+            var branchName = !string.IsNullOrEmpty(cardId) ? cardId : "1-B and 1-F";
+            return prefix + "Branch Initialization: Use the action buttons above the chat input box to launch the sprint and generate your " + branchName + " branch. You cannot create branches manually.";
+        }
+
         private string FormatTaskDetails(List<object> tasks)
         {
             if (tasks.Count == 0) return "No tasks assigned";
@@ -997,15 +1254,19 @@ namespace strAppersBackend.Controllers
                 
                 var customFieldsJson = taskElement.TryGetProperty("CustomFields", out var cfProp) ? cfProp.ToString() : "{}";
                 var customFields = JsonSerializer.Deserialize<Dictionary<string, string>>(customFieldsJson) ?? new Dictionary<string, string>();
+                var cardId = customFields.TryGetValue("CardId", out var cid) ? cid : null;
                 
                 var checklistItems = new List<string>();
                 if (taskElement.TryGetProperty("ChecklistItems", out var checklistProp) && checklistProp.ValueKind == JsonValueKind.Array)
                 {
                     checklistItems = checklistProp.EnumerateArray()
-                        .Select(item => item.GetString() ?? "")
+                        .Select(item => NormalizeBranchInitializationChecklistItem(item.GetString() ?? "", cardId))
                         .Where(s => !string.IsNullOrEmpty(s))
                         .ToList();
                 }
+
+                var checklistCompleted = checklistItems.Count(s => s.TrimStart().StartsWith("[x]", StringComparison.OrdinalIgnoreCase));
+                var checklistTotal = checklistItems.Count;
                 
                 var taskDetail = $"- Task: {name}\n  Status: {(closed ? "Completed" : "In Progress")}\n  Description: {description ?? "No description"}";
                 
@@ -1021,13 +1282,69 @@ namespace strAppersBackend.Controllers
                 
                 if (checklistItems.Any())
                 {
-                    taskDetail += $"\n  Task Breakdown:\n{string.Join("\n", checklistItems.Select(item => $"    - {item}"))}";
+                    taskDetail += $"\n  Task Breakdown: {checklistCompleted} of {checklistTotal} completed\n{string.Join("\n", checklistItems.Select(item => $"    - {item}"))}";
+                    _logger.LogDebug("[Mentor] FormatTaskDetails: task '{TaskName}' checklist {Completed}/{Total} included in prompt", name, checklistCompleted, checklistTotal);
                 }
                 
                 details.Add(taskDetail);
             }
             
             return string.Join("\n\n", details);
+        }
+
+        /// <summary>One-line task summary for CONTEXT (avoids duplicating full task details under both Task: and CURRENT TASK DETAILS).</summary>
+        private string GetTaskSummaryForContext(List<object> tasks)
+        {
+            if (tasks.Count == 0) return "No tasks assigned.";
+            var taskJson = JsonSerializer.Serialize(tasks[0]);
+            var taskElement = JsonSerializer.Deserialize<JsonElement>(taskJson);
+            var name = taskElement.TryGetProperty("Name", out var nameProp) ? nameProp.GetString() : "";
+            var closed = taskElement.TryGetProperty("Closed", out var closedProp) ? closedProp.GetBoolean() : false;
+            var status = closed ? "Completed" : "In Progress";
+            return string.IsNullOrEmpty(name) ? "See CURRENT TASK DETAILS below." : $"{name} ({status}). Full breakdown in CURRENT TASK DETAILS below.";
+        }
+
+        /// <summary>Returns Trello label name(s) for the given role. Full Stack Developer maps to Backend Developer + Frontend Developer so both sprint cards are fetched.</summary>
+        private static IReadOnlyList<string> GetTrelloLabelNamesForRole(string roleName)
+        {
+            if (string.Equals(roleName, "Full Stack Developer", StringComparison.OrdinalIgnoreCase))
+                return new[] { "Backend Developer", "Frontend Developer" };
+            return new[] { roleName };
+        }
+
+        /// <summary>Builds the Platform GitHub &amp; Workflow Rules section for developer-only mentor context. Uses GitHub:BranchNamingPatterns and GitHub:ValidationContext from config.</summary>
+        private string BuildPlatformGitHubWorkflowRulesSection()
+        {
+            var backendPattern = _configuration["GitHub:BranchNamingPatterns:Backend"] ?? "^([1-9]|1[0-9]|20)-B$";
+            var frontendPattern = _configuration["GitHub:BranchNamingPatterns:Frontend"] ?? "^([1-9]|1[0-9]|20)-F$";
+            var validationContext = _configuration["GitHub:ValidationContext"] ?? "Mentor-Validation";
+            return $"\n\n🛠 PLATFORM GITHUB & WORKFLOW RULES (Developer Role):\n" +
+                "1. Repository Access & Permissions\n" +
+                "- Collaborator Status: All developers are added as Collaborators to their respective project repositories. They must check their email and manually approve the GitHub invitation before they can access the repo or push code. When the user says they cannot edit the repo on GitHub, only see Fork, or get permission/push errors, remind them to check their email and accept the GitHub collaborator invitation.\n" +
+                "- Branch Protection: The main branch is strictly protected. Direct pushes to main are disabled. The \"Merge\" button is only enabled after a successful \"" + validationContext + "\" status check.\n\n" +
+                "2. Sprint & Branching Logic (Strict)\n" +
+                "- Platform-Only Branching: Users cannot create branches manually via Git CLI or the GitHub UI. Branching is handled ONLY by the platform backend.\n" +
+                "- Sprint Initialization: No work can begin until the developer initiates the Sprint via the platform's chat buttons.\n" +
+                "- When explaining how to launch the sprint or generate the branch, say to use the buttons above the chat input box (e.g. \"Use the buttons above the chat box to launch the sprint and generate your 1-B and 1-F branches\"). Do NOT say \"via the AI Mentor chat\" or \"in the chat\"—it is the action buttons above the chat input, not the chat itself.\n" +
+                "- Validation Check: The Mentor Agent must always verify if a sprint is initialized by checking if a branch exists that follows the pre-defined naming convention.\n\n" +
+                "3. Naming Conventions & Enforcement\n" +
+                "- Strict Naming: Branches must follow the platform's specific naming convention:\n" +
+                "  * Backend: " + backendPattern + "\n" +
+                "  * Frontend: " + frontendPattern + "\n" +
+                "- When referring to the developer's branch in your response, use the correct branch names: Backend repo = {sprint}-B (e.g. 1-B for Sprint 1), Frontend repo = {sprint}-F (e.g. 1-F for Sprint 1). For Full Stack Developer, mention both (1-B and 1-F) when relevant. Never say \"Sprint1\" or \"Sprint1 branch\" as the branch name—use 1-B or 1-F (or \"Sprint 1 branch (1-B for backend, 1-F for frontend)\").\n" +
+                "- Proactive Correction: If the Mentor Agent detects a branch name that does not follow the convention, it must immediately notify the user and instruct them to rename it or delete and re-create it via the platform.\n\n" +
+                "4. Deployment & Webhook Latency\n" +
+                "- Deployment Delay: GitHub push deployments and CI/CD status checks can take up to a few minutes to process.\n" +
+                "- Error Handling: Warn the developer that errors or validation failures might not appear instantly. If a push happens, they should wait for the platform/GitHub to sync before assuming success.\n\n" +
+                "5. The \"Gatekeeper\" PR Process\n" +
+                "- Validation Trigger: When a developer opens or updates a Pull Request (PR), the platform receives a webhook. This triggers the AI validation logic.\n" +
+                "- Blocker Logic: If the AI validation fails, the PR is blocked from merging. The developer must address the feedback in the code and push again to trigger a fresh validation.\n\n" +
+                "6. Trello Access (Developer Roles)\n" +
+                "- Developers do not have access to Trello. They see their sprint tasks by clicking the \"My Tasks\" button in the platform (where they can also mark items complete). Task details are also in CURRENT TASK DETAILS in this chat. When asked \"where can I see my tasks?\", tell them to use the \"My Tasks\" button. For board-level or Trello-specific questions, direct them to the Product Manager (use the PM's first name from TEAM MEMBERS).\n\n" +
+                "7. PR Readiness\n" +
+                "- When a task's breakdown is fully completed (e.g. 5 of 5 in CURRENT TASK DETAILS), you may suggest that they are ready to open a Pull Request and proceed to merge after validation. Example: \"You've completed all items for this task. When you're ready, open a Pull Request; once it passes validation, you can merge.\" Keep the tone professional.\n\n" +
+                "8. Code Review Requests\n" +
+                "- Code review is a built-in platform feature. When the user asks you to review their code, comment on their code, give your opinion on their commits, or feedback on their code (e.g. \"review my code\", \"what do you think about these commits?\", \"can you review this?\", \"feedback on my code\"), do NOT list commits, give task-alignment advice, or perform the review in chat. Your response must direct them to use the built-in feature: the \"Review my code\" button below the chat input box. Example: \"We have a built-in code review—click the 'Review my code' button below the chat to get detailed feedback on your branch.\"";
         }
 
         private string GetModuleDescriptionForFirstTask(JsonElement firstTask, Dictionary<string, string> moduleDescriptions)
@@ -1109,6 +1426,7 @@ namespace strAppersBackend.Controllers
         /// <summary>
         /// Get the Platform Context & Vision and Knowledge Limitations content to prepend to system prompts
         /// </summary>
+        // PromptType: General — Refactor To DB (single block, no variants; read from MentorPrompt category "Platform Context and Vision")
         private string GetPlatformContextAndLimitations()
         {
             return @"Platform Context & Vision:
@@ -1117,6 +1435,10 @@ The Mission: This platform is the new standard for hands-on engineering. We do n
 How the System Works:
 • True Professional Experience: Juniors are placed in high-fidelity environments where they must navigate real-world complexity (CORS, Environment Variables, API Contracts, and Deployment Pipelines).
 • The Team Dynamic: Most projects are collaborative, featuring distinct roles like Backend Developer, Frontend Developer, UI/UX, and PM. You oversee the interdependencies between these repos and individuals.
+• Trello Access: Only the Product Manager has direct access to Trello. Each role (developers, UI/UX) can see their sprint tasks in the platform by clicking ""My Tasks"" and can mark items as complete there; for board-level or Trello-related matters they should coordinate with the PM.
+• Where to see my tasks: When a user asks where they can see their tasks, tell them to click the ""My Tasks"" button in the platform to view their sprint tasks and mark items as complete. You can also reference CURRENT TASK DETAILS in this chat for the same list—but always mention the ""My Tasks"" button as the place to see and manage tasks in the UI.
+• Figma design: Once the UI/UX designer has entered their public Figma file URL (via the Figma button in the platform), everyone on the team can view the design by clicking the Figma button.
+• Where to see the Figma design: When the user asks how or where to see the Figma design, tell them to click the Figma button in the platform—that is where the design is available to the whole team once the UI/UX designer has entered the public file URL. Do NOT say to ask the UI/UX designer for a link; the link is shared via the platform. If the design is not there yet, they can ask the UI/UX designer (use first name from TEAM MEMBERS) to add the Figma file URL via the Figma button.
 • The Scouting Edge: Every action the user takes—from commit quality to how they resolve architectural conflicts—is analyzed. This is a stage where their skills are exposed to potential employers. We are the 'Scouting Ground' for the next generation of tech talent.
 Your Role as the Mentor:
 1. Lead by Context: You are the only entity with a 'Global View' of all repositories (API and Client) and the Trello roadmap. You know when a Backend push will break a Frontend fetch.
@@ -1136,15 +1458,63 @@ Your intelligence is strictly tethered to the Current Project Context and the us
 • If the Backend Developer asks for advice on CSS styling, redirect them: 'That's a frontend concern. Check the UI/UX design cards or sync with the Frontend dev. My focus for you is the API integrity.'
 • If a user asks for 'Best practices for Python' in a .NET project, you do not know Python for the purposes of this conversation. Your expertise is locked to the Project's System Design.
 4. No External LLM Assistance: If the user asks you to 'Act like ChatGPT' or 'Explain a concept from scratch' that is easily Googleable, challenge them to find the answer in the context of the code. Your value is not in explaining what a variable is, but where that specific variable lives in their repository.
+5. Task Dependencies: Use the Dependencies field in CURRENT TASK DETAILS and TEAM MEMBER TASKS. If the user's task lists dependencies on another role's task (e.g. card IDs in Dependencies), and that dependency is not yet complete in TEAM MEMBER TASKS, remind the user that they may need to wait or coordinate with that team member (use first names from TEAM MEMBERS) before they can complete their work.
 
 ";
         }
 
+        /// <summary>Returns role-specific instructions for the mentor (UI/UX, PM only). Shown only for that role.</summary>
+        private static string BuildPerRoleInstructions(string roleName)
+        {
+            if (string.IsNullOrWhiteSpace(roleName)) return "";
+            var r = roleName.Trim();
+            var sb = new System.Text.StringBuilder();
+            // UI/UX Designer
+            if (r.Contains("UI/UX", StringComparison.OrdinalIgnoreCase) || (r.Contains("Designer", StringComparison.OrdinalIgnoreCase) && !r.Contains("Product", StringComparison.OrdinalIgnoreCase)))
+            {
+                sb.Append("\n\n?? ROLE: UI/UX DESIGNER (present only for this role):\n");
+                sb.Append("- Figma: The platform has a Figma button where you can enter your Figma file URL so the design is available to all team members. When guiding the designer, direct them to use it.\n");
+                sb.Append("- For the design to be viewable by the team and by external tools, the Figma file must be shared appropriately: set file access to \"Anyone with the link\" (or your organization's equivalent). If your organization uses link expiration or password protection, ensure the link remains valid for the team. Organization admins can restrict public link sharing—if viewing fails, the designer may need to check sharing settings or ask their admin.\n");
+            }
+            // Product Manager
+            if (r.Contains("Product Manager", StringComparison.OrdinalIgnoreCase) || r.Equals("PM", StringComparison.OrdinalIgnoreCase))
+            {
+                sb.Append("\n\n?? ROLE: PRODUCT MANAGER (present only for this role):\n");
+                sb.Append("- Encourage use of the \"Bugs Sprint\" (or Bugs list) for logging and tracking bugs so the team has a single place to see and prioritize defects.\n");
+            }
+            return sb.ToString();
+        }
+
+        /// <summary>Returns role-specific instructions for Frontend or Backend developer (not Full Stack). Shown only for that role.</summary>
+        private static string BuildFrontendBackendRoleInstructions(string roleName)
+        {
+            if (string.IsNullOrWhiteSpace(roleName)) return "";
+            var r = roleName.Trim();
+            var isFullStack = r.Contains("Full Stack", StringComparison.OrdinalIgnoreCase);
+            if (isFullStack) return "";
+            var sb = new System.Text.StringBuilder();
+            if (r.Contains("Frontend", StringComparison.OrdinalIgnoreCase))
+            {
+                sb.Append("\n\n?? ROLE: FRONTEND DEVELOPER (present only for this role; not for Full Stack):\n");
+                sb.Append("- When the user reports issues or errors: first check BOARD STATES (deployment status, build failures, RuntimeError, GithubPages errors) and state what you see; then if needed suggest copying the full error from the browser console (F12 → Console). Do not give only generic troubleshooting without diagnosing from BOARD STATES first.\n");
+                sb.Append("- Task dependencies: Your tasks often depend on the UI/UX designer (for GUI/layout and design specs) and on the Backend developer (for REST API). If your task lists dependencies, coordinate with those roles—e.g. ask the Backend developer for the REST API details for the relevant endpoints before implementing the frontend calls.\n");
+                sb.Append("- The live frontend is deployed via GitHub Pages; the main entry is typically index.html. You can refer to the deployed URL (from BOARD STATES or project info) when discussing the live site.\n");
+            }
+            if (r.Contains("Backend", StringComparison.OrdinalIgnoreCase))
+            {
+                sb.Append("\n\n?? ROLE: BACKEND DEVELOPER (present only for this role; not for Full Stack):\n");
+                sb.Append("- When the user reports a crash or issue: first check BOARD STATES (Railway build status, RuntimeError, latest push) and state what you see before suggesting steps. Do not give only generic troubleshooting without diagnosing from BOARD STATES first.\n");
+                sb.Append("- You are expected to provide the REST API (endpoints, request/response shapes) to the Frontend developer so they can integrate with your backend. When the frontend depends on your APIs, ensure you communicate or document the API contract (e.g. via Swagger or a short spec) and coordinate with the Frontend developer (use first name from TEAM MEMBERS).\n");
+            }
+            return sb.ToString();
+        }
+
+        // PromptType: General — Keep (builds context with variants: new/existing conversation, meeting state, date, etc.)
         private string BuildEnhancedSystemPrompt(string baseSystemPrompt, JsonElement contextData)
         {
             // Prepend Platform Context & Vision and Knowledge Limitations to the system prompt
             var platformContext = GetPlatformContextAndLimitations();
-            var enhancedBasePrompt = platformContext + baseSystemPrompt;
+            var enhancedBasePrompt = Dbg(1202) + platformContext + Dbg(1203) + baseSystemPrompt;
 
             if (contextData.ValueKind == JsonValueKind.Undefined || contextData.ValueKind == JsonValueKind.Null)
             {
@@ -1294,6 +1664,14 @@ Your intelligence is strictly tethered to the Current Project Context and the us
             var currentDate = DateTime.UtcNow;
             contextInfo += $"\n\nCURRENT DATE: {currentDate:MMMM d, yyyy} (Use this as the reference point for calculating future dates)";
             
+            // Add project brief so the mentor knows what the project is about
+            if (contextData.TryGetProperty("ProjectDescription", out var projectDescProp) && projectDescProp.ValueKind == JsonValueKind.String)
+            {
+                var projectDescription = projectDescProp.GetString();
+                if (!string.IsNullOrWhiteSpace(projectDescription))
+                    contextInfo += $"\n\nPROJECT BRIEF:\n{projectDescription.Trim()}";
+            }
+            
             // Add team members list separately with proper formatting
             if (!string.IsNullOrEmpty(teamMembersInfo))
             {
@@ -1380,23 +1758,19 @@ Your intelligence is strictly tethered to the Current Project Context and the us
             {
                 var githubTemplate = _promptConfig.Mentor.EnhancedPrompt.GitHubContextTemplate ?? 
                     "GITHUB REPOSITORY STATUS:\n{0}\n\nUse this information to provide accurate, context-aware responses about the student's code and repository activity.";
-                githubContextSection = $"\n\n{string.Format(githubTemplate, githubContextInfo)}";
+                githubContextSection = $"\n\n{DbgConfig("EnhancedPrompt.GitHubContextTemplate")}{string.Format(githubTemplate, githubContextInfo)}";
             }
 
-            // Add database connection information if password is available
+            // Add database connection information only for developer roles (PM/UI-UX do not need DB connection strings)
             string databaseInfoSection = "";
-            if (!string.IsNullOrEmpty(databasePassword))
+            if (isDeveloperRole && !string.IsNullOrEmpty(databasePassword))
             {
                 databaseInfoSection = $"\n\nDATABASE CONNECTION INFORMATION:\n" +
                     $"The project has a Neon PostgreSQL database. " +
-                    $"⚠️ CRITICAL: If the user asks for database connection details, you MUST extract the EXACT connection string from the README content (if available in the context above). " +
-                    $"The README contains the complete connection string with the isolated database role. " +
+                    $"If the user asks for connection details, use the PROJECT INFORMATION (FROM README) or DATABASE CONNECTION INFORMATION (FALLBACK) section provided later in this prompt; ignore any connection details from chat history. " +
                     $"Parse the connection string and provide EXACT values - DO NOT use placeholders or generic formats. " +
-                    $"ONLY if the README is not available, use the following information:\n" +
-                    $"- Database Password: {databasePassword}\n" +
-                    $"- Note: This password is for the isolated database role. " +
-                    $"The full connection string with exact database name (starts with 'AppDB_'), username, host, and port is in the README. " +
-                    $"ALWAYS prioritize and extract EXACT values from the README connection string.";
+                    $"Password for the isolated database role (fallback): {databasePassword}. " +
+                    $"The full connection string with exact database name (AppDB_...), username (db_appdb_..._user), host, and port is in those sections.";
             }
             
             // Only add GitHub capabilities for developer roles (from configuration)
@@ -1412,16 +1786,28 @@ Your intelligence is strictly tethered to the Current Project Context and the us
 
             if (!string.IsNullOrEmpty(contextInfo))
             {
-                var capabilitiesSection = !string.IsNullOrEmpty(capabilitiesInfo) ? $"\n\n{capabilitiesInfo}" : "";
-                return $"{enhancedBasePrompt}\n\nCURRENT CONTEXT:\n{contextInfo}{githubContextSection}{databaseInfoSection}{capabilitiesSection}\n\n{_promptConfig.Mentor.EnhancedPrompt.ContextReminder}";
+                var capabilitiesSection = !string.IsNullOrEmpty(capabilitiesInfo) ? $"\n\n{DbgConfig("EnhancedPrompt.DeveloperCapabilitiesInfo|NonDeveloperCapabilitiesInfo")}{capabilitiesInfo}" : "";
+                var nonDeveloperInstructionsSection = (!isDeveloperRole && !string.IsNullOrEmpty(_promptConfig.Mentor.NonDeveloperInstructions))
+                    ? $"\n\n{DbgConfig("NonDeveloperInstructions")}{_promptConfig.Mentor.NonDeveloperInstructions}"
+                    : "";
+                var perRoleSection = !isDeveloperRole ? BuildPerRoleInstructions(roleName) : "";
+                // Only emit debug markers when the corresponding section has content (avoids orphan markers for non-developer)
+                var dbg1430 = string.IsNullOrEmpty(githubContextSection) ? "" : Dbg(1430);
+                var dbg1437 = string.IsNullOrEmpty(databaseInfoSection) ? "" : Dbg(1437);
+                var dbg1470 = string.IsNullOrEmpty(capabilitiesSection) ? "" : Dbg(1470);
+                return $"{enhancedBasePrompt}\n\n{Dbg(1371)}CURRENT CONTEXT:\n{contextInfo}{dbg1430}{githubContextSection}{dbg1437}{databaseInfoSection}{dbg1470}{capabilitiesSection}{nonDeveloperInstructionsSection}{perRoleSection}\n\n{Dbg(1471)}{DbgConfig("EnhancedPrompt.ContextReminder")}{_promptConfig.Mentor.EnhancedPrompt.ContextReminder}";
             }
 
             // Even without context, add capability information if available
             if (!string.IsNullOrEmpty(capabilitiesInfo))
             {
-                return $"{enhancedBasePrompt}\n\n{capabilitiesInfo}";
+                var nonDevInstr = (!isDeveloperRole && !string.IsNullOrEmpty(_promptConfig.Mentor.NonDeveloperInstructions))
+                    ? $"\n\n{DbgConfig("NonDeveloperInstructions")}{_promptConfig.Mentor.NonDeveloperInstructions}"
+                    : "";
+                var perRoleSection = !isDeveloperRole ? BuildPerRoleInstructions(roleName) : "";
+                return $"{enhancedBasePrompt}\n\n{Dbg(1477)}{DbgConfig("EnhancedPrompt.DeveloperCapabilitiesInfo|NonDeveloperCapabilitiesInfo")}{capabilitiesInfo}{nonDevInstr}{perRoleSection}";
             }
-            
+
             return enhancedBasePrompt;
         }
 
@@ -2043,7 +2429,60 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                     _logger.LogWarning("Build failure detected: Service={ServiceName}, Branch={Branch}, Commit={CommitHash}, Author={CommitAuthor}", 
                         serviceName, payload.Details?.Branch, payload.Details?.CommitHash, payload.Details?.CommitAuthor);
                 }
-                
+
+                // Trigger backend validation for this branch so BuildValidation row is updated (Railway webhook does not write it)
+                var webhookBranch = string.IsNullOrWhiteSpace(payload.Details?.Branch) ? "main" : payload.Details.Branch.Trim();
+                var capturedBoardId = boardId;
+                var capturedBranch = webhookBranch;
+                _ = Task.Run(async () =>
+                {
+                    using (var scope = _serviceScopeFactory.CreateScope())
+                    {
+                        ILogger<MentorController>? scopedLogger = null;
+                        try
+                        {
+                            await Task.Delay(1000); // Brief delay so Railway row is committed
+                            scopedLogger = scope.ServiceProvider.GetRequiredService<ILogger<MentorController>>();
+                            var scopedContext = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+                            var scopedTrelloService = scope.ServiceProvider.GetRequiredService<ITrelloService>();
+                            var scopedGitHubService = scope.ServiceProvider.GetRequiredService<IGitHubService>();
+                            var scopedIntentService = scope.ServiceProvider.GetRequiredService<IMentorIntentService>();
+                            var scopedCodeReviewAgent = scope.ServiceProvider.GetRequiredService<ICodeReviewAgent>();
+                            var scopedPromptConfig = scope.ServiceProvider.GetRequiredService<IOptions<PromptConfig>>();
+                            var scopedTrelloConfig = scope.ServiceProvider.GetRequiredService<IOptions<TrelloConfig>>();
+                            var scopedConfiguration = scope.ServiceProvider.GetRequiredService<IConfiguration>();
+                            var scopedHttpClientFactory = scope.ServiceProvider.GetRequiredService<IHttpClientFactory>();
+                            var scopedAIService = scope.ServiceProvider.GetRequiredService<IAIService>();
+                            var scopedChatCompletionService = scope.ServiceProvider.GetRequiredService<IChatCompletionService>();
+                            var scopedDeploymentsConfig = scope.ServiceProvider.GetRequiredService<IOptions<DeploymentsConfig>>();
+                            var scopedTestingConfig = scope.ServiceProvider.GetRequiredService<IOptions<TestingConfig>>();
+                            var tempController = new MentorController(
+                                scopedContext,
+                                scopedLogger,
+                                scopedTrelloService,
+                                scopedGitHubService,
+                                scopedIntentService,
+                                scopedCodeReviewAgent,
+                                scopedPromptConfig,
+                                scopedTrelloConfig,
+                                scopedConfiguration,
+                                scopedHttpClientFactory,
+                                scopedAIService,
+                                scopedChatCompletionService,
+                                scopedDeploymentsConfig,
+                                scopedTestingConfig,
+                                scope.ServiceProvider.GetRequiredService<IServiceScopeFactory>());
+                            await tempController.ValidateBackendInternal(capturedBoardId, capturedBranch, fromRailwayWebhook: true);
+                            scopedLogger.LogInformation("[RAILWAY WEBHOOK] BuildValidation updated for BoardId={BoardId}, Branch={Branch}", capturedBoardId, capturedBranch);
+                        }
+                        catch (Exception ex)
+                        {
+                            (scopedLogger ?? scope.ServiceProvider.GetRequiredService<ILogger<MentorController>>())
+                                .LogWarning(ex, "[RAILWAY WEBHOOK] Failed to run ValidateBackend for BoardId={BoardId}, Branch={Branch}: {Message}", capturedBoardId, capturedBranch, ex.Message);
+                        }
+                    }
+                });
+
                 return Ok(new { Success = true, Message = "Webhook received and processed", BoardId = boardId, BuildStatus = buildStatus });
             }
             catch (Exception ex)
@@ -2324,16 +2763,16 @@ Your intelligence is strictly tethered to the Current Project Context and the us
 
                 // Use empty string instead of NULL for GithubBranch to ensure ON CONFLICT works correctly
                 // PostgreSQL treats NULL values as DISTINCT in unique constraints, so multiple NULLs don't conflict
-                // Empty string ensures proper conflict detection (same approach as Railway records)
-                var githubPagesGithubBranch = ""; // Use empty string instead of NULL for GithubPages records
-                
+                var githubPagesGithubBranch = ""; // Frontend log does not send branch; use '' so one row per board for page-load/runtime logs
+                var serviceName = "PageRuntime"; // Identifies records from frontend page load / runtime log (vs deployment status from API)
+                var latestEventVal = request.Type; // e.g. FRONTEND_SUCCESS, FRONTEND_RUNTIME
+
                 // Check if record exists for logging
-                // GithubPages records use empty string '' for GithubBranch (not NULL) to ensure ON CONFLICT works
                 var existingState = await _context.BoardStates
                     .FirstOrDefaultAsync(bs => bs.BoardId == request.BoardId && 
                                                bs.Source == source && 
                                                bs.Webhook == webhook &&
-                                               (bs.GithubBranch == "" || bs.GithubBranch == null)); // Check both for backward compatibility
+                                               (bs.GithubBranch == "" || bs.GithubBranch == null));
 
                 if (existingState != null)
                 {
@@ -2346,16 +2785,16 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                         request.BoardId, source, webhook, request.Type);
                 }
 
-                // Use FormattableString for safe parameterization
+                // Use FormattableString for safe parameterization; ServiceName and LatestEvent make the record identifiable (not entirely empty)
                 FormattableString sql = $@"
                     INSERT INTO ""BoardStates"" (
-                        ""BoardId"", ""Source"", ""Webhook"", 
+                        ""BoardId"", ""Source"", ""Webhook"", ""ServiceName"", ""LatestEvent"",
                         ""LastBuildStatus"", ""LastBuildOutput"", ""ErrorMessage"", 
                         ""File"", ""Line"", ""StackTrace"", ""LatestErrorSummary"", ""Timestamp"", 
                         ""DevRole"", ""GithubBranch"",
                         ""CreatedAt"", ""UpdatedAt""
                     ) VALUES (
-                        {request.BoardId}, {source}, {webhook}, 
+                        {request.BoardId}, {source}, {webhook}, {serviceName}, {latestEventVal},
                         {buildStatus}, {errorOutput}, {errorMessage}, 
                         {request.File}, {request.Line}, {request.Stack}, {latestErrorSummary}, {timestamp}, 
                         {"Frontend"}, {githubPagesGithubBranch},
@@ -2363,6 +2802,8 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                     )
                     ON CONFLICT (""BoardId"", ""Source"", ""Webhook"", ""GithubBranch"") 
                     DO UPDATE SET
+                        ""ServiceName"" = EXCLUDED.""ServiceName"",
+                        ""LatestEvent"" = EXCLUDED.""LatestEvent"",
                         ""LastBuildStatus"" = EXCLUDED.""LastBuildStatus"",
                         ""LastBuildOutput"" = EXCLUDED.""LastBuildOutput"",
                         ""ErrorMessage"" = EXCLUDED.""ErrorMessage"",
@@ -2409,15 +2850,19 @@ Your intelligence is strictly tethered to the Current Project Context and the us
             {
                 _logger.LogInformation("[GithubPages] Updating BoardState for BoardId: {BoardId}, Repo: {Owner}/{Repo}", boardId, owner, repositoryName);
 
-                // Get detailed status information from GitHub Pages API
+                // Get detailed status information from GitHub Pages API (use "GitHub" client for SSL handling on restricted networks)
                 var request = new HttpRequestMessage(HttpMethod.Get, 
                     $"https://api.github.com/repos/{owner}/{repositoryName}/pages");
                 request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", accessToken);
+                request.Headers.Add("User-Agent", "StrAppersBackend/1.0");
+                request.Headers.Accept.Add(new System.Net.Http.Headers.MediaTypeWithQualityHeaderValue("application/vnd.github+json"));
+                request.Headers.Add("X-GitHub-Api-Version", "2022-11-28");
 
-                using var httpClient = _httpClientFactory.CreateClient();
+                using var httpClient = _httpClientFactory.CreateClient("GitHub");
                 var response = await httpClient.SendAsync(request);
                 string? buildStatus = null;
                 string? statusMessage = null;
+                string? sourceBranch = null;
 
                 if (response.IsSuccessStatusCode)
                 {
@@ -2428,7 +2873,12 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                     });
 
                     var status = pagesInfo.TryGetProperty("status", out var statusProp) ? statusProp.GetString() : null;
-                    
+                    var htmlUrl = pagesInfo.TryGetProperty("html_url", out var htmlUrlProp) ? htmlUrlProp.GetString() : null;
+                    if (pagesInfo.TryGetProperty("source", out var sourceProp) && sourceProp.TryGetProperty("branch", out var branchProp))
+                        sourceBranch = branchProp.GetString();
+                    _logger.LogInformation("[GithubPages] API response for {Owner}/{Repo}: Status={Status}, SourceBranch={SourceBranch}, Url={Url}",
+                        owner, repositoryName, status ?? "null", sourceBranch ?? "null", htmlUrl ?? "null");
+
                     // Map GitHub Pages status to build status
                     if (status == "built")
                     {
@@ -2455,6 +2905,12 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                 {
                     buildStatus = "NOT_ENABLED";
                     statusMessage = "GitHub Pages is not enabled for this repository";
+                    _logger.LogWarning("[GithubPages] API returned 404 for {Owner}/{Repo} - Pages not enabled", owner, repositoryName);
+                }
+                else
+                {
+                    var errorBody = await response.Content.ReadAsStringAsync();
+                    _logger.LogWarning("[GithubPages] API returned {StatusCode} for {Owner}/{Repo}: {Content}", response.StatusCode, owner, repositoryName, errorBody ?? "");
                 }
 
                 // Only update if we got a status
@@ -2462,20 +2918,23 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                 {
                     var source = "GithubPages";
                     var webhook = false; // API-triggered, not webhook
-                    var githubPagesGithubBranch = ""; // Use empty string instead of NULL
+                    var githubPagesGithubBranch = sourceBranch ?? ""; // From API source.branch; use "" if unknown so we have one canonical row
                     var timestamp = DateTime.UtcNow;
                     var createdAt = DateTime.UtcNow;
                     var updatedAt = DateTime.UtcNow;
 
+                    // Do not run migration UPDATE here: it can cause duplicate key when a row with this branch already exists (e.g. from a previous INSERT). Upsert by (BoardId, Source, Webhook, GithubBranch) only.
+
+                    var pagesServiceName = "PagesBuild"; // Deployment status from GitHub Pages API (vs PageRuntime = frontend page load log)
                     FormattableString sql = $@"
                         INSERT INTO ""BoardStates"" (
-                            ""BoardId"", ""Source"", ""Webhook"", 
+                            ""BoardId"", ""Source"", ""Webhook"", ""ServiceName"",
                             ""LastBuildStatus"", ""LastBuildOutput"", ""ErrorMessage"", 
                             ""Timestamp"", 
                             ""DevRole"", ""GithubBranch"",
                             ""CreatedAt"", ""UpdatedAt""
                         ) VALUES (
-                            {boardId}, {source}, {webhook}, 
+                            {boardId}, {source}, {webhook}, {pagesServiceName},
                             {buildStatus}, {statusMessage}, NULL, 
                             {timestamp}, 
                             {"Frontend"}, {githubPagesGithubBranch},
@@ -2483,6 +2942,7 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                         )
                         ON CONFLICT (""BoardId"", ""Source"", ""Webhook"", ""GithubBranch"") 
                         DO UPDATE SET
+                            ""ServiceName"" = EXCLUDED.""ServiceName"",
                             ""LastBuildStatus"" = EXCLUDED.""LastBuildStatus"",
                             ""LastBuildOutput"" = EXCLUDED.""LastBuildOutput"",
                             ""Timestamp"" = EXCLUDED.""Timestamp"",
@@ -2780,6 +3240,8 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                     System.Text.Json.JsonDocument? responseDoc = null;
                     try
                     {
+                        if (string.IsNullOrEmpty(responseContent))
+                            break;
                         responseDoc = System.Text.Json.JsonDocument.Parse(responseContent);
                         
                         // Check for GraphQL errors
@@ -3252,6 +3714,31 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                 return StatusCode(500, new { Success = false, Message = "An error occurred while processing your request." });
             }
         }
+
+        /// <summary>
+        /// Get the last X chat history messages for a student/sprint (X = ChatHistoryLength from appSettings). For frontend refresh of chat.
+        /// </summary>
+        [HttpGet("use/chat-history")]
+        public async Task<ActionResult<object>> GetMentorChatHistory([FromQuery] int studentId, [FromQuery] int sprintNumber)
+        {
+            try
+            {
+                var limit = _promptConfig.Mentor.ChatHistoryLength * 2; // last N pairs (user + assistant)
+                var messages = await _context.MentorChatHistory
+                    .Where(h => h.StudentId == studentId && h.SprintId == sprintNumber)
+                    .OrderByDescending(h => h.CreatedAt)
+                    .Take(limit)
+                    .OrderBy(h => h.CreatedAt)
+                    .Select(h => new { h.Role, h.Message, h.CreatedAt, h.AIModelName })
+                    .ToListAsync();
+                return Ok(new { Success = true, Messages = messages });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error getting mentor chat history for StudentId: {StudentId}, SprintNumber: {SprintNumber}", studentId, sprintNumber);
+                return StatusCode(500, new { Success = false, Message = ex.Message });
+            }
+        }
         
         /// <summary>
         /// Parses error details from build output/logs
@@ -3659,7 +4146,7 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                     _logger.LogWarning("No commits found with author filter '{Username}'. Attempting to fetch all commits without author filter to diagnose issue.", student.GithubUser);
                     try
                     {
-                        using var httpClient = new HttpClient();
+                        using var httpClient = _httpClientFactory.CreateClient("GitHub");
                         httpClient.DefaultRequestHeaders.Add("User-Agent", "StrAppers-Backend");
                         if (!string.IsNullOrEmpty(accessToken))
                         {
@@ -3730,8 +4217,11 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                     _logger.LogWarning("No commits found with author filter '{Username}'. Attempting fallback: fetch all commits without author filter.", student.GithubUser);
                     try
                     {
-                        using var httpClient = new HttpClient();
+                        // Use named "GitHub" client for SSL handling (corporate proxy/UntrustedRoot)
+                        using var httpClient = _httpClientFactory.CreateClient("GitHub");
                         httpClient.DefaultRequestHeaders.Add("User-Agent", "StrAppers-Backend");
+                        httpClient.DefaultRequestHeaders.Accept.Add(new System.Net.Http.Headers.MediaTypeWithQualityHeaderValue("application/vnd.github+json"));
+                        httpClient.DefaultRequestHeaders.Add("X-GitHub-Api-Version", "2022-11-28");
                         if (!string.IsNullOrEmpty(accessToken))
                         {
                             httpClient.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", accessToken);
@@ -3842,8 +4332,8 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                     
                     try
                     {
-                        // Fetch all recent commits without author filter
-                        using var httpClient = new HttpClient();
+                        // Fetch all recent commits without author filter - use configured "GitHub" client (SSL handling)
+                        using var httpClient = _httpClientFactory.CreateClient("GitHub");
                         httpClient.DefaultRequestHeaders.Add("User-Agent", "StrAppers-Backend");
                         var allCommitsUrl = $"https://api.github.com/repos/{owner}/{repo}/commits?per_page=10";
                         var allCommitsResponse = await httpClient.GetAsync(allCommitsUrl);
@@ -4273,6 +4763,7 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                     });
                 }
 
+                // PromptType: Developers — Keep (code review prompt has dynamic context; single block but used only for code review flow)
                 // Build system prompt for code review from configuration
                 var codeReviewSystemPrompt = _promptConfig.Mentor.CodeReview.ReviewSystemPrompt;
 
@@ -4420,6 +4911,7 @@ Your intelligence is strictly tethered to the Current Project Context and the us
         /// <summary>
         /// Handle general mentor response (original behavior)
         /// </summary>
+        // PromptType: General — Keep (orchestrates context + BuildEnhancedSystemPrompt + user message; variants in context)
         private async Task<ActionResult<object>> HandleGeneralMentorResponse(MentorRequest request, MentorIntent intent, AIModel aiModel)
         {
             try
@@ -4440,6 +4932,10 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                 var contextData = contextElement.TryGetProperty("Context", out var ctxProp) 
                     ? ctxProp 
                     : default(JsonElement);
+                // Full user prompt includes CURRENT TASK DETAILS (checklist, progress) so the mentor can answer progress/percentage questions
+                var contextUserPrompt = contextElement.TryGetProperty("UserPrompt", out var userPromptProp) 
+                    ? userPromptProp.GetString() ?? "" 
+                    : "";
 
                 // Get user question early for use in sprint detection
                 var userQuestion = request.UserQuestion ?? "";
@@ -4570,67 +5066,81 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                                         userQuestion.Contains("endpoint", StringComparison.OrdinalIgnoreCase) ||
                                         userQuestion.Contains("railway", StringComparison.OrdinalIgnoreCase));
                 
-                // Check if user is asking to review code (even if intent wasn't detected)
-                // This catches cases where intent detection failed but user clearly wants code review
+                // Check if user is asking to review code or for opinion/feedback on commits (even if intent wasn't detected)
+                // This catches "review my code", "what do you think/thin about my/these commits?", "feedback on my code", etc.
                 // Note: lowerQuestion is already declared earlier in the method
-                var isAskingToReviewCode = (lowerQuestion.Contains("review") && 
-                                          (lowerQuestion.Contains("code") || 
+                var isAskingToReviewCode = (lowerQuestion.Contains("review") &&
+                                          (lowerQuestion.Contains("code") ||
                                            lowerQuestion.Contains("my code") ||
                                            lowerQuestion.Contains("this file") ||
                                            lowerQuestion.Contains("the file") ||
                                            lowerQuestion.Contains("file") ||
                                            lowerQuestion.Contains("it") ||
-                                           lowerQuestion.Contains("that"))) ||
+                                           lowerQuestion.Contains("that") ||
+                                           lowerQuestion.Contains("commits"))) ||
                                           lowerQuestion.Contains("give feedback") ||
                                           lowerQuestion.Contains("provide feedback") ||
                                           lowerQuestion.Contains("feedback on") ||
                                           (lowerQuestion.Contains("please") && lowerQuestion.Contains("review")) ||
-                                          (lowerQuestion.Contains("can you") && lowerQuestion.Contains("review"));
+                                          (lowerQuestion.Contains("can you") && lowerQuestion.Contains("review")) ||
+                                          ((lowerQuestion.Contains("think") || lowerQuestion.Contains("thin")) && (lowerQuestion.Contains("commits") || lowerQuestion.Contains("my code") || lowerQuestion.Contains("code"))) ||
+                                          (lowerQuestion.Contains("these commits") && (lowerQuestion.Contains("what do you") || lowerQuestion.Contains("think") || lowerQuestion.Contains("thin") || lowerQuestion.Contains("opinion") || lowerQuestion.Contains("feedback"))) ||
+                                          lowerQuestion.Contains("opinion on") ||
+                                          lowerQuestion.Contains("thoughts on");
                 
-                // If asking to review code and is developer role, route to code review handler
-                if (isAskingToReviewCode && isDeveloperRole)
-                {
-                    _logger.LogInformation("Detected code review request in HandleGeneralMentorResponse: {UserQuestion}. Routing to code review handler.", userQuestion);
-                    // Force code_review intent and route to code review handler
-                    intent.Type = "code_review";
-                    intent.Confidence = 0.9;
-                    return await HandleCodeReviewIntent(request, intent, aiModel);
-                }
+                // When user asks to review code in chat, do NOT route to code review handler—let the mentor respond with the instruction to use the Code Review button below the chat (see Platform Rules rule 8).
                 
-                // If asking to review code, check for commits and add explicit instruction
+                // If asking to review code / feedback on commits, check for commits and add explicit instruction (no-commits vs use-button)
                 string? codeReviewWarning = null;
+                string? codeReviewButtonInstruction = null;
                 if (isAskingToReviewCode && student != null && isDeveloperRole)
                 {
                     try
                     {
-                        // Get appropriate repository URL based on role
-                        var (frontendRepoUrl, backendRepoUrl, _) = GetRepositoryUrlsByRole(student);
-                        var githubRepoUrl = !string.IsNullOrEmpty(backendRepoUrl) ? backendRepoUrl : frontendRepoUrl;
-                        
-                        if (!string.IsNullOrEmpty(student.GithubUser) && !string.IsNullOrEmpty(githubRepoUrl))
+                        var (frontendRepoUrl, backendRepoUrl, isFullStack) = GetRepositoryUrlsByRole(student);
+                        var hasAnyCommits = false;
+
+                        if (!string.IsNullOrEmpty(student.GithubUser))
                         {
-                            var repoParts = githubRepoUrl.Replace("https://github.com/", "").Replace("http://github.com/", "").TrimEnd('/').Split('/');
-                            
-                            if (repoParts.Length >= 2)
+                            // For Full Stack, check BOTH repos so we don't say "no commits" when they have commits on the other repo
+                            var urlsToCheck = new List<string>();
+                            if (!string.IsNullOrEmpty(backendRepoUrl)) urlsToCheck.Add(backendRepoUrl);
+                            if (!string.IsNullOrEmpty(frontendRepoUrl) && frontendRepoUrl != backendRepoUrl) urlsToCheck.Add(frontendRepoUrl);
+                            if (urlsToCheck.Count == 0 && !string.IsNullOrEmpty(frontendRepoUrl)) urlsToCheck.Add(frontendRepoUrl);
+
+                            foreach (var url in urlsToCheck)
                             {
-                                var owner = repoParts[0];
-                                var repo = repoParts[1];
-                                
-                                // Check for commits
-                                var recentCommits = await _githubService.GetRecentCommitsAsync(owner, repo, student.GithubUser, 5, accessToken);
-                                
-                                if (!recentCommits.Any())
+                                var repoParts = url.Replace("https://github.com/", "").Replace("http://github.com/", "").TrimEnd('/').Split('/');
+                                if (repoParts.Length >= 2)
                                 {
-                                    // No commits found - add explicit instruction to be honest
-                                    codeReviewWarning = "\n\n🚨 CRITICAL: The user asked you to review their code, but there are NO commits in their repository. You MUST respond honestly: \"I don't see any commits in your repository yet. Please make sure your code is committed and pushed to GitHub, then ask me to review it again.\" DO NOT generate fake reviews or claim you reviewed code when there are no commits.";
+                                    var owner = repoParts[0];
+                                    var repo = repoParts[1];
+                                    var recentCommits = await _githubService.GetRecentCommitsAsync(owner, repo, student.GithubUser, 5, accessToken);
+                                    if (recentCommits.Any())
+                                    {
+                                        hasAnyCommits = true;
+                                        break;
+                                    }
                                 }
                             }
+                        }
+
+                        if (!hasAnyCommits)
+                        {
+                            codeReviewWarning = "\n\n🚨 CRITICAL: The user asked you to review their code, but there are NO commits in their repository. You MUST respond honestly: \"I don't see any commits in your repository yet. Please make sure your code is committed and pushed to GitHub, then use the Code Review button below the chat to get feedback.\" DO NOT generate fake reviews or claim you reviewed code when there are no commits.";
+                        }
+                        else
+                        {
+                            codeReviewButtonInstruction = "\n\n🚨 CODE REVIEW REQUEST: The user is asking for your opinion or feedback on their code or commits. You MUST NOT list commits, give task-alignment advice, or discuss commits in chat. Code review is a built-in platform feature. Your ONLY response: direct them to click the \"Review my code\" button below the chat input box. Example: \"We have a built-in code review—click the 'Review my code' button below the chat to get detailed feedback on your branch.\"";
                         }
                     }
                     catch (Exception ex)
                     {
                         _logger.LogError(ex, "Error checking commits for code review warning");
+                        codeReviewButtonInstruction = "\n\n🚨 CODE REVIEW REQUEST: The user is asking for your opinion or feedback on their code or commits. Do NOT list commits or give advice in chat. Direct them to the built-in feature: click the \"Review my code\" button below the chat input box.";
                     }
+                    if (codeReviewButtonInstruction == null && isAskingToReviewCode && isDeveloperRole)
+                        codeReviewButtonInstruction = "\n\n🚨 CODE REVIEW REQUEST: The user is asking for your opinion or feedback on their code or commits. Do NOT list commits or give advice in chat. Direct them to click the \"Review my code\" button below the chat input box.";
                 }
                 
                 // Check if user is asking to repeat instructions (likely GitHub-related)
@@ -4734,32 +5244,19 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                     // Always add GitHub info for developer roles, especially if asking about GitHub or repeating instructions
                     if (isAskingAboutRepo || isAskingToRepeat || !string.IsNullOrEmpty(githubUser) || !string.IsNullOrEmpty(githubRepoUrl))
                     {
-                        githubAccountInfo = "\n\n⚠️ CRITICAL GITHUB INFORMATION (Developer Role) - MUST FOLLOW:\n";
-                        githubAccountInfo += "The student ALREADY HAS a GitHub account and their project repository ALREADY EXISTS.\n";
-                        githubAccountInfo += "⚠️ ABSOLUTE REQUIREMENT: When providing GitHub/Git instructions:\n";
-                        githubAccountInfo += "1. NEVER include steps to create a GitHub account\n";
-                        githubAccountInfo += "2. NEVER include steps to create a repository\n";
-                        githubAccountInfo += "3. ALWAYS start by acknowledging their existing account and repository\n";
-                        githubAccountInfo += "4. Focus ONLY on Git workflow: git init → git add → git commit → git push\n";
-                        githubAccountInfo += "5. IGNORE any previous chat history that mentioned creating accounts or repositories\n";
-                        githubAccountInfo += "6. ⚠️ CRITICAL FORMATTING: ALWAYS wrap ALL code snippets and commands in triple backticks (```bash\ncommand\n```)\n";
-                        githubAccountInfo += "   - Even single commands like 'git init' MUST be wrapped: ```bash\ngit init\n```\n";
-                        githubAccountInfo += "   - This ensures proper display in the frontend with copy buttons\n";
+                        githubAccountInfo = "\n\n⚠️ CRITICAL GITHUB INFORMATION (Developer Role):\n";
+                        githubAccountInfo += "Terminal commands: put each full command in a ```bash ... ``` block. Example—write \"Switch to the main branch\" as plain text, then on the next line: ```bash\ngit checkout main\n``` Do not put single words like main in backticks in sentences. Do not put branch names (e.g. 1-B, 1-F, Sprint 1) in code blocks or backticks when used in prose—only full terminal commands go in ```bash blocks. Write branch names as plain text (e.g. your 1-B branch, your 1-F branch).\n";
                         if (!string.IsNullOrEmpty(githubUser))
-                        {
-                            githubAccountInfo += $"\nTheir GitHub username: {githubUser}\n";
-                        }
+                            githubAccountInfo += $"GitHub username: {githubUser}\n";
                         if (!string.IsNullOrEmpty(githubRepoUrl))
-                        {
-                            githubAccountInfo += $"Their repository URL: {githubRepoUrl}\n";
-                        }
-                        githubAccountInfo += "\nIf the user asks to 'instruct again' or 'repeat', provide ONLY the Git workflow steps (init, add, commit, push) - NOT account/repository creation. ALWAYS wrap all commands in triple backticks.";
+                            githubAccountInfo += $"Repository URL: {githubRepoUrl}\n";
+                        githubAccountInfo += "If the user says 'explain again' or 'repeat', repeat what you last explained (same topic); use ```bash blocks for any commands.";
                     }
                 }
                 else if (student != null && !isDeveloperRole)
                 {
-                    // For non-developer roles, add a note that GitHub assumptions don't apply
-                    githubAccountInfo = "\n\nNOTE: This student is NOT in a developer role. Do NOT assume they have a GitHub account or repository unless explicitly mentioned in the context.";
+                    // Non-developer note is already in BuildEnhancedSystemPrompt via NonDeveloperCapabilitiesInfo; do not duplicate here.
+                    githubAccountInfo = "";
                 }
 
                 // Build enhanced system prompt with context (but NOT the user question)
@@ -4768,26 +5265,185 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                 // Add instruction to skip greeting if there's existing chat history
                 if (!hasChatHistory)
                 {
-                    enhancedSystemPrompt = $"{enhancedSystemPrompt}\n\nNOTE: This is a new conversation. You may greet the user naturally if appropriate.";
+                    enhancedSystemPrompt = $"{enhancedSystemPrompt}\n\n{Dbg(4853)}NOTE: This is a new conversation. You may greet the user naturally if appropriate.";
                 }
                 else
                 {
-                    enhancedSystemPrompt = $"{enhancedSystemPrompt}\n\n⚠️ IMPORTANT: This is NOT a new conversation - there is existing chat history. Do NOT greet the user with phrases like \"Hi [name]! How can I help you today?\" or similar greetings. Go straight to answering their question based on the conversation context.\n\n" +
-                        $"⚠️ CRITICAL: If the user asks about database connection details, IGNORE any database connection information from the chat history below. " +
-                        $"Chat history may contain outdated information from deleted boards or old projects. " +
-                        $"ALWAYS use the CURRENT connection information from the PROJECT INFORMATION (README) section above or from the current context, NOT from chat history.";
+                    enhancedSystemPrompt = $"{enhancedSystemPrompt}\n\n{Dbg(4857)}⚠️ IMPORTANT: This is NOT a new conversation - there is existing chat history. Do NOT greet the user with phrases like \"Hi [name]! How can I help you today?\" or similar greetings. Go straight to answering their question based on the conversation context.";
+                    // Developer DB reminder is added later, after PROJECT INFORMATION (README) and FALLBACK sections, so "above" is correct there (see ABSOLUTELY CRITICAL INSTRUCTIONS block).
                 }
                 
+                // Add Platform GitHub & Workflow Rules for developers only (after DeveloperCapabilitiesInfo, before CRITICAL GITHUB INFORMATION)
+                if (isDeveloperRole)
+                {
+                    var platformRules = BuildPlatformGitHubWorkflowRulesSection();
+                    if (!string.IsNullOrEmpty(platformRules))
+                        enhancedSystemPrompt = $"{enhancedSystemPrompt}{Dbg(4865)}{platformRules}";
+                    // Frontend-only or Backend-only instructions (not for Full Stack)
+                    if (student != null)
+                    {
+                        var roleName = student.StudentRoles?.FirstOrDefault(sr => sr.IsActive)?.Role?.Name ?? "";
+                        var frontendBackendSection = BuildFrontendBackendRoleInstructions(roleName);
+                        if (!string.IsNullOrEmpty(frontendBackendSection))
+                            enhancedSystemPrompt = $"{enhancedSystemPrompt}{frontendBackendSection}";
+                    }
+                    // Sprint branch status so mentor does not tell user to initialize when branches already exist
+                    if (student != null && !string.IsNullOrEmpty(student.BoardId))
+                    {
+                        var roleNameForBranch = student.StudentRoles?.FirstOrDefault(sr => sr.IsActive)?.Role?.Name ?? "";
+                        var isFullStackRole = string.Equals(roleNameForBranch, "Full Stack Developer", StringComparison.OrdinalIgnoreCase);
+                        var checkBackend = isFullStackRole || roleNameForBranch.Contains("Backend", StringComparison.OrdinalIgnoreCase);
+                        var checkFrontend = isFullStackRole || roleNameForBranch.Contains("Frontend", StringComparison.OrdinalIgnoreCase);
+                        bool? branch1B = null, branch1F = null;
+                        if (checkBackend) branch1B = await BranchExistsForBoardAsync(student.BoardId, "1-B", true);
+                        if (checkFrontend) branch1F = await BranchExistsForBoardAsync(student.BoardId, "1-F", false);
+                        var parts = new List<string>();
+                        if (branch1B.HasValue) parts.Add($"1-B: {(branch1B.Value ? "exists (initialized)" : "not created")}");
+                        if (branch1F.HasValue) parts.Add($"1-F: {(branch1F.Value ? "exists (initialized)" : "not created")}");
+                        if (parts.Count > 0)
+                        {
+                            var existingBranches = new List<string>();
+                            if (branch1B == true) existingBranches.Add("1-B");
+                            if (branch1F == true) existingBranches.Add("1-F");
+                            var missingBranches = new List<string>();
+                            if (branch1B == false) missingBranches.Add("1-B");
+                            if (branch1F == false) missingBranches.Add("1-F");
+                            var statusLine = "?? SPRINT BRANCH STATUS: " + string.Join("; ", parts) + ".";
+                            if (existingBranches.Count > 0)
+                                statusLine += " Do NOT suggest creating " + string.Join(" or ", existingBranches) + "—already initialized.";
+                            if (missingBranches.Count > 0)
+                                statusLine += " Only suggest using the action buttons above the chat to generate " + string.Join(" and ", missingBranches) + ".";
+                            enhancedSystemPrompt = $"{enhancedSystemPrompt}\n\n{statusLine}";
+                        }
+                    }
+                }
+
+                // Add BoardStates JSON for developers only: retrieves all records for the current board only (BoardId filter), then optionally by DevRole for non-Full Stack
+                var excludeBoardStatesFromPrompt = _configuration.GetValue<bool>("PromptConfig:Mentor:ExcludeBoardStatesFromPrompt", false);
+                var hadBoardStatesFullStack = false;
+                if (isDeveloperRole && student != null && !string.IsNullOrEmpty(student.BoardId))
+                {
+                    var boardId = student.BoardId;
+                    var roleName = student.StudentRoles?.FirstOrDefault(sr => sr.IsActive)?.Role?.Name ?? "";
+                    var isFullStack = string.Equals(roleName, "Full Stack Developer", StringComparison.OrdinalIgnoreCase);
+
+                    IQueryable<BoardState> boardStatesQuery = _context.BoardStates.Where(bs => bs.BoardId == boardId); // current board only, all such records
+                    if (!isFullStack)
+                        boardStatesQuery = boardStatesQuery.Where(bs => bs.DevRole == "Backend" || bs.DevRole == "Frontend");
+
+                    var boardStatesList = await boardStatesQuery
+                        .OrderByDescending(bs => bs.UpdatedAt)
+                        .Select(bs => new
+                        {
+                            bs.Id,
+                            bs.BoardId,
+                            bs.Source,
+                            bs.ServiceName,
+                            bs.Webhook,
+                            bs.DevRole,
+                            bs.GithubBranch,
+                            bs.LastBuildStatus,
+                            bs.PRStatus,
+                            bs.BranchStatus,
+                            bs.LatestCommitId,
+                            LatestCommitDescription = bs.LatestCommitDescription != null && bs.LatestCommitDescription.Length > 300
+                                ? bs.LatestCommitDescription.Substring(0, 300) + "..."
+                                : bs.LatestCommitDescription,
+                            bs.ErrorMessage,
+                            LatestErrorSummary = bs.LatestErrorSummary != null && bs.LatestErrorSummary.Length > 500
+                                ? bs.LatestErrorSummary.Substring(0, 500) + "..."
+                                : bs.LatestErrorSummary,
+                            bs.CreatedAt,
+                            bs.UpdatedAt
+                        })
+                        .ToListAsync();
+
+                    // Serialize for prompt; include LatestCommitId/LatestCommitDescription so mentor sees latest push (GitHub-Push-Backend, GitHub-Push-Frontend, Railway)
+                    var boardStatesForPrompt = boardStatesList.Select(bs => new
+                    {
+                        bs.Id,
+                        bs.BoardId,
+                        bs.Source,
+                        bs.ServiceName,
+                        bs.Webhook,
+                        bs.DevRole,
+                        bs.GithubBranch,
+                        bs.LastBuildStatus,
+                        bs.PRStatus,
+                        bs.BranchStatus,
+                        bs.LatestCommitId,
+                        LatestCommitDescription = bs.LatestCommitDescription != null && bs.LatestCommitDescription.Length > 200 ? bs.LatestCommitDescription.Substring(0, 200) + "..." : bs.LatestCommitDescription,
+                        ErrorMessage = bs.ErrorMessage != null && bs.ErrorMessage.Length > 400 ? bs.ErrorMessage.Substring(0, 400) + "..." : bs.ErrorMessage,
+                        LatestErrorSummary = bs.LatestErrorSummary != null && bs.LatestErrorSummary.Length > 500 ? bs.LatestErrorSummary.Substring(0, 500) + "..." : bs.LatestErrorSummary,
+                        bs.CreatedAt,
+                        bs.UpdatedAt
+                    }).ToList();
+                    var boardStatesJson = JsonSerializer.Serialize(boardStatesForPrompt, new JsonSerializerOptions { WriteIndented = false });
+                    // Full Stack: commit status and build from BOARD STATES only (GitHub-Push-Backend, GitHub-Push-Frontend, Railway)
+                    var fullStackCommitStatusLine = "";
+                    if (isFullStack)
+                    {
+                        var pushBackend = boardStatesList.FirstOrDefault(bs => bs.Source == "GitHub-Push-Backend");
+                        var railway = boardStatesList.FirstOrDefault(bs => bs.Source == "Railway");
+                        var backendCommit = pushBackend != null && (!string.IsNullOrEmpty(pushBackend.LatestCommitId) || !string.IsNullOrEmpty(pushBackend.LatestCommitDescription))
+                            ? (pushBackend.LatestCommitDescription ?? $"commit {pushBackend.LatestCommitId}")
+                            : (railway != null && (!string.IsNullOrEmpty(railway.LatestCommitId) || !string.IsNullOrEmpty(railway.LatestCommitDescription))
+                                ? (railway.LatestCommitDescription ?? $"commit {railway.LatestCommitId}")
+                                : null);
+                        var backendBuildStatus = railway?.LastBuildStatus;
+                        var backendBuildFailed = !string.IsNullOrEmpty(backendBuildStatus) && !backendBuildStatus.Equals("SUCCESS", StringComparison.OrdinalIgnoreCase);
+                        var backendBuildError = backendBuildFailed && railway != null
+                            ? (string.IsNullOrEmpty(railway.LatestErrorSummary) ? railway.ErrorMessage : railway.LatestErrorSummary)
+                            : null;
+                        if (!string.IsNullOrEmpty(backendBuildError) && backendBuildError.Length > 350)
+                            backendBuildError = backendBuildError.Substring(0, 350) + "...";
+                        var pushFrontend = boardStatesList.FirstOrDefault(bs => bs.Source == "GitHub-Push-Frontend");
+                        var frontendCommit = pushFrontend != null && (!string.IsNullOrEmpty(pushFrontend.LatestCommitId) || !string.IsNullOrEmpty(pushFrontend.LatestCommitDescription))
+                            ? (pushFrontend.LatestCommitDescription ?? $"commit {pushFrontend.LatestCommitId}")
+                            : null;
+                        var frontendActivity = boardStatesList.Any(bs => (bs.Source == "GitHub" && bs.ServiceName == "pull_request" || bs.Source == "GithubPages") && bs.GithubBranch == "1-F" && !string.IsNullOrEmpty(bs.LatestCommitId));
+                        fullStackCommitStatusLine = "\n?? FULL STACK – YOU MUST REPORT BOTH BRANCHES. Use ONLY the BOARD STATES data below (latest push and Railway build):\n";
+                        fullStackCommitStatusLine += $"  • Backend (1-B): {(backendCommit != null ? "Latest push: " + backendCommit : "no push in BOARD STATES yet")}";
+                        if (!string.IsNullOrEmpty(backendBuildStatus))
+                            fullStackCommitStatusLine += $" | Railway build: {backendBuildStatus}";
+                        if (backendBuildFailed && !string.IsNullOrEmpty(backendBuildError))
+                            fullStackCommitStatusLine += $" | Build error/details: {backendBuildError}";
+                        fullStackCommitStatusLine += "\n";
+                        fullStackCommitStatusLine += $"  • Frontend (1-F): {(frontendCommit != null ? "Latest push: " + frontendCommit : (frontendActivity ? "has activity (PR/webhook)" : "no push in BOARD STATES yet"))}\n";
+                    }
+                    // Board States prompt text from config (PromptConfig:Mentor:BoardStates*) to avoid large inline strings; fallback only when config not set
+                    var boardStatesAwareness = !string.IsNullOrWhiteSpace(_promptConfig.Mentor.BoardStatesAwareness)
+                        ? _promptConfig.Mentor.BoardStatesAwareness
+                        : GetBoardStatesAwarenessDefault();
+                    var boardStatesAwarenessWithoutJson = !string.IsNullOrWhiteSpace(_promptConfig.Mentor.BoardStatesAwarenessWithoutJson)
+                        ? _promptConfig.Mentor.BoardStatesAwarenessWithoutJson
+                        : GetBoardStatesAwarenessWithoutJsonDefault();
+                    var boardHealthFirstLastInstruction = !string.IsNullOrWhiteSpace(_promptConfig.Mentor.BoardHealthFirstLastInstruction)
+                        ? _promptConfig.Mentor.BoardHealthFirstLastInstruction
+                        : GetBoardHealthFirstLastInstructionDefault();
+                    if (excludeBoardStatesFromPrompt && isFullStack)
+                    {
+                        _logger.LogInformation("[Mentor] Excluding BOARD STATES JSON from prompt (Mentor:ExcludeBoardStatesFromPrompt=true). Using commit status line and awareness only.");
+                        enhancedSystemPrompt = $"{enhancedSystemPrompt}\n\n{Dbg(4864)}{fullStackCommitStatusLine}{boardStatesAwarenessWithoutJson}";
+                    }
+                    else
+                    {
+                        enhancedSystemPrompt = $"{enhancedSystemPrompt}\n\n{Dbg(4864)}BOARD STATES (for context; filtered by BoardId and DevRole Backend/Frontend unless Full Stack):\n{boardStatesJson}{fullStackCommitStatusLine}{boardStatesAwareness}";
+                    }
+                    enhancedSystemPrompt += $"\n\n{boardHealthFirstLastInstruction}";
+                    hadBoardStatesFullStack = isFullStack;
+                }
+
                 // Add GitHub account information
                 if (!string.IsNullOrEmpty(githubAccountInfo))
                 {
-                    enhancedSystemPrompt = $"{enhancedSystemPrompt}{githubAccountInfo}";
+                    enhancedSystemPrompt = $"{enhancedSystemPrompt}{Dbg(4866)}{githubAccountInfo}";
                 }
                 
-                // Add repository access information to system prompt if relevant
-                if (!string.IsNullOrEmpty(repositoryStatusInfo))
+                // Add repository access information only for developer roles (avoids "You have access to the repository" for PM/UI-UX)
+                if (!string.IsNullOrEmpty(repositoryStatusInfo) && isDeveloperRole)
                 {
-                    enhancedSystemPrompt = $"{enhancedSystemPrompt}\n\n{repositoryStatusInfo}";
+                    enhancedSystemPrompt = $"{enhancedSystemPrompt}\n\n{Dbg(4872)}{repositoryStatusInfo}";
                 }
 
                 // Extract WebApi URL and Swagger URL from README if available (for developer roles)
@@ -4811,6 +5467,35 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                     }
                 }
                 
+                // Fallback: README often has only relative Swagger path (/swagger) because domain is set after repo creation. Use ProjectBoard.WebApiUrl.
+                if (isDeveloperRole && student.ProjectBoard != null && !string.IsNullOrWhiteSpace(student.ProjectBoard.WebApiUrl))
+                {
+                    var boardUrl = student.ProjectBoard.WebApiUrl.Trim();
+                    if (string.IsNullOrEmpty(webApiUrl) && string.IsNullOrEmpty(swaggerUrl))
+                    {
+                        if (boardUrl.EndsWith("/swagger", StringComparison.OrdinalIgnoreCase))
+                        {
+                            webApiUrl = boardUrl.Substring(0, boardUrl.Length - 8).TrimEnd('/');
+                            swaggerUrl = boardUrl;
+                        }
+                        else
+                        {
+                            webApiUrl = boardUrl;
+                            swaggerUrl = $"{boardUrl.TrimEnd('/')}/swagger";
+                        }
+                    }
+                    else if (string.IsNullOrEmpty(webApiUrl))
+                    {
+                        webApiUrl = boardUrl.EndsWith("/swagger", StringComparison.OrdinalIgnoreCase)
+                            ? boardUrl.Substring(0, boardUrl.Length - 8).TrimEnd('/')
+                            : boardUrl;
+                    }
+                    else if (string.IsNullOrEmpty(swaggerUrl))
+                    {
+                        swaggerUrl = webApiUrl.TrimEnd('/') + "/swagger";
+                    }
+                }
+                
                 // Add README content if fetched (for connection string parsing, etc.)
                 if (isDeveloperRole)
                 {
@@ -4822,7 +5507,7 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                     
                     if (!string.IsNullOrEmpty(readmeContent))
                     {
-                        enhancedSystemPrompt = $"{enhancedSystemPrompt}\n\n=== PROJECT INFORMATION (FROM README) ===\n" +
+                        enhancedSystemPrompt = $"{enhancedSystemPrompt}\n\n{Dbg(4907)}=== PROJECT INFORMATION (FROM README) ===\n" +
                         $"{readmeContent}\n\n" +
                             $"=== END OF PROJECT INFORMATION ===\n\n";
                     }
@@ -4909,7 +5594,7 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                                 _logger.LogWarning("⚠️ [MENTOR] NeonProjectId not found in ProjectBoard. Cannot retrieve host dynamically. This may be an older board created before project-per-tenant model.");
                             }
                             
-                            enhancedSystemPrompt = $"{enhancedSystemPrompt}\n\n=== DATABASE CONNECTION INFORMATION (FALLBACK - README MISSING/INCOMPLETE) ===\n" +
+                            enhancedSystemPrompt = $"{enhancedSystemPrompt}\n\n{Dbg(4994)}=== DATABASE CONNECTION INFORMATION (FALLBACK - README MISSING/INCOMPLETE) ===\n" +
                                 $"- Database Name: {dbName}\n" +
                                 $"- Username: {username}\n" +
                                 $"- Password: {dbPassword}\n";
@@ -4928,14 +5613,14 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                         }
                     }
                     
-                    enhancedSystemPrompt = $"{enhancedSystemPrompt}" +
+                    enhancedSystemPrompt = $"{enhancedSystemPrompt}{Dbg(5013)}" +
                         $"🚨 ABSOLUTELY CRITICAL INSTRUCTIONS FOR DATABASE CONNECTION INFORMATION - READ CAREFULLY:\n" +
-                        $"1. If the user asks about database connection details, you MUST extract the EXACT connection string from the PROJECT INFORMATION section above (README).\n" +
+                        $"1. If the user asks about database connection details, get the EXACT connection string from the PROJECT INFORMATION (FROM README) section above if present; otherwise use the DATABASE CONNECTION INFORMATION (FALLBACK) section above.\n" +
                         $"2. The connection string is in the format: postgresql://username:password@host:port/database?sslmode=require\n" +
                         $"3. 🚨 FORBIDDEN: You MUST NEVER use placeholders like <boardid>, <BoardId>, db_appdb_<boardid>_user, AppDB_<boardid>, or ANY other placeholder format.\n" +
                         $"4. 🚨 FORBIDDEN: You MUST NEVER say 'replace <boardid> with your board ID' or similar instructions.\n" +
                         $"5. 🚨 FORBIDDEN: You MUST NEVER use angle brackets < > or square brackets [ ] as placeholders.\n" +
-                        $"6. ✅ REQUIRED: Extract and provide the COMPLETE, EXACT connection string from the README above.\n" +
+                        $"6. ✅ REQUIRED: Extract and provide the COMPLETE, EXACT connection string from the section(s) above (README if present, otherwise FALLBACK).\n" +
                         $"7. ✅ REQUIRED: If the README shows a connection string like 'postgresql://db_appdb_695e42b42ddace5d23fb1f0e_user:password@host:5432/AppDB_695e42b42ddace5d23fb1f0e?sslmode=require', you MUST provide it EXACTLY as shown.\n" +
                         $"8. IMPORTANT: Database name starts with 'AppDB_' (capital A, capital D, capital B) followed by the actual board ID - it does NOT end with '_user'.\n" +
                         $"9. IMPORTANT: Username is 'db_appdb_' (lowercase) followed by the actual board ID and '_user' (lowercase).\n" +
@@ -4943,7 +5628,7 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                         $"11. URL-decode the password if it contains encoded characters (e.g., %24 becomes $, %40 becomes @, %25 becomes %).\n" +
                         $"12. 🚨 EXAMPLE OF WHAT NOT TO DO: 'Database Name: AppDB_<boardid>' or 'Username: db_appdb_<boardid>_user' - THIS IS WRONG!\n" +
                         $"13. ✅ EXAMPLE OF WHAT TO DO: If README shows 'AppDB_695e42b42ddace5d23fb1f0e', provide 'AppDB_695e42b42ddace5d23fb1f0e' - EXACTLY as shown.\n" +
-                        $"14. DO NOT use generic or default connection information (like neondb_owner) - ALWAYS use what's in the README.\n" +
+                        $"14. Use the exact values from the section(s) above (README or FALLBACK); do not use generic/default (e.g. neondb_owner).\n" +
                         $"15. IGNORE any database connection information from previous chat history - it may be from deleted boards or old projects.\n" +
                         $"16. If the README connection string is missing or incomplete, use the DATABASE CONNECTION INFORMATION (FALLBACK) section above if available.\n" +
                         $"For all other project information, use the content above to answer naturally.";
@@ -4969,11 +5654,11 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                     webApiInfo += "\nYou can reference these URLs when helping the developer with API-related questions, testing, or integration tasks.\n";
                     webApiInfo += "=== END WEB API INFORMATION ===\n";
                     
-                    enhancedSystemPrompt = $"{enhancedSystemPrompt}{webApiInfo}";
+                    enhancedSystemPrompt = $"{enhancedSystemPrompt}{Dbg(5054)}{webApiInfo}";
                 }
                 else if (isAskingAboutConnectionString && string.IsNullOrEmpty(readmeContent) && isDeveloperRole)
                 {
-                    enhancedSystemPrompt = $"{enhancedSystemPrompt}\n\n⚠️ NOTE: The user asked about connection strings or project configuration details, " +
+                    enhancedSystemPrompt = $"{enhancedSystemPrompt}\n\n{Dbg(5058)}⚠️ NOTE: The user asked about connection strings or project configuration details, " +
                         $"but this information is not currently available in their project repository. " +
                         $"You should inform them that the requested information could not be found.";
                 }
@@ -4981,7 +5666,12 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                 // Add code review warning if user asked to review code but there are no commits
                 if (!string.IsNullOrEmpty(codeReviewWarning))
                 {
-                    enhancedSystemPrompt = $"{enhancedSystemPrompt}{codeReviewWarning}";
+                    enhancedSystemPrompt = $"{enhancedSystemPrompt}{Dbg(5066)}{codeReviewWarning}";
+                }
+                // When user asks for opinion/feedback on code or commits (and has commits), direct them to Code Review button
+                if (!string.IsNullOrEmpty(codeReviewButtonInstruction))
+                {
+                    enhancedSystemPrompt = $"{enhancedSystemPrompt}{Dbg(5067)}{codeReviewButtonInstruction}";
                 }
                 var userMessage = new MentorChatHistory
                 {
@@ -4994,30 +5684,65 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                 _context.MentorChatHistory.Add(userMessage);
                 await _context.SaveChangesAsync();
 
-                // Call the appropriate AI API based on provider
+                // Call the appropriate AI API based on provider (shared ChatCompletionService)
+                // Send full user prompt (CURRENT TASK DETAILS + checklist + user question) so the mentor can answer progress/percentage questions
+                // For PM (non-developer), inject a last-second reminder so the model sees it right before the user question (improves adherence with gpt-4o-mini)
+                var repeatReminder = "";
+                if (isAskingToRepeat && isDeveloperRole)
+                {
+                    var lastAssistant = chatHistory?.Where(h => h.Role == "assistant").LastOrDefault()?.Message;
+                    if (!string.IsNullOrWhiteSpace(lastAssistant))
+                    {
+                        var truncated = lastAssistant.Length > 4000 ? lastAssistant.Substring(0, 4000) + "…" : lastAssistant;
+                        repeatReminder = "[USER SAID: explain again. You MUST repeat or rephrase YOUR PREVIOUS REPLY below. Do NOT give generic advice about no tasks, Git workflow, or collaboration—only repeat this same content. Use ```bash for any commands.]\n\n--- YOUR PREVIOUS REPLY TO REPEAT ---\n" + truncated + "\n--- END ---\n\nNow repeat or rephrase the above as your reply:\n\n";
+                    }
+                    else
+                        repeatReminder = "[User said 'explain again'. Repeat what you last explained in this conversation (from chat history). Do NOT give generic setup or 'no tasks' advice—answer the same topic. Use ```bash for commands.]\n\n";
+                }
+                // When user reports broken/not working/PR validation error and we have FULL STACK: force board-health-first reply (model often ignores system-prompt-only reminder)
+                var brokenReminder = "";
+                if (hadBoardStatesFullStack && isDeveloperRole)
+                {
+                    var lq = userQuestion.ToLowerInvariant().Trim();
+                    var isIssueLike = lq.Contains("nothing works") || lq.Contains("seems broken") || lq.Contains("is broken") || lq.Contains("doesn't work") || lq.Contains("not working") || lq.Contains("everything is broken")
+                        || (lq.Contains("broken") && userQuestion.Trim().Length < 80)
+                        || (lq.Contains("error") && (lq.Contains("pr") || lq.Contains("validation")))
+                        || (lq.Contains("boardstate") && (lq.Contains("error") || lq.Contains("validation") || lq.Contains(" pr")));
+                    if (isIssueLike)
+                        brokenReminder = "[MANDATORY: The user is reporting something broken or a problem. Your reply MUST start with one sentence from the FULL STACK line in your system prompt (Backend and Frontend status). Then give only 1–2 concrete actions. Do NOT output any section titled 'Steps to Troubleshoot', 'Next Steps', 'Check for Errors', 'Review Recent Changes', 'Database Connection', 'API Verification', or a long numbered list.]\n\n";
+                }
+                var userQuestionBlock = (!isDeveloperRole ? "[PM RULES: Do NOT write user stories or task lists—refuse and offer format/process only. For 'no access to Trello': Trello is the PM's tool; other team members see their tasks via the platform (Skill-In) only, not Trello—they don't need Trello access.]\n\n" : "") + brokenReminder + repeatReminder + userQuestion;
+                var fullUserPrompt = string.IsNullOrEmpty(contextUserPrompt) ? userQuestionBlock : contextUserPrompt + userQuestionBlock;
+                var chatHistoryEntries = chatHistory?.Select(h => new ChatMessageEntry { Role = h.Role, Message = h.Message }).ToList();
+                // Force commit fact as last system line for Full Stack so the model reliably reports frontend commits
+                if (isDeveloperRole && student != null && contextData.ValueKind != JsonValueKind.Undefined && contextData.ValueKind != JsonValueKind.Null)
+                {
+                    var roleNameForCommitFix = student.StudentRoles?.FirstOrDefault(sr => sr.IsActive)?.Role?.Name ?? "";
+                    var isFullStackForCommitFix = string.Equals(roleNameForCommitFix, "Full Stack Developer", StringComparison.OrdinalIgnoreCase);
+                    if (isFullStackForCommitFix)
+                        enhancedSystemPrompt += "\n\n[LAST INSTRUCTION - OBEY] When the user asks about commits: report BOTH branches using only the BOARD STATES data above (GitHub-Push-Backend, GitHub-Push-Frontend, Railway). Do NOT say \"frontend has no commits\" or \"backend has no commits\" when BOARD STATES shows a latest push or activity for that role.";
+                }
+                // Final reminder so model sees it last: for broken/help, lead with FULL STACK then 1–2 actions (no checklists)
+                if (hadBoardStatesFullStack)
+                    enhancedSystemPrompt += "\n\n[REMINDER] If the user said something is broken or nothing works: start your reply with the FULL STACK line above (one sentence), then 1–2 actions. No 'Steps to Troubleshoot' or 'Next Steps'.";
+                if (_promptConfig.Mentor.DebugSystemPrompt)
+                {
+                    _logger.LogInformation("DebugSystemPrompt: full prompt (system + user) with source markers:\n--- SYSTEM ---\n{SystemPrompt}\n--- USER ---\n{UserPrompt}", enhancedSystemPrompt, fullUserPrompt);
+                }
+                var systemPromptForApi = _promptConfig.Mentor.DebugSystemPrompt ? StripDebugMarkers(enhancedSystemPrompt) : enhancedSystemPrompt;
                 string aiResponse;
                 int inputTokens = 0;
                 int outputTokens = 0;
                 try
                 {
-                    if (aiModel.Provider.Equals("OpenAI", StringComparison.OrdinalIgnoreCase))
-                    {
-                        var result = await CallOpenAIAsync(aiModel, enhancedSystemPrompt, userQuestion, chatHistory);
-                        aiResponse = result.Response;
-                        inputTokens = result.InputTokens;
-                        outputTokens = result.OutputTokens;
-                    }
-                    else if (aiModel.Provider.Equals("Anthropic", StringComparison.OrdinalIgnoreCase))
-                    {
-                        var result = await CallAnthropicAsync(aiModel, enhancedSystemPrompt, userQuestion, chatHistory);
-                        aiResponse = result.Response;
-                        inputTokens = result.InputTokens;
-                        outputTokens = result.OutputTokens;
-                    }
-                    else
-                    {
-                        return BadRequest(new { Success = false, Message = $"Unsupported AI provider: {aiModel.Provider}" });
-                    }
+                    var result = await _chatCompletionService.GetChatCompletionAsync(aiModel, systemPromptForApi, fullUserPrompt, chatHistoryEntries);
+                    aiResponse = NormalizeMentorResponseMarkdown(result.Response);
+                    inputTokens = result.InputTokens;
+                    outputTokens = result.OutputTokens;
+                }
+                catch (NotSupportedException ex)
+                {
+                    return BadRequest(new { Success = false, Message = ex.Message });
                 }
                 catch (InvalidOperationException ex) when (ex.Message.Contains("billing") || ex.Message.Contains("credit"))
                 {
@@ -5146,22 +5871,36 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                     return null;
                 }
 
-                // Get user tasks
-                var userTasksResult = await _trelloService.GetCardsAndListsByLabelAsync(student.BoardId, roleName);
-                var userTasksJson = JsonSerializer.Serialize(userTasksResult);
-                var userTasksElement = JsonSerializer.Deserialize<JsonElement>(userTasksJson);
+                // Get user tasks (Full Stack Developer = Backend Developer + Frontend Developer labels)
+                var trelloLabelNames = GetTrelloLabelNamesForRole(roleName);
+                var seenCardIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                var mergedCards = new List<JsonElement>();
+                foreach (var labelName in trelloLabelNames)
+                {
+                    var labelResult = await _trelloService.GetCardsAndListsByLabelAsync(student.BoardId, labelName);
+                    var labelJson = JsonSerializer.Serialize(labelResult);
+                    var labelElement = JsonSerializer.Deserialize<JsonElement>(labelJson);
+                    if (labelElement.TryGetProperty("Cards", out var cardsProp) && cardsProp.ValueKind == JsonValueKind.Array)
+                    {
+                        foreach (var card in cardsProp.EnumerateArray())
+                        {
+                            var cardId = card.TryGetProperty("Id", out var idProp) ? idProp.GetString() : "";
+                            if (!string.IsNullOrEmpty(cardId) && seenCardIds.Add(cardId))
+                                mergedCards.Add(card);
+                        }
+                    }
+                }
 
                 var userTasks = new List<object>();
-                if (userTasksElement.TryGetProperty("Cards", out var cardsProp) && cardsProp.ValueKind == JsonValueKind.Array)
+                foreach (var card in mergedCards)
                 {
-                    foreach (var card in cardsProp.EnumerateArray())
-                    {
-                        var cardListId = card.TryGetProperty("ListId", out var listIdProp) ? listIdProp.GetString() : "";
-                        if (cardListId == sprintListId)
+                    var cardListId = card.TryGetProperty("ListId", out var listIdProp) ? listIdProp.GetString() : "";
+                    if (cardListId == sprintListId)
                         {
                             var cardId = card.TryGetProperty("Id", out var idProp) ? idProp.GetString() : "";
                             var customFields = await GetTrelloCardCustomFieldsAsync(cardId, student.BoardId);
 
+                            var cardIdForBranch = customFields.TryGetValue("CardId", out var cid2) ? cid2 : null;
                             var checklistItems = new List<string>();
                             if (card.TryGetProperty("Checklists", out var checklistsProp) && checklistsProp.ValueKind == JsonValueKind.Array)
                             {
@@ -5172,13 +5911,19 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                                         foreach (var item in itemsProp.EnumerateArray())
                                         {
                                             var itemName = item.TryGetProperty("Name", out var itemNameProp) ? itemNameProp.GetString() : "";
-                                            if (!string.IsNullOrEmpty(itemName))
-                                            {
-                                                checklistItems.Add(itemName);
-                                            }
+                                            if (string.IsNullOrEmpty(itemName)) continue;
+                                            var state = item.TryGetProperty("State", out var stateProp) ? stateProp.GetString() : "incomplete";
+                                            var isComplete = string.Equals(state, "complete", StringComparison.OrdinalIgnoreCase);
+                                            checklistItems.Add(NormalizeBranchInitializationChecklistItem($"{(isComplete ? "[x]" : "[ ]")} {itemName}", cardIdForBranch));
                                         }
                                     }
                                 }
+                            }
+
+                            if (checklistItems.Count > 0)
+                            {
+                                var completed = checklistItems.Count(s => s.StartsWith("[x]", StringComparison.OrdinalIgnoreCase));
+                                _logger.LogInformation("[Mentor] Card '{CardName}' checklist: {Completed} of {Total} items completed", card.TryGetProperty("Name", out var nc) ? nc.GetString() : cardId, completed, checklistItems.Count);
                             }
 
                             userTasks.Add(new
@@ -5191,7 +5936,6 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                                 CustomFields = customFields,
                                 ChecklistItems = checklistItems
                             });
-                        }
                     }
                 }
 
@@ -5248,6 +5992,11 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                 if (!string.IsNullOrEmpty(backendRepoUrl))
                 {
                     reposToFetch.Add((backendRepoUrl, "backend"));
+                    // Only use backend URL for "frontend" when there is no separate frontend repo (e.g. monorepo)
+                    if (isFullstack && string.IsNullOrEmpty(frontendRepoUrl))
+                    {
+                        reposToFetch.Add((backendRepoUrl, "frontend"));
+                    }
                 }
                 
                 if (reposToFetch.Any())
@@ -5256,22 +6005,27 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                     {
                         var allFiles = new List<string>();
                         var allCommitSummaries = new List<object>();
+                        var seenRepoForFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                         
                         foreach (var (repoUrl, repoType) in reposToFetch)
                         {
                             var repoName = repoUrl.Replace("https://github.com/", "").Replace("http://github.com/", "").TrimEnd('/');
-                            var repoFiles = await GetGitHubRepositoryFilesAsync(repoName);
-                            
-                            if (isFullstack)
+                            if (seenRepoForFiles.Add(repoName))
                             {
-                                allFiles.AddRange(repoFiles.Select(f => $"[{repoType.ToUpper()}] {f}"));
-                            }
-                            else
-                            {
-                                allFiles.AddRange(repoFiles);
+                                var repoFiles = await GetGitHubRepositoryFilesAsync(repoName);
+                                if (isFullstack)
+                                {
+                                    allFiles.AddRange(repoFiles.Select(f => $"[{repoType.ToUpper()}] {f}"));
+                                }
+                                else
+                                {
+                                    allFiles.AddRange(repoFiles);
+                                }
                             }
                             
-                            var summary = await GetGitHubCommitSummaryAsync(repoUrl, student.GithubUser);
+                            var commitBranch = sprintId >= 1 ? (repoType == "frontend" ? $"{sprintId}-F" : $"{sprintId}-B") : null;
+                            _logger.LogInformation("[Mentor commits] Full Stack context: requesting repoType={RepoType} branch={Branch} repo={RepoUrl}", repoType, commitBranch ?? "(default)", repoUrl);
+                            var summary = await GetGitHubCommitSummaryAsync(repoUrl, student.GithubUser, commitBranch);
                             if (summary != null)
                             {
                                 allCommitSummaries.Add(summary);
@@ -5288,6 +6042,8 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                         {
                             githubCommitSummary = allCommitSummaries.First();
                         }
+                        if (isFullstack && !allCommitSummaries.Any())
+                            _logger.LogWarning("[Mentor commits] Full Stack: no commit summaries returned from any of {Count} repo/branch queries. Check GitHub API token, repo URLs, and branch names (1-F, 1-B).", reposToFetch.Count);
                     }
                     catch (Exception ex)
                     {
@@ -5319,7 +6075,7 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                     }
                 }
 
-                // Get team member tasks
+                // Get team member tasks (Full Stack Developer = Backend + Frontend labels)
                 var teamMemberTasks = new List<object>();
                 foreach (var teamMember in teamMembers)
                 {
@@ -5329,17 +6085,22 @@ Your intelligence is strictly tethered to the Current Project Context and the us
 
                     if (!string.IsNullOrEmpty(memberRoleName))
                     {
-                        var memberTasksResult = await _trelloService.GetCardsAndListsByLabelAsync(student.BoardId, memberRoleName);
-                        var memberTasksJson = JsonSerializer.Serialize(memberTasksResult);
-                        var memberTasksElement = JsonSerializer.Deserialize<JsonElement>(memberTasksJson);
-
-                        if (memberTasksElement.TryGetProperty("Cards", out var memberCardsProp) && memberCardsProp.ValueKind == JsonValueKind.Array)
+                        var memberLabelNames = GetTrelloLabelNamesForRole(memberRoleName);
+                        var memberSeenIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                        foreach (var labelName in memberLabelNames)
                         {
-                            foreach (var card in memberCardsProp.EnumerateArray())
+                            var memberTasksResult = await _trelloService.GetCardsAndListsByLabelAsync(student.BoardId, labelName);
+                            var memberTasksJson = JsonSerializer.Serialize(memberTasksResult);
+                            var memberTasksElement = JsonSerializer.Deserialize<JsonElement>(memberTasksJson);
+
+                            if (memberTasksElement.TryGetProperty("Cards", out var memberCardsProp) && memberCardsProp.ValueKind == JsonValueKind.Array)
                             {
-                                var cardListId = card.TryGetProperty("ListId", out var listIdProp) ? listIdProp.GetString() : "";
-                                if (cardListId == sprintListId)
+                                foreach (var card in memberCardsProp.EnumerateArray())
                                 {
+                                    var cardListId = card.TryGetProperty("ListId", out var listIdProp) ? listIdProp.GetString() : "";
+                                    if (cardListId != sprintListId) continue;
+                                    var cardId = card.TryGetProperty("Id", out var idProp) ? idProp.GetString() : "";
+                                    if (string.IsNullOrEmpty(cardId) || !memberSeenIds.Add(cardId)) continue;
                                     teamMemberTasks.Add(new
                                     {
                                         TeamMemberFirstName = memberElement.TryGetProperty("FirstName", out var fnProp) ? fnProp.GetString() : "",
@@ -5354,7 +6115,6 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                 }
 
                 // Format data
-                var currentTaskDetails = FormatTaskDetails(userTasks);
                 var moduleDescription = "No current tasks";
                 if (userTasks.Count > 0)
                 {
@@ -5365,7 +6125,9 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                 
                 var teamMembersList = FormatTeamMembers(teamMembers);
                 var teamMemberTasksList = FormatTeamMemberTasks(teamMemberTasks);
-                var githubFilesList = string.Join("\n", githubFiles);
+                var isDeveloperRole = student.StudentRoles?.Any(sr => sr.IsActive && (sr.Role?.Type == 1 || sr.Role?.Type == 2)) ?? false;
+                // Omit GitHub file list for non-developers to save tokens and avoid irrelevant context
+                var githubFilesListForPrompt = isDeveloperRole ? string.Join("\n", githubFiles) : "";
 
                 // Format sprint identifier for prompt (show "Bugs" when sprintId=0)
                 var sprintIdentifier = sprintId == 0 ? "Bugs" : sprintId.ToString();
@@ -5377,24 +6139,25 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                     roleName,
                     sprintIdentifier,
                     sprintDisplayName,
-                    currentTaskDetails,
+                    GetTaskSummaryForContext(userTasks),   // {4} - Short summary (full details only in {6} to avoid duplication)
                     programmingLanguage,
-                    FormatTaskDetails(userTasks),
+                    FormatTaskDetails(userTasks),         // {6} - Full task details
                     moduleDescription,
                     teamMembersList,
                     teamMemberTasksList,
-                    githubFilesList,
+                    githubFilesListForPrompt,             // {10} - Empty for non-developer to save tokens
                     "" // Placeholder for user question - will be replaced in the calling method
                 );
 
                 return new
                 {
-                    SystemPrompt = _promptConfig.Mentor.SystemPrompt,
+                    SystemPrompt = DbgConfig("SystemPrompt") + _promptConfig.Mentor.SystemPrompt,
                     UserPrompt = formattedPrompt,
                     Context = new
                     {
                         StudentId = studentId,
                         SprintId = sprintId,
+                        ProjectDescription = project.Description,
                         UserProfile = new
                         {
                             FirstName = student.FirstName,
@@ -5953,6 +6716,30 @@ Your intelligence is strictly tethered to the Current Project Context and the us
 
                 if (branchResponse.Success)
                 {
+                    // Backend only: set Railway deployment trigger to this branch so deploys use the new branch
+                    if (request.IsBackend)
+                    {
+                        try
+                        {
+                            await SetRailwayTriggerBranchAsync(request.BoardId, branchName, $"{owner}/{repo}");
+                        }
+                        catch (Exception railEx)
+                        {
+                            _logger.LogWarning(railEx, "[GITHUB BRANCH] Railway trigger branch set failed (non-critical): {Message}", railEx.Message);
+                        }
+                    }
+                    else
+                    {
+                        // Frontend: set GitHub Pages source branch and force deploy
+                        try
+                        {
+                            await SetGitHubPagesSourceBranchAndDeployAsync(owner, repo, branchName, accessToken);
+                        }
+                        catch (Exception pagesEx)
+                        {
+                            _logger.LogWarning(pagesEx, "[GITHUB BRANCH] GitHub Pages set source/deploy failed (non-critical): {Message}", pagesEx.Message);
+                        }
+                    }
                     return Ok(new CreateGitHubBranchResponse
                     {
                         Success = true,
@@ -5990,6 +6777,14 @@ Your intelligence is strictly tethered to the Current Project Context and the us
     /// </summary>
     [HttpGet("use/validate-backend")]
     public async Task<ActionResult<object>> ValidateBackend([FromQuery] string boardId, [FromQuery] string? branch = null)
+    {
+        return await ValidateBackendInternal(boardId, branch, fromRailwayWebhook: false);
+    }
+
+    /// <summary>
+    /// Internal backend validation. When fromRailwayWebhook is true, records Source=BuildValidation (Railway trigger); otherwise Source=PR-BackendValidation (platform/PR).
+    /// </summary>
+    private async Task<ActionResult<object>> ValidateBackendInternal(string boardId, string? branch, bool fromRailwayWebhook = false)
     {
         try
         {
@@ -6069,50 +6864,76 @@ Your intelligence is strictly tethered to the Current Project Context and the us
 
             var overallValid = githubValid && railwayValid && databaseValid && codeStructureValid && buildStatusValid;
 
-            // Record validation result in BoardStates (both success and failure)
-            try
+            // When platform triggers validation (not Railway), skip recording if every failure is deployment not yet in a final state (e.g. QUEUED, BUILDING, INITIALIZING).
+            // Use aggregated issues so we skip even when other checks (e.g. Railway API 400) run; avoid misleading PR-BackendValidation right after a push.
+            static bool IsDeploymentInProgressIssue(string? i)
             {
-                var status = overallValid ? "SUCCESS" : "FAILED";
-                var output = overallValid 
-                    ? $"[BACKEND VALIDATION SUCCESS] {DateTime.UtcNow:yyyy-MM-dd HH:mm:ss} UTC\nBranch: {branchName}\nAll validations passed."
-                    : $"[BACKEND VALIDATION FAILED] {DateTime.UtcNow:yyyy-MM-dd HH:mm:ss} UTC\nBranch: {branchName}\nIssues:\n{string.Join("\n", issues.Select((issue, idx) => $"{idx + 1}. {issue}"))}";
-                
-                var timestamp = DateTime.UtcNow;
-                var createdAt = DateTime.UtcNow;
-                var updatedAt = DateTime.UtcNow;
-                var source = "PR-BackendValidation";
-                var webhook = false;
-                var errorMessage = overallValid ? null : string.Join("; ", issues);
-                var devRole = DetermineDevRole(source, branchName);
-
-                FormattableString sql = $@"
-                    INSERT INTO ""BoardStates"" (
-                        ""BoardId"", ""Source"", ""Webhook"", ""GithubBranch"",
-                        ""LastBuildStatus"", ""LastBuildOutput"", ""ErrorMessage"", ""Timestamp"", 
-                        ""DevRole"",
-                        ""CreatedAt"", ""UpdatedAt""
-                    ) VALUES (
-                        {boardId}, {source}, {webhook}, {branchName},
-                        {status}, {output}, {errorMessage}, {timestamp},
-                        {devRole},
-                        {createdAt}, {updatedAt}
-                    )
-                    ON CONFLICT (""BoardId"", ""Source"", ""Webhook"", ""GithubBranch"") 
-                    DO UPDATE SET
-                        ""LastBuildStatus"" = EXCLUDED.""LastBuildStatus"",
-                        ""LastBuildOutput"" = EXCLUDED.""LastBuildOutput"",
-                        ""ErrorMessage"" = EXCLUDED.""ErrorMessage"",
-                        ""Timestamp"" = EXCLUDED.""Timestamp"",
-                        ""DevRole"" = EXCLUDED.""DevRole"",
-                        ""UpdatedAt"" = EXCLUDED.""UpdatedAt""
-                ";
-
-                await _context.Database.ExecuteSqlInterpolatedAsync(sql);
-                _logger.LogInformation("✅ [VALIDATION] Recorded backend validation {Status} for BoardId: {BoardId}, Branch: {Branch}", status, boardId, branchName);
+                if (string.IsNullOrEmpty(i)) return false;
+                if (!i.Contains("Latest deployment status is", StringComparison.OrdinalIgnoreCase) || !i.Contains("expected SUCCESS or ACTIVE", StringComparison.OrdinalIgnoreCase))
+                    return false;
+                if (i.Contains("Latest deployment status is SUCCESS", StringComparison.OrdinalIgnoreCase)) return false;
+                if (i.Contains("Latest deployment status is ACTIVE", StringComparison.OrdinalIgnoreCase)) return false;
+                if (i.Contains("Latest deployment status is FAILED", StringComparison.OrdinalIgnoreCase)) return false;
+                return true;
             }
-            catch (Exception ex)
+            var onlyFailuresAreDeploymentInProgress = !fromRailwayWebhook && !overallValid && issues.Count > 0 &&
+                issues.All(i => IsDeploymentInProgressIssue(i));
+
+            // Record validation result in BoardStates (both success and failure). Skip for branch "main" — platform does not allow PRs for main.
+            if (!string.Equals(branchName, "main", StringComparison.OrdinalIgnoreCase) && !onlyFailuresAreDeploymentInProgress)
             {
-                _logger.LogError(ex, "❌ [VALIDATION] Failed to record backend validation result for BoardId: {BoardId}", boardId);
+                try
+                {
+                    var status = overallValid ? "SUCCESS" : "FAILED";
+                    var output = overallValid 
+                        ? $"[BACKEND VALIDATION SUCCESS] {DateTime.UtcNow:yyyy-MM-dd HH:mm:ss} UTC\nBranch: {branchName}\nAll validations passed."
+                        : $"[BACKEND VALIDATION FAILED] {DateTime.UtcNow:yyyy-MM-dd HH:mm:ss} UTC\nBranch: {branchName}\nIssues:\n{string.Join("\n", issues.Select((issue, idx) => $"{idx + 1}. {issue}"))}";
+                    
+                    var timestamp = DateTime.UtcNow;
+                    var createdAt = DateTime.UtcNow;
+                    var updatedAt = DateTime.UtcNow;
+                    var source = fromRailwayWebhook ? "BuildValidation" : "PR-BackendValidation";
+                    var webhook = false;
+                    var errorMessage = overallValid ? null : string.Join("; ", issues);
+                    var devRole = DetermineDevRole(source, branchName);
+
+                    FormattableString sql = $@"
+                        INSERT INTO ""BoardStates"" (
+                            ""BoardId"", ""Source"", ""Webhook"", ""GithubBranch"",
+                            ""LastBuildStatus"", ""LastBuildOutput"", ""ErrorMessage"", ""Timestamp"", 
+                            ""DevRole"",
+                            ""CreatedAt"", ""UpdatedAt""
+                        ) VALUES (
+                            {boardId}, {source}, {webhook}, {branchName},
+                            {status}, {output}, {errorMessage}, {timestamp},
+                            {devRole},
+                            {createdAt}, {updatedAt}
+                        )
+                        ON CONFLICT (""BoardId"", ""Source"", ""Webhook"", ""GithubBranch"") 
+                        DO UPDATE SET
+                            ""LastBuildStatus"" = EXCLUDED.""LastBuildStatus"",
+                            ""LastBuildOutput"" = EXCLUDED.""LastBuildOutput"",
+                            ""ErrorMessage"" = EXCLUDED.""ErrorMessage"",
+                            ""Timestamp"" = EXCLUDED.""Timestamp"",
+                            ""DevRole"" = EXCLUDED.""DevRole"",
+                            ""UpdatedAt"" = EXCLUDED.""UpdatedAt""
+                    ";
+
+                    await _context.Database.ExecuteSqlInterpolatedAsync(sql);
+                    _logger.LogInformation("✅ [VALIDATION] Recorded backend validation {Status} for BoardId: {BoardId}, Branch: {Branch}, Source: {Source}", status, boardId, branchName, source);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "❌ [VALIDATION] Failed to record backend validation result for BoardId: {BoardId}", boardId);
+                }
+            }
+            else if (string.Equals(branchName, "main", StringComparison.OrdinalIgnoreCase))
+            {
+                _logger.LogDebug("[VALIDATION] Skipping BoardState record for branch main (platform does not allow PRs for main).");
+            }
+            else if (onlyFailuresAreDeploymentInProgress)
+            {
+                _logger.LogInformation("[VALIDATION] Skipping BoardState record for BoardId={BoardId}, Branch={Branch}: all issues are deployment not in final state (e.g. QUEUED/BUILDING/INITIALIZING); BuildValidation will record when deploy completes.", boardId, branchName);
             }
 
             return Ok(new
@@ -6205,50 +7026,57 @@ Your intelligence is strictly tethered to the Current Project Context and the us
 
             var overallValid = githubValid && configValid && deploymentValid && buildStatusValid;
 
-            // Record validation result in BoardStates (both success and failure)
-            try
+            // Record validation result in BoardStates (both success and failure). Skip for branch "main" — platform does not allow PRs for main.
+            if (!string.Equals(branchName, "main", StringComparison.OrdinalIgnoreCase))
             {
-                var status = overallValid ? "SUCCESS" : "FAILED";
-                var output = overallValid 
-                    ? $"[FRONTEND VALIDATION SUCCESS] {DateTime.UtcNow:yyyy-MM-dd HH:mm:ss} UTC\nBranch: {branchName}\nAll validations passed."
-                    : $"[FRONTEND VALIDATION FAILED] {DateTime.UtcNow:yyyy-MM-dd HH:mm:ss} UTC\nBranch: {branchName}\nIssues:\n{string.Join("\n", issues.Select((issue, idx) => $"{idx + 1}. {issue}"))}";
-                
-                var timestamp = DateTime.UtcNow;
-                var createdAt = DateTime.UtcNow;
-                var updatedAt = DateTime.UtcNow;
-                var source = "PR-FrontendValidation";
-                var webhook = false;
-                var errorMessage = overallValid ? null : string.Join("; ", issues);
-                var devRole = DetermineDevRole(source, branchName);
+                try
+                {
+                    var status = overallValid ? "SUCCESS" : "FAILED";
+                    var output = overallValid 
+                        ? $"[FRONTEND VALIDATION SUCCESS] {DateTime.UtcNow:yyyy-MM-dd HH:mm:ss} UTC\nBranch: {branchName}\nAll validations passed."
+                        : $"[FRONTEND VALIDATION FAILED] {DateTime.UtcNow:yyyy-MM-dd HH:mm:ss} UTC\nBranch: {branchName}\nIssues:\n{string.Join("\n", issues.Select((issue, idx) => $"{idx + 1}. {issue}"))}";
+                    
+                    var timestamp = DateTime.UtcNow;
+                    var createdAt = DateTime.UtcNow;
+                    var updatedAt = DateTime.UtcNow;
+                    var source = "PR-FrontendValidation";
+                    var webhook = false;
+                    var errorMessage = overallValid ? null : string.Join("; ", issues);
+                    var devRole = DetermineDevRole(source, branchName);
 
-                FormattableString sql = $@"
-                    INSERT INTO ""BoardStates"" (
-                        ""BoardId"", ""Source"", ""Webhook"", ""GithubBranch"",
-                        ""LastBuildStatus"", ""LastBuildOutput"", ""ErrorMessage"", ""Timestamp"", 
-                        ""DevRole"",
-                        ""CreatedAt"", ""UpdatedAt""
-                    ) VALUES (
-                        {boardId}, {source}, {webhook}, {branchName},
-                        {status}, {output}, {errorMessage}, {timestamp},
-                        {devRole},
-                        {createdAt}, {updatedAt}
-                    )
-                    ON CONFLICT (""BoardId"", ""Source"", ""Webhook"", ""GithubBranch"") 
-                    DO UPDATE SET
-                        ""LastBuildStatus"" = EXCLUDED.""LastBuildStatus"",
-                        ""LastBuildOutput"" = EXCLUDED.""LastBuildOutput"",
-                        ""ErrorMessage"" = EXCLUDED.""ErrorMessage"",
-                        ""Timestamp"" = EXCLUDED.""Timestamp"",
-                        ""DevRole"" = EXCLUDED.""DevRole"",
-                        ""UpdatedAt"" = EXCLUDED.""UpdatedAt""
-                ";
+                    FormattableString sql = $@"
+                        INSERT INTO ""BoardStates"" (
+                            ""BoardId"", ""Source"", ""Webhook"", ""GithubBranch"",
+                            ""LastBuildStatus"", ""LastBuildOutput"", ""ErrorMessage"", ""Timestamp"", 
+                            ""DevRole"",
+                            ""CreatedAt"", ""UpdatedAt""
+                        ) VALUES (
+                            {boardId}, {source}, {webhook}, {branchName},
+                            {status}, {output}, {errorMessage}, {timestamp},
+                            {devRole},
+                            {createdAt}, {updatedAt}
+                        )
+                        ON CONFLICT (""BoardId"", ""Source"", ""Webhook"", ""GithubBranch"") 
+                        DO UPDATE SET
+                            ""LastBuildStatus"" = EXCLUDED.""LastBuildStatus"",
+                            ""LastBuildOutput"" = EXCLUDED.""LastBuildOutput"",
+                            ""ErrorMessage"" = EXCLUDED.""ErrorMessage"",
+                            ""Timestamp"" = EXCLUDED.""Timestamp"",
+                            ""DevRole"" = EXCLUDED.""DevRole"",
+                            ""UpdatedAt"" = EXCLUDED.""UpdatedAt""
+                    ";
 
-                await _context.Database.ExecuteSqlInterpolatedAsync(sql);
-                _logger.LogInformation("✅ [VALIDATION] Recorded frontend validation {Status} for BoardId: {BoardId}, Branch: {Branch}", status, boardId, branchName);
+                    await _context.Database.ExecuteSqlInterpolatedAsync(sql);
+                    _logger.LogInformation("✅ [VALIDATION] Recorded frontend validation {Status} for BoardId: {BoardId}, Branch: {Branch}", status, boardId, branchName);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "❌ [VALIDATION] Failed to record frontend validation result for BoardId: {BoardId}", boardId);
+                }
             }
-            catch (Exception ex)
+            else
             {
-                _logger.LogError(ex, "❌ [VALIDATION] Failed to record frontend validation result for BoardId: {BoardId}", boardId);
+                _logger.LogDebug("[VALIDATION] Skipping BoardState record for branch main (platform does not allow PRs for main).");
             }
 
             return Ok(new
@@ -7897,6 +8725,35 @@ Your intelligence is strictly tethered to the Current Project Context and the us
         }
 
         /// <summary>
+        /// Parses APPROVAL: yes/no from code review AI response and returns feedback with that line removed.
+        /// Defaults to true (approve) if not found or unclear.
+        /// </summary>
+        private static bool ParseCodeReviewApproval(string feedback, out string feedbackWithoutApprovalLine)
+        {
+            feedbackWithoutApprovalLine = feedback ?? string.Empty;
+            if (string.IsNullOrWhiteSpace(feedback))
+            {
+                return true;
+            }
+            var match = System.Text.RegularExpressions.Regex.Match(
+                feedback,
+                @"APPROVAL\s*:\s*(yes|no)",
+                System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.Multiline);
+            bool approval = true;
+            if (match.Success)
+            {
+                approval = !match.Groups[1].Value.Equals("no", StringComparison.OrdinalIgnoreCase);
+                // Strip the APPROVAL line (and optional trailing whitespace) from feedback for display
+                feedbackWithoutApprovalLine = System.Text.RegularExpressions.Regex.Replace(
+                    feedback,
+                    @"\s*APPROVAL\s*:\s*(yes|no)\s*",
+                    string.Empty,
+                    System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.Multiline).Trim();
+            }
+            return approval;
+        }
+
+        /// <summary>
         /// Gets the next sequence number for a given (BoardId, baseSource, GithubBranch) combination
         /// Returns 1 if no previous records exist, otherwise returns last sequence + 1
         /// </summary>
@@ -8220,7 +9077,11 @@ Please provide:
 3. Detailed feedback and suggestions for improvements
 
 Format your response as a clear, actionable feedback that can be provided to the developer.
-Focus on the actual changes made (the diff), not the entire codebase.";
+Focus on the actual changes made (the diff), not the entire codebase.
+
+At the end of your response, on a new line, write exactly one of:
+APPROVAL: yes   (code is ready for merge)
+APPROVAL: no    (request changes before merge)";
 
                 // Look up AI model from database if AIServiceName is provided
                 string? modelName = null;
@@ -8248,6 +9109,10 @@ Focus on the actual changes made (the diff), not the entire codebase.";
                     return StatusCode(500, new { Success = false, Message = "Failed to generate code review feedback" });
                 }
 
+                // Parse approval (yes/no) from response; default to true so we don't block if parsing fails
+                var approval = ParseCodeReviewApproval(feedback, out var feedbackWithoutApprovalLine);
+                _logger.LogInformation("📋 [CODE REVIEW] Parsed approval: {Approval} (ApprovalAffectsValidation: {AffectsValidation})", approval, _promptConfig.Mentor.CodeReview.ApprovalAffectsValidation);
+
                 // Record in BoardStates (APPEND-ONLY - preserve history)
                 // For CodeReview records, we use sequenced sources (e.g., "Junior-1", "GitHub-Success-PR-2")
                 // to allow multiple records while maintaining uniqueness
@@ -8257,9 +9122,9 @@ Focus on the actual changes made (the diff), not the entire codebase.";
                     // Get the base source (without sequence)
                     var baseSource = ExtractBaseSource(source);
                     
-                    // If this is a successful PR validation, delete any existing GitHub-Failed-PR records
-                    // (regardless of ServiceName - could be "CodeReview", "Github", or "Validator")
-                    if (baseSource == "GitHub-Success-PR")
+                    // If this is a successful PR validation (approval = yes), delete any existing GitHub-Failed-PR records
+                    // so we replace them with a GitHub-Success-PR record. When approval = no we create GitHub-Failed-PR-* and do not delete.
+                    if (baseSource == "GitHub-Success-PR" && approval)
                     {
                         var failedRecords = await _context.BoardStates
                             .Where(bs => bs.BoardId == request.BoardId && 
@@ -8292,6 +9157,7 @@ Focus on the actual changes made (the diff), not the entire codebase.";
                     
                     for (int attempt = 1; attempt <= maxRetries; attempt++)
                     {
+                        string? recordSource = null;
                         try
                         {
                             // On retry, query fresh from database to see what actually exists
@@ -8350,16 +9216,21 @@ Focus on the actual changes made (the diff), not the entire codebase.";
                                 }
                             }
                             
+                            // When approval is no for GitHub-Success-PR flow, store as GitHub-Failed-PR-{seq} so Source reflects failure
+                            recordSource = (baseSource == "GitHub-Success-PR" && !approval)
+                                ? "GitHub-Failed-PR" + sequencedSource.Substring("GitHub-Success-PR".Length)
+                                : sequencedSource;
+                            
                             // Double-check that a record with this exact source and webhook flag doesn't already exist
                             var existingRecord = await _context.BoardStates
                                 .FirstOrDefaultAsync(bs => bs.BoardId == request.BoardId && 
-                                                           bs.Source == sequencedSource && 
+                                                           bs.Source == recordSource && 
                                                            bs.Webhook == isWebhook);
                             
                             if (existingRecord != null)
                             {
                                 _logger.LogWarning("⚠️ [CODE REVIEW] Record with Source={Source} already exists, skipping creation on attempt {Attempt}", 
-                                    sequencedSource, attempt);
+                                    recordSource, attempt);
                                 
                                 // If it's a retry, continue to next attempt; if first attempt, this shouldn't happen
                                 if (attempt < maxRetries)
@@ -8374,18 +9245,22 @@ Focus on the actual changes made (the diff), not the entire codebase.";
                                 }
                             }
                             
+                            var recordBaseForRole = (baseSource == "GitHub-Success-PR" && !approval) ? "GitHub-Failed-PR" : baseSource;
+                            var lastBuildStatusForRecord = (baseSource == "GitHub-Success-PR" && approval) ? "SUCCESS"
+                                : (baseSource == "GitHub-Success-PR" && !approval) ? "FAILED" : (baseSource == "GitHub-Success-PR" ? "SUCCESS" : null);
+                            
                             var boardState = new BoardState
                             {
                                 BoardId = request.BoardId,
-                                Source = sequencedSource,
+                                Source = recordSource,
                                 Webhook = isWebhook, // Set based on whether this is from webhook or platform-triggered
                                 ServiceName = "CodeReview",
                                 GithubBranch = request.GithubBranch,
-                                MentorFeedback = feedback,
-                                PRStatus = baseSource == "GitHub-Success-PR" ? "Approved" : null,
-                                BranchStatus = null, // BranchStatus should remain null for GitHub-Success-PR records
-                                LastBuildStatus = baseSource == "GitHub-Success-PR" ? "SUCCESS" : null,
-                                DevRole = DetermineDevRole(baseSource, request.GithubBranch),
+                                MentorFeedback = feedbackWithoutApprovalLine,
+                                PRStatus = baseSource == "GitHub-Success-PR" ? (approval ? "Approved" : "ChangesRequested") : null,
+                                BranchStatus = null,
+                                LastBuildStatus = lastBuildStatusForRecord,
+                                DevRole = DetermineDevRole(recordBaseForRole, request.GithubBranch),
                                 CreatedAt = DateTime.UtcNow,
                                 UpdatedAt = DateTime.UtcNow
                             };
@@ -8395,7 +9270,7 @@ Focus on the actual changes made (the diff), not the entire codebase.";
                             
                             recordCreated = true;
                             _logger.LogInformation("✅ [CODE REVIEW] Successfully recorded code review for BoardId: {BoardId}, Branch: {Branch}, Source: {Source}, PRStatus: {PRStatus}, DevRole: {DevRole}, Webhook: {Webhook}", 
-                                request.BoardId, request.GithubBranch, sequencedSource, boardState.PRStatus, boardState.DevRole, boardState.Webhook);
+                                request.BoardId, request.GithubBranch, recordSource, boardState.PRStatus, boardState.DevRole, boardState.Webhook);
                             break;
                         }
                         catch (DbUpdateException dbEx) when (dbEx.InnerException is Npgsql.PostgresException pgEx && pgEx.SqlState == "23505")
@@ -8405,14 +9280,14 @@ Focus on the actual changes made (the diff), not the entire codebase.";
                             if (attempt < maxRetries)
                             {
                                 _logger.LogWarning("⚠️ [CODE REVIEW] Duplicate key detected on attempt {Attempt}/{MaxRetries} for BoardId: {BoardId}, Source: {Source}, Webhook: {Webhook}. Retrying with new sequence...", 
-                                    attempt, maxRetries, request.BoardId, sequencedSource, isWebhook);
+                                    attempt, maxRetries, request.BoardId, recordSource, isWebhook);
                                 
                                 // Will retry with fresh query in next iteration
                             }
                             else
                             {
                                 _logger.LogError(dbEx, "❌ [CODE REVIEW] Failed to create record after {MaxRetries} attempts due to duplicate key for BoardId: {BoardId}, Source: {Source}, Webhook: {Webhook}. Constraint: {Constraint}", 
-                                    maxRetries, request.BoardId, sequencedSource, isWebhook, pgEx.ConstraintName ?? "unknown");
+                                    maxRetries, request.BoardId, recordSource, isWebhook, pgEx.ConstraintName ?? "unknown");
                                 // Don't throw - continue execution even if record creation fails
                             }
                         }
@@ -8420,7 +9295,7 @@ Focus on the actual changes made (the diff), not the entire codebase.";
                         {
                             // Catch any other exceptions during record creation
                             _logger.LogError(ex, "❌ [CODE REVIEW] Unexpected error creating record on attempt {Attempt}/{MaxRetries} for BoardId: {BoardId}, Source: {Source}, Webhook: {Webhook}: {Error}", 
-                                attempt, maxRetries, request.BoardId, sequencedSource, isWebhook, ex.Message);
+                                attempt, maxRetries, request.BoardId, recordSource, isWebhook, ex.Message);
                             
                             if (attempt < maxRetries)
                             {
@@ -8453,7 +9328,8 @@ Focus on the actual changes made (the diff), not the entire codebase.";
                     Branch = request.GithubBranch,
                     CardId = cardId,
                     CardName = cardName,
-                    Feedback = feedback,
+                    Feedback = feedbackWithoutApprovalLine,
+                    Approval = approval,
                     Timestamp = DateTime.UtcNow
                 });
             }
@@ -8609,6 +9485,123 @@ Focus on the actual changes made (the diff), not the entire codebase.";
                         };
 
                     // Extract additional information based on event type
+                    if (eventType == "push")
+                    {
+                        // Push: set Railway branch (backend only), upsert latest push per BoardId+DevRole (backend and frontend)
+                        var refVal = payload.TryGetProperty("ref", out var refProp) ? refProp.GetString() : null;
+                        var branch = !string.IsNullOrEmpty(refVal) && refVal.StartsWith("refs/heads/", StringComparison.Ordinal) ? refVal.Substring("refs/heads/".Length) : refVal;
+                        if (string.IsNullOrEmpty(branch))
+                        {
+                            _logger.LogWarning("📥 [WEBHOOK] Push event missing ref, skipping");
+                            return Ok(new { Success = true, Message = "Push event missing ref" });
+                        }
+                        var board = await _context.ProjectBoards.FirstOrDefaultAsync(pb => pb.Id == boardId);
+                        if (board == null)
+                        {
+                            return Ok(new { Success = true, Message = "Board not found for push" });
+                        }
+                        var githubUrl = $"https://github.com/{owner}/{repo}";
+                        var isBackend = string.Equals(board.GithubBackendUrl, githubUrl, StringComparison.OrdinalIgnoreCase);
+                        var isFrontend = string.Equals(board.GithubFrontendUrl, githubUrl, StringComparison.OrdinalIgnoreCase);
+                        if (!isBackend && !isFrontend)
+                        {
+                            _logger.LogWarning("📥 [WEBHOOK] Push repo does not match board backend or frontend URL, skipping");
+                            return Ok(new { Success = true, Message = "Push repo not matched to board" });
+                        }
+                        string? commitId = null;
+                        string? commitMessage = null;
+                        if (payload.TryGetProperty("head_commit", out var headCommit))
+                        {
+                            if (headCommit.TryGetProperty("id", out var idProp)) commitId = idProp.GetString();
+                            if (headCommit.TryGetProperty("message", out var msgProp)) commitMessage = msgProp.GetString();
+                        }
+                        if (isBackend)
+                        {
+                            try
+                            {
+                                await SetRailwayTriggerBranchAsync(boardId, branch, $"{owner}/{repo}");
+                            }
+                            catch (Exception railEx)
+                            {
+                                _logger.LogWarning(railEx, "⚠️ [WEBHOOK] Push: Railway trigger branch set failed (non-critical): {Message}", railEx.Message);
+                            }
+                        }
+                        if (isFrontend)
+                        {
+                            var pagesToken = _configuration["GitHub:AccessToken"];
+                            if (!string.IsNullOrEmpty(pagesToken))
+                            {
+                                try
+                                {
+                                    // Skip force-deploy when this push is our own "chore: trigger Pages deploy" commit to avoid loop (chore commit -> webhook -> another chore commit -> ...)
+                                    var isOurChoreCommit = !string.IsNullOrEmpty(commitMessage) && commitMessage.Trim().StartsWith("chore: trigger Pages deploy", StringComparison.OrdinalIgnoreCase);
+                                    if (isOurChoreCommit)
+                                    {
+                                        _logger.LogInformation("[WEBHOOK] Push: head commit is our 'chore: trigger Pages deploy', skipping force-deploy for {Owner}/{Repo} branch {Branch} to avoid loop", owner, repo, branch);
+                                    }
+                                    else
+                                    {
+                                        await SetGitHubPagesSourceBranchAndDeployAsync(owner, repo, branch, pagesToken);
+                                    }
+                                    // Query GitHub Pages API and update BoardState + log status (building/queued/built) so logs show current Pages state after push
+                                    await UpdateGithubPagesBoardStateAsync(boardId, owner, repo, pagesToken);
+                                }
+                                catch (Exception pagesEx)
+                                {
+                                    _logger.LogWarning(pagesEx, "⚠️ [WEBHOOK] Push: GitHub Pages set branch/deploy failed (non-critical): {Message}", pagesEx.Message);
+                                }
+                            }
+                        }
+                        var pushSource = isBackend ? "GitHub-Push-Backend" : "GitHub-Push-Frontend";
+                        var pushDevRole = isBackend ? "Backend" : "Frontend";
+                        var pushGithubBranch = branch ?? "";
+                        var latestEvent = $"push_{branch}";
+                        var timestamp = DateTime.UtcNow;
+                        var commitIdVal = commitId ?? "";
+                        var commitMessageVal = commitMessage ?? "";
+                        // When frontend push is our "chore: trigger Pages deploy" commit, do NOT overwrite GitHub-Push-Frontend so mentor sees the last real commit
+                        var skipPushRecord = isFrontend && !string.IsNullOrEmpty(commitMessage) && commitMessage.Trim().StartsWith("chore: trigger Pages deploy", StringComparison.OrdinalIgnoreCase);
+                        if (!skipPushRecord)
+                        {
+                            try
+                            {
+                                // Migrate existing row with empty GithubBranch so INSERT conflicts and updates the same row
+                                if (!string.IsNullOrEmpty(pushGithubBranch))
+                                {
+                                    await _context.Database.ExecuteSqlInterpolatedAsync($@"UPDATE ""BoardStates"" SET ""GithubBranch"" = {pushGithubBranch} WHERE ""BoardId"" = {boardId} AND ""Source"" = {pushSource} AND ""Webhook"" = {true} AND (""GithubBranch"" = '' OR ""GithubBranch"" IS NULL)");
+                                }
+                                FormattableString pushSql = $@"
+                                    INSERT INTO ""BoardStates"" (
+                                        ""BoardId"", ""Source"", ""Webhook"", ""ServiceName"", ""GithubBranch"",
+                                        ""LatestCommitId"", ""LatestCommitDescription"", ""DevRole"", ""LatestEvent"",
+                                        ""CreatedAt"", ""UpdatedAt""
+                                    ) VALUES (
+                                        {boardId}, {pushSource}, {true}, {"push"}, {pushGithubBranch},
+                                        {commitIdVal}, {commitMessageVal}, {pushDevRole}, {latestEvent},
+                                        {timestamp}, {timestamp}
+                                    )
+                                    ON CONFLICT (""BoardId"", ""Source"", ""Webhook"", ""GithubBranch"")
+                                    DO UPDATE SET
+                                        ""LatestCommitId"" = EXCLUDED.""LatestCommitId"",
+                                        ""LatestCommitDescription"" = EXCLUDED.""LatestCommitDescription"",
+                                        ""DevRole"" = EXCLUDED.""DevRole"",
+                                        ""LatestEvent"" = EXCLUDED.""LatestEvent"",
+                                        ""UpdatedAt"" = EXCLUDED.""UpdatedAt""";
+                                await _context.Database.ExecuteSqlInterpolatedAsync(pushSql);
+                            }
+                            catch (Exception ex)
+                            {
+                                _logger.LogWarning(ex, "⚠️ [WEBHOOK] Push: Failed to upsert BoardState for {Source}", pushSource);
+                            }
+                        }
+                        else
+                        {
+                            _logger.LogInformation("[WEBHOOK] Push: skipping GitHub-Push-Frontend record update (chore commit) so mentor sees last real commit");
+                        }
+                        _logger.LogInformation("✅ [WEBHOOK] Push recorded for BoardId={BoardId}, Branch={Branch}, Role={Role}", boardId, branch, pushDevRole);
+                        return Ok(new { Success = true, Message = "Push processed", BoardId = boardId, Branch = branch, Role = pushDevRole });
+                    }
+
                     if (eventType == "pull_request")
                     {
                         if (payload.TryGetProperty("action", out var actionProp))
@@ -8824,6 +9817,7 @@ Focus on the actual changes made (the diff), not the entire codebase.";
                                                     var scopedIntentService = scope.ServiceProvider.GetRequiredService<IMentorIntentService>();
                                                     var scopedPromptConfig = scope.ServiceProvider.GetRequiredService<IOptions<PromptConfig>>();
                                                     var scopedTrelloConfig = scope.ServiceProvider.GetRequiredService<IOptions<TrelloConfig>>();
+                                                    var scopedChatCompletionService = scope.ServiceProvider.GetRequiredService<IChatCompletionService>();
                                                     var scopedDeploymentsConfig = scope.ServiceProvider.GetRequiredService<IOptions<DeploymentsConfig>>();
                                                     var scopedTestingConfig = scope.ServiceProvider.GetRequiredService<IOptions<TestingConfig>>();
                                                     
@@ -8840,6 +9834,7 @@ Focus on the actual changes made (the diff), not the entire codebase.";
                                                         scopedConfiguration,
                                                         scopedHttpClientFactory,
                                                         scopedAIService,
+                                                        scopedChatCompletionService,
                                                         scopedDeploymentsConfig,
                                                         scopedTestingConfig,
                                                         scope.ServiceProvider.GetRequiredService<IServiceScopeFactory>());
@@ -8956,7 +9951,35 @@ Focus on the actual changes made (the diff), not the entire codebase.";
                                             {
                                                 _logger.LogWarning(mergeEx, "⚠️ [WEBHOOK] Failed to update/create GitHub-Merge record for PR #{IssueNumber} (non-critical)", issueNumber);
                                             }
-                                            
+                                            // Backend only: set Railway deployment trigger to main (no active branch after merge)
+                                            var isBackendRepo = repo?.StartsWith("backend_", StringComparison.OrdinalIgnoreCase) ?? false;
+                                            if (isBackendRepo && !string.IsNullOrEmpty(boardId) && !string.IsNullOrEmpty(owner) && !string.IsNullOrEmpty(repo))
+                                            {
+                                                try
+                                                {
+                                                    await SetRailwayTriggerBranchAsync(boardId, "main", $"{owner}/{repo}");
+                                                }
+                                                catch (Exception railEx)
+                                                {
+                                                    _logger.LogWarning(railEx, "⚠️ [WEBHOOK] Railway trigger branch set to main failed (non-critical)");
+                                                }
+                                            }
+                                            // Frontend only: set GitHub Pages source to main and force deploy
+                                            if (!isBackendRepo && merged && !string.IsNullOrEmpty(owner) && !string.IsNullOrEmpty(repo))
+                                            {
+                                                var pagesToken = _configuration["GitHub:AccessToken"];
+                                                if (!string.IsNullOrEmpty(pagesToken))
+                                                {
+                                                    try
+                                                    {
+                                                        await SetGitHubPagesSourceBranchAndDeployAsync(owner, repo, "main", pagesToken);
+                                                    }
+                                                    catch (Exception pagesEx)
+                                                    {
+                                                        _logger.LogWarning(pagesEx, "⚠️ [WEBHOOK] GitHub Pages set to main/deploy failed (non-critical)");
+                                                    }
+                                                }
+                                            }
                                             // Don't set merge status on the webhook record itself (it's just for webhook tracking)
                                             boardState.BranchStatus = null;
                                             boardState.PRStatus = null;
@@ -9011,13 +10034,14 @@ Focus on the actual changes made (the diff), not the entire codebase.";
                     }
 
                     // Append webhook record (constraint now includes GithubBranch, allowing multiple PRs for different branches)
-                    // The unique constraint on (BoardId, Source, Webhook, GithubBranch) allows:
-                    // - Multiple PRs for different branches (different GithubBranch values)
-                    // - Multiple records with NULL GithubBranch (NULLs are distinct in PostgreSQL)
-                    _context.BoardStates.Add(boardState);
-                    await _context.SaveChangesAsync();
-                    _logger.LogInformation("✅ [WEBHOOK] Recorded webhook event {EventType} for BoardId: {BoardId}, Branch: {Branch}", 
-                        eventType, boardId, boardState.GithubBranch ?? "N/A");
+                    // Skip generic record for deployment_status to avoid empty rows; GitHub Pages status is stored via UpdateGithubPagesBoardStateAsync.
+                    if (eventType != "deployment_status")
+                    {
+                        _context.BoardStates.Add(boardState);
+                        await _context.SaveChangesAsync();
+                        _logger.LogInformation("✅ [WEBHOOK] Recorded webhook event {EventType} for BoardId: {BoardId}, Branch: {Branch}", 
+                            eventType, boardId, boardState.GithubBranch ?? "N/A");
+                    }
                 }
                 catch (DbUpdateException ex) when (ex.InnerException is Npgsql.PostgresException pgEx && pgEx.SqlState == "23505")
                 {
@@ -9370,12 +10394,21 @@ Focus on the actual changes made (the diff), not the entire codebase.";
                     };
 
                     string feedback = "Code review completed successfully.";
+                    bool codeReviewApproval = true; // default so we don't block if parsing fails
                     try
                     {
                         var codeReviewActionResult = await CodeReviewInternal(codeReviewRequest, "GitHub-Success-PR");
                         
+                        // Extract Approval from result when available (affects Mentor-Validation status if ApprovalAffectsValidation is true)
+                        if (codeReviewActionResult.Value != null)
+                        {
+                            var jsonString = JsonSerializer.Serialize(codeReviewActionResult.Value);
+                            var jsonElement = JsonSerializer.Deserialize<JsonElement>(jsonString);
+                            if (jsonElement.TryGetProperty("Approval", out var approvalProp))
+                                codeReviewApproval = approvalProp.GetBoolean();
+                        }
+                        
                         // Get feedback from BoardStates (handle sequenced sources like "GitHub-Success-PR-1", "GitHub-Success-PR-2")
-                        // Fetch all matching records and filter by base source in memory
                         var baseSource = "GitHub-Success-PR";
                         var allCodeReviewStates = await _context.BoardStates
                             .Where(bs => bs.BoardId == board.Id && 
@@ -9390,12 +10423,55 @@ Focus on the actual changes made (the diff), not the entire codebase.";
                             .FirstOrDefault();
 
                         feedback = codeReviewState?.MentorFeedback ?? feedback;
-                        _logger.LogInformation("✅ [VALIDATE-PR] Code review completed");
+                        _logger.LogInformation("✅ [VALIDATE-PR] Code review completed (Approval: {Approval})", codeReviewApproval);
                     }
                     catch (Exception codeReviewEx)
                     {
                         _logger.LogWarning(codeReviewEx, "⚠️ [VALIDATE-PR] Code review failed (non-critical): {Error}", codeReviewEx.Message);
                         // Continue - code review failure doesn't block validation success
+                    }
+
+                    // If ApprovalAffectsValidation is true and AI said no, post the review feedback to the PR, then set Mentor-Validation to failure
+                    if (_promptConfig.Mentor.CodeReview.ApprovalAffectsValidation && !codeReviewApproval)
+                    {
+                        _logger.LogWarning("❌ [VALIDATE-PR] Code review approval is NO - posting feedback to PR and setting Mentor-Validation to failure");
+                        int? prNumForComment = issueNumber;
+                        if (!prNumForComment.HasValue)
+                        {
+                            var prWebhookForComment = await _context.BoardStates
+                                .Where(bs => bs.Source == "GitHub" && bs.ServiceName == "pull_request" && bs.GithubBranch == branchName && bs.LatestCommitId == sha)
+                                .OrderByDescending(bs => bs.CreatedAt)
+                                .FirstOrDefaultAsync();
+                            if (prWebhookForComment != null && !string.IsNullOrEmpty(prWebhookForComment.LatestEvent))
+                            {
+                                var parts = prWebhookForComment.LatestEvent.Split('#');
+                                if (parts.Length > 1 && int.TryParse(parts[1], out var parsedPrNumber))
+                                    prNumForComment = parsedPrNumber;
+                            }
+                        }
+                        if (prNumForComment.HasValue)
+                        {
+                            try
+                            {
+                                await _githubService.AddPullRequestCommentAsync(owner, repoName, prNumForComment.Value, feedback, accessToken);
+                                _logger.LogInformation("✅ [VALIDATE-PR] Posted code review feedback to PR #{PRNumber} (changes requested)", prNumForComment.Value);
+                            }
+                            catch (Exception commentEx)
+                            {
+                                _logger.LogError(commentEx, "❌ [VALIDATE-PR] Failed to add PR comment with feedback: {Error}", commentEx.Message);
+                            }
+                        }
+                        try
+                        {
+                            await _githubService.UpdateCommitStatusAsync(owner, repoName, sha, "failure", validationContext,
+                                "Code review requested changes.", accessToken);
+                            _logger.LogInformation("✅ [VALIDATE-PR] Status set to 'failure' (approval affects validation)");
+                        }
+                        catch (Exception statusEx)
+                        {
+                            _logger.LogError(statusEx, "❌ [VALIDATE-PR] Failed to set failure status: {Error}", statusEx.Message);
+                        }
+                        return Ok(new { Success = false, Message = "The code review requested changes. Check the feedback below or on your PR.", Feedback = feedback, CodeReviewRequestedChanges = true });
                     }
 
                     // Step 6: Post AI Feedback to GitHub PR comment BEFORE setting success status
@@ -9770,6 +10846,7 @@ Focus on the actual changes made (the diff), not the entire codebase.";
                     
                     string feedback = "Code review completed successfully.";
                     bool codeReviewSuccess = false;
+                    bool codeReviewApproval = true; // default so we don't block if parsing fails
                     string? codeReviewError = null;
                     
                     if (recentRecord != null && recentRecord.CreatedAt >= recentCutoff)
@@ -9781,6 +10858,7 @@ Focus on the actual changes made (the diff), not the entire codebase.";
                                 recentRecord.Source, recentRecord.CreatedAt, recentRecord.Webhook);
                             feedback = recentRecord.MentorFeedback ?? "Code review completed successfully.";
                             codeReviewSuccess = true;
+                            codeReviewApproval = recentRecord.PRStatus == "Approved"; // from stored record
                         }
                     }
                     
@@ -9825,10 +10903,14 @@ Focus on the actual changes made (the diff), not the entire codebase.";
                                     
                                     if (codeReviewSuccess)
                                     {
-                                        // Extract feedback if available
+                                        // Extract feedback and approval
                                         if (jsonElement.TryGetProperty("Feedback", out var feedbackProp))
                                         {
                                             feedback = feedbackProp.GetString() ?? feedback;
+                                        }
+                                        if (jsonElement.TryGetProperty("Approval", out var approvalProp))
+                                        {
+                                            codeReviewApproval = approvalProp.GetBoolean();
                                         }
                                         
                                         // Also check BoardStates as fallback (handle sequenced sources)
@@ -9936,6 +11018,35 @@ Focus on the actual changes made (the diff), not the entire codebase.";
                         
                         // Return failure with code review error as feedback
                         return (false, failureMessage, failureMessage);
+                    }
+
+                    // If ApprovalAffectsValidation is true and AI said no, still post the review feedback to the PR, then set Mentor-Validation to failure
+                    if (_promptConfig.Mentor.CodeReview.ApprovalAffectsValidation && !codeReviewApproval)
+                    {
+                        _logger.LogWarning("❌ [SHARED VALIDATION] Code review approval is NO - posting feedback to PR and setting Mentor-Validation to failure");
+                        if (issueNumber.HasValue)
+                        {
+                            try
+                            {
+                                await _githubService.AddPullRequestCommentAsync(owner, repoName, issueNumber.Value, feedback, accessToken);
+                                _logger.LogInformation("✅ [SHARED VALIDATION] Posted code review feedback to PR #{PRNumber} (changes requested)", issueNumber);
+                            }
+                            catch (Exception commentEx)
+                            {
+                                _logger.LogError(commentEx, "❌ [SHARED VALIDATION] Failed to add PR comment with feedback: {Error}", commentEx.Message);
+                            }
+                        }
+                        try
+                        {
+                            await _githubService.UpdateCommitStatusAsync(owner, repoName, sha, "failure", validationContext,
+                                "Code review requested changes.", accessToken);
+                            statusSet = true;
+                        }
+                        catch (Exception statusEx)
+                        {
+                            _logger.LogError(statusEx, "❌ [SHARED VALIDATION] Failed to set failure status: {Error}", statusEx.Message);
+                        }
+                        return (false, feedback, "Code review requested changes.");
                     }
 
                     // Post comment to GitHub PR BEFORE setting success status
@@ -10175,18 +11286,24 @@ Focus on the actual changes made (the diff), not the entire codebase.";
                 }
                 else
                 {
-                    // Check if failure was due to code review (feedback will contain code review error)
+                    // Failure was due to validation or code review; distinguish "approval requested changes" from other failures
+                    var isCodeReviewRequestedChanges = string.Equals(errorMessage, "Code review requested changes.", StringComparison.Ordinal);
                     var isCodeReviewFailure = !string.IsNullOrEmpty(feedback) && 
                                              (errorMessage?.Contains("Code review") == true || 
                                               errorMessage?.Contains("Trello card") == true ||
                                               feedback.Contains("Code review") == true ||
                                               feedback.Contains("Trello card") == true);
                     
+                    var message = isCodeReviewRequestedChanges
+                        ? "The code review requested changes. Check the feedback below or on your PR."
+                        : (errorMessage ?? "Validation failed");
+                    
                     return Ok(new 
                     { 
                         Success = false, 
-                        Message = errorMessage ?? "Validation failed",
-                        Feedback = feedback, // Code review error message if code review failed
+                        Message = message,
+                        Feedback = feedback,
+                        CodeReviewRequestedChanges = isCodeReviewRequestedChanges,
                         CodeReviewFeedback = isCodeReviewFailure ? (feedback ?? errorMessage) : null,
                         CodeReviewStatus = isCodeReviewFailure ? "failed" : "not_attempted",
                         Sha = sha 
@@ -10431,12 +11548,294 @@ Focus on the actual changes made (the diff), not the entire codebase.";
                     // Continue - merge was successful, BoardState record creation is non-critical
                 }
 
+                // Backend only: set Railway deployment trigger to main (no active branch after merge)
+                if (request.IsBackend)
+                {
+                    try
+                    {
+                        await SetRailwayTriggerBranchAsync(request.BoardId, "main", $"{owner}/{repo}");
+                    }
+                    catch (Exception railEx)
+                    {
+                        _logger.LogWarning(railEx, "⚠️ [GITHUB-MERGE] Railway trigger branch set to main failed (non-critical)");
+                    }
+                }
+                else
+                {
+                    // Frontend: set GitHub Pages source to main and force deploy
+                    try
+                    {
+                        await SetGitHubPagesSourceBranchAndDeployAsync(owner, repo, "main", accessToken);
+                    }
+                    catch (Exception pagesEx)
+                    {
+                        _logger.LogWarning(pagesEx, "⚠️ [GITHUB-MERGE] GitHub Pages set to main/deploy failed (non-critical)");
+                    }
+                }
+
                 return Ok(new { Success = true, Message = "Pull request merged successfully", PRNumber = pr.Number, BranchName = request.BranchName });
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "❌ [GITHUB-MERGE] Error processing platform-triggered merge");
                 return StatusCode(500, new { Success = false, Message = $"Error merging PR: {ex.Message}" });
+            }
+        }
+
+        /// <summary>
+        /// Sets the Railway deployment trigger branch for the backend service of the given board.
+        /// Service name is derived from boardId (same as board creation: WebApi_{boardId} sanitized).
+        /// Does not throw; logs and returns on missing config or API errors (non-critical for merge/branch flows).
+        /// </summary>
+        private async Task SetRailwayTriggerBranchAsync(string boardId, string targetBranch, string repoOwnerSlashRepo)
+        {
+            if (string.IsNullOrWhiteSpace(boardId) || string.IsNullOrWhiteSpace(targetBranch) || string.IsNullOrWhiteSpace(repoOwnerSlashRepo))
+            {
+                _logger.LogWarning("[RAILWAY] SetRailwayTriggerBranch skipped: missing boardId, targetBranch, or repo.");
+                return;
+            }
+            var railwayApiToken = _configuration["Railway:ApiToken"];
+            var railwayApiUrl = _configuration["Railway:ApiUrl"] ?? "https://backboard.railway.com/graphql/v2";
+            var projectId = _configuration["Railway:SharedProjectId"];
+            if (string.IsNullOrWhiteSpace(railwayApiToken) || railwayApiToken == "your-railway-api-token-here" || string.IsNullOrWhiteSpace(projectId))
+            {
+                _logger.LogDebug("[RAILWAY] SetRailwayTriggerBranch skipped: Railway not configured.");
+                return;
+            }
+            var repo = repoOwnerSlashRepo.Trim();
+            if (repo.Contains("https://github.com/", StringComparison.OrdinalIgnoreCase))
+                repo = repo.Replace("https://github.com/", "", StringComparison.OrdinalIgnoreCase).TrimEnd('/');
+            var railwayServiceName = System.Text.RegularExpressions.Regex.Replace(("WebApi_" + boardId).ToLowerInvariant(), @"[^a-z0-9-_]", "-");
+            try
+            {
+                using var httpClient = _httpClientFactory.CreateClient();
+                httpClient.Timeout = TimeSpan.FromSeconds(30);
+                httpClient.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", railwayApiToken);
+                httpClient.DefaultRequestHeaders.Accept.Add(new System.Net.Http.Headers.MediaTypeWithQualityHeaderValue("application/json"));
+                var projectQuery = new
+                {
+                    query = @"query project($id: String!) { project(id: $id) { id services { edges { node { id name } } } } }",
+                    variables = new { id = projectId }
+                };
+                var projectResponse = await httpClient.PostAsync(railwayApiUrl, new StringContent(JsonSerializer.Serialize(projectQuery), System.Text.Encoding.UTF8, "application/json"));
+                var projectContent = await projectResponse.Content.ReadAsStringAsync();
+                if (!projectResponse.IsSuccessStatusCode)
+                {
+                    _logger.LogWarning("[RAILWAY] Project query failed: {StatusCode} {Content}", projectResponse.StatusCode, projectContent);
+                    return;
+                }
+                string? serviceId = null;
+                using (var projectDoc = JsonDocument.Parse(projectContent))
+                {
+                    var root = projectDoc.RootElement;
+                    if (root.TryGetProperty("errors", out var errs))
+                    {
+                        _logger.LogWarning("[RAILWAY] Project query errors: {Errors}", errs.GetRawText());
+                        return;
+                    }
+                    if (root.TryGetProperty("data", out var data) && data.TryGetProperty("project", out var project) &&
+                        project.TryGetProperty("services", out var services) && services.TryGetProperty("edges", out var edges))
+                    {
+                        foreach (var edge in edges.EnumerateArray())
+                        {
+                            if (edge.TryGetProperty("node", out var node) &&
+                                node.TryGetProperty("name", out var nameProp) &&
+                                string.Equals(nameProp.GetString(), railwayServiceName, StringComparison.OrdinalIgnoreCase))
+                            {
+                                if (node.TryGetProperty("id", out var idProp))
+                                {
+                                    serviceId = idProp.GetString();
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+                if (string.IsNullOrEmpty(serviceId))
+                {
+                    _logger.LogWarning("[RAILWAY] Service not found for name '{ServiceName}' (boardId={BoardId}).", railwayServiceName, boardId);
+                    return;
+                }
+                var connectMutation = new
+                {
+                    query = @"mutation serviceConnect($id: String!, $input: ServiceConnectInput!) { serviceConnect(id: $id, input: $input) { id } }",
+                    variables = new { id = serviceId, input = new { repo = repo, branch = targetBranch.Trim() } }
+                };
+                var connectResponse = await httpClient.PostAsync(railwayApiUrl, new StringContent(JsonSerializer.Serialize(connectMutation), System.Text.Encoding.UTF8, "application/json"));
+                var connectContent = await connectResponse.Content.ReadAsStringAsync();
+                if (!connectResponse.IsSuccessStatusCode)
+                {
+                    _logger.LogWarning("[RAILWAY] serviceConnect failed: {StatusCode} {Content}", connectResponse.StatusCode, connectContent);
+                    return;
+                }
+                using (var connectDoc = JsonDocument.Parse(connectContent))
+                {
+                    if (connectDoc.RootElement.TryGetProperty("errors", out var errs))
+                    {
+                        _logger.LogWarning("[RAILWAY] serviceConnect errors: {Errors}", errs.GetRawText());
+                        return;
+                    }
+                    if (connectDoc.RootElement.TryGetProperty("data", out var data) && data.TryGetProperty("serviceConnect", out var sc) && sc.ValueKind != JsonValueKind.Null)
+                    {
+                        _logger.LogInformation("[RAILWAY] Trigger branch set to '{Branch}' for board {BoardId} (service {ServiceName}).", targetBranch, boardId, railwayServiceName);
+                        return;
+                    }
+                }
+                _logger.LogWarning("[RAILWAY] serviceConnect returned no data.serviceConnect: {Content}", connectContent);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "[RAILWAY] SetRailwayTriggerBranch failed for boardId={BoardId}, branch={Branch}: {Message}", boardId, targetBranch, ex.Message);
+            }
+        }
+
+        /// <summary>
+        /// Sets the GitHub Pages publishing source branch via GitHub API (no Actions). Then forces a deploy by creating an empty commit and updating the ref.
+        /// Does not throw; logs and returns on missing config or API errors.
+        /// </summary>
+        private async Task SetGitHubPagesSourceBranchAndDeployAsync(string owner, string repo, string branch, string accessToken)
+        {
+            if (string.IsNullOrWhiteSpace(owner) || string.IsNullOrWhiteSpace(repo) || string.IsNullOrWhiteSpace(branch) || string.IsNullOrWhiteSpace(accessToken))
+            {
+                _logger.LogWarning("[GITHUB PAGES] Set source skipped: missing owner, repo, branch, or token.");
+                return;
+            }
+            try
+            {
+                // Use named client with GitHub SSL config; cap time so we don't hang on fetch
+                using var httpClient = _httpClientFactory.CreateClient("DeploymentController");
+                httpClient.Timeout = TimeSpan.FromSeconds(60);
+                httpClient.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", accessToken);
+                httpClient.DefaultRequestHeaders.Add("User-Agent", "StrAppersBackend/1.0");
+                httpClient.DefaultRequestHeaders.Accept.Add(new System.Net.Http.Headers.MediaTypeWithQualityHeaderValue("application/vnd.github+json"));
+                httpClient.DefaultRequestHeaders.Add("X-GitHub-Api-Version", "2022-11-28");
+
+                var baseUrl = "https://api.github.com";
+                // 1) Set Pages source branch (PUT /repos/{owner}/{repo}/pages — source.branch and source.path required per GitHub API docs)
+                var pagesBody = System.Text.Json.JsonSerializer.Serialize(new { source = new { branch = branch, path = "/" } });
+                var pagesRequest = new HttpRequestMessage(HttpMethod.Put, $"{baseUrl}/repos/{owner}/{repo}/pages");
+                pagesRequest.Content = new StringContent(pagesBody, System.Text.Encoding.UTF8, "application/json");
+                var pagesResponse = await httpClient.SendAsync(pagesRequest);
+                var pagesContent = await pagesResponse.Content.ReadAsStringAsync();
+                if (!pagesResponse.IsSuccessStatusCode)
+                {
+                    _logger.LogWarning("[GITHUB PAGES] Set source failed: {StatusCode} {Content}", pagesResponse.StatusCode, pagesContent);
+                    return;
+                }
+                _logger.LogInformation("[GITHUB PAGES] Source set to branch '{Branch}' for {Owner}/{Repo}", branch, owner, repo);
+
+                // 2) Force deploy: empty commit + update ref so Pages rebuilds from this branch.
+                //    POST /pages/builds only builds from the default branch (per GitHub docs), so we push an empty commit to the source branch instead.
+                var refResponse = await httpClient.GetAsync($"{baseUrl}/repos/{owner}/{repo}/git/ref/heads/{Uri.EscapeDataString(branch)}");
+                if (!refResponse.IsSuccessStatusCode)
+                {
+                    _logger.LogWarning("[GITHUB PAGES] Force deploy skipped: could not get ref for {Branch} ({StatusCode})", branch, refResponse.StatusCode);
+                    return;
+                }
+                var refJson = await refResponse.Content.ReadAsStringAsync();
+                using (var refDoc = System.Text.Json.JsonDocument.Parse(refJson))
+                {
+                    if (!refDoc.RootElement.TryGetProperty("object", out var obj) || !obj.TryGetProperty("sha", out var shaProp))
+                    {
+                        _logger.LogWarning("[GITHUB PAGES] Force deploy skipped: no object.sha in ref response");
+                        return;
+                    }
+                    var commitSha = shaProp.GetString();
+                    if (string.IsNullOrEmpty(commitSha))
+                    {
+                        _logger.LogWarning("[GITHUB PAGES] Force deploy skipped: empty commit sha");
+                        return;
+                    }
+                    var commitResponse = await httpClient.GetAsync($"{baseUrl}/repos/{owner}/{repo}/git/commits/{commitSha}");
+                    if (!commitResponse.IsSuccessStatusCode)
+                    {
+                        _logger.LogWarning("[GITHUB PAGES] Force deploy skipped: could not get commit ({StatusCode})", commitResponse.StatusCode);
+                        return;
+                    }
+                    var commitJson = await commitResponse.Content.ReadAsStringAsync();
+                    string? treeSha = null;
+                    using (var commitDoc = System.Text.Json.JsonDocument.Parse(commitJson))
+                    {
+                        if (commitDoc.RootElement.TryGetProperty("tree", out var tree) && tree.TryGetProperty("sha", out var treeShaProp))
+                            treeSha = treeShaProp.GetString();
+                    }
+                    if (string.IsNullOrEmpty(treeSha))
+                    {
+                        _logger.LogWarning("[GITHUB PAGES] Force deploy skipped: no tree sha");
+                        return;
+                    }
+                    var newCommitBody = System.Text.Json.JsonSerializer.Serialize(new
+                    {
+                        tree = treeSha,
+                        parents = new[] { commitSha },
+                        message = "chore: trigger Pages deploy"
+                    });
+                    var newCommitRequest = new HttpRequestMessage(HttpMethod.Post, $"{baseUrl}/repos/{owner}/{repo}/git/commits");
+                    newCommitRequest.Content = new StringContent(newCommitBody, System.Text.Encoding.UTF8, "application/json");
+                    var newCommitResponse = await httpClient.SendAsync(newCommitRequest);
+                    var newCommitContent = await newCommitResponse.Content.ReadAsStringAsync();
+                    if (!newCommitResponse.IsSuccessStatusCode)
+                    {
+                        _logger.LogWarning("[GITHUB PAGES] Force deploy (create commit) failed: {StatusCode} {Content}", newCommitResponse.StatusCode, newCommitContent);
+                        return;
+                    }
+                    string? newSha = null;
+                    using (var newDoc = System.Text.Json.JsonDocument.Parse(newCommitContent))
+                    {
+                        if (newDoc.RootElement.TryGetProperty("sha", out var newShaProp))
+                            newSha = newShaProp.GetString();
+                    }
+                    if (string.IsNullOrEmpty(newSha))
+                    {
+                        _logger.LogWarning("[GITHUB PAGES] Force deploy skipped: no sha in new commit response");
+                        return;
+                    }
+                    var updateRefBody = System.Text.Json.JsonSerializer.Serialize(new { sha = newSha });
+                    var updateRefRequest = new HttpRequestMessage(HttpMethod.Patch, $"{baseUrl}/repos/{owner}/{repo}/git/refs/heads/{Uri.EscapeDataString(branch)}");
+                    updateRefRequest.Content = new StringContent(updateRefBody, System.Text.Encoding.UTF8, "application/json");
+                    var updateRefResponse = await httpClient.SendAsync(updateRefRequest);
+                    if (!updateRefResponse.IsSuccessStatusCode)
+                    {
+                        _logger.LogWarning("[GITHUB PAGES] Force deploy (update ref) failed: {StatusCode}", updateRefResponse.StatusCode);
+                        return;
+                    }
+                    _logger.LogInformation("[GITHUB PAGES] Force deploy triggered for {Owner}/{Repo} branch {Branch}", owner, repo, branch);
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "[GITHUB PAGES] SetGitHubPagesSourceBranchAndDeploy failed for {Owner}/{Repo} branch {Branch}: {Message}", owner, repo, branch, ex.Message);
+            }
+        }
+
+        /// <summary>
+        /// Returns true if the given branch exists in the board's GitHub repo (for mentor prompt branch status).
+        /// </summary>
+        private async Task<bool> BranchExistsForBoardAsync(string boardId, string branchName, bool isBackend)
+        {
+            if (string.IsNullOrWhiteSpace(boardId) || string.IsNullOrWhiteSpace(branchName))
+                return false;
+            try
+            {
+                var board = await _context.ProjectBoards.FirstOrDefaultAsync(pb => pb.Id == boardId);
+                if (board == null) return false;
+                var githubUrl = isBackend ? board.GithubBackendUrl : board.GithubFrontendUrl;
+                if (string.IsNullOrEmpty(githubUrl)) return false;
+                var uri = new Uri(githubUrl);
+                var pathParts = uri.AbsolutePath.TrimStart('/').Split('/');
+                if (pathParts.Length < 2) return false;
+                var owner = pathParts[0];
+                var repo = pathParts[1];
+                var accessToken = _configuration["GitHub:AccessToken"];
+                if (string.IsNullOrEmpty(accessToken)) return false;
+                if (branchName.Equals("main", StringComparison.OrdinalIgnoreCase) || branchName.Equals("master", StringComparison.OrdinalIgnoreCase))
+                    return true;
+                var branchSha = await _githubService.GetBranchShaAsync(owner, repo, branchName, accessToken);
+                return !string.IsNullOrEmpty(branchSha);
+            }
+            catch
+            {
+                return false;
             }
         }
 

@@ -1078,12 +1078,23 @@ public class StudentsController : ControllerBase
             
             _logger.LogInformation("Searching for students with boardId: {BoardId} and IsAvailable: true", boardId);
             
-            // Get students with role information
-            var students = await _context.Students
+            // Get students with role information (materialize first so we can compute roleNames in C#)
+            var studentsRaw = await _context.Students
                 .Include(s => s.StudentRoles)
                     .ThenInclude(sr => sr.Role)
                 .Where(s => s.BoardId == boardId && s.IsAvailable)
-                .Select(s => new
+                .ToListAsync();
+
+            var students = studentsRaw.Select(s =>
+            {
+                var roleName = s.StudentRoles?
+                    .Where(sr => sr.IsActive && sr.Role != null)
+                    .Select(sr => sr.Role!.Name)
+                    .FirstOrDefault() ?? "Team Member";
+                var roleNames = (roleName.Contains("Fullstack", StringComparison.OrdinalIgnoreCase) || roleName.Contains("Full Stack", StringComparison.OrdinalIgnoreCase))
+                    ? new[] { roleName, "Backend Developer", "Frontend Developer" }
+                    : new[] { roleName };
+                return (object)new
                 {
                     Id = s.Id,
                     FirstName = s.FirstName,
@@ -1099,12 +1110,13 @@ public class StudentsController : ControllerBase
                     IsAdmin = s.IsAdmin,
                     BoardId = s.BoardId,
                     IsAvailable = s.IsAvailable,
-                    RoleId = s.StudentRoles.FirstOrDefault(sr => sr.IsActive).RoleId,
-                    RoleName = s.StudentRoles.FirstOrDefault(sr => sr.IsActive).Role.Name,
+                    RoleId = s.StudentRoles?.FirstOrDefault(sr => sr.IsActive)?.RoleId,
+                    RoleName = roleName,
+                    RoleNames = roleNames,
                     CreatedAt = s.CreatedAt,
                     UpdatedAt = s.UpdatedAt
-                })
-                .ToListAsync();
+                };
+            }).ToList();
 
             _logger.LogInformation("Found {Count} students for board {BoardId}", students.Count, boardId);
             return Ok(students);
