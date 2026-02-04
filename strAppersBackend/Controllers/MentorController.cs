@@ -9111,7 +9111,7 @@ APPROVAL: no    (request changes before merge)";
 
                 // Parse approval (yes/no) from response; default to true so we don't block if parsing fails
                 var approval = ParseCodeReviewApproval(feedback, out var feedbackWithoutApprovalLine);
-                _logger.LogInformation("📋 [CODE REVIEW] Parsed approval: {Approval} (ApprovalAffectsValidation: {AffectsValidation})", approval, _promptConfig.Mentor.CodeReview.ApprovalAffectsValidation);
+                _logger.LogInformation("📋 [CODE REVIEW] Parsed approval: {Approval} (MentorPRApproval: {MentorPRApproval})", approval, _promptConfig.Mentor.CodeReview.MentorPRApproval);
 
                 // Record in BoardStates (APPEND-ONLY - preserve history)
                 // For CodeReview records, we use sequenced sources (e.g., "Junior-1", "GitHub-Success-PR-2")
@@ -10399,7 +10399,7 @@ APPROVAL: no    (request changes before merge)";
                     {
                         var codeReviewActionResult = await CodeReviewInternal(codeReviewRequest, "GitHub-Success-PR");
                         
-                        // Extract Approval from result when available (affects Mentor-Validation status if ApprovalAffectsValidation is true)
+                        // Extract Approval from result when available (affects Mentor-Validation status if MentorPRApproval is true)
                         if (codeReviewActionResult.Value != null)
                         {
                             var jsonString = JsonSerializer.Serialize(codeReviewActionResult.Value);
@@ -10431,8 +10431,8 @@ APPROVAL: no    (request changes before merge)";
                         // Continue - code review failure doesn't block validation success
                     }
 
-                    // If ApprovalAffectsValidation is true and AI said no, post the review feedback to the PR, then set Mentor-Validation to failure
-                    if (_promptConfig.Mentor.CodeReview.ApprovalAffectsValidation && !codeReviewApproval)
+                    // If MentorPRApproval is true and AI said no, post the review feedback to the PR, then set Mentor-Validation to failure
+                    if (_promptConfig.Mentor.CodeReview.MentorPRApproval && !codeReviewApproval)
                     {
                         _logger.LogWarning("❌ [VALIDATE-PR] Code review approval is NO - posting feedback to PR and setting Mentor-Validation to failure");
                         int? prNumForComment = issueNumber;
@@ -11020,8 +11020,8 @@ APPROVAL: no    (request changes before merge)";
                         return (false, failureMessage, failureMessage);
                     }
 
-                    // If ApprovalAffectsValidation is true and AI said no, still post the review feedback to the PR, then set Mentor-Validation to failure
-                    if (_promptConfig.Mentor.CodeReview.ApprovalAffectsValidation && !codeReviewApproval)
+                    // If MentorPRApproval is true and AI said no, still post the review feedback to the PR, then set Mentor-Validation to failure
+                    if (_promptConfig.Mentor.CodeReview.MentorPRApproval && !codeReviewApproval)
                     {
                         _logger.LogWarning("❌ [SHARED VALIDATION] Code review approval is NO - posting feedback to PR and setting Mentor-Validation to failure");
                         if (issueNumber.HasValue)

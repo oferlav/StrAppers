@@ -60,7 +60,7 @@ namespace strAppersBackend.Models
         public string ReviewUserPromptHeader { get; set; } = string.Empty;
         public string ReviewInstructions { get; set; } = string.Empty;
         /// <summary>When true, AI code review approval (yes/no) affects the Mentor-Validation GitHub status: "no" sets status to failure.</summary>
-        public bool ApprovalAffectsValidation { get; set; } = true;
+        public bool MentorPRApproval { get; set; } = true;
     }
 
     /// <summary>
