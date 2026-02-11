@@ -27,6 +27,14 @@ namespace strAppersBackend.Models
         /// Placeholders: {{LiveSprintJson}} and {{SystemSprintJson}} are replaced with the live and system sprint card JSON.
         /// </summary>
         public string? SprintMergePrompt { get; set; }
+        /// <summary>
+        /// When true (default), board creation creates only the visible sprints (see VisibleSprints) plus one empty sprint and Bugs; after a sprint merge, the next empty sprint is created from TrelloBoardJson.
+        /// </summary>
+        public bool NextSprintOnlyVisability { get; set; } = true;
+        /// <summary>
+        /// Number of "system" sprints to create with full content. Board gets Sprint 1..VisibleSprints (system), Sprint (VisibleSprints+1) (empty), and Bugs. Default 2 = Sprint1, Sprint2 (system), Sprint3 (empty), Bugs.
+        /// </summary>
+        public int VisibleSprints { get; set; } = 2;
     }
 
     public class TrelloUserRegistrationRequest

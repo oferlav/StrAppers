@@ -47,6 +47,8 @@ namespace strAppersBackend.Models
         public string BoardStatesAwarenessWithoutJson { get; set; } = string.Empty;
         /// <summary>Last instruction appended when board states are in prompt: report board health first when user reports issues/help.</summary>
         public string BoardHealthFirstLastInstruction { get; set; } = string.Empty;
+        /// <summary>Platform interface, role permissions (CRM, Resources, Diagrams), and staggered sprint methodology. When set in config overrides Prompts/Mentor/PlatformInterfaceAndRolePermissions.txt.</summary>
+        public string PlatformInterfaceAndRolePermissions { get; set; } = string.Empty;
     }
 
     /// <summary>

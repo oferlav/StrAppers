@@ -215,8 +215,8 @@ public class BoardsController : ControllerBase
             _logger.LogInformation("Trello schedule: FirstDayOfWeek={FirstDayOfWeek}, LocalTime={LocalTime}, Kickoff (first day of week 10:00 local) UTC={KickoffUtc}", firstDayOfWeekStr, localTimeStr, kickoffUtc);
 
             var useDBProjectBoard = _configuration.GetValue<bool>("Trello:UseDBProjectBoard", true);
-            string? sprint1OverrideListId = null;
-            DateTime? sprint1OverrideDueDateUtc = null;
+            var visibleSprints = _configuration.GetValue<int>("Trello:VisibleSprints", 2);
+            var overriddenSprints = new Dictionary<int, (string ListId, DateTime? DueDateUtc)>();
             TrelloProjectCreationRequest? trelloRequest = null;
             object? sprintPlanForStorage = null;
             var useSavedTrelloJson = false;
@@ -510,6 +510,59 @@ public class BoardsController : ControllerBase
                 return StatusCode(500, "Failed to build Trello board request");
             }
 
+            // When NextSprintOnlyVisability is true, create VisibleSprints (system) + 1 (empty) + Bugs. E.g. VisibleSprints=2 → Sprint1, Sprint2 (system), Sprint3 (empty), Bugs.
+            var nextSprintOnlyVisability = _configuration.GetValue<bool>("Trello:NextSprintOnlyVisability", true);
+            if (nextSprintOnlyVisability && trelloRequest.SprintPlan?.Lists != null && trelloRequest.SprintPlan.Lists.Count > visibleSprints + 1)
+            {
+                var canonicalSprintNames = new[] { "Sprint 1", "Sprint 2", "Sprint 3", "Sprint 4", "Sprint 5", "Sprint 6", "Sprint 7" };
+                var listNamesToInclude = canonicalSprintNames.Take(visibleSprints + 1).ToHashSet(StringComparer.OrdinalIgnoreCase);
+                listNamesToInclude.Add("Bugs");
+                var listsToInclude = new List<TrelloList>();
+                foreach (var name in canonicalSprintNames.Take(visibleSprints + 1))
+                {
+                    var found = trelloRequest.SprintPlan.Lists.FirstOrDefault(l => string.Equals(l.Name, name, StringComparison.OrdinalIgnoreCase));
+                    if (found != null)
+                        listsToInclude.Add(found);
+                }
+                var bugsList = trelloRequest.SprintPlan.Lists.FirstOrDefault(l => string.Equals(l.Name, "Bugs", StringComparison.OrdinalIgnoreCase));
+                if (bugsList != null && !listsToInclude.Contains(bugsList))
+                    listsToInclude.Add(bugsList);
+                var listNames = listsToInclude.Select(l => l.Name).ToHashSet(StringComparer.OrdinalIgnoreCase);
+                trelloRequest.SprintPlan.Lists = listsToInclude;
+                if (trelloRequest.SprintPlan.Cards != null)
+                {
+                    trelloRequest.SprintPlan.Cards = trelloRequest.SprintPlan.Cards
+                        .Where(c => c.ListName != null && listNames.Contains(c.ListName))
+                        .ToList();
+                }
+                _logger.LogInformation("NextSprintOnlyVisability: limited board to VisibleSprints={VisibleSprints} (Sprint 1..{LastSystem} system, Sprint {Empty} empty) + Bugs ({ListNames}), {CardCount} cards",
+                    visibleSprints, visibleSprints, visibleSprints + 1, string.Join(", ", listNames), trelloRequest.SprintPlan.Cards?.Count ?? 0);
+            }
+
+            // Ensure list order is canonical (Sprint 1, 2, ... 7, Bugs last) and Position = index so Trello creates lists left-to-right correctly
+            if (trelloRequest.SprintPlan?.Lists != null && trelloRequest.SprintPlan.Lists.Count > 0)
+            {
+                var canonicalNames = new[] { "Sprint 1", "Sprint 2", "Sprint 3", "Sprint 4", "Sprint 5", "Sprint 6", "Sprint 7", "Bugs" };
+                var used = new HashSet<TrelloList>();
+                var ordered = new List<TrelloList>();
+                foreach (var name in canonicalNames)
+                {
+                    var found = trelloRequest.SprintPlan.Lists.FirstOrDefault(l => string.Equals(l.Name, name, StringComparison.OrdinalIgnoreCase));
+                    if (found != null && !used.Contains(found))
+                    {
+                        used.Add(found);
+                        ordered.Add(found);
+                    }
+                }
+                foreach (var l in trelloRequest.SprintPlan.Lists)
+                    if (!used.Contains(l))
+                        ordered.Add(l);
+                trelloRequest.SprintPlan.Lists = ordered;
+                // Use 1-based pos: Trello treats pos=0 as "append to end", which put Sprint 1 last (after Bugs). pos=1,2,... keeps left-to-right order.
+                for (var i = 0; i < ordered.Count; i++)
+                    ordered[i].Position = i + 1;
+            }
+
             // Override sprint due dates: sprint starts first day of week, due = last day of weekend (and when UseDBProjectBoard, override saved JSON dates)
             if (trelloRequest.SprintPlan?.Lists != null && trelloRequest.SprintPlan.Cards != null)
             {
@@ -587,47 +640,47 @@ public class BoardsController : ControllerBase
                 }
                 trelloBoardId = trelloResponse.BoardId;
 
-                // When CreatePMEmptyBoard and UseDBProjectBoard: override Sprint1 on EmptyBoard with SystemBoard Sprint1 (no merge)
+                // When CreatePMEmptyBoard and UseDBProjectBoard: override Sprint 1..VisibleSprints on EmptyBoard with SystemBoard content (no merge)
                 if (useDBProjectBoard && !string.IsNullOrEmpty(trelloResponse.SystemBoardId))
                 {
-                    _logger.LogInformation("[BOARD-CREATE] Overriding Sprint1 on EmptyBoard (BoardId={BoardId}, ProjectId={ProjectId})", trelloResponse.BoardId, request.ProjectId);
-                    var systemSprint = await _trelloService.GetSprintFromBoardAsync(trelloResponse.SystemBoardId, "Sprint1")
-                        ?? await _trelloService.GetSprintFromBoardAsync(trelloResponse.SystemBoardId, "Sprint 1");
-                    if (systemSprint?.Cards == null || systemSprint.Cards.Count == 0)
+                    for (var sprintNum = 1; sprintNum <= visibleSprints; sprintNum++)
                     {
-                        _logger.LogWarning("[BOARD-CREATE] SystemBoard Sprint1 not found or has no cards (SystemBoardId={SystemBoardId}). Skipping override and ProjectBoardSprintMerge.", trelloResponse.SystemBoardId);
-                    }
-                    else
-                    {
-                        var liveSprint = await _trelloService.GetSprintFromBoardAsync(trelloResponse.BoardId, "Sprint1")
-                            ?? await _trelloService.GetSprintFromBoardAsync(trelloResponse.BoardId, "Sprint 1");
+                        var sprintNameNoSpace = $"Sprint{sprintNum}";
+                        var sprintNameWithSpace = $"Sprint {sprintNum}";
+                        _logger.LogInformation("[BOARD-CREATE] Overriding {SprintName} on EmptyBoard (BoardId={BoardId}, ProjectId={ProjectId})", sprintNameWithSpace, trelloResponse.BoardId, request.ProjectId);
+                        var systemSprint = await _trelloService.GetSprintFromBoardAsync(trelloResponse.SystemBoardId, sprintNameNoSpace)
+                            ?? await _trelloService.GetSprintFromBoardAsync(trelloResponse.SystemBoardId, sprintNameWithSpace);
+                        if (systemSprint?.Cards == null || systemSprint.Cards.Count == 0)
+                        {
+                            _logger.LogWarning("[BOARD-CREATE] SystemBoard {SprintName} not found or has no cards (SystemBoardId={SystemBoardId}). Skipping override.", sprintNameWithSpace, trelloResponse.SystemBoardId);
+                            continue;
+                        }
+                        var liveSprint = await _trelloService.GetSprintFromBoardAsync(trelloResponse.BoardId, sprintNameNoSpace)
+                            ?? await _trelloService.GetSprintFromBoardAsync(trelloResponse.BoardId, sprintNameWithSpace);
                         if (liveSprint == null)
                         {
-                            _logger.LogWarning("[BOARD-CREATE] Live board Sprint1 list not found (BoardId={BoardId}). Skipping override and ProjectBoardSprintMerge.", trelloResponse.BoardId);
+                            _logger.LogWarning("[BOARD-CREATE] Live board {SprintName} list not found (BoardId={BoardId}). Skipping override.", sprintNameWithSpace, trelloResponse.BoardId);
+                            continue;
+                        }
+                        var (overrideSuccess, overrideError) = await _trelloService.OverrideSprintOnBoardAsync(trelloResponse.BoardId, liveSprint.ListId, systemSprint.Cards);
+                        if (!overrideSuccess)
+                        {
+                            _logger.LogWarning("[BOARD-CREATE] Failed to override {SprintName} on EmptyBoard: {Error}", sprintNameWithSpace, overrideError);
                         }
                         else
                         {
-                            var (overrideSuccess, overrideError) = await _trelloService.OverrideSprintOnBoardAsync(trelloResponse.BoardId, liveSprint.ListId, systemSprint.Cards);
-                            if (!overrideSuccess)
-                            {
-                                _logger.LogWarning("[BOARD-CREATE] Failed to override Sprint1 on EmptyBoard: {Error}", overrideError);
-                            }
-                            else
-                            {
-                                _logger.LogInformation("[BOARD-CREATE] Sprint1 on EmptyBoard overridden with SystemBoard Sprint1. Will upsert ProjectBoardSprintMerge after ProjectBoard is saved.");
-                                var dueDateRaw = systemSprint.Cards.Count > 0 ? systemSprint.Cards[0].DueDate : null;
-                                sprint1OverrideListId = liveSprint.ListId;
-                                sprint1OverrideDueDateUtc = dueDateRaw.HasValue ? ToUtcForDb(dueDateRaw.Value) : (DateTime?)null;
-                            }
+                            _logger.LogInformation("[BOARD-CREATE] {SprintName} on EmptyBoard overridden with SystemBoard. Will upsert ProjectBoardSprintMerge after ProjectBoard is saved.", sprintNameWithSpace);
+                            var dueDateRaw = systemSprint.Cards.Count > 0 ? systemSprint.Cards[0].DueDate : null;
+                            overriddenSprints[sprintNum] = (liveSprint.ListId, dueDateRaw.HasValue ? ToUtcForDb(dueDateRaw.Value) : (DateTime?)null);
                         }
                     }
                 }
                 else
                 {
                     if (!useDBProjectBoard)
-                        _logger.LogInformation("[BOARD-CREATE] UseDBProjectBoard is false; skipping Sprint1 override and ProjectBoardSprintMerge.");
+                        _logger.LogInformation("[BOARD-CREATE] UseDBProjectBoard is false; skipping sprint overrides and ProjectBoardSprintMerge.");
                     else if (string.IsNullOrEmpty(trelloResponse.SystemBoardId))
-                        _logger.LogInformation("[BOARD-CREATE] No SystemBoardId (CreatePMEmptyBoard may be false or single board); skipping Sprint1 override and ProjectBoardSprintMerge.");
+                        _logger.LogInformation("[BOARD-CREATE] No SystemBoardId (CreatePMEmptyBoard may be false or single board); skipping sprint overrides and ProjectBoardSprintMerge.");
                 }
             }
 
@@ -2672,10 +2725,10 @@ public class BoardsController : ControllerBase
                 throw;
             }
 
-            // Upsert ProjectBoardSprintMerge for ALL sprints on the board; only Sprint1 gets MergedAt set (FK requires ProjectBoard to exist first)
+            // Upsert ProjectBoardSprintMerge for ALL sprints on the board; sprints 1..VisibleSprints (overridden from SystemBoard) get MergedAt set (FK requires ProjectBoard to exist first)
             var sprintCount = trelloRequest?.SprintPlan?.Lists?.Count ?? 0;
-            if (sprintCount <= 0 && !string.IsNullOrEmpty(sprint1OverrideListId))
-                sprintCount = 1;
+            if (sprintCount <= 0 && overriddenSprints.Count > 0)
+                sprintCount = overriddenSprints.Keys.Max();
             if (sprintCount > 0)
             {
                 try
@@ -2685,10 +2738,10 @@ public class BoardsController : ControllerBase
                         string? listId = null;
                         DateTime? dueDateUtc = null;
                         DateTime? mergedAt = null;
-                        if (sprintNum == 1 && !string.IsNullOrEmpty(sprint1OverrideListId))
+                        if (overriddenSprints.TryGetValue(sprintNum, out var overridden))
                         {
-                            listId = sprint1OverrideListId;
-                            dueDateUtc = sprint1OverrideDueDateUtc;
+                            listId = overridden.ListId;
+                            dueDateUtc = overridden.DueDateUtc;
                             mergedAt = DateTime.UtcNow;
                         }
                         else
@@ -2721,7 +2774,7 @@ public class BoardsController : ControllerBase
                         {
                             mergeRecord.ListId = listId ?? mergeRecord.ListId;
                             mergeRecord.DueDate = dueDateUtc ?? mergeRecord.DueDate;
-                            if (sprintNum == 1 && !string.IsNullOrEmpty(sprint1OverrideListId))
+                            if (overriddenSprints.ContainsKey(sprintNum))
                                 mergeRecord.MergedAt = DateTime.UtcNow;
                             _logger.LogInformation("[BOARD-CREATE] ProjectBoardSprintMerge updated for BoardId={BoardId}, SprintNumber={SprintNumber}", trelloBoardId, sprintNum);
                         }

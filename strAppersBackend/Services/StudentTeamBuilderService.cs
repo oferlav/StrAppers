@@ -4,7 +4,7 @@ using strAppersBackend.Data;
 namespace strAppersBackend.Services
 {
     /// <summary>
-    /// Runs due sprint merges for boards with students in status=3: for each unique BoardId, merges sprints where DueDate has passed and MergedAt is null.
+    /// Runs due sprint merges for boards with students in status=3: for each unique BoardId, merges sprint N when the previous sprint (N-1) DueDate has passed and MergedAt is null (e.g. Sprint 2 DueDate Feb 22 → merge Sprint 3 on Feb 23+).
     /// </summary>
     public class StudentTeamBuilderService : IStudentTeamBuilderService
     {
@@ -50,12 +50,24 @@ namespace strAppersBackend.Services
                 }
                 var projectId = projectBoard.ProjectId;
 
-                // Sprints for this board where MergedAt is null and DueDate has passed (current date >= DueDate)
+                // Merge sprint N when the *previous* sprint (N-1) DueDate has passed (e.g. Sprint 2 DueDate Feb 22 → merge Sprint 3 on Feb 23+)
                 var nowUtc = DateTime.UtcNow;
-                var dueSprints = await _context.ProjectBoardSprintMerges
-                    .Where(m => m.ProjectBoardId == boardId && m.MergedAt == null && m.DueDate != null && m.DueDate.Value <= nowUtc)
+                var allMerges = await _context.ProjectBoardSprintMerges
+                    .Where(m => m.ProjectBoardId == boardId)
                     .OrderBy(m => m.SprintNumber)
                     .ToListAsync();
+                var mergeBySprint = allMerges.ToDictionary(m => m.SprintNumber);
+                var dueSprints = new List<strAppersBackend.Models.ProjectBoardSprintMerge>();
+                foreach (var m in allMerges)
+                {
+                    if (m.MergedAt != null)
+                        continue;
+                    if (m.SprintNumber <= 1)
+                        continue; // Sprint 1 is never due by this rule (and has MergedAt set for VisibleSprints)
+                    if (!mergeBySprint.TryGetValue(m.SprintNumber - 1, out var prev) || prev.DueDate == null || prev.DueDate.Value > nowUtc)
+                        continue;
+                    dueSprints.Add(m);
+                }
 
                 if (dueSprints.Count == 0)
                     continue;

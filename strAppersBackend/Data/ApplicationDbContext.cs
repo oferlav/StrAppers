@@ -41,6 +41,9 @@ public class ApplicationDbContext : DbContext
     public DbSet<CustomerChatHistory> CustomerChatHistory { get; set; }
     public DbSet<PromptCategory> PromptCategories { get; set; }
     public DbSet<MentorPrompt> MentorPrompts { get; set; }
+    public DbSet<StakeholderCategory> StakeholderCategories { get; set; }
+    public DbSet<StakeholderStatus> StakeholderStatuses { get; set; }
+    public DbSet<Stakeholder> Stakeholders { get; set; }
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -243,6 +246,7 @@ public class ApplicationDbContext : DbContext
             entity.Property(e => e.Kickoff).HasColumnName("Kickoff").HasDefaultValue(false);
             entity.Property(e => e.CriteriaIds).HasColumnName("CriteriaIds").HasMaxLength(500);
             entity.Property(e => e.TrelloBoardJson).HasColumnName("TrelloBoardJson").HasColumnType("TEXT");
+            entity.Property(e => e.CustomerPastStory).HasColumnName("CustomerPastStory").HasColumnType("TEXT");
 
             // Foreign key relationships
             entity.HasOne(e => e.Organization)
@@ -503,6 +507,48 @@ public class ApplicationDbContext : DbContext
 
             entity.HasIndex(e => e.RoleId);
             entity.HasIndex(e => e.CategoryId);
+        });
+
+        // Configure StakeholderCategory entity
+        modelBuilder.Entity<StakeholderCategory>(entity =>
+        {
+            entity.HasKey(e => e.Id);
+            entity.ToTable("StakeholderCategories");
+            entity.Property(e => e.Name).IsRequired().HasMaxLength(200);
+        });
+
+        // Configure StakeholderStatus entity
+        modelBuilder.Entity<StakeholderStatus>(entity =>
+        {
+            entity.HasKey(e => e.Id);
+            entity.ToTable("StakeholderStatuses");
+            entity.Property(e => e.Name).IsRequired().HasMaxLength(200);
+        });
+
+        // Configure Stakeholder entity
+        modelBuilder.Entity<Stakeholder>(entity =>
+        {
+            entity.HasKey(e => e.Id);
+            entity.ToTable("Stakeholders");
+            entity.Property(e => e.Name).IsRequired().HasMaxLength(500);
+            entity.Property(e => e.Delta).HasColumnType("TEXT");
+            entity.Property(e => e.BoardId).HasMaxLength(50);
+            entity.HasOne(e => e.Category)
+                .WithMany(c => c.Stakeholders)
+                .HasForeignKey(e => e.CategoryId)
+                .OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne(e => e.Status)
+                .WithMany(s => s.Stakeholders)
+                .HasForeignKey(e => e.StatusId)
+                .OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne(e => e.ProjectBoard)
+                .WithMany()
+                .HasForeignKey(e => e.BoardId)
+                .HasPrincipalKey(pb => pb.Id)
+                .OnDelete(DeleteBehavior.SetNull);
+            entity.HasIndex(e => e.CategoryId);
+            entity.HasIndex(e => e.StatusId);
+            entity.HasIndex(e => e.BoardId);
         });
 
         // Configure MentorChatHistory entity (Id is identity; ensure value-generated on add to avoid duplicate key when sequence is out of sync)

@@ -129,6 +129,12 @@ namespace strAppersBackend.Controllers
                     ? promptWithDescription.Replace(designContextPlaceholder, contextText, StringComparison.OrdinalIgnoreCase)
                     : $"{promptWithDescription}\n\n=== PROJECT OVERVIEW ===\n{projectDescription}\n\n=== PROJECT MODULE CONTEXT (Sprint {sprintNumber}, Sequence {sequenceForSprint}) ===\n{contextText}\n=== END CONTEXT ===";
 
+                // Append Customer Past Story (Projects.CustomerPastStory, linked by ProjectId) to context
+                var customerPastStory = string.IsNullOrWhiteSpace(project?.CustomerPastStory)
+                    ? "(None.)"
+                    : project.CustomerPastStory.Trim();
+                enhancedSystemPrompt += $"\n\n=== CUSTOMER PAST STORY ===\n{customerPastStory}\n=== END CUSTOMER PAST STORY ===";
+
                 // Chat history from CustomerChatHistory (StudentId = student Id, SprintId = SprintNumber), limited by ChatHistoryLength
                 var chatHistoryLength = _promptConfig.Customer.ChatHistoryLength;
                 var rawChatHistory = await _context.CustomerChatHistory

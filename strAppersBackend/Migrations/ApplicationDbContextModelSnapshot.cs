@@ -1132,6 +1132,10 @@ namespace strAppersBackend.Migrations
                         .HasColumnType("TEXT")
                         .HasColumnName("TrelloBoardJson");
 
+                    b.Property<string>("CustomerPastStory")
+                        .HasColumnType("TEXT")
+                        .HasColumnName("CustomerPastStory");
+
                     b.Property<string>("Description")
                         .HasMaxLength(1000)
                         .HasColumnType("character varying(1000)");
@@ -1941,6 +1945,82 @@ namespace strAppersBackend.Migrations
                     b.ToTable("MentorPrompt");
                 });
 
+            modelBuilder.Entity("strAppersBackend.Models.Stakeholder", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
+
+                    b.Property<string>("BoardId")
+                        .HasMaxLength(50)
+                        .HasColumnType("character varying(50)");
+
+                    b.Property<int>("CategoryId")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("Delta")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasMaxLength(500)
+                        .HasColumnType("character varying(500)");
+
+                    b.Property<int>("StatusId")
+                        .HasColumnType("integer");
+
+                    b.Property<int>("V1AlignmentScore")
+                        .HasColumnType("integer");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("BoardId");
+
+                    b.HasIndex("CategoryId");
+
+                    b.HasIndex("StatusId");
+
+                    b.ToTable("Stakeholders");
+                });
+
+            modelBuilder.Entity("strAppersBackend.Models.StakeholderCategory", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)");
+
+                    b.HasKey("Id");
+
+                    b.ToTable("StakeholderCategories");
+                });
+
+            modelBuilder.Entity("strAppersBackend.Models.StakeholderStatus", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)");
+
+                    b.HasKey("Id");
+
+                    b.ToTable("StakeholderStatuses");
+                });
+
             modelBuilder.Entity("strAppersBackend.Models.Student", b =>
                 {
                     b.Property<int>("Id")
@@ -2708,6 +2788,32 @@ namespace strAppersBackend.Migrations
                     b.Navigation("Project");
                 });
 
+            modelBuilder.Entity("strAppersBackend.Models.Stakeholder", b =>
+                {
+                    b.HasOne("strAppersBackend.Models.ProjectBoard", "ProjectBoard")
+                        .WithMany()
+                        .HasForeignKey("BoardId")
+                        .OnDelete(DeleteBehavior.SetNull);
+
+                    b.HasOne("strAppersBackend.Models.StakeholderCategory", "Category")
+                        .WithMany("Stakeholders")
+                        .HasForeignKey("CategoryId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("strAppersBackend.Models.StakeholderStatus", "Status")
+                        .WithMany("Stakeholders")
+                        .HasForeignKey("StatusId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.Navigation("Category");
+
+                    b.Navigation("ProjectBoard");
+
+                    b.Navigation("Status");
+                });
+
             modelBuilder.Entity("strAppersBackend.Models.ProjectsIDE", b =>
                 {
                     b.HasOne("strAppersBackend.Models.Project", "Project")
@@ -2829,6 +2935,16 @@ namespace strAppersBackend.Migrations
                     b.Navigation("Role");
 
                     b.Navigation("Student");
+                });
+
+            modelBuilder.Entity("strAppersBackend.Models.StakeholderCategory", b =>
+                {
+                    b.Navigation("Stakeholders");
+                });
+
+            modelBuilder.Entity("strAppersBackend.Models.StakeholderStatus", b =>
+                {
+                    b.Navigation("Stakeholders");
                 });
 
             modelBuilder.Entity("strAppersBackend.Models.Employer", b =>

@@ -100,6 +100,12 @@ namespace strAppersBackend.Controllers
         private static string GetBoardHealthFirstLastInstructionDefault() =>
             LoadMentorPromptFile("BoardHealthFirstLastInstruction") ?? "[LAST INSTRUCTION] For broken/help/issues: start your reply with the FULL STACK line above; then 1–2 actions. No checklists or long lists.";
 
+        /// <summary>Platform interface, role permissions (CRM, Resources, Diagrams), and staggered sprint methodology. When PromptConfig:Mentor:PlatformInterfaceAndRolePermissions is set, uses it; else loads Prompts/Mentor/PlatformInterfaceAndRolePermissions.txt.</summary>
+        private string GetPlatformInterfaceAndRolePermissions() =>
+            !string.IsNullOrWhiteSpace(_promptConfig.Mentor.PlatformInterfaceAndRolePermissions)
+                ? _promptConfig.Mentor.PlatformInterfaceAndRolePermissions.Trim()
+                : (LoadMentorPromptFile("PlatformInterfaceAndRolePermissions") ?? "").Trim();
+
         /// <summary>
         /// Normalize mentor response markdown so the frontend displays correctly. The UI only renders inline code
         /// (single backticks), not fenced code blocks (```...```). So we: (1) normalize line endings; (2) remove
@@ -695,7 +701,9 @@ namespace strAppersBackend.Controllers
             {
                 var baseSystemPrompt = _promptConfig.Mentor.SystemPrompt;
                 var platformContext = GetPlatformContextAndLimitations();
-                var fullSystemPrompt = platformContext + baseSystemPrompt;
+                var platformInterfaceBlock = GetPlatformInterfaceAndRolePermissions();
+                var platformInterfaceSection = string.IsNullOrEmpty(platformInterfaceBlock) ? "" : "\n\n" + platformInterfaceBlock;
+                var fullSystemPrompt = platformContext + platformInterfaceSection + baseSystemPrompt;
 
                 // Return the prompts - JSON strings preserve \n characters which will be rendered as line breaks
                 // when the JSON is parsed and displayed
@@ -704,6 +712,7 @@ namespace strAppersBackend.Controllers
                     Success = true,
                     SystemPrompt = fullSystemPrompt,
                     PlatformContextAndLimitations = platformContext,
+                    PlatformInterfaceAndRolePermissions = platformInterfaceBlock,
                     BaseSystemPrompt = baseSystemPrompt
                 });
             }
@@ -1514,7 +1523,9 @@ Your intelligence is strictly tethered to the Current Project Context and the us
         {
             // Prepend Platform Context & Vision and Knowledge Limitations to the system prompt
             var platformContext = GetPlatformContextAndLimitations();
-            var enhancedBasePrompt = Dbg(1202) + platformContext + Dbg(1203) + baseSystemPrompt;
+            var platformInterfaceBlock = GetPlatformInterfaceAndRolePermissions();
+            var platformInterfaceSection = string.IsNullOrEmpty(platformInterfaceBlock) ? "" : "\n\n" + platformInterfaceBlock;
+            var enhancedBasePrompt = Dbg(1202) + platformContext + platformInterfaceSection + Dbg(1203) + baseSystemPrompt;
 
             if (contextData.ValueKind == JsonValueKind.Undefined || contextData.ValueKind == JsonValueKind.Null)
             {
@@ -6636,8 +6647,9 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                 string branchName;
                 if (request.SprintNumber == 0)
                 {
-                    // Special case: sprintNumber 0 creates a "Bugs" branch
-                    branchName = "Bugs";
+                    // Special case: sprintNumber 0 creates a "Bugs" branch (Bugs-B for backend, Bugs-F for frontend)
+                    var bugsLetter = request.IsBackend ? "B" : "F";
+                    branchName = $"Bugs-{bugsLetter}";
                 }
                 else
                 {
@@ -6653,6 +6665,27 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                 if (string.IsNullOrEmpty(accessToken))
                 {
                     return StatusCode(500, "GitHub access token is not configured");
+                }
+
+                // Block when there are open PRs (except for Bugs branches): merge or close them before creating a new branch
+                var openPRs = await _githubService.GetOpenPullRequestsAsync(owner, repo, accessToken);
+                var branchesWithOpenPRs = openPRs
+                    .Select(pr => pr.HeadBranch)
+                    .Where(refName => !string.IsNullOrEmpty(refName) &&
+                        !string.Equals(refName, "Bugs-F", StringComparison.Ordinal) &&
+                        !string.Equals(refName, "Bugs-B", StringComparison.Ordinal))
+                    .Distinct()
+                    .ToList();
+                if (branchesWithOpenPRs.Count > 0 && request.SprintNumber != 0)
+                {
+                    var branchesList = string.Join(", ", branchesWithOpenPRs);
+                    _logger.LogWarning("❌ [GITHUB BRANCH] Cannot create branch '{BranchName}'. There are open PRs for branch(es): {Branches}. Merge or close them first.", branchName, branchesList);
+                    return BadRequest(new CreateGitHubBranchResponse
+                    {
+                        Success = false,
+                        ErrorMessage = $"Cannot create branch '{branchName}'. There are open PRs for branch(es): {branchesList}. Please merge or close them before creating a new branch.",
+                        StatusCode = 400
+                    });
                 }
 
                 // Check for unmerged branches (all branches excluding main)
@@ -6694,22 +6727,92 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                     _logger.LogWarning("⚠️ [GITHUB BRANCH] Failed to get branches list. Status: {StatusCode}", branchesResponse.StatusCode);
                 }
                 
-                if (unmergedBranches.Count > 0)
+                // Block only branches that are not merged into main (Bugs-F/Bugs-B are always allowed).
+                // Prefer "merged PR" check: if the branch has a closed PR that was merged (including squash-merge), treat as merged.
+                // Fallback: GitHub compare main...branch; ahead_by == 0 means all commits are in main (merge-commit merge).
+                var candidateBlocking = unmergedBranches
+                    .Where(b => !string.Equals(b, "Bugs-F", StringComparison.Ordinal) && !string.Equals(b, "Bugs-B", StringComparison.Ordinal))
+                    .ToList();
+                var blockingBranches = new List<string>();
+                foreach (var b in candidateBlocking)
                 {
-                    var branchesList = string.Join(", ", unmergedBranches);
+                    bool considerMerged = false;
+                    // 1) Check for a merged PR (covers squash-merge and merge-commit; compare alone fails for squash-merge)
+                    var pullsUrl = $"https://api.github.com/repos/{owner}/{repo}/pulls?state=closed&head={Uri.EscapeDataString(owner)}:{Uri.EscapeDataString(b)}";
+                    var pullsRequest = new HttpRequestMessage(HttpMethod.Get, pullsUrl);
+                    pullsRequest.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", accessToken);
+                    pullsRequest.Headers.Add("User-Agent", "StrAppersBackend/1.0");
+                    pullsRequest.Headers.Accept.Add(new System.Net.Http.Headers.MediaTypeWithQualityHeaderValue("application/vnd.github.v3+json"));
+                    try
+                    {
+                        var pullsResponse = await httpClient.SendAsync(pullsRequest);
+                        if (pullsResponse.IsSuccessStatusCode)
+                        {
+                            var pullsJson = await pullsResponse.Content.ReadAsStringAsync();
+                            using var pullsDoc = System.Text.Json.JsonDocument.Parse(pullsJson);
+                            foreach (var pr in pullsDoc.RootElement.EnumerateArray())
+                            {
+                                var merged = pr.TryGetProperty("merged_at", out var mergedAtProp) && mergedAtProp.ValueKind != System.Text.Json.JsonValueKind.Null && !string.IsNullOrWhiteSpace(mergedAtProp.GetString());
+                                if (merged)
+                                {
+                                    considerMerged = true;
+                                    _logger.LogInformation("[GITHUB BRANCH] Branch {Branch} has merged PR (merged_at), treating as merged", b);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogDebug(ex, "[GITHUB BRANCH] Pulls check for branch {Branch} failed, trying compare", b);
+                    }
+                    if (considerMerged)
+                        continue;
+                    // 2) Fallback: compare main...branch; 0 commits ahead = branch fully in main (e.g. merge-commit merge)
+                    var compareUrl = $"https://api.github.com/repos/{owner}/{repo}/compare/main...{Uri.EscapeDataString(b)}";
+                    var compareRequest = new HttpRequestMessage(HttpMethod.Get, compareUrl);
+                    compareRequest.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", accessToken);
+                    compareRequest.Headers.Add("User-Agent", "StrAppersBackend/1.0");
+                    compareRequest.Headers.Accept.Add(new System.Net.Http.Headers.MediaTypeWithQualityHeaderValue("application/vnd.github.v3+json"));
+                    try
+                    {
+                        var compareResponse = await httpClient.SendAsync(compareRequest);
+                        if (compareResponse.IsSuccessStatusCode)
+                        {
+                            var compareJson = await compareResponse.Content.ReadAsStringAsync();
+                            using var compareDoc = System.Text.Json.JsonDocument.Parse(compareJson);
+                            var root = compareDoc.RootElement;
+                            var aheadBy = root.TryGetProperty("ahead_by", out var aheadProp) ? aheadProp.GetInt32() : -1;
+                            if (aheadBy == 0)
+                            {
+                                considerMerged = true;
+                                _logger.LogInformation("[GITHUB BRANCH] Branch {Branch} compare main...branch ahead_by=0, treating as merged", b);
+                            }
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogDebug(ex, "[GITHUB BRANCH] Compare main...{Branch} failed, treating as unmerged", b);
+                    }
+                    if (!considerMerged)
+                        blockingBranches.Add(b);
+                }
+                if (blockingBranches.Count > 0 && request.SprintNumber != 0)
+                {
+                    var branchesList = string.Join(", ", blockingBranches);
                     
                     _logger.LogWarning("❌ [GITHUB BRANCH] Cannot create branch '{BranchName}'. Found {Count} unmerged branch(es): {Branches}", 
-                        branchName, unmergedBranches.Count, branchesList);
+                        branchName, blockingBranches.Count, branchesList);
                     
                     return BadRequest(new CreateGitHubBranchResponse
                     {
                         Success = false,
-                        ErrorMessage = $"Cannot create branch '{branchName}'. There are {unmergedBranches.Count} unmerged branch(es): {branchesList}. Please merge or delete the existing branches before creating a new branch.",
+                        ErrorMessage = $"Cannot create branch '{branchName}'. There are {blockingBranches.Count} unmerged branch(es): {branchesList}. Please merge or delete the existing branches before creating a new branch.",
                         StatusCode = 400
                     });
                 }
 
-                _logger.LogInformation("✅ [GITHUB BRANCH] No unmerged branches found. Creating branch '{BranchName}' in {Owner}/{Repo} for sprint {SprintNumber}",
+                _logger.LogInformation("✅ [GITHUB BRANCH] Creating branch '{BranchName}' in {Owner}/{Repo} for sprint {SprintNumber}" + (request.SprintNumber == 0 ? " (Bugs branch - unmerged branches allowed)" : " (no unmerged branches)"),
                     branchName, owner, repo, request.SprintNumber);
 
                 var branchResponse = await _githubService.CreateBranchAsync(owner, repo, branchName, "main", accessToken);
@@ -6730,14 +6833,17 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                     }
                     else
                     {
-                        // Frontend: set GitHub Pages source branch and force deploy
+                        // Frontend: ensure GitHub Pages is enabled (can get disabled when new branches are added), then set source to new branch and force deploy
                         try
                         {
+                            var pagesEnabled = await _githubService.EnableGitHubPagesAsync(owner, repo, accessToken);
+                            if (!pagesEnabled)
+                                _logger.LogWarning("[GITHUB BRANCH] Enable GitHub Pages returned false for {Owner}/{Repo}, continuing to set source anyway", owner, repo);
                             await SetGitHubPagesSourceBranchAndDeployAsync(owner, repo, branchName, accessToken);
                         }
                         catch (Exception pagesEx)
                         {
-                            _logger.LogWarning(pagesEx, "[GITHUB BRANCH] GitHub Pages set source/deploy failed (non-critical): {Message}", pagesEx.Message);
+                            _logger.LogWarning(pagesEx, "[GITHUB BRANCH] GitHub Pages enable/set source/deploy failed (non-critical): {Message}", pagesEx.Message);
                         }
                     }
                     return Ok(new CreateGitHubBranchResponse
@@ -8922,21 +9028,37 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                 }
 
                 // Parse branch name to get sprint number and role
-                // Format: "SprintNumber-RoleLetter" (e.g., "2-F" for Sprint 2, Frontend)
+                // Format: "SprintNumber-RoleLetter" (e.g., "2-F") or "Bugs-B" / "Bugs-F"
                 var branchParts = request.GithubBranch.Split('-');
-                if (branchParts.Length != 2 || !int.TryParse(branchParts[0], out var sprintNumber))
+                int sprintNumber;
+                string roleLetter;
+                if (branchParts.Length == 2 && branchParts[0].Equals("Bugs", StringComparison.OrdinalIgnoreCase) &&
+                    (branchParts[1].Equals("B", StringComparison.OrdinalIgnoreCase) || branchParts[1].Equals("F", StringComparison.OrdinalIgnoreCase)))
                 {
-                    return BadRequest(new { Success = false, Message = $"Invalid branch name format. Expected format: 'SprintNumber-RoleLetter' (e.g., '2-F')" });
+                    sprintNumber = 0;
+                    roleLetter = branchParts[1].ToUpper();
                 }
-
-                var roleLetter = branchParts[1].ToUpper();
-                var cardId = request.GithubBranch; // CardId matches branch name
-
-                // Get Trello card by CardId
-                var trelloCard = await _trelloService.GetCardByCardIdAsync(request.BoardId, cardId);
-                if (trelloCard == null)
+                else if (branchParts.Length != 2 || !int.TryParse(branchParts[0], out sprintNumber))
                 {
-                    return NotFound(new { Success = false, Message = $"Trello card with CardId '{cardId}' not found" });
+                    return BadRequest(new { Success = false, Message = $"Invalid branch name format. Expected format: 'SprintNumber-RoleLetter' (e.g., '2-F') or 'Bugs-B' / 'Bugs-F'" });
+                }
+                else
+                {
+                    roleLetter = branchParts[1].ToUpper();
+                }
+                var cardId = request.GithubBranch; // CardId matches branch name
+                var isBugsBranch = sprintNumber == 0;
+
+                // Get Trello card by CardId (required only for sprint branches; Bugs branches are reviewed by diff only)
+                JsonElement? trelloCard = null;
+                if (!isBugsBranch)
+                {
+                    var card = await _trelloService.GetCardByCardIdAsync(request.BoardId, cardId);
+                    if (card == null)
+                    {
+                        return NotFound(new { Success = false, Message = $"Trello card with CardId '{cardId}' not found" });
+                    }
+                    trelloCard = card.Value;
                 }
 
                 // Determine if backend or frontend based on role letter
@@ -9046,20 +9168,36 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                     diffContent.AppendLine();
                 }
 
-                // Extract card information
-                var cardName = trelloCard.Value.TryGetProperty("name", out var nameProp) ? nameProp.GetString() : "";
-                var cardDesc = trelloCard.Value.TryGetProperty("desc", out var descProp) ? descProp.GetString() : "";
-                
-                // Get checklist items
-                var checklistItems = new List<string>();
-                if (trelloCard.Value.TryGetProperty("idChecklists", out var checklistIdsProp))
+                // Build AI prompt: for Bugs branch, diff-only (no Trello card); for sprint branches, include card and alignment check
+                var cardNameForResponse = isBugsBranch ? request.GithubBranch : "";
+                string codeReviewPrompt;
+                if (isBugsBranch)
                 {
-                    // Note: Would need to fetch checklist details separately if needed
-                }
+                    codeReviewPrompt = $@"Please review the following code changes (diff) for a bug fix branch.
 
-                // Prepare AI prompt for code review
-                // Align the diff against the actual Trello card requirements
-                var codeReviewPrompt = $@"Please review the following code changes (diff) for a Trello card task.
+Context: This is a Bugs branch (bug fixes only). Do NOT compare the code to a task description or Trello card. Evaluate only the code changes.
+
+Code Changes (Diff):
+{diffContent}
+
+Please provide:
+1. Code quality review (best practices, potential bugs, readability)
+2. Specific feedback on the changes with references to the diff where relevant
+3. Suggestions for improvements if any
+
+Format your response as clear, actionable feedback. Focus on the actual changes in the diff.
+
+At the end of your response, on a new line, write exactly one of:
+APPROVAL: yes   (code is ready for merge)
+APPROVAL: no    (request changes before merge)";
+                }
+                else
+                {
+                    var cardName = trelloCard!.Value.TryGetProperty("name", out var nameProp) ? nameProp.GetString() : "";
+                    cardNameForResponse = cardName ?? "";
+                    var cardDesc = trelloCard.Value.TryGetProperty("desc", out var descProp) ? descProp.GetString() : "";
+
+                    codeReviewPrompt = $@"Please review the following code changes (diff) for a Trello card task.
 
 Trello Card Information:
 - Card ID: {cardId}
@@ -9082,6 +9220,7 @@ Focus on the actual changes made (the diff), not the entire codebase.
 At the end of your response, on a new line, write exactly one of:
 APPROVAL: yes   (code is ready for merge)
 APPROVAL: no    (request changes before merge)";
+                }
 
                 // Look up AI model from database if AIServiceName is provided
                 string? modelName = null;
@@ -9327,7 +9466,7 @@ APPROVAL: no    (request changes before merge)";
                     BoardId = request.BoardId,
                     Branch = request.GithubBranch,
                     CardId = cardId,
-                    CardName = cardName,
+                    CardName = cardNameForResponse,
                     Feedback = feedbackWithoutApprovalLine,
                     Approval = approval,
                     Timestamp = DateTime.UtcNow
@@ -10153,7 +10292,7 @@ APPROVAL: no    (request changes before merge)";
                 _logger.LogInformation("🔍 [VALIDATE-PR] Extracted branch name: {Branch}", branchName);
                 
                 var patternKey = type == "be" ? "GitHub:BranchNamingPatterns:Backend" : "GitHub:BranchNamingPatterns:Frontend";
-                var pattern = _configuration[patternKey] ?? (type == "be" ? "^([1-9]|1[0-9]|20)-B$" : "^([1-9]|1[0-9]|20)-F$");
+                var pattern = _configuration[patternKey] ?? (type == "be" ? "^(Bugs-B|([1-9]|1[0-9]|20)-B)$" : "^(Bugs-F|([1-9]|1[0-9]|20)-F)$");
                 _logger.LogInformation("🔍 [VALIDATE-PR] Branch naming pattern: {Pattern} (from config key: {PatternKey})", pattern, patternKey);
 
                 var regex = new System.Text.RegularExpressions.Regex(pattern);
@@ -10649,7 +10788,7 @@ APPROVAL: no    (request changes before merge)";
                 // Step 2: Branch naming validation
                 _logger.LogInformation("🔍 [SHARED VALIDATION] Step 2: Validating branch naming");
                 var patternKey = type == "be" ? "GitHub:BranchNamingPatterns:Backend" : "GitHub:BranchNamingPatterns:Frontend";
-                var pattern = _configuration[patternKey] ?? (type == "be" ? "^([1-9]|1[0-9]|20)-B$" : "^([1-9]|1[0-9]|20)-F$");
+                var pattern = _configuration[patternKey] ?? (type == "be" ? "^(Bugs-B|([1-9]|1[0-9]|20)-B)$" : "^(Bugs-F|([1-9]|1[0-9]|20)-F)$");
                 var regex = new System.Text.RegularExpressions.Regex(pattern);
                 
                 if (!regex.IsMatch(branchName))
@@ -11135,6 +11274,80 @@ APPROVAL: no    (request changes before merge)";
         }
 
         /// <summary>
+        /// GET PR validation status for a board/branch.
+        /// Route: GET /api/Mentor/use/pr-status?boardId=...&amp;branchName=...&amp;isBackend=true|false
+        /// Returns true only if there is an open PR for the branch and the GitHub "Mentor-Validation" commit status is success. Returns false if no open PR, or status is missing/pending/failure.
+        /// </summary>
+        [HttpGet("use/pr-status")]
+        public async Task<ActionResult<bool>> GetPRStatus([FromQuery] string boardId, [FromQuery] string branchName, [FromQuery] bool isBackend = false)
+        {
+            if (string.IsNullOrWhiteSpace(boardId))
+            {
+                _logger.LogInformation("[PR-STATUS] Returning false: boardId is empty");
+                return BadRequest(false);
+            }
+            if (string.IsNullOrWhiteSpace(branchName))
+            {
+                _logger.LogInformation("[PR-STATUS] Returning false: branchName is empty");
+                return BadRequest(false);
+            }
+            var board = await _context.ProjectBoards.FirstOrDefaultAsync(pb => pb.Id == boardId);
+            if (board == null)
+            {
+                _logger.LogInformation("[PR-STATUS] Returning false: board {BoardId} not found", boardId);
+                return Ok(false);
+            }
+            var githubUrl = isBackend ? board.GithubBackendUrl : board.GithubFrontendUrl;
+            if (string.IsNullOrEmpty(githubUrl))
+            {
+                _logger.LogInformation("[PR-STATUS] Returning false: GitHub {Type} URL not configured for board {BoardId}", isBackend ? "backend" : "frontend", boardId);
+                return Ok(false);
+            }
+            var uri = new Uri(githubUrl);
+            var pathParts = uri.AbsolutePath.TrimStart('/').Split('/');
+            if (pathParts.Length < 2)
+            {
+                _logger.LogInformation("[PR-STATUS] Returning false: invalid GitHub URL format for board {BoardId}", boardId);
+                return Ok(false);
+            }
+            var owner = pathParts[0];
+            var repo = pathParts[1];
+            var accessToken = _configuration["GitHub:AccessToken"];
+            if (string.IsNullOrEmpty(accessToken))
+            {
+                _logger.LogInformation("[PR-STATUS] Returning false: GitHub access token not configured");
+                return Ok(false);
+            }
+            var openPR = await _githubService.GetPullRequestByBranchAsync(owner, repo, branchName, accessToken);
+            if (openPR == null || openPR.Number == 0)
+            {
+                _logger.LogInformation("[PR-STATUS] Returning false: no open PR for branch {Branch} in {Owner}/{Repo}", branchName, owner, repo);
+                return Ok(false);
+            }
+            var headSha = openPR.HeadSha;
+            if (string.IsNullOrWhiteSpace(headSha))
+            {
+                headSha = await _githubService.GetBranchShaAsync(owner, repo, branchName, accessToken);
+            }
+            if (string.IsNullOrWhiteSpace(headSha))
+            {
+                _logger.LogInformation("[PR-STATUS] Returning false: could not get head SHA for PR #{PRNumber} branch {Branch}", openPR.Number, branchName);
+                return Ok(false);
+            }
+            var validationContext = _configuration["GitHub:ValidationContext"] ?? "Mentor-Validation";
+            var commitStatus = await _githubService.GetCommitStatusAsync(owner, repo, headSha, validationContext, accessToken);
+            var passed = commitStatus != null && string.Equals(commitStatus.State, "success", StringComparison.OrdinalIgnoreCase);
+            if (!passed)
+            {
+                var reason = commitStatus == null
+                    ? $"no {validationContext} status on GitHub (cleared or not set)"
+                    : $"GitHub {validationContext} status is '{commitStatus.State}'";
+                _logger.LogInformation("[PR-STATUS] Returning false: {Reason} for board {BoardId} branch {Branch} (PR #{PRNumber})", reason, boardId, branchName, openPR.Number);
+            }
+            return Ok(passed);
+        }
+
+        /// <summary>
         /// Platform-triggered PR validation endpoint
         /// Route: POST /api/Mentor/use/github-pr
         /// Parameters: boardId, branchName, isBackend
@@ -11486,12 +11699,30 @@ APPROVAL: no    (request changes before merge)";
                 // Phase 3: Execute Merge & Update PSA
                 _logger.LogInformation("📥 [GITHUB-MERGE] Phase 3: Executing merge");
                 var commitTitle = $"Completed: Sprint Task {request.BranchName}";
-                var mergeSuccess = await _githubService.MergePullRequestAsync(owner, repo, pr.Number, commitTitle, accessToken);
+                var mergeResult = await _githubService.MergePullRequestAsync(owner, repo, pr.Number, commitTitle, accessToken);
 
-                if (!mergeSuccess)
+                if (!mergeResult.Success)
                 {
-                    _logger.LogError("❌ [GITHUB-MERGE] Failed to merge PR #{PRNumber}", pr.Number);
-                    return StatusCode(500, new { Success = false, Message = "Failed to merge pull request" });
+                    _logger.LogError("❌ [GITHUB-MERGE] Failed to merge PR #{PRNumber}: {StatusCode} {Error}", pr.Number, mergeResult.HttpStatusCode, mergeResult.ErrorMessage);
+                    // 405 = Method Not Allowed = GitHub returns "Pull Request is not mergeable" (usually merge conflicts)
+                    if (mergeResult.HttpStatusCode == 405)
+                    {
+                        var (_, mergeableState) = await _githubService.GetPullRequestMergeableStateAsync(owner, repo, pr.Number, accessToken);
+                        var prUrl = $"https://github.com/{owner}/{repo}/pull/{pr.Number}";
+                        var detail = new
+                        {
+                            Success = false,
+                            Message = "The pull request cannot be merged because there are merge conflicts (or the branch is not mergeable). Resolve the conflicts before merging.",
+                            Reason = "NotMergeable",
+                            MergeableState = mergeableState,
+                            GitHubMessage = mergeResult.ErrorMessage,
+                            ResolveConflictsHint = "Open the PR on GitHub to see which files have conflicts (e.g. config.js). Resolve them in the GitHub web editor, or locally: git fetch origin main && git merge origin/main, fix the conflicts, then push. Then try merging again.",
+                            PullRequestUrl = prUrl
+                        };
+                        return StatusCode(409, detail);
+                    }
+                    return StatusCode(mergeResult.HttpStatusCode >= 400 && mergeResult.HttpStatusCode < 600 ? mergeResult.HttpStatusCode : 500,
+                        new { Success = false, Message = mergeResult.ErrorMessage ?? "Failed to merge pull request" });
                 }
 
                 _logger.LogInformation("✅ [GITHUB-MERGE] Successfully merged PR #{PRNumber}", pr.Number);

@@ -27,6 +27,8 @@ namespace strAppersBackend.Services
         Task<SprintSnapshot?> GetSprintFromBoardAsync(string boardId, string sprintListName);
         /// <summary>Overrides a list on a board: archives existing cards, then creates cards from the given snapshot (with checklists and CardId custom field).</summary>
         Task<(bool Success, string? Error)> OverrideSprintOnBoardAsync(string boardId, string listId, IReadOnlyList<SprintSnapshotCard> cards);
+        /// <summary>If the next sprint list does not exist on the board, creates it and adds empty cards from the project template (TrelloBoardJson).</summary>
+        Task EnsureNextEmptySprintOnBoardAsync(string boardId, TrelloProjectCreationRequest request, int nextSprintNumber);
     }
 
     public class TrelloService : ITrelloService
@@ -2489,6 +2491,184 @@ namespace strAppersBackend.Services
             {
                 _logger.LogError(ex, "Error overriding sprint on board {BoardId} list {ListId}", boardId, listId);
                 return (false, ex.Message);
+            }
+        }
+
+        /// <inheritdoc />
+        public async Task EnsureNextEmptySprintOnBoardAsync(string boardId, TrelloProjectCreationRequest request, int nextSprintNumber)
+        {
+            if (request?.SprintPlan?.Lists == null || request.SprintPlan.Lists.Count == 0)
+            {
+                _logger.LogDebug("EnsureNextEmptySprint: no lists in template, skipping next sprint {NextSprint}.", nextSprintNumber);
+                return;
+            }
+            var sprintNameNoSpace = $"Sprint{nextSprintNumber}";
+            var sprintNameWithSpace = $"Sprint {nextSprintNumber}";
+            var templateList = request.SprintPlan.Lists
+                .FirstOrDefault(l => l.Position == nextSprintNumber || string.Equals(l.Name, sprintNameWithSpace, StringComparison.OrdinalIgnoreCase) || string.Equals(l.Name, sprintNameNoSpace, StringComparison.OrdinalIgnoreCase));
+            if (templateList == null)
+            {
+                _logger.LogDebug("EnsureNextEmptySprint: no list for sprint {NextSprint} in template (Lists: {Names}).", nextSprintNumber, string.Join(", ", request.SprintPlan.Lists.Select(l => l.Name)));
+                return;
+            }
+            var listName = templateList.Name;
+            var templateCards = (request.SprintPlan.Cards ?? new List<TrelloCard>())
+                .Where(c => string.Equals(c.ListName, listName, StringComparison.OrdinalIgnoreCase))
+                .ToList();
+
+            var listsUrl = $"https://api.trello.com/1/boards/{boardId}/lists?key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
+            var listsResponse = await _httpClient.GetAsync(listsUrl);
+            if (!listsResponse.IsSuccessStatusCode)
+            {
+                _logger.LogWarning("EnsureNextEmptySprint: failed to get lists for board {BoardId}: {Status}.", boardId, listsResponse.StatusCode);
+                return;
+            }
+            var listsJson = await listsResponse.Content.ReadAsStringAsync();
+            var lists = JsonSerializer.Deserialize<JsonElement[]>(listsJson);
+            if (lists != null)
+            {
+                foreach (var list in lists)
+                {
+                    var name = list.TryGetProperty("name", out var n) ? n.GetString() : "";
+                    if (string.Equals(name, listName, StringComparison.OrdinalIgnoreCase))
+                    {
+                        _logger.LogInformation("EnsureNextEmptySprint: list {ListName} already exists on board {BoardId}, skipping.", listName, boardId);
+                        return;
+                    }
+                }
+            }
+
+            try
+            {
+                var createListUrl = $"https://api.trello.com/1/boards/{boardId}/lists?name={Uri.EscapeDataString(listName)}&pos={templateList.Position}&key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
+                var createListResponse = await _httpClient.PostAsync(createListUrl, null);
+                if (!createListResponse.IsSuccessStatusCode)
+                {
+                    _logger.LogWarning("EnsureNextEmptySprint: failed to create list {ListName} on board {BoardId}: {Status}.", listName, boardId, createListResponse.StatusCode);
+                    return;
+                }
+                var listJson = await createListResponse.Content.ReadAsStringAsync();
+                var listData = JsonSerializer.Deserialize<JsonElement>(listJson);
+                var newListId = listData.GetProperty("id").GetString();
+                if (string.IsNullOrEmpty(newListId))
+                {
+                    _logger.LogWarning("EnsureNextEmptySprint: created list but no list id returned.");
+                    return;
+                }
+
+                var roleLabelIds = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                var labelsUrl = $"https://api.trello.com/1/boards/{boardId}/labels?key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
+                var labelsResponse = await _httpClient.GetAsync(labelsUrl);
+                if (labelsResponse.IsSuccessStatusCode)
+                {
+                    var labelsJson = await labelsResponse.Content.ReadAsStringAsync();
+                    var labelsData = JsonSerializer.Deserialize<JsonElement[]>(labelsJson);
+                    if (labelsData != null)
+                        foreach (var lb in labelsData)
+                        {
+                            var nm = lb.TryGetProperty("name", out var nn) ? nn.GetString() : null;
+                            var id = lb.TryGetProperty("id", out var ii) ? ii.GetString() : null;
+                            if (!string.IsNullOrEmpty(nm) && !string.IsNullOrEmpty(id))
+                                roleLabelIds[nm] = id;
+                        }
+                }
+
+                string? cardIdFieldId = null;
+                var cfUrl = $"https://api.trello.com/1/boards/{boardId}/customFields?key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
+                var cfRes = await _httpClient.GetAsync(cfUrl);
+                if (cfRes.IsSuccessStatusCode)
+                {
+                    var cfContent = await cfRes.Content.ReadAsStringAsync();
+                    var cfArr = JsonSerializer.Deserialize<JsonElement[]>(cfContent);
+                    if (cfArr != null)
+                        foreach (var f in cfArr)
+                            if (f.TryGetProperty("name", out var fn) && fn.GetString() == "CardId" && f.TryGetProperty("id", out var fi))
+                            { cardIdFieldId = fi.GetString(); break; }
+                }
+
+                var errors = new List<string>();
+                foreach (var card in templateCards)
+                {
+                    var desc = "To be filled...";
+                    var createCardUrl = $"https://api.trello.com/1/cards?name={Uri.EscapeDataString(card.Name)}&desc={Uri.EscapeDataString(desc)}&idList={newListId}&key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
+                    if (card.DueDate.HasValue)
+                        createCardUrl += $"&due={card.DueDate.Value:yyyy-MM-dd}";
+                    if (!string.IsNullOrEmpty(card.RoleName) && roleLabelIds.TryGetValue(card.RoleName, out var labelId))
+                        createCardUrl += $"&idLabels={labelId}";
+                    var cardRes = await _httpClient.PostAsync(createCardUrl, null);
+                    if (!cardRes.IsSuccessStatusCode)
+                    {
+                        _logger.LogWarning("EnsureNextEmptySprint: failed to create card {CardName}: {Status}.", card.Name, cardRes.StatusCode);
+                        continue;
+                    }
+                    var cardResJson = await cardRes.Content.ReadAsStringAsync();
+                    var cardResData = JsonSerializer.Deserialize<JsonElement>(cardResJson);
+                    var newCardId = cardResData.GetProperty("id").GetString();
+                    var createClUrl = $"https://api.trello.com/1/checklists?name=Checklist&idCard={newCardId}&key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
+                    var clRes = await _httpClient.PostAsync(createClUrl, null);
+                    if (clRes.IsSuccessStatusCode)
+                    {
+                        var clJson = await clRes.Content.ReadAsStringAsync();
+                        var clData = JsonSerializer.Deserialize<JsonElement>(clJson);
+                        var checklistId = clData.GetProperty("id").GetString();
+                        var addItemUrl = $"https://api.trello.com/1/checklists/{checklistId}/checkItems?name={Uri.EscapeDataString("Create a Checklist...")}&pos=1&key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
+                        await _httpClient.PostAsync(addItemUrl, null);
+                    }
+                    if (!string.IsNullOrEmpty(card.CardId) && !string.IsNullOrEmpty(cardIdFieldId))
+                        await SetCustomFieldValueAsync(newCardId!, cardIdFieldId, "text", card.CardId, errors);
+                }
+                _logger.LogInformation("EnsureNextEmptySprint: created list {ListName} with {Count} empty cards on board {BoardId}.", listName, templateCards.Count, boardId);
+
+                // Reorder all lists to canonical order (Sprint 1, 2, ... 7, Bugs last) on the live Trello board
+                var listsUrl2 = $"https://api.trello.com/1/boards/{boardId}/lists?key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
+                var listsResponse2 = await _httpClient.GetAsync(listsUrl2);
+                if (listsResponse2.IsSuccessStatusCode)
+                {
+                    var listsJson2 = await listsResponse2.Content.ReadAsStringAsync();
+                    var lists2 = JsonSerializer.Deserialize<JsonElement[]>(listsJson2);
+                    if (lists2 != null && lists2.Length > 0)
+                    {
+                        var canonicalNames = new[] { "Sprint 1", "Sprint 2", "Sprint 3", "Sprint 4", "Sprint 5", "Sprint 6", "Sprint 7", "Bugs" };
+                        var orderedIds = new List<string>();
+                        foreach (var name in canonicalNames)
+                        {
+                            var listEl = lists2.FirstOrDefault(l =>
+                                string.Equals(l.TryGetProperty("name", out var n) ? n.GetString() : null, name, StringComparison.OrdinalIgnoreCase));
+                            if (listEl.ValueKind != JsonValueKind.Undefined && listEl.TryGetProperty("id", out var idProp))
+                            {
+                                var id = idProp.GetString();
+                                if (!string.IsNullOrEmpty(id))
+                                    orderedIds.Add(id);
+                            }
+                        }
+                        foreach (var listEl in lists2)
+                        {
+                            var nm = listEl.TryGetProperty("name", out var nn) ? nn.GetString() : null;
+                            if (string.IsNullOrEmpty(nm)) continue;
+                            if (canonicalNames.Any(c => string.Equals(c, nm, StringComparison.OrdinalIgnoreCase)))
+                                continue;
+                            if (listEl.TryGetProperty("id", out var idProp2))
+                            {
+                                var id2 = idProp2.GetString();
+                                if (!string.IsNullOrEmpty(id2))
+                                    orderedIds.Add(id2);
+                            }
+                        }
+                        for (var i = 0; i < orderedIds.Count; i++)
+                        {
+                            var pos = (i + 1) * 65536.0;
+                            var putUrl = $"https://api.trello.com/1/lists/{orderedIds[i]}?pos={pos}&key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
+                            var putRes = await _httpClient.PutAsync(putUrl, null);
+                            if (!putRes.IsSuccessStatusCode)
+                                _logger.LogWarning("EnsureNextEmptySprint: failed to set list position at index {Index} on board {BoardId}: {Status}.", i, boardId, putRes.StatusCode);
+                        }
+                        _logger.LogInformation("EnsureNextEmptySprint: reordered {Count} lists to canonical order (Sprint 1..7, Bugs last) on board {BoardId}.", orderedIds.Count, boardId);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "EnsureNextEmptySprint: error creating next sprint {NextSprint} on board {BoardId}.", nextSprintNumber, boardId);
             }
         }
     }

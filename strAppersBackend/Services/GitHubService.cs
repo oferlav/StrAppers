@@ -72,7 +72,9 @@ public interface IGitHubService
     Task<List<GitHubPullRequest>> GetOpenPullRequestsAsync(string owner, string repo, string? accessToken = null);
     Task<GitHubPullRequest?> CreatePullRequestAsync(string owner, string repo, string headBranch, string baseBranch, string title, string body, string? accessToken = null);
     Task<GitHubCommitStatus?> GetCommitStatusAsync(string owner, string repo, string sha, string context, string? accessToken = null);
-    Task<bool> MergePullRequestAsync(string owner, string repo, int pullRequestNumber, string commitTitle, string? accessToken = null);
+    Task<MergePullRequestResult> MergePullRequestAsync(string owner, string repo, int pullRequestNumber, string commitTitle, string? accessToken = null);
+    /// <summary>Gets mergeable and mergeable_state for a PR (e.g. to explain merge failures).</summary>
+    Task<(bool? Mergeable, string? MergeableState)> GetPullRequestMergeableStateAsync(string owner, string repo, int pullRequestNumber, string? accessToken = null);
 }
 
 public class GitHubService : IGitHubService
@@ -2890,24 +2892,24 @@ public class GitHubService : IGitHubService
     }
 
     /// <summary>
-    /// Merges a pull request
+    /// Merges a pull request. Returns result with Success, HttpStatusCode, and ErrorMessage for detailed failure handling.
     /// Uses PUT /repos/{owner}/{repo}/pulls/{number}/merge
     /// </summary>
-    public async Task<bool> MergePullRequestAsync(string owner, string repo, int pullRequestNumber, string commitTitle, string? accessToken = null)
+    public async Task<MergePullRequestResult> MergePullRequestAsync(string owner, string repo, int pullRequestNumber, string commitTitle, string? accessToken = null)
     {
         try
         {
             if (string.IsNullOrWhiteSpace(owner) || string.IsNullOrWhiteSpace(repo) || pullRequestNumber <= 0)
             {
                 _logger.LogWarning("MergePullRequestAsync: Invalid parameters");
-                return false;
+                return new MergePullRequestResult { Success = false, HttpStatusCode = 400, ErrorMessage = "Invalid parameters" };
             }
 
             var token = accessToken ?? _configuration["GitHub:AccessToken"];
             if (string.IsNullOrEmpty(token))
             {
                 _logger.LogWarning("MergePullRequestAsync: GitHub access token not configured");
-                return false;
+                return new MergePullRequestResult { Success = false, HttpStatusCode = 500, ErrorMessage = "GitHub access token not configured" };
             }
 
             var url = $"{GitHubApiBaseUrl}/repos/{owner}/{repo}/pulls/{pullRequestNumber}/merge";
@@ -2929,10 +2931,11 @@ public class GitHubService : IGitHubService
             request.Content = content;
 
             var response = await _httpClient.SendAsync(request);
+            var statusCode = (int)response.StatusCode;
+            var responseContent = await response.Content.ReadAsStringAsync();
             
             if (response.IsSuccessStatusCode)
             {
-                var responseContent = await response.Content.ReadAsStringAsync();
                 var mergeData = JsonSerializer.Deserialize<JsonElement>(responseContent, new JsonSerializerOptions 
                 { 
                     PropertyNameCaseInsensitive = true 
@@ -2942,26 +2945,71 @@ public class GitHubService : IGitHubService
                 if (merged)
                 {
                     _logger.LogInformation("✅ [GITHUB MERGE] Successfully merged PR #{PRNumber}", pullRequestNumber);
-                    return true;
+                    return new MergePullRequestResult { Success = true, HttpStatusCode = statusCode };
                 }
                 else
                 {
                     _logger.LogWarning("⚠️ [GITHUB MERGE] PR #{PRNumber} merge request returned success but merged=false", pullRequestNumber);
-                    return false;
+                    return new MergePullRequestResult { Success = false, HttpStatusCode = statusCode, ErrorMessage = "Merge response indicated merged=false" };
                 }
             }
             else
             {
-                var errorContent = await response.Content.ReadAsStringAsync();
+                string? ghMessage = null;
+                try
+                {
+                    var errDoc = JsonSerializer.Deserialize<JsonElement>(responseContent, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+                    if (errDoc.TryGetProperty("message", out var msgProp))
+                        ghMessage = msgProp.GetString();
+                }
+                catch { /* use raw if parse fails */ }
                 _logger.LogWarning("Failed to merge PR #{PRNumber} in repo {Owner}/{Repo}. Status: {StatusCode}, Error: {Error}", 
-                    pullRequestNumber, owner, repo, response.StatusCode, errorContent);
-                return false;
+                    pullRequestNumber, owner, repo, response.StatusCode, responseContent);
+                return new MergePullRequestResult
+                {
+                    Success = false,
+                    HttpStatusCode = statusCode,
+                    ErrorMessage = ghMessage ?? responseContent
+                };
             }
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error merging PR #{PRNumber} in repo {Owner}/{Repo}", pullRequestNumber, owner, repo);
-            return false;
+            return new MergePullRequestResult { Success = false, HttpStatusCode = 500, ErrorMessage = ex.Message };
+        }
+    }
+
+    /// <summary>
+    /// Gets mergeable and mergeable_state for a PR. mergeable_state can be: clean, dirty (conflicts), unstable, blocked, behind, has_hooks, unknown.
+    /// </summary>
+    public async Task<(bool? Mergeable, string? MergeableState)> GetPullRequestMergeableStateAsync(string owner, string repo, int pullRequestNumber, string? accessToken = null)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(owner) || string.IsNullOrWhiteSpace(repo) || pullRequestNumber <= 0)
+                return (null, null);
+            var token = accessToken ?? _configuration["GitHub:AccessToken"];
+            var url = $"{GitHubApiBaseUrl}/repos/{owner}/{repo}/pulls/{pullRequestNumber}";
+            var req = new HttpRequestMessage(HttpMethod.Get, url);
+            if (!string.IsNullOrEmpty(token))
+                req.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", token);
+            var response = await _httpClient.SendAsync(req);
+            if (!response.IsSuccessStatusCode)
+                return (null, null);
+            var content = await response.Content.ReadAsStringAsync();
+            using var doc = JsonDocument.Parse(content);
+            var root = doc.RootElement;
+            bool? mergeable = null;
+            if (root.TryGetProperty("mergeable", out var mProp) && mProp.ValueKind != JsonValueKind.Null)
+                mergeable = mProp.GetBoolean();
+            string? mergeableState = root.TryGetProperty("mergeable_state", out var msProp) ? msProp.GetString() : null;
+            return (mergeable, mergeableState);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "GetPullRequestMergeableStateAsync failed for PR #{PRNumber}", pullRequestNumber);
+            return (null, null);
         }
     }
 
@@ -10922,6 +10970,16 @@ public class CreateBranchResponse
     public string? GitHubResponse { get; set; }
     public string? ErrorMessage { get; set; }
     public int StatusCode { get; set; }
+}
+
+/// <summary>
+/// Result of a merge attempt; used to return HTTP status and error message when merge fails (e.g. 405 conflicts).
+/// </summary>
+public class MergePullRequestResult
+{
+    public bool Success { get; set; }
+    public int HttpStatusCode { get; set; }
+    public string? ErrorMessage { get; set; }
 }
 
 

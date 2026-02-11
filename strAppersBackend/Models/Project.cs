@@ -51,6 +51,12 @@ public class Project
     [Column("TrelloBoardJson", TypeName = "TEXT")]
     public string? TrelloBoardJson { get; set; }
 
+    /// <summary>
+    /// Past story / backstory for the AI Customer (non-technical founder). Injected into Customer chatbot context by ProjectId.
+    /// </summary>
+    [Column("CustomerPastStory", TypeName = "TEXT")]
+    public string? CustomerPastStory { get; set; }
+
     // IDE Generation fields
     [Column("deployment_manifest", TypeName = "TEXT")]
     public string? DeploymentManifest { get; set; }

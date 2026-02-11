@@ -164,13 +164,13 @@ public class SmtpEmailService : ISmtpEmailService
         return message;
     }
 
-    private string BuildGoogleCalendarLink(string title, DateTime startLocal, DateTime endLocal, string description = "", string location = "", string timeZoneId = "Asia/Jerusalem", string[] guests = null)
+    private string BuildGoogleCalendarLink(string title, DateTime startUtc, DateTime endUtc, string description = "", string location = "", string timeZoneId = "Asia/Jerusalem", string[] guests = null)
     {
-        // Convert to UTC and format as YYYYMMDDTHHMMSSZ
-        string ToGCalUtc(DateTime dtLocal) =>
-            dtLocal.ToUniversalTime().ToString("yyyyMMdd'T'HHmmss'Z'");
+        // Format meeting times as UTC (YYYYMMDDTHHMMSSZ). Use original UTC times so the link matches the .ics and avoids double calendar entries.
+        string FormatAsUtc(DateTime dt) =>
+            (dt.Kind == DateTimeKind.Utc ? dt : dt.ToUniversalTime()).ToString("yyyyMMdd'T'HHmmss'Z'");
 
-        string dates = $"{ToGCalUtc(startLocal)}/{ToGCalUtc(endLocal)}";
+        string dates = $"{FormatAsUtc(startUtc)}/{FormatAsUtc(endUtc)}";
 
         string baseUrl = "https://calendar.google.com/calendar/render?action=TEMPLATE";
         string url = baseUrl
@@ -239,11 +239,11 @@ END:VCALENDAR";
         var endTimeFormatted = endLocal.ToString("MMMM dd, yyyy 'at' h:mm tt");
         var duration = (endTime - startTime).TotalMinutes;
         
-        // Generate Google Calendar link (use local time for link)
+        // Generate Google Calendar link from UTC times so it matches the .ics (avoids double calendar entry with wrong offset)
         var googleCalendarLink = BuildGoogleCalendarLink(
             title: meetingTitle,
-            startLocal: startLocal,
-            endLocal: endLocal,
+            startUtc: startTime,
+            endUtc: endTime,
             description: $"{meetingDescription}\n\nMeeting Link: {meetingLink}",
             location: meetingLink,
             timeZoneId: "Asia/Jerusalem"
@@ -469,11 +469,11 @@ END:VCALENDAR";
         var endTimeFormatted = endLocal.ToString("MMMM dd, yyyy 'at' h:mm tt");
         var duration = (endTime - startTime).TotalMinutes;
         
-        // Generate Google Calendar link
+        // Generate Google Calendar link from UTC times so it matches the .ics (avoids double calendar entry with wrong offset)
         var googleCalendarLink = BuildGoogleCalendarLink(
             title: meetingTitle,
-            startLocal: startLocal,
-            endLocal: endLocal,
+            startUtc: startTime,
+            endUtc: endTime,
             description: customMessage ?? "",
             location: meetingLink,
             timeZoneId: "Asia/Jerusalem"

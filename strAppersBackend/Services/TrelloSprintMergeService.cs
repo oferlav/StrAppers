@@ -145,6 +145,27 @@ namespace strAppersBackend.Services
                 _logger.LogError(exDb, "[MERGE-SPRINT] Failed to upsert ProjectBoardSprintMerge for BoardId={BoardId}, SprintNumber={SprintNumber}: {Message}", boardId, sprintNumber, exDb.Message);
             }
 
+            // When NextSprintOnlyVisability is true, ensure the next empty sprint exists on the live board (from Projects.TrelloBoardJson)
+            if (_trelloConfig.NextSprintOnlyVisability)
+            {
+                try
+                {
+                    var project = await _context.Projects.AsNoTracking().FirstOrDefaultAsync(p => p.Id == projectId);
+                    if (project != null && !string.IsNullOrWhiteSpace(project.TrelloBoardJson))
+                    {
+                        var trelloRequest = JsonSerializer.Deserialize<TrelloProjectCreationRequest>(project.TrelloBoardJson);
+                        if (trelloRequest != null)
+                        {
+                            await _trelloService.EnsureNextEmptySprintOnBoardAsync(boardId, trelloRequest, sprintNumber + 1);
+                        }
+                    }
+                }
+                catch (Exception exNext)
+                {
+                    _logger.LogWarning(exNext, "[MERGE-SPRINT] Failed to ensure next empty sprint on board {BoardId}: {Message}", boardId, exNext.Message);
+                }
+            }
+
             return (true, null, cardsToApply.Count);
         }
 
