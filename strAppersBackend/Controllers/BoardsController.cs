@@ -2741,8 +2741,9 @@ public class BoardsController : ControllerBase
                         if (overriddenSprints.TryGetValue(sprintNum, out var overridden))
                         {
                             listId = overridden.ListId;
-                            dueDateUtc = overridden.DueDateUtc;
                             mergedAt = DateTime.UtcNow;
+                            // DueDate for row N = this sprint's own first card DueDate (trigger for merging N+1 is row N.DueDate has passed).
+                            dueDateUtc = overridden.DueDateUtc;
                         }
                         else
                         {
@@ -2751,6 +2752,7 @@ public class BoardsController : ControllerBase
                             if (snapshot == null)
                                 continue;
                             listId = snapshot.ListId;
+                            // DueDate for row N = this sprint's own first card DueDate.
                             dueDateUtc = snapshot.Cards?.Count > 0 && snapshot.Cards[0].DueDate.HasValue
                                 ? ToUtcForDb(snapshot.Cards[0].DueDate.Value)
                                 : (DateTime?)null;

@@ -1593,6 +1593,40 @@ jobs:
     }
 
     /// <summary>
+    /// Invite one or more members to an existing Trello board by email (e.g. to add PM to a board created before the allowBillableGuest fix).
+    /// POST api/Utilities/trello/invite-to-board
+    /// </summary>
+    [HttpPost("trello/invite-to-board")]
+    public async Task<ActionResult<object>> TrelloInviteToBoard([FromBody] TrelloInviteToBoardRequest request)
+    {
+        if (request == null || string.IsNullOrWhiteSpace(request.BoardId))
+            return BadRequest(new { Success = false, Message = "BoardId is required." });
+        var emails = request.Emails?.Where(e => !string.IsNullOrWhiteSpace(e)).Distinct().ToList() ?? new List<string>();
+        if (emails.Count == 0)
+            return BadRequest(new { Success = false, Message = "At least one email is required in Emails." });
+        var invited = new List<string>();
+        var failed = new List<object>();
+        foreach (var email in emails)
+        {
+            var (success, error) = await _trelloService.InviteMemberToBoardByEmailAsync(request.BoardId.Trim(), email!.Trim());
+            if (success)
+                invited.Add(email.Trim());
+            else
+                failed.Add(new { email = email.Trim(), error = error ?? "Unknown error" });
+        }
+        return Ok(new
+        {
+            Success = failed.Count == 0,
+            BoardId = request.BoardId,
+            Invited = invited,
+            Failed = failed,
+            Message = failed.Count == 0
+                ? $"Invited {invited.Count} member(s) to the board."
+                : $"Invited {invited.Count} member(s); {failed.Count} failed."
+        });
+    }
+
+    /// <summary>
     /// Generates Trello board creation JSON using the AI service (same flow as POST api/Boards/use/create) and stores it in Projects.TrelloBoardJson.
     /// When Trello:UseDBProjectBoard is true, board create will use this saved JSON instead of calling AI.
     /// </summary>
@@ -3160,4 +3194,14 @@ public class ResendGitHubInvitationRequest
 
     /// <summary>Must be "Frontend" or "Backend" when using BoardId. Frontend repo = BoardId; backend repo = backend_{BoardId}.</summary>
     public string? RepoType { get; set; }
+}
+
+/// <summary>Request for POST api/Utilities/trello/invite-to-board</summary>
+public class TrelloInviteToBoardRequest
+{
+    /// <summary>Trello board ID (e.g. 698f522ddffd39fa9da1a6a7).</summary>
+    public string? BoardId { get; set; }
+
+    /// <summary>Email addresses to invite to the board (e.g. PM who was not added before allowBillableGuest fix).</summary>
+    public List<string>? Emails { get; set; }
 }

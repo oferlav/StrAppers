@@ -15,6 +15,7 @@ namespace strAppersBackend.Services
         private readonly ITrelloService _trelloService;
         private readonly IAIService _aiService;
         private readonly TrelloConfig _trelloConfig;
+        private readonly IConfiguration _configuration;
         private readonly ILogger<TrelloSprintMergeService> _logger;
 
         public TrelloSprintMergeService(
@@ -22,12 +23,14 @@ namespace strAppersBackend.Services
             ITrelloService trelloService,
             IAIService aiService,
             IOptions<TrelloConfig> trelloConfig,
+            IConfiguration configuration,
             ILogger<TrelloSprintMergeService> logger)
         {
             _context = context;
             _trelloService = trelloService;
             _aiService = aiService;
             _trelloConfig = trelloConfig.Value;
+            _configuration = configuration;
             _logger = logger;
         }
 
@@ -110,6 +113,7 @@ namespace strAppersBackend.Services
             if (!overrideSuccess)
                 return (false, overrideError ?? "Failed to override sprint on board.", 0);
 
+            // DueDate for row N = this sprint's own first card DueDate (trigger for merging N+1 is row N.DueDate has passed).
             var dueDateRaw = cardsToApply.Count > 0 ? cardsToApply[0].DueDate : null;
             var dueDateUtc = dueDateRaw.HasValue ? ToUtcForDb(dueDateRaw.Value) : (DateTime?)null;
             _logger.LogInformation("[MERGE-SPRINT] Upserting ProjectBoardSprintMerge: BoardId={BoardId}, SprintNumber={SprintNumber}, DueDate={DueDate}", boardId, sprintNumber, dueDateUtc);
@@ -146,6 +150,7 @@ namespace strAppersBackend.Services
             }
 
             // When NextSprintOnlyVisability is true, ensure the next empty sprint exists on the live board (from Projects.TrelloBoardJson)
+            // and insert ProjectBoardSprintMerge for that sprint so "run due sprint merges" can merge it after this sprint's DueDate passes.
             if (_trelloConfig.NextSprintOnlyVisability)
             {
                 try
@@ -156,7 +161,39 @@ namespace strAppersBackend.Services
                         var trelloRequest = JsonSerializer.Deserialize<TrelloProjectCreationRequest>(project.TrelloBoardJson);
                         if (trelloRequest != null)
                         {
-                            await _trelloService.EnsureNextEmptySprintOnBoardAsync(boardId, trelloRequest, sprintNumber + 1);
+                            // Compute next sprint DueDate = this sprint's due + one sprint length (do not use template dates from DB).
+                            var sprintLengthWeeks = _configuration.GetValue<int>("BusinessLogicConfig:SprintLengthInWeeks", 1);
+                            DateTime? nextDueDateUtc = null;
+                            if (dueDateUtc.HasValue)
+                                nextDueDateUtc = dueDateUtc.Value.AddDays(7 * sprintLengthWeeks);
+
+                            var nextListId = await _trelloService.EnsureNextEmptySprintOnBoardAsync(boardId, trelloRequest, sprintNumber + 1, nextDueDateUtc);
+                            if (!string.IsNullOrEmpty(nextListId))
+                            {
+                                var nextSprintNum = sprintNumber + 1;
+                                var nextMergeRecord = await _context.ProjectBoardSprintMerges
+                                    .FirstOrDefaultAsync(m => m.ProjectBoardId == boardId && m.SprintNumber == nextSprintNum);
+                                if (nextMergeRecord == null)
+                                {
+                                    nextMergeRecord = new ProjectBoardSprintMerge
+                                    {
+                                        ProjectBoardId = boardId,
+                                        SprintNumber = nextSprintNum,
+                                        ListId = nextListId,
+                                        DueDate = nextDueDateUtc,
+                                        MergedAt = null
+                                    };
+                                    _context.ProjectBoardSprintMerges.Add(nextMergeRecord);
+                                    _logger.LogInformation("[MERGE-SPRINT] ProjectBoardSprintMerge added for next sprint BoardId={BoardId}, SprintNumber={SprintNumber}, ListId={ListId}, DueDate={DueDate}", boardId, nextSprintNum, nextListId, nextDueDateUtc);
+                                }
+                                else
+                                {
+                                    nextMergeRecord.ListId = nextListId;
+                                    nextMergeRecord.DueDate = nextDueDateUtc ?? nextMergeRecord.DueDate;
+                                    _logger.LogInformation("[MERGE-SPRINT] ProjectBoardSprintMerge updated for next sprint BoardId={BoardId}, SprintNumber={SprintNumber}", boardId, nextSprintNum);
+                                }
+                                await _context.SaveChangesAsync();
+                            }
                         }
                     }
                 }

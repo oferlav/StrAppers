@@ -17,17 +17,20 @@ namespace strAppersBackend.Controllers
         private readonly ApplicationDbContext _context;
         private readonly IChatCompletionService _chatCompletionService;
         private readonly PromptConfig _promptConfig;
+        private readonly TestingConfig _testingConfig;
         private readonly ILogger<CustomerController> _logger;
 
         public CustomerController(
             ApplicationDbContext context,
             IChatCompletionService chatCompletionService,
             IOptions<PromptConfig> promptConfig,
+            IOptions<TestingConfig> testingConfig,
             ILogger<CustomerController> logger)
         {
             _context = context;
             _chatCompletionService = chatCompletionService;
             _promptConfig = promptConfig.Value;
+            _testingConfig = testingConfig.Value;
             _logger = logger;
         }
 
@@ -177,7 +180,9 @@ namespace strAppersBackend.Controllers
                     return StatusCode(402, new { Success = false, Message = "AI API credits insufficient. Please check your API account billing." });
                 }
 
-                var responseWithTokens = $"{aiResponse}\n\n---\n[Token Usage: Input={inputTokens}, Output={outputTokens}, Total={inputTokens + outputTokens}]";
+                var responseToReturn = _testingConfig.ShowTokenUsage
+                    ? $"{aiResponse}\n\n---\n[Token Usage: Input={inputTokens}, Output={outputTokens}, Total={inputTokens + outputTokens}]"
+                    : aiResponse;
 
                 var assistantMessage = new CustomerChatHistory
                 {
@@ -195,7 +200,7 @@ namespace strAppersBackend.Controllers
                 {
                     Success = true,
                     Model = new { aiModel.Id, aiModel.Name, aiModel.Provider },
-                    Response = responseWithTokens
+                    Response = responseToReturn
                 });
             }
             catch (Exception ex)

@@ -300,11 +300,21 @@ public class TeamsController : ControllerBase
                 return NotFound(new { Success = false, Message = $"ProjectBoard with ID {request.BoardId} not found" });
             }
 
-            // Convert to service request
+            // Parse and normalize to UTC (Unspecified = local per Trello:LocalTime)
+            if (!System.DateTime.TryParse(request.DateTime, out var startTime))
+            {
+                _logger.LogError("Invalid DateTime format: {DateTime}", request.DateTime);
+                return BadRequest(new { Success = false, Message = "Invalid DateTime format" });
+            }
+            startTime = NormalizeMeetingTimeToUtc(startTime);
+            var endTime = startTime.AddMinutes(request.DurationMinutes);
+
+            // Pass UTC to Graph so the meeting is created at the correct time
+            var dateTimeUtcString = startTime.ToString("yyyy-MM-ddTHH:mm:ssZ");
             var serviceRequest = new Services.CreateTeamsMeetingRequest
             {
                 Title = request.Title,
-                DateTime = request.DateTime,
+                DateTime = dateTimeUtcString,
                 DurationMinutes = request.DurationMinutes,
                 Attendees = request.Attendees
             };
@@ -319,25 +329,6 @@ public class TeamsController : ControllerBase
             }
 
             _logger.LogInformation("Teams meeting created successfully. Meeting ID: {MeetingId}", result.MeetingId);
-
-            // Parse start and end times for email
-            if (!System.DateTime.TryParse(request.DateTime, out var startTime))
-            {
-                _logger.LogError("Invalid DateTime format: {DateTime}", request.DateTime);
-                return BadRequest(new { Success = false, Message = "Invalid DateTime format" });
-            }
-
-            // Ensure the DateTime is UTC for PostgreSQL compatibility
-            if (startTime.Kind == DateTimeKind.Unspecified)
-            {
-                startTime = DateTime.SpecifyKind(startTime, DateTimeKind.Utc);
-            }
-            else if (startTime.Kind == DateTimeKind.Local)
-            {
-                startTime = startTime.ToUniversalTime();
-            }
-
-            var endTime = startTime.AddMinutes(request.DurationMinutes);
 
             // Send SMTP email invitations to all attendees
             _logger.LogInformation("Sending SMTP email invitations to {Count} attendees", request.Attendees.Count);
@@ -634,30 +625,21 @@ public class TeamsController : ControllerBase
                 return NotFound(new { Success = false, Message = $"ProjectBoard with ID {request.BoardId} not found" });
             }
 
-            // Parse start and end times
+            // Parse and normalize to UTC (Unspecified = local per Trello:LocalTime)
             if (!System.DateTime.TryParse(request.DateTime, out var startTime))
             {
                 _logger.LogError("Invalid DateTime format: {DateTime}", request.DateTime);
                 return BadRequest(new { Success = false, Message = "Invalid DateTime format" });
             }
-
-            // Ensure the DateTime is UTC for PostgreSQL compatibility
-            if (startTime.Kind == DateTimeKind.Unspecified)
-            {
-                startTime = DateTime.SpecifyKind(startTime, DateTimeKind.Utc);
-            }
-            else if (startTime.Kind == DateTimeKind.Local)
-            {
-                startTime = startTime.ToUniversalTime();
-            }
-
+            startTime = NormalizeMeetingTimeToUtc(startTime);
             var endTime = startTime.AddMinutes(request.DurationMinutes);
 
-            // Convert to service request - create meeting WITHOUT attendees to avoid Exchange sending invites
+            // Pass UTC to Graph so the meeting is created at the correct time
+            var dateTimeUtcString = startTime.ToString("yyyy-MM-ddTHH:mm:ssZ");
             var serviceRequest = new Services.CreateTeamsMeetingRequest
             {
                 Title = request.Title,
-                DateTime = request.DateTime,
+                DateTime = dateTimeUtcString,
                 DurationMinutes = request.DurationMinutes,
                 Attendees = new List<string>() // Empty list to prevent Exchange from sending invites
             };
@@ -990,30 +972,21 @@ public class TeamsController : ControllerBase
                 return NotFound(new { Success = false, Message = $"ProjectBoard with ID {request.BoardId} not found" });
             }
 
-            // Parse start and end times
+            // Parse and normalize to UTC (Unspecified = local per Trello:LocalTime)
             if (!System.DateTime.TryParse(request.DateTime, out var startTime))
             {
                 _logger.LogError("Invalid DateTime format: {DateTime}", request.DateTime);
                 return BadRequest(new { Success = false, Message = "Invalid DateTime format" });
             }
-
-            // Ensure the DateTime is UTC for PostgreSQL compatibility
-            if (startTime.Kind == DateTimeKind.Unspecified)
-            {
-                startTime = DateTime.SpecifyKind(startTime, DateTimeKind.Utc);
-            }
-            else if (startTime.Kind == DateTimeKind.Local)
-            {
-                startTime = startTime.ToUniversalTime();
-            }
-
+            startTime = NormalizeMeetingTimeToUtc(startTime);
             var endTime = startTime.AddMinutes(request.DurationMinutes);
 
-            // Convert to service request - create meeting WITHOUT attendees to avoid Exchange sending invites
+            // Pass UTC to Graph so the meeting is created at the correct time
+            var dateTimeUtcString = startTime.ToString("yyyy-MM-ddTHH:mm:ssZ");
             var serviceRequest = new Services.CreateTeamsMeetingRequest
             {
                 Title = request.Title,
-                DateTime = request.DateTime,
+                DateTime = dateTimeUtcString,
                 DurationMinutes = request.DurationMinutes,
                 Attendees = new List<string>() // Empty list to prevent Exchange from sending invites
             };
@@ -1311,6 +1284,23 @@ public class TeamsController : ControllerBase
                 Message = $"An error occurred while creating the Teams meeting: {ex.Message}"
             });
         }
+    }
+
+    /// <summary>
+    /// Normalize a parsed meeting DateTime to UTC. When Kind is Unspecified, treat as local time
+    /// per Trello:LocalTime and convert to UTC (avoids 2-hour shift when client sends local time without Z).
+    /// </summary>
+    private DateTime NormalizeMeetingTimeToUtc(DateTime parsed)
+    {
+        if (parsed.Kind == DateTimeKind.Utc)
+            return parsed;
+        if (parsed.Kind == DateTimeKind.Local)
+            return parsed.ToUniversalTime();
+        // Unspecified: treat as local time in Trello:LocalTime and convert to UTC
+        var localTimeStr = _configuration["Trello:LocalTime"] ?? "GMT+2";
+        var offset = strAppersBackend.Services.TrelloBoardScheduleHelper.ParseLocalTimeOffset(localTimeStr);
+        var utc = parsed.Subtract(offset);
+        return DateTime.SpecifyKind(utc, DateTimeKind.Utc);
     }
 
 }

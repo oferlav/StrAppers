@@ -27,8 +27,10 @@ namespace strAppersBackend.Services
         Task<SprintSnapshot?> GetSprintFromBoardAsync(string boardId, string sprintListName);
         /// <summary>Overrides a list on a board: archives existing cards, then creates cards from the given snapshot (with checklists and CardId custom field).</summary>
         Task<(bool Success, string? Error)> OverrideSprintOnBoardAsync(string boardId, string listId, IReadOnlyList<SprintSnapshotCard> cards);
-        /// <summary>If the next sprint list does not exist on the board, creates it and adds empty cards from the project template (TrelloBoardJson).</summary>
-        Task EnsureNextEmptySprintOnBoardAsync(string boardId, TrelloProjectCreationRequest request, int nextSprintNumber);
+        /// <summary>If the next sprint list does not exist on the board, creates it and adds empty cards from the project template (TrelloBoardJson). Returns the new list id when created, null otherwise. When dueDateForNewCards is set, cards are created with that due date instead of template dates.</summary>
+        Task<string?> EnsureNextEmptySprintOnBoardAsync(string boardId, TrelloProjectCreationRequest request, int nextSprintNumber, DateTime? dueDateForNewCards = null);
+        /// <summary>Invite a member to an existing Trello board by email (e.g. to add PM to a board created before allowBillableGuest fix).</summary>
+        Task<(bool Success, string? Error)> InviteMemberToBoardByEmailAsync(string boardId, string email);
     }
 
     public class TrelloService : ITrelloService
@@ -91,8 +93,8 @@ namespace strAppersBackend.Services
                 var boardData = JsonSerializer.Deserialize<JsonElement>(boardJson);
                 var boardId = boardData.GetProperty("id").GetString();
 
-                // Invite user to the board
-                var inviteUrl = $"https://api.trello.com/1/boards/{boardId}/members?email={Uri.EscapeDataString(email)}&type=normal&key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
+                // Invite user to the board (allowBillableGuest=true required in some workspaces to avoid 403)
+                var inviteUrl = $"https://api.trello.com/1/boards/{boardId}/members?email={Uri.EscapeDataString(email)}&type=normal&allowBillableGuest=true&key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
                 
                 var inviteResponse = await _httpClient.PutAsync(inviteUrl, null);
                 
@@ -197,6 +199,86 @@ namespace strAppersBackend.Services
             }
         }
 
+        /// <inheritdoc />
+        public async Task<(bool Success, string? Error)> InviteMemberToBoardByEmailAsync(string boardId, string email)
+        {
+            if (string.IsNullOrWhiteSpace(boardId) || string.IsNullOrWhiteSpace(email))
+                return (false, "BoardId and email are required.");
+            try
+            {
+                var inviteUrl = $"https://api.trello.com/1/boards/{Uri.EscapeDataString(boardId)}/members?email={Uri.EscapeDataString(email)}&type=normal&allowBillableGuest=true&key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
+                var response = await _httpClient.PutAsync(inviteUrl, null);
+                var responseContent = await response.Content.ReadAsStringAsync();
+                if (response.IsSuccessStatusCode)
+                {
+                    _logger.LogInformation("Invited {Email} to board {BoardId}", email, boardId);
+                    return (true, null);
+                }
+                var error = GetInviteErrorMessage(responseContent);
+                _logger.LogWarning("Failed to invite {Email} to board {BoardId}: {Error}", email, boardId, error);
+                return (false, error);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error inviting {Email} to board {BoardId}", email, boardId);
+                return (false, ex.Message);
+            }
+        }
+
+        /// <summary>
+        /// Normalizes project description for Trello board desc. If the value is JSON with a "content" array of objects
+        /// (e.g. {"content":[{"type":"paragraph","text":"..."}]}), extracts and concatenates the "text" values so
+        /// "About this board" shows readable text instead of raw JSON.
+        /// </summary>
+        private static string NormalizeBoardDescriptionForTrello(string? description)
+        {
+            if (string.IsNullOrWhiteSpace(description))
+                return "";
+            var s = description.Trim();
+            if (s.Length < 10 || (s[0] != '{' && s[0] != '['))
+                return s;
+            try
+            {
+                using var doc = JsonDocument.Parse(s);
+                var root = doc.RootElement;
+                if (root.TryGetProperty("content", out var content) && content.ValueKind == JsonValueKind.Array)
+                {
+                    var parts = new List<string>();
+                    foreach (var item in content.EnumerateArray())
+                    {
+                        if (item.TryGetProperty("text", out var textProp))
+                        {
+                            var t = textProp.GetString();
+                            if (!string.IsNullOrWhiteSpace(t))
+                                parts.Add(t.Trim());
+                        }
+                    }
+                    if (parts.Count > 0)
+                        return string.Join("\n\n", parts);
+                }
+            }
+            catch (JsonException) { /* not JSON or wrong shape, use as-is */ }
+            return s;
+        }
+
+        /// <summary>
+        /// Removes leading checkbox-style "[]", "[ ]", "[x]" line prefix from checklist item text before sending to Trello (DB may store these prefixes).
+        /// </summary>
+        private static string StripChecklistLinePrefix(string? item)
+        {
+            if (string.IsNullOrEmpty(item)) return item ?? string.Empty;
+            var s = item.TrimStart();
+            if (s.StartsWith("[", StringComparison.Ordinal))
+            {
+                int close = s.IndexOf(']');
+                if (close >= 0)
+                {
+                    s = s.Substring(close + 1).TrimStart();
+                }
+            }
+            return s.Length > 0 ? s : item;
+        }
+
         /// <summary>
         /// Returns a user-friendly message when Trello returns "Must reactivate user first" (403) for a previously deleted Atlassian user.
         /// </summary>
@@ -228,8 +310,9 @@ namespace strAppersBackend.Services
 
             try
             {
-                // Step 1: Create the board
-                var createBoardUrl = $"https://api.trello.com/1/boards?name={Uri.EscapeDataString(boardName)}&desc={Uri.EscapeDataString(request.ProjectDescription ?? "")}&defaultLists=false&prefs_permissionLevel=public&key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
+                // Step 1: Create the board (normalize description so JSON content array is shown as readable text in "About this board")
+                var descForTrello = NormalizeBoardDescriptionForTrello(request.ProjectDescription);
+                var createBoardUrl = $"https://api.trello.com/1/boards?name={Uri.EscapeDataString(boardName)}&desc={Uri.EscapeDataString(descForTrello)}&defaultLists=false&prefs_permissionLevel=public&key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
                 
                 if (!string.IsNullOrEmpty(organizationId))
                 {
@@ -283,10 +366,9 @@ namespace strAppersBackend.Services
                     {
                         try
                         {
-                            // Add as Single-Board Guest: type=normal (board member permission), allowBillableGuest=false (prevent multi-board guest billing)
-                            // If user is not already a workspace member, they will automatically become a Single-Board Guest
-                            // Single-Board Guests are free and can only see the board(s) they're invited to
-                            var inviteUrl = $"https://api.trello.com/1/boards/{trelloBoardId}/members?email={Uri.EscapeDataString(member.Email)}&type=normal&allowBillableGuest=false&key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
+                            // Add as board member (type=normal). allowBillableGuest=true required by Trello API for invite-by-email in some workspaces
+                            // (403 "Member not allowed to add a multi-board guest without allowBillableGuest parameter" when false).
+                            var inviteUrl = $"https://api.trello.com/1/boards/{trelloBoardId}/members?email={Uri.EscapeDataString(member.Email)}&type=normal&allowBillableGuest=true&key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
                             var inviteResponse = await _httpClient.PutAsync(inviteUrl, null);
                             var responseContent = await inviteResponse.Content.ReadAsStringAsync();
                             
@@ -458,10 +540,9 @@ namespace strAppersBackend.Services
                     {
                         try
                         {
-                            // Add as Single-Board Guest: type=normal (board member permission), allowBillableGuest=false (prevent multi-board guest billing)
-                            // If user is not already a workspace member, they will automatically become a Single-Board Guest
-                            // Single-Board Guests are free and can only see the board(s) they're invited to
-                            var inviteUrl = $"https://api.trello.com/1/boards/{emptyBoardId}/members?email={Uri.EscapeDataString(member.Email)}&type=normal&allowBillableGuest=false&key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
+                            // Add as board member (type=normal). allowBillableGuest=true required by Trello API for invite-by-email in some workspaces
+                            // (403 "Member not allowed to add a multi-board guest without allowBillableGuest parameter" when false).
+                            var inviteUrl = $"https://api.trello.com/1/boards/{emptyBoardId}/members?email={Uri.EscapeDataString(member.Email)}&type=normal&allowBillableGuest=true&key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
                             var inviteResponse = await _httpClient.PutAsync(inviteUrl, null);
                             var inviteResponseContent = inviteResponse.IsSuccessStatusCode ? null : await inviteResponse.Content.ReadAsStringAsync();
                             
@@ -539,10 +620,9 @@ namespace strAppersBackend.Services
                     {
                         try
                         {
-                            // Add as Single-Board Guest: type=normal (board member permission), allowBillableGuest=false (prevent multi-board guest billing)
-                            // If user is not already a workspace member, they will automatically become a Single-Board Guest
-                            // Single-Board Guests are free and can only see the board(s) they're invited to
-                            var inviteUrl = $"https://api.trello.com/1/boards/{trelloBoardId}/members?email={Uri.EscapeDataString(member.Email)}&type=normal&allowBillableGuest=false&key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
+                            // Add as board member (type=normal). allowBillableGuest=true required by Trello API for invite-by-email in some workspaces
+                            // (403 "Member not allowed to add a multi-board guest without allowBillableGuest parameter" when false).
+                            var inviteUrl = $"https://api.trello.com/1/boards/{trelloBoardId}/members?email={Uri.EscapeDataString(member.Email)}&type=normal&allowBillableGuest=true&key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
                             var inviteResponse = await _httpClient.PutAsync(inviteUrl, null);
                             var inviteResponseContent = inviteResponse.IsSuccessStatusCode ? null : await inviteResponse.Content.ReadAsStringAsync();
                             
@@ -664,7 +744,8 @@ namespace strAppersBackend.Services
                                         {
                                             try
                                             {
-                                                var addItemUrl = $"https://api.trello.com/1/checklists/{checklistId}/checkItems?name={Uri.EscapeDataString(item)}&pos={position}&key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
+                                                var itemName = StripChecklistLinePrefix(item);
+                                                var addItemUrl = $"https://api.trello.com/1/checklists/{checklistId}/checkItems?name={Uri.EscapeDataString(itemName)}&pos={position}&key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
                                                 var addItemResponse = await _httpClient.PostAsync(addItemUrl, null);
                                                 
                                                 if (addItemResponse.IsSuccessStatusCode)
@@ -809,7 +890,8 @@ namespace strAppersBackend.Services
                                     int position = 1;
                                     foreach (var item in card.ChecklistItems)
                                     {
-                                        var addItemUrl = $"https://api.trello.com/1/checklists/{checklistId}/checkItems?name={Uri.EscapeDataString(item)}&pos={position}&key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
+                                        var itemName = StripChecklistLinePrefix(item);
+                                        var addItemUrl = $"https://api.trello.com/1/checklists/{checklistId}/checkItems?name={Uri.EscapeDataString(itemName)}&pos={position}&key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
                                         await _httpClient.PostAsync(addItemUrl, null);
                                         position++;
                                     }
@@ -2474,7 +2556,8 @@ namespace strAppersBackend.Services
                             int pos = 1;
                             foreach (var item in card.ChecklistItems)
                             {
-                                var addItemUrl = $"https://api.trello.com/1/checklists/{checklistId}/checkItems?name={Uri.EscapeDataString(item)}&pos={pos}&key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
+                                var itemName = StripChecklistLinePrefix(item);
+                                var addItemUrl = $"https://api.trello.com/1/checklists/{checklistId}/checkItems?name={Uri.EscapeDataString(itemName)}&pos={pos}&key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
                                 await _httpClient.PostAsync(addItemUrl, null);
                                 pos++;
                             }
@@ -2495,12 +2578,12 @@ namespace strAppersBackend.Services
         }
 
         /// <inheritdoc />
-        public async Task EnsureNextEmptySprintOnBoardAsync(string boardId, TrelloProjectCreationRequest request, int nextSprintNumber)
+        public async Task<string?> EnsureNextEmptySprintOnBoardAsync(string boardId, TrelloProjectCreationRequest request, int nextSprintNumber, DateTime? dueDateForNewCards = null)
         {
             if (request?.SprintPlan?.Lists == null || request.SprintPlan.Lists.Count == 0)
             {
                 _logger.LogDebug("EnsureNextEmptySprint: no lists in template, skipping next sprint {NextSprint}.", nextSprintNumber);
-                return;
+                return null;
             }
             var sprintNameNoSpace = $"Sprint{nextSprintNumber}";
             var sprintNameWithSpace = $"Sprint {nextSprintNumber}";
@@ -2509,7 +2592,7 @@ namespace strAppersBackend.Services
             if (templateList == null)
             {
                 _logger.LogDebug("EnsureNextEmptySprint: no list for sprint {NextSprint} in template (Lists: {Names}).", nextSprintNumber, string.Join(", ", request.SprintPlan.Lists.Select(l => l.Name)));
-                return;
+                return null;
             }
             var listName = templateList.Name;
             var templateCards = (request.SprintPlan.Cards ?? new List<TrelloCard>())
@@ -2521,7 +2604,7 @@ namespace strAppersBackend.Services
             if (!listsResponse.IsSuccessStatusCode)
             {
                 _logger.LogWarning("EnsureNextEmptySprint: failed to get lists for board {BoardId}: {Status}.", boardId, listsResponse.StatusCode);
-                return;
+                return null;
             }
             var listsJson = await listsResponse.Content.ReadAsStringAsync();
             var lists = JsonSerializer.Deserialize<JsonElement[]>(listsJson);
@@ -2533,7 +2616,7 @@ namespace strAppersBackend.Services
                     if (string.Equals(name, listName, StringComparison.OrdinalIgnoreCase))
                     {
                         _logger.LogInformation("EnsureNextEmptySprint: list {ListName} already exists on board {BoardId}, skipping.", listName, boardId);
-                        return;
+                        return null;
                     }
                 }
             }
@@ -2545,7 +2628,7 @@ namespace strAppersBackend.Services
                 if (!createListResponse.IsSuccessStatusCode)
                 {
                     _logger.LogWarning("EnsureNextEmptySprint: failed to create list {ListName} on board {BoardId}: {Status}.", listName, boardId, createListResponse.StatusCode);
-                    return;
+                    return null;
                 }
                 var listJson = await createListResponse.Content.ReadAsStringAsync();
                 var listData = JsonSerializer.Deserialize<JsonElement>(listJson);
@@ -2553,7 +2636,7 @@ namespace strAppersBackend.Services
                 if (string.IsNullOrEmpty(newListId))
                 {
                     _logger.LogWarning("EnsureNextEmptySprint: created list but no list id returned.");
-                    return;
+                    return null;
                 }
 
                 var roleLabelIds = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
@@ -2591,8 +2674,9 @@ namespace strAppersBackend.Services
                 {
                     var desc = "To be filled...";
                     var createCardUrl = $"https://api.trello.com/1/cards?name={Uri.EscapeDataString(card.Name)}&desc={Uri.EscapeDataString(desc)}&idList={newListId}&key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
-                    if (card.DueDate.HasValue)
-                        createCardUrl += $"&due={card.DueDate.Value:yyyy-MM-dd}";
+                    var cardDue = dueDateForNewCards ?? (card.DueDate.HasValue ? (DateTime?)card.DueDate.Value : null);
+                    if (cardDue.HasValue)
+                        createCardUrl += $"&due={cardDue.Value:yyyy-MM-dd}";
                     if (!string.IsNullOrEmpty(card.RoleName) && roleLabelIds.TryGetValue(card.RoleName, out var labelId))
                         createCardUrl += $"&idLabels={labelId}";
                     var cardRes = await _httpClient.PostAsync(createCardUrl, null);
@@ -2665,10 +2749,12 @@ namespace strAppersBackend.Services
                         _logger.LogInformation("EnsureNextEmptySprint: reordered {Count} lists to canonical order (Sprint 1..7, Bugs last) on board {BoardId}.", orderedIds.Count, boardId);
                     }
                 }
+                return newListId;
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "EnsureNextEmptySprint: error creating next sprint {NextSprint} on board {BoardId}.", nextSprintNumber, boardId);
+                return null;
             }
         }
     }

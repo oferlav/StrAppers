@@ -4684,7 +4684,7 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                 }
 
                 // Get module description and task description from context
-                var contextResult = await GetMentorContextInternal(request.StudentId, request.SprintId);
+                var contextResult = await GetMentorContextInternal(request.StudentId, request.SprintId, request.IsBackend);
                 string? moduleDescription = null;
                 string? taskDescription = null;
 
@@ -4927,8 +4927,8 @@ Your intelligence is strictly tethered to the Current Project Context and the us
         {
             try
             {
-                // Get mentor context
-                var contextResult = await GetMentorContextInternal(request.StudentId, request.SprintId);
+                // Get mentor context (IsBackend sets UserProfile.Role to Backend/Frontend when role is Full Stack Developer)
+                var contextResult = await GetMentorContextInternal(request.StudentId, request.SprintId, request.IsBackend);
                 if (contextResult == null)
                 {
                     return BadRequest(new { Success = false, Message = "Failed to get mentor context" });
@@ -5761,8 +5761,10 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                     return StatusCode(402, new { Success = false, Message = "AI API credits insufficient. Please check your API account billing." });
                 }
 
-                // Temporarily append token usage to response
-                var responseWithTokens = $"{aiResponse}\n\n---\n[Token Usage: Input={inputTokens}, Output={outputTokens}, Total={inputTokens + outputTokens}]";
+                // Append token usage to response only when Testing:ShowTokenUsage is true
+                var responseToReturn = _testingConfig.Value.ShowTokenUsage
+                    ? $"{aiResponse}\n\n---\n[Token Usage: Input={inputTokens}, Output={outputTokens}, Total={inputTokens + outputTokens}]"
+                    : aiResponse;
 
                 // Save AI response to chat history (without token info)
                 var assistantMessage = new MentorChatHistory
@@ -5786,7 +5788,7 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                         aiModel.Name,
                         aiModel.Provider
                     },
-                    Response = responseWithTokens,
+                    Response = responseToReturn,
                     Context = contextResult
                 });
             }
@@ -5801,7 +5803,8 @@ Your intelligence is strictly tethered to the Current Project Context and the us
         /// <summary>
         /// Internal method to get mentor context (extracted from GetMentorContext for reuse)
         /// </summary>
-        private async Task<object?> GetMentorContextInternal(int studentId, int sprintId)
+        /// <param name="isBackend">When the student's role is Full Stack Developer, true = Backend Developer context, false = Frontend Developer context. Ignored for other roles.</param>
+        private async Task<object?> GetMentorContextInternal(int studentId, int sprintId, bool? isBackend = null)
         {
             try
             {
@@ -5820,7 +5823,14 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                 }
 
                 var activeRole = student.StudentRoles?.FirstOrDefault(sr => sr.IsActive);
-                var roleName = activeRole?.Role?.Name ?? "Team Member";
+                var originalRoleName = activeRole?.Role?.Name ?? "Team Member";
+                var roleName = originalRoleName;
+                if (isBackend.HasValue &&
+                    (string.Equals(roleName, "Full Stack Developer", StringComparison.OrdinalIgnoreCase) ||
+                     string.Equals(roleName, "Fullstack Developer", StringComparison.OrdinalIgnoreCase)))
+                {
+                    roleName = isBackend.Value ? "Backend Developer" : "Frontend Developer";
+                }
                 var programmingLanguage = student.ProgrammingLanguage?.Name ?? "Not specified";
                 var project = student.ProjectBoard?.Project;
 
@@ -6160,9 +6170,17 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                     "" // Placeholder for user question - will be replaced in the calling method
                 );
 
+                var baseSystemPrompt = DbgConfig("SystemPrompt") + _promptConfig.Mentor.SystemPrompt;
+                var isFullStackRole = string.Equals(originalRoleName, "Full Stack Developer", StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(originalRoleName, "Fullstack Developer", StringComparison.OrdinalIgnoreCase);
+                if (isFullStackRole)
+                {
+                    baseSystemPrompt += "\n\n[CONTEXT] The user selects whether they are in Frontend or Backend context using the \"Frontend\" and \"Backend\" buttons at the bottom of the chat panel. Your current context is reflected in UserProfile.Role (either \"Frontend Developer\" or \"Backend Developer\").";
+                }
+
                 return new
                 {
-                    SystemPrompt = DbgConfig("SystemPrompt") + _promptConfig.Mentor.SystemPrompt,
+                    SystemPrompt = baseSystemPrompt,
                     UserPrompt = formattedPrompt,
                     Context = new
                     {
@@ -7217,6 +7235,8 @@ Your intelligence is strictly tethered to the Current Project Context and the us
         public int StudentId { get; set; }
         public int SprintId { get; set; }
         public string UserQuestion { get; set; } = string.Empty;
+        /// <summary>When the student's role is Full Stack Developer, set to true for backend context or false for frontend context. Ignored for other roles.</summary>
+        public bool? IsBackend { get; set; }
     }
 
     #region Validation Helper Methods
