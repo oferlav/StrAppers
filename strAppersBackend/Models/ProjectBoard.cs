@@ -164,6 +164,76 @@ namespace strAppersBackend.Models
         public string? YoutubeUrl { get; set; }
 
         /// <summary>
+        /// Collection journey URL for the project board
+        /// </summary>
+        [MaxLength(1000)]
+        [Column("CollectionJourneyUrl")]
+        public string? CollectionJourneyUrl { get; set; }
+
+        /// <summary>
+        /// Database schema URL for the project board
+        /// </summary>
+        [MaxLength(1000)]
+        [Column("DatabaseSchemaUrl")]
+        public string? DatabaseSchemaUrl { get; set; }
+
+        /// <summary>
+        /// Document 1 URL for the project board
+        /// </summary>
+        [MaxLength(1000)]
+        [Column("Document1Url")]
+        public string? Document1Url { get; set; }
+
+        /// <summary>
+        /// Document 2 URL for the project board
+        /// </summary>
+        [MaxLength(1000)]
+        [Column("Document2Url")]
+        public string? Document2Url { get; set; }
+
+        /// <summary>
+        /// Document 3 URL for the project board
+        /// </summary>
+        [MaxLength(1000)]
+        [Column("Document3Url")]
+        public string? Document3Url { get; set; }
+
+        /// <summary>
+        /// Document 4 URL for the project board
+        /// </summary>
+        [MaxLength(1000)]
+        [Column("Document4Url")]
+        public string? Document4Url { get; set; }
+
+        /// <summary>
+        /// Document 1 display name for the project board
+        /// </summary>
+        [MaxLength(50)]
+        [Column("Document1Name")]
+        public string? Document1Name { get; set; }
+
+        /// <summary>
+        /// Document 2 display name for the project board
+        /// </summary>
+        [MaxLength(50)]
+        [Column("Document2Name")]
+        public string? Document2Name { get; set; }
+
+        /// <summary>
+        /// Document 3 display name for the project board
+        /// </summary>
+        [MaxLength(50)]
+        [Column("Document3Name")]
+        public string? Document3Name { get; set; }
+
+        /// <summary>
+        /// Document 4 display name for the project board
+        /// </summary>
+        [MaxLength(50)]
+        [Column("Document4Name")]
+        public string? Document4Name { get; set; }
+
+        /// <summary>
         /// Group chat information for the project board
         /// </summary>
         [Column("GroupChat", TypeName = "text")]

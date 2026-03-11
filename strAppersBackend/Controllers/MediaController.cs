@@ -27,12 +27,22 @@ public class MediaController : ControllerBase
     {
         [Required]
         public string BoardId { get; set; } = string.Empty;
-        
+
         public string? FacebookUrl { get; set; }
         public string? PresentationUrl { get; set; }
         public string? LinkedInUrl { get; set; }
         public string? InstagramUrl { get; set; }
         public string? YoutubeUrl { get; set; }
+        public string? CollectionJourneyUrl { get; set; }
+        public string? DatabaseSchemaUrl { get; set; }
+        public string? Document1Url { get; set; }
+        public string? Document2Url { get; set; }
+        public string? Document3Url { get; set; }
+        public string? Document4Url { get; set; }
+        public string? Document1Name { get; set; }
+        public string? Document2Name { get; set; }
+        public string? Document3Name { get; set; }
+        public string? Document4Name { get; set; }
     }
 
     /// <summary>
@@ -46,6 +56,16 @@ public class MediaController : ControllerBase
         public string? LinkedInUrl { get; set; }
         public string? InstagramUrl { get; set; }
         public string? YoutubeUrl { get; set; }
+        public string? CollectionJourneyUrl { get; set; }
+        public string? DatabaseSchemaUrl { get; set; }
+        public string? Document1Url { get; set; }
+        public string? Document2Url { get; set; }
+        public string? Document3Url { get; set; }
+        public string? Document4Url { get; set; }
+        public string? Document1Name { get; set; }
+        public string? Document2Name { get; set; }
+        public string? Document3Name { get; set; }
+        public string? Document4Name { get; set; }
     }
 
     /// <summary>
@@ -67,7 +87,17 @@ public class MediaController : ControllerBase
                     PresentationUrl = b.PresentationUrl,
                     LinkedInUrl = b.LinkedInUrl,
                     InstagramUrl = b.InstagramUrl,
-                    YoutubeUrl = b.YoutubeUrl
+                    YoutubeUrl = b.YoutubeUrl,
+                    CollectionJourneyUrl = b.CollectionJourneyUrl,
+                    DatabaseSchemaUrl = b.DatabaseSchemaUrl,
+                    Document1Url = b.Document1Url,
+                    Document2Url = b.Document2Url,
+                    Document3Url = b.Document3Url,
+                    Document4Url = b.Document4Url,
+                    Document1Name = b.Document1Name,
+                    Document2Name = b.Document2Name,
+                    Document3Name = b.Document3Name,
+                    Document4Name = b.Document4Name
                 })
                 .FirstOrDefaultAsync();
 
@@ -133,6 +163,46 @@ public class MediaController : ControllerBase
             {
                 board.YoutubeUrl = request.YoutubeUrl.Length > 1000 ? request.YoutubeUrl.Substring(0, 1000) : request.YoutubeUrl;
             }
+            if (request.CollectionJourneyUrl != null)
+            {
+                board.CollectionJourneyUrl = request.CollectionJourneyUrl.Length > 1000 ? request.CollectionJourneyUrl.Substring(0, 1000) : request.CollectionJourneyUrl;
+            }
+            if (request.DatabaseSchemaUrl != null)
+            {
+                board.DatabaseSchemaUrl = request.DatabaseSchemaUrl.Length > 1000 ? request.DatabaseSchemaUrl.Substring(0, 1000) : request.DatabaseSchemaUrl;
+            }
+            if (request.Document1Url != null)
+            {
+                board.Document1Url = request.Document1Url.Length > 1000 ? request.Document1Url.Substring(0, 1000) : request.Document1Url;
+            }
+            if (request.Document2Url != null)
+            {
+                board.Document2Url = request.Document2Url.Length > 1000 ? request.Document2Url.Substring(0, 1000) : request.Document2Url;
+            }
+            if (request.Document3Url != null)
+            {
+                board.Document3Url = request.Document3Url.Length > 1000 ? request.Document3Url.Substring(0, 1000) : request.Document3Url;
+            }
+            if (request.Document4Url != null)
+            {
+                board.Document4Url = request.Document4Url.Length > 1000 ? request.Document4Url.Substring(0, 1000) : request.Document4Url;
+            }
+            if (request.Document1Name != null)
+            {
+                board.Document1Name = request.Document1Name.Length > 50 ? request.Document1Name.Substring(0, 50) : request.Document1Name;
+            }
+            if (request.Document2Name != null)
+            {
+                board.Document2Name = request.Document2Name.Length > 50 ? request.Document2Name.Substring(0, 50) : request.Document2Name;
+            }
+            if (request.Document3Name != null)
+            {
+                board.Document3Name = request.Document3Name.Length > 50 ? request.Document3Name.Substring(0, 50) : request.Document3Name;
+            }
+            if (request.Document4Name != null)
+            {
+                board.Document4Name = request.Document4Name.Length > 50 ? request.Document4Name.Substring(0, 50) : request.Document4Name;
+            }
 
             board.UpdatedAt = DateTime.UtcNow;
 
@@ -147,7 +217,17 @@ public class MediaController : ControllerBase
                 PresentationUrl = board.PresentationUrl,
                 LinkedInUrl = board.LinkedInUrl,
                 InstagramUrl = board.InstagramUrl,
-                YoutubeUrl = board.YoutubeUrl
+                YoutubeUrl = board.YoutubeUrl,
+                CollectionJourneyUrl = board.CollectionJourneyUrl,
+                DatabaseSchemaUrl = board.DatabaseSchemaUrl,
+                Document1Url = board.Document1Url,
+                Document2Url = board.Document2Url,
+                Document3Url = board.Document3Url,
+                Document4Url = board.Document4Url,
+                Document1Name = board.Document1Name,
+                Document2Name = board.Document2Name,
+                Document3Name = board.Document3Name,
+                Document4Name = board.Document4Name
             };
 
             return Ok(new { success = true, data = response });

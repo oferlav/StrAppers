@@ -63,6 +63,13 @@ public class Student
     [MaxLength(50)]
     public string? BoardId { get; set; }
     public ProjectBoard? ProjectBoard { get; set; }
+
+    /// <summary>
+    /// FK to ProjectInstances.InstanceId (which instance of a project the student is in).
+    /// </summary>
+    public int? InstanceId { get; set; }
+    [ForeignKey("InstanceId")]
+    public ProjectInstance? ProjectInstance { get; set; }
     
     // Availability status
     public bool IsAvailable { get; set; } = true;

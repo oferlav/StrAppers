@@ -51,6 +51,7 @@ public class ProjectsController : ControllerBase
                     Title = p.Title,
                     Description = p.Description,
                     ExtendedDescription = p.ExtendedDescription,
+                    ShortBrief = p.ShortBrief,
                     Priority = p.Priority,
                     OrganizationId = p.OrganizationId,
                     IsAvailable = p.IsAvailable,
@@ -86,6 +87,7 @@ public class ProjectsController : ControllerBase
                     Title = p.Title,
                     Description = p.Description,
                     ExtendedDescription = p.ExtendedDescription,
+                    ShortBrief = p.ShortBrief,
                     Priority = p.Priority,
                     OrganizationId = p.OrganizationId,
                     IsAvailable = p.IsAvailable,
@@ -148,6 +150,7 @@ public class ProjectsController : ControllerBase
                     Title = p.Title,
                     Description = p.Description,
                     ExtendedDescription = p.ExtendedDescription,
+                    ShortBrief = p.ShortBrief,
                     Priority = p.Priority,
                     OrganizationId = p.OrganizationId,
                     IsAvailable = p.IsAvailable,
@@ -215,6 +218,7 @@ public class ProjectsController : ControllerBase
                 Title = request.Title,
                 Description = request.Description,
                 ExtendedDescription = request.ExtendedDescription,
+                ShortBrief = request.ShortBrief,
                 Priority = request.Priority,
                 OrganizationId = organizationId,
                 IsAvailable = request.IsAvailable,
@@ -234,6 +238,7 @@ public class ProjectsController : ControllerBase
                     Title = p.Title,
                     Description = p.Description,
                     ExtendedDescription = p.ExtendedDescription,
+                    ShortBrief = p.ShortBrief,
                     Priority = p.Priority,
                     OrganizationId = p.OrganizationId,
                     IsAvailable = p.IsAvailable,
@@ -423,6 +428,7 @@ public class ProjectsController : ControllerBase
                 Title = request.Title,
                 Description = request.Description,
                 ExtendedDescription = request.ExtendedDescription,
+                ShortBrief = request.ShortBrief,
                 Priority = "high", // Default priority
                 OrganizationId = request.OrganizationId,
                 IsAvailable = true, // Default isAvailable
@@ -442,6 +448,7 @@ public class ProjectsController : ControllerBase
                     Title = p.Title,
                     Description = p.Description,
                     ExtendedDescription = p.ExtendedDescription,
+                    ShortBrief = p.ShortBrief,
                     Priority = p.Priority,
                     OrganizationId = p.OrganizationId,
                     IsAvailable = p.IsAvailable,
@@ -516,8 +523,9 @@ public class ProjectsController : ControllerBase
                 {
                     Id = p.Id,
                     Title = p.Title,
-                    Description = p.Description,
+                    Description = p.ShortBrief,
                     ExtendedDescription = p.ExtendedDescription,
+                    ShortBrief = p.ShortBrief,
                     Priority = p.Priority,
                     OrganizationId = p.OrganizationId,
                     IsAvailable = p.IsAvailable,
@@ -671,6 +679,7 @@ public class ProjectsController : ControllerBase
                     Title = p.Title,
                     Description = p.Description,
                     ExtendedDescription = p.ExtendedDescription,
+                    ShortBrief = p.ShortBrief,
                     Priority = p.Priority,
                     OrganizationId = p.OrganizationId,
                     IsAvailable = p.IsAvailable,
@@ -813,6 +822,7 @@ public class ProjectsController : ControllerBase
                     Title = p.Title,
                     Description = p.Description,
                     ExtendedDescription = p.ExtendedDescription,
+                    ShortBrief = p.ShortBrief,
                     Priority = p.Priority,
                     OrganizationId = p.OrganizationId,
                     IsAvailable = p.IsAvailable,
@@ -920,6 +930,9 @@ public class ProjectsController : ControllerBase
 
             if (request.ExtendedDescription != null)
                 project.ExtendedDescription = request.ExtendedDescription;
+
+            if (request.ShortBrief != null)
+                project.ShortBrief = request.ShortBrief;
 
             if (!string.IsNullOrEmpty(request.Priority))
                 project.Priority = request.Priority;

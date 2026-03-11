@@ -31,6 +31,182 @@ public class StudentsController : ControllerBase
     }
 
     /// <summary>
+    /// Add a project instance for a student when all projects appear "taken". Ensures the student can be allocated
+    /// by creating a new ProjectInstance (e.g. new cohort) and assigning the student to it.
+    /// </summary>
+    /// <param name="studentId">The student ID to allocate</param>
+    /// <returns>Success true with ProjectId/InstanceId when a new instance was created; Success false when conditions are not met (do nothing).</returns>
+    [HttpPost("use/add-project-instance")]
+    public async Task<ActionResult<object>> AddProjectInstance([FromQuery] int studentId)
+    {
+        try
+        {
+            var student = await _context.Students
+                .Include(s => s.StudentRoles.Where(sr => sr.IsActive))
+                .FirstOrDefaultAsync(s => s.Id == studentId);
+
+            if (student == null)
+                return NotFound($"Student with ID {studentId} not found.");
+
+            if (student.InstanceId.HasValue)
+            {
+                _logger.LogInformation("AddProjectInstance: Student {StudentId} already has InstanceId {InstanceId}, skipping.", studentId, student.InstanceId);
+                return Ok(new { Success = false, Message = "Student already has a project instance." });
+            }
+
+            int? targetRoleId = student.StudentRoles?.FirstOrDefault(sr => sr.IsActive)?.RoleId;
+            if (!targetRoleId.HasValue)
+            {
+                _logger.LogWarning("AddProjectInstance: Student {StudentId} has no active role.", studentId);
+                return BadRequest("Student has no active role.");
+            }
+
+            var availableProjectIds = await _context.Projects
+                .Where(p => p.IsAvailable)
+                .Select(p => p.Id)
+                .ToListAsync();
+
+            if (availableProjectIds.Count == 0)
+            {
+                _logger.LogInformation("AddProjectInstance: No available projects.");
+                return Ok(new { Success = false, Message = "No available projects." });
+            }
+
+            // Role compatibility: same RoleId, or if target is Fullstack (6) then 6, 2, 3 allowed
+            bool RoleCompatible(int? otherRoleId)
+            {
+                if (!otherRoleId.HasValue) return false;
+                if (otherRoleId.Value == targetRoleId!.Value) return true;
+                if (targetRoleId.Value == 6 && (otherRoleId.Value == 6 || otherRoleId.Value == 2 || otherRoleId.Value == 3))
+                    return true;
+                return false;
+            }
+
+            // Students with InstanceId=null, project in priorities, Status 0/1/2
+            var studentsUnallocated = await _context.Students
+                .Include(s => s.StudentRoles.Where(sr => sr.IsActive))
+                .Where(s => s.Id != studentId
+                    && s.InstanceId == null
+                    && s.Status.HasValue && s.Status >= 0 && s.Status <= 2
+                    && (s.ProjectPriority1.HasValue || s.ProjectPriority2.HasValue || s.ProjectPriority3.HasValue || s.ProjectPriority4.HasValue))
+                .ToListAsync();
+
+            // Return false only if we find a project where NO student in the pool has a role compatible with the target (i.e. no "slot" for target's role).
+            foreach (var projId in availableProjectIds)
+            {
+                var withThisProject = studentsUnallocated.Where(s =>
+                    s.ProjectPriority1 == projId || s.ProjectPriority2 == projId || s.ProjectPriority3 == projId || s.ProjectPriority4 == projId).ToList();
+                if (withThisProject.Count == 0) continue; // No one else in pool for this project – condition met.
+                bool atLeastOneCompatible = withThisProject.Any(s =>
+                    RoleCompatible(s.StudentRoles?.FirstOrDefault(sr => sr.IsActive)?.RoleId));
+                if (!atLeastOneCompatible)
+                {
+                    _logger.LogInformation(
+                        "AddProjectInstance: Project {ProjectId} – no unallocated student with this project in their priorities has a role compatible with target (RoleId {TargetRoleId}); cannot add instance.",
+                        projId, targetRoleId);
+                    return Ok(new { Success = false, Message = "A project has no student with compatible role; cannot add instance." });
+                }
+            }
+
+            // Walk ProjectInstances table row by row; for each (ProjectId, InstanceId) repeat the same logic:
+            // students with this InstanceId and this project in priorities (Status 0/1/2) must have at least one compatible role.
+            var projectInstanceRows = await _context.ProjectInstances
+                .Select(pi => new { pi.ProjectId, pi.InstanceId })
+                .ToListAsync();
+
+            foreach (var row in projectInstanceRows)
+            {
+                var studentsInThisInstanceWithThisProject = await _context.Students
+                    .Include(s => s.StudentRoles.Where(sr => sr.IsActive))
+                    .Where(s => s.Id != studentId
+                        && s.InstanceId == row.InstanceId
+                        && s.Status.HasValue && s.Status >= 0 && s.Status <= 2
+                        && (s.ProjectPriority1 == row.ProjectId || s.ProjectPriority2 == row.ProjectId
+                            || s.ProjectPriority3 == row.ProjectId || s.ProjectPriority4 == row.ProjectId))
+                    .ToListAsync();
+
+                // If this instance has no students with this project in priorities, condition is not met – return false.
+                if (studentsInThisInstanceWithThisProject.Count == 0)
+                {
+                    _logger.LogInformation(
+                        "AddProjectInstance: ProjectInstances row ProjectId={ProjectId}, InstanceId={InstanceId} – no students in Students table with this project in priorities and this InstanceId; cannot add instance.",
+                        row.ProjectId, row.InstanceId);
+                    return Ok(new { Success = false, Message = "An existing instance has no matching students; cannot add instance." });
+                }
+
+                bool atLeastOneCompatible = studentsInThisInstanceWithThisProject.Any(s =>
+                    RoleCompatible(s.StudentRoles?.FirstOrDefault(sr => sr.IsActive)?.RoleId));
+                if (!atLeastOneCompatible)
+                {
+                    _logger.LogInformation(
+                        "AddProjectInstance: ProjectInstances row ProjectId={ProjectId}, InstanceId={InstanceId} – no student has role compatible with target (RoleId {TargetRoleId}); cannot add instance.",
+                        row.ProjectId, row.InstanceId, targetRoleId);
+                    return Ok(new { Success = false, Message = "An existing instance has no student with compatible role; cannot add instance." });
+                }
+            }
+
+            // All checks passed: pick next InstanceId and choose project for even distribution
+            var nextInstanceId = projectInstanceRows.Count > 0 ? projectInstanceRows.Max(r => r.InstanceId) + 1 : 1;
+
+            // Instance count per project (among available only)
+            var instanceCountByProject = projectInstanceRows
+                .GroupBy(r => r.ProjectId)
+                .ToDictionary(g => g.Key, g => g.Count());
+
+            var projectsWithZeroInstances = availableProjectIds
+                .Where(pid => !instanceCountByProject.ContainsKey(pid) || instanceCountByProject[pid] == 0)
+                .ToList();
+
+            int chosenProjectId;
+            var random = new Random();
+            if (projectsWithZeroInstances.Count > 0)
+            {
+                // Prefer projects with no instances: random among those
+                chosenProjectId = projectsWithZeroInstances[random.Next(projectsWithZeroInstances.Count)];
+            }
+            else
+            {
+                // All available projects already have at least one instance
+                var minCount = availableProjectIds.Min(pid => instanceCountByProject.GetValueOrDefault(pid, 0));
+                var projectsWithFewest = availableProjectIds
+                    .Where(pid => instanceCountByProject.GetValueOrDefault(pid, 0) == minCount)
+                    .ToList();
+                if (projectsWithFewest.Count == 1)
+                    chosenProjectId = projectsWithFewest[0];
+                else
+                    // Tie (even distribution): random from all available projects
+                    chosenProjectId = availableProjectIds[random.Next(availableProjectIds.Count)];
+            }
+
+            var projectInstance = new ProjectInstance
+            {
+                ProjectId = chosenProjectId,
+                InstanceId = nextInstanceId
+            };
+            _context.ProjectInstances.Add(projectInstance);
+            student.InstanceId = nextInstanceId;
+            student.UpdatedAt = DateTime.UtcNow;
+
+            await _context.SaveChangesAsync();
+
+            _logger.LogInformation("AddProjectInstance: Created ProjectInstance ProjectId={ProjectId}, InstanceId={InstanceId} and assigned student {StudentId}.", chosenProjectId, nextInstanceId, studentId);
+            return Ok(new
+            {
+                Success = true,
+                Message = "New project instance created and student assigned.",
+                ProjectId = chosenProjectId,
+                InstanceId = nextInstanceId,
+                StudentId = studentId
+            });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error in AddProjectInstance for student {StudentId}", studentId);
+            return StatusCode(500, "An error occurred while adding project instance.");
+        }
+    }
+
+    /// <summary>
     /// Set prioritized projects for a student. The first project becomes the active ProjectId and Priority1.
     /// </summary>
     /// <remarks>
@@ -1272,6 +1448,70 @@ public class StudentsController : ControllerBase
     }
 
     /// <summary>
+    /// Get students (including photo/avatars) who: have at least one project in ProjectPriority1-4 that is available,
+    /// Status is 0, 1, or 2, and student IsAvailable is true.
+    /// </summary>
+    [HttpGet("use/project-allocated-no-board-avatars")]
+    public async Task<ActionResult<IEnumerable<object>>> GetProjectAllocatedNoBoardAvatars()
+    {
+        try
+        {
+            _logger.LogInformation("Getting students for project-allocated-no-board-avatars (with photos)");
+
+            var availableProjectIds = await _context.Projects
+                .Where(p => p.IsAvailable)
+                .Select(p => p.Id)
+                .ToListAsync();
+
+            var students = await _context.Students
+                .Include(s => s.StudentRoles)
+                    .ThenInclude(sr => sr.Role)
+                .Where(s => s.IsAvailable
+                    && s.Status.HasValue && s.Status >= 0 && s.Status <= 2
+                    && ((s.ProjectPriority1.HasValue && availableProjectIds.Contains(s.ProjectPriority1.Value))
+                        || (s.ProjectPriority2.HasValue && availableProjectIds.Contains(s.ProjectPriority2.Value))
+                        || (s.ProjectPriority3.HasValue && availableProjectIds.Contains(s.ProjectPriority3.Value))
+                        || (s.ProjectPriority4.HasValue && availableProjectIds.Contains(s.ProjectPriority4.Value))))
+                .Select(s => new
+                {
+                    StudentId = s.Id,
+                    ProjectId = s.ProjectId,
+                    IsAdmin = s.IsAdmin,
+                    FirstName = s.FirstName,
+                    LastName = s.LastName,
+                    Email = s.Email,
+                    LinkedInUrl = s.LinkedInUrl,
+                    GithubUser = s.GithubUser,
+                    IsAvailable = s.IsAvailable,
+                    Status = s.Status,
+                    Photo = s.Photo,
+                    RoleId = s.StudentRoles.FirstOrDefault(sr => sr.IsActive).RoleId,
+                    RoleName = s.StudentRoles.FirstOrDefault(sr => sr.IsActive).Role.Name
+                })
+                .ToListAsync();
+
+            _logger.LogInformation("Found {Count} students for project-allocated-no-board-avatars", students.Count);
+
+            return Ok(new
+            {
+                Success = true,
+                Count = students.Count,
+                Students = students
+            });
+        }
+        catch (DbUpdateException ex)
+        {
+            _logger.LogError(ex, "Database error while retrieving project-allocated-no-board-avatars: {Message}", ex.Message);
+            return StatusCode(500, "Database error occurred while retrieving students");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error retrieving project-allocated-no-board-avatars: {Message}", ex.Message);
+            return StatusCode(500, $"An error occurred while retrieving students: {ex.Message}");
+        }
+    }
+
+    /// <summary>
     /// Set a student as admin for a project and set all other students in the same project as non-admin
     /// </summary>
     /// <param name="studentId">The student ID to set as admin</param>
@@ -1411,7 +1651,8 @@ public class StudentsController : ControllerBase
                     Id = student.Id,
                     FirstName = student.FirstName,
                     LastName = student.LastName,
-                    Email = student.Email
+                    Email = student.Email,
+                    Status = student.Status
                 }
             });
         }

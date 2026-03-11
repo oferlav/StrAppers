@@ -216,6 +216,8 @@ public class BoardsController : ControllerBase
 
             var useDBProjectBoard = _configuration.GetValue<bool>("Trello:UseDBProjectBoard", true);
             var visibleSprints = _configuration.GetValue<int>("Trello:VisibleSprints", 2);
+            var mergeType = _configuration["Trello:MergeType"] ?? "Merge";
+            var isMergeTypeAdd = string.Equals(mergeType, "Add", StringComparison.OrdinalIgnoreCase);
             var overriddenSprints = new Dictionary<int, (string ListId, DateTime? DueDateUtc)>();
             TrelloProjectCreationRequest? trelloRequest = null;
             object? sprintPlanForStorage = null;
@@ -261,11 +263,11 @@ public class BoardsController : ControllerBase
                         {
                             var before = trelloRequest.SprintPlan.Cards.Count;
                             trelloRequest.SprintPlan.Cards = trelloRequest.SprintPlan.Cards
-                                .Where(c => !string.IsNullOrEmpty(c.RoleName) && teamRoleNames.Contains(c.RoleName))
+                                .Where(c => string.Equals(c.ListName, "User Stories", StringComparison.OrdinalIgnoreCase) || (!string.IsNullOrEmpty(c.RoleName) && teamRoleNames.Contains(c.RoleName)))
                                 .ToList();
                             var removed = before - trelloRequest.SprintPlan.Cards.Count;
                             if (removed > 0)
-                                _logger.LogInformation("Filtered {Removed} cards for roles not in team (template had all roles). Sending {Count} cards to Trello.", removed, trelloRequest.SprintPlan.Cards.Count);
+                                _logger.LogInformation("Filtered {Removed} cards for roles not in team (template had all roles). User Stories list cards are always kept. Sending {Count} cards to Trello.", removed, trelloRequest.SprintPlan.Cards.Count);
                         }
                         // UseDBProjectBoard: override saved sprint due dates (first day of week = sprint start, last day of weekend = due)
                         if (useDBProjectBoard && trelloRequest.SprintPlan?.Cards != null)
@@ -283,6 +285,7 @@ public class BoardsController : ControllerBase
                             }
                             _logger.LogInformation("[BOARD-CREATE] Overrode sprint due dates from Trello:FirstDayOfWeek={FirstDay}, LocalTime={LocalTime}", firstDayOfWeekStr, localTimeStr);
                         }
+
                         _logger.LogInformation("Using saved TrelloBoardJson for project {ProjectId} instead of AI", request.ProjectId);
                     }
                 }
@@ -510,15 +513,33 @@ public class BoardsController : ControllerBase
                 return StatusCode(500, "Failed to build Trello board request");
             }
 
-            // When NextSprintOnlyVisability is true, create VisibleSprints (system) + 1 (empty) + Bugs. E.g. VisibleSprints=2 → Sprint1, Sprint2 (system), Sprint3 (empty), Bugs.
+            // Max sprint number in the template (before list limiting) — used e.g. for User Story cards range.
+            int maxSprintFromTemplate = 0;
+            if (trelloRequest.SprintPlan?.Lists != null)
+            {
+                foreach (var list in trelloRequest.SprintPlan.Lists)
+                {
+                    var match = Regex.Match(list.Name ?? "", @"Sprint\s*(\d+)", RegexOptions.IgnoreCase);
+                    if (match.Success && int.TryParse(match.Groups[1].Value, out var n) && n > maxSprintFromTemplate)
+                        maxSprintFromTemplate = n;
+                }
+                if (maxSprintFromTemplate == 0)
+                    maxSprintFromTemplate = 7; // fallback when template has no Sprint N lists
+            }
+
+            // When NextSprintOnlyVisability is true (and not MergeType=Add), create VisibleSprints (system) + 1 (empty) + Bugs. When MergeType=Add, create only VisibleSprints + Bugs (no next empty sprint).
             var nextSprintOnlyVisability = _configuration.GetValue<bool>("Trello:NextSprintOnlyVisability", true);
-            if (nextSprintOnlyVisability && trelloRequest.SprintPlan?.Lists != null && trelloRequest.SprintPlan.Lists.Count > visibleSprints + 1)
+            var maxListsForBoard = isMergeTypeAdd ? visibleSprints + 1 : visibleSprints + 2; // +1 = Bugs only for Add; +1 empty + Bugs for Merge
+            if (nextSprintOnlyVisability && trelloRequest.SprintPlan?.Lists != null && trelloRequest.SprintPlan.Lists.Count > maxListsForBoard)
             {
                 var canonicalSprintNames = new[] { "Sprint 1", "Sprint 2", "Sprint 3", "Sprint 4", "Sprint 5", "Sprint 6", "Sprint 7" };
-                var listNamesToInclude = canonicalSprintNames.Take(visibleSprints + 1).ToHashSet(StringComparer.OrdinalIgnoreCase);
+                // MergeType=Add: only VisibleSprints + Bugs (no next empty sprint). Merge: VisibleSprints + 1 (empty) + Bugs.
+                var sprintNamesToTake = isMergeTypeAdd ? visibleSprints : visibleSprints + 1;
+                var listNamesToInclude = canonicalSprintNames.Take(sprintNamesToTake).ToHashSet(StringComparer.OrdinalIgnoreCase);
                 listNamesToInclude.Add("Bugs");
+                listNamesToInclude.Add("User Stories"); // preserve template's User Stories list when present
                 var listsToInclude = new List<TrelloList>();
-                foreach (var name in canonicalSprintNames.Take(visibleSprints + 1))
+                foreach (var name in canonicalSprintNames.Take(sprintNamesToTake))
                 {
                     var found = trelloRequest.SprintPlan.Lists.FirstOrDefault(l => string.Equals(l.Name, name, StringComparison.OrdinalIgnoreCase));
                     if (found != null)
@@ -527,6 +548,9 @@ public class BoardsController : ControllerBase
                 var bugsList = trelloRequest.SprintPlan.Lists.FirstOrDefault(l => string.Equals(l.Name, "Bugs", StringComparison.OrdinalIgnoreCase));
                 if (bugsList != null && !listsToInclude.Contains(bugsList))
                     listsToInclude.Add(bugsList);
+                var userStoriesList = trelloRequest.SprintPlan.Lists.FirstOrDefault(l => string.Equals(l.Name, "User Stories", StringComparison.OrdinalIgnoreCase));
+                if (userStoriesList != null && !listsToInclude.Contains(userStoriesList))
+                    listsToInclude.Add(userStoriesList);
                 var listNames = listsToInclude.Select(l => l.Name).ToHashSet(StringComparer.OrdinalIgnoreCase);
                 trelloRequest.SprintPlan.Lists = listsToInclude;
                 if (trelloRequest.SprintPlan.Cards != null)
@@ -535,8 +559,48 @@ public class BoardsController : ControllerBase
                         .Where(c => c.ListName != null && listNames.Contains(c.ListName))
                         .ToList();
                 }
-                _logger.LogInformation("NextSprintOnlyVisability: limited board to VisibleSprints={VisibleSprints} (Sprint 1..{LastSystem} system, Sprint {Empty} empty) + Bugs ({ListNames}), {CardCount} cards",
-                    visibleSprints, visibleSprints, visibleSprints + 1, string.Join(", ", listNames), trelloRequest.SprintPlan.Cards?.Count ?? 0);
+                _logger.LogInformation("NextSprintOnlyVisability: limited board to VisibleSprints={VisibleSprints} MergeType={MergeType} (Sprint 1..{Last}) + Bugs ({ListNames}), {CardCount} cards",
+                    visibleSprints, mergeType, sprintNamesToTake, string.Join(", ", listNames), trelloRequest.SprintPlan.Cards?.Count ?? 0);
+            }
+
+            // When Trello:UserStoryList is true, add "User Stories" list (and cards) to the plan — does not depend on stored template; applied for every board creation.
+            var userStoryListEnabled = _configuration.GetValue<bool>("Trello:UserStoryList", true);
+            var userStoryFirstSprint = _configuration.GetValue<int>("Trello:UserStoryFirstSprint", 3);
+            if (userStoryFirstSprint < 1) userStoryFirstSprint = 1;
+            _logger.LogInformation("[BOARD-CREATE] UserStoryList: UserStoryList={UserStoryList}, UserStoryFirstSprint={UserStoryFirstSprint}.", userStoryListEnabled, userStoryFirstSprint);
+
+            if (userStoryListEnabled && trelloRequest.SprintPlan?.Lists != null)
+            {
+                const string userStoriesListName = "User Stories";
+                if (trelloRequest.SprintPlan.Lists.Any(l => string.Equals(l.Name, userStoriesListName, StringComparison.OrdinalIgnoreCase)))
+                {
+                    _logger.LogInformation("[BOARD-CREATE] User Stories list already in plan; skipping.");
+                }
+                else
+                {
+                    var maxPosition = trelloRequest.SprintPlan.Lists.Count > 0 ? trelloRequest.SprintPlan.Lists.Max(l => l.Position) : 0;
+                    trelloRequest.SprintPlan.Lists.Add(new TrelloList
+                    {
+                        Name = userStoriesListName,
+                        BoardName = trelloRequest.SprintPlan.Lists.FirstOrDefault()?.BoardName ?? "",
+                        Position = maxPosition + 1
+                    });
+                    trelloRequest.SprintPlan.Cards ??= new List<TrelloCard>();
+                    for (var sprintNum = userStoryFirstSprint; sprintNum <= maxSprintFromTemplate; sprintNum++)
+                    {
+                        trelloRequest.SprintPlan.Cards.Add(new TrelloCard
+                        {
+                            Name = $"Sprint {sprintNum} User Story",
+                            Description = "Add User Story here",
+                            ListName = userStoriesListName,
+                            ChecklistItems = new List<string> { "Add Acceptance Criteria here" },
+                            ChecklistName = "Acceptance Criteria",
+                            SprintNumber = sprintNum
+                        });
+                    }
+                    var cardCount = maxSprintFromTemplate >= userStoryFirstSprint ? maxSprintFromTemplate - userStoryFirstSprint + 1 : 0;
+                    _logger.LogInformation("[BOARD-CREATE] Added User Stories list to plan with {Count} cards (sprints {First}..{Last}, max from template).", cardCount, userStoryFirstSprint, maxSprintFromTemplate);
+                }
             }
 
             // Ensure list order is canonical (Sprint 1, 2, ... 7, Bugs last) and Position = index so Trello creates lists left-to-right correctly
@@ -2069,19 +2133,61 @@ public class BoardsController : ControllerBase
                     // Use boardId directly (no prefix) so GitHub Pages URL matches: https://skill-in-projects.github.io/{boardId}/
                     var frontendRepoName = trelloBoardId;
                     _logger.LogInformation("📦 [FRONTEND] Creating frontend repository: {RepoName}", frontendRepoName);
-                    
-                    var frontendRequest = new CreateRepositoryRequest
+
+                    var useHardcodedFrontendTemplate = _configuration["GitHub:UseHardcodedFrontendTemplate"]?.Trim() != "false";
+                    var frontendTemplateOwner = _configuration["GitHub:FrontendTemplateOwner"]?.Trim();
+                    var frontendTemplateRepo = _configuration["GitHub:FrontendTemplateRepo"]?.Trim();
+                    var useFrontendTemplate = !useHardcodedFrontendTemplate && !string.IsNullOrEmpty(frontendTemplateOwner) && !string.IsNullOrEmpty(frontendTemplateRepo);
+
+                    CreateRepositoryResponse? frontendResponse;
+                    if (useHardcodedFrontendTemplate)
                     {
-                        Name = frontendRepoName,
-                        Description = SanitizeRepoDescription($"Frontend repository for {project.Title}"),
-                        IsPrivate = false,  // Public repository to enable GitHub Pages on free plan
-                        Collaborators = githubUsernames,
-                        ProjectTitle = project.Title,
-                        WebApiUrl = webApiUrl  // Pass API URL for config.js
-                    };
-                    
-                    var frontendResponse = await _gitHubService.CreateRepositoryAsync(frontendRequest);
-                    
+                        _logger.LogInformation("📦 [FRONTEND] Using hardcoded rich frontend (React + Vite)");
+                        var frontendRequest = new CreateRepositoryRequest
+                        {
+                            Name = frontendRepoName,
+                            Description = SanitizeRepoDescription($"Frontend repository for {project.Title}"),
+                            IsPrivate = false,
+                            Collaborators = githubUsernames,
+                            ProjectTitle = project.Title,
+                            WebApiUrl = webApiUrl
+                        };
+                        frontendResponse = await _gitHubService.CreateRepositoryAsync(frontendRequest);
+                    }
+                    else if (useFrontendTemplate)
+                    {
+                        _logger.LogInformation("📦 [FRONTEND] Using template repository: {Owner}/{Repo}", frontendTemplateOwner, frontendTemplateRepo);
+                        frontendResponse = await _gitHubService.CreateRepositoryFromTemplateAsync(
+                            frontendTemplateOwner!,
+                            frontendTemplateRepo!,
+                            frontendRepoName,
+                            owner: null,
+                            SanitizeRepoDescription($"Frontend repository for {project.Title}"),
+                            isPrivate: false,
+                            githubUsernames,
+                            githubToken);
+                        if (frontendResponse == null)
+                        {
+                            _logger.LogError("❌ [FRONTEND] CRITICAL: Failed to create frontend repository from template");
+                            throw new InvalidOperationException(
+                                "Failed to create frontend GitHub repository from template. " +
+                                "GitHub repository creation is required - board creation cannot proceed.");
+                        }
+                    }
+                    else
+                    {
+                        var frontendRequest = new CreateRepositoryRequest
+                        {
+                            Name = frontendRepoName,
+                            Description = SanitizeRepoDescription($"Frontend repository for {project.Title}"),
+                            IsPrivate = false,  // Public repository to enable GitHub Pages on free plan
+                            Collaborators = githubUsernames,
+                            ProjectTitle = project.Title,
+                            WebApiUrl = webApiUrl  // Pass API URL for config.js
+                        };
+                        frontendResponse = await _gitHubService.CreateRepositoryAsync(frontendRequest);
+                    }
+
                     if (frontendResponse.Success && !string.IsNullOrEmpty(frontendResponse.RepositoryUrl))
                     {
                         frontendRepositoryUrl = frontendResponse.RepositoryUrl;
@@ -2097,21 +2203,31 @@ public class BoardsController : ControllerBase
                         {
                             var frontendOwner = frontendPathParts[0];
                             var frontendRepoNameFromUrl = frontendPathParts[1];
-                            
-                            // Step A: Create README.md immediately after repo creation (before branch protection)
-                            _logger.LogInformation("📝 [GITHUB] Step A: Creating initial README.md for frontend repository {Owner}/{Repo}", frontendOwner, frontendRepoNameFromUrl);
-                            var readmeSuccess = await _gitHubService.CreateInitialReadmeAsync(frontendOwner, frontendRepoNameFromUrl, project.Title, githubToken, isFrontend: true, webApiUrl: webApiUrl);
-                            if (readmeSuccess)
+
+                            if (useHardcodedFrontendTemplate)
                             {
-                                _logger.LogInformation("✅ [GITHUB] Step A: Frontend repository README.md created successfully");
+                                _logger.LogInformation("📝 [GITHUB] Step A: Skipping README (rich frontend commit will include README)");
+                            }
+                            else if (!useFrontendTemplate)
+                            {
+                                // Step A: Create README.md immediately after repo creation (before branch protection) — vanilla flow only
+                                _logger.LogInformation("📝 [GITHUB] Step A: Creating initial README.md for frontend repository {Owner}/{Repo}", frontendOwner, frontendRepoNameFromUrl);
+                                var readmeSuccess = await _gitHubService.CreateInitialReadmeAsync(frontendOwner, frontendRepoNameFromUrl, project.Title, githubToken, isFrontend: true, webApiUrl: webApiUrl);
+                                if (readmeSuccess)
+                                {
+                                    _logger.LogInformation("✅ [GITHUB] Step A: Frontend repository README.md created successfully");
+                                }
+                                else
+                                {
+                                    _logger.LogError("❌ [GITHUB] CRITICAL: Failed to create frontend repository README.md");
+                                    throw new InvalidOperationException(
+                                        "Failed to create frontend repository README.md. " +
+                                        "Repository initialization is required - board creation cannot proceed.");
+                                }
                             }
                             else
                             {
-                                // CRITICAL: README creation failed - board creation cannot proceed
-                                _logger.LogError("❌ [GITHUB] CRITICAL: Failed to create frontend repository README.md");
-                                throw new InvalidOperationException(
-                                    "Failed to create frontend repository README.md. " +
-                                    "Repository initialization is required - board creation cannot proceed.");
+                                _logger.LogInformation("📝 [GITHUB] Step A: Skipping README (template repository already has content)");
                             }
 
                             // Step B: Create webhook for frontend repository
@@ -2165,15 +2281,45 @@ public class BoardsController : ControllerBase
                                 // Ruleset creation failure is not critical - log warning but continue
                                 _logger.LogWarning("⚠️ [GITHUB] Failed to create frontend repository ruleset (non-critical)");
                             }
-                            
-                            // Create frontend-only commit (files at root, no workflows)
-                            var frontendCommitSuccess = await _gitHubService.CreateFrontendOnlyCommitAsync(
-                                frontendOwner, frontendRepoNameFromUrl, project.Title, githubToken, webApiUrl);
-                            
-                            if (frontendCommitSuccess)
+
+                            bool frontendReadyForDeploy = false;
+                            if (useHardcodedFrontendTemplate)
                             {
-                                _logger.LogInformation("✅ [FRONTEND] Frontend-only commit created successfully");
-                                
+                                // Hardcoded rich frontend (React + Vite)
+                                frontendReadyForDeploy = await _gitHubService.CreateRichFrontendOnlyCommitAsync(
+                                    frontendOwner, frontendRepoNameFromUrl, project.Title, githubToken, webApiUrl);
+                                if (frontendReadyForDeploy)
+                                    _logger.LogInformation("✅ [FRONTEND] Rich frontend (React+Vite) commit created successfully");
+                                else
+                                    _logger.LogWarning("⚠️ [FRONTEND] Failed to create rich frontend commit");
+                            }
+                            else if (useFrontendTemplate)
+                            {
+                                // Template flow: update config file with backend URL and mentor API so frontend-backend integration is preserved
+                                var configPath = _configuration["GitHub:FrontendTemplateConfigPath"]?.Trim() ?? "public/config.js";
+                                var mentorApiBaseUrl = _configuration["ApiBaseUrl"];
+                                var configJsContent = _gitHubService.GenerateConfigJs(webApiUrl, mentorApiBaseUrl);
+                                _logger.LogInformation("📝 [GITHUB] Updating template config file {ConfigPath} for {Owner}/{Repo}", configPath, frontendOwner, frontendRepoNameFromUrl);
+                                var configUpdated = await _gitHubService.UpdateFileAsync(frontendOwner, frontendRepoNameFromUrl, configPath, configJsContent, "Configure backend and mentor API URLs", githubToken, "main");
+                                if (configUpdated)
+                                    _logger.LogInformation("✅ [GITHUB] Template config file updated successfully");
+                                else
+                                    _logger.LogWarning("⚠️ [GITHUB] Failed to update template config file (deployment will still run; fix config in repo if needed)");
+                                frontendReadyForDeploy = true; // Always deploy template repos (enable Pages)
+                            }
+                            else
+                            {
+                                // Vanilla flow: Create frontend-only commit (files at root, no workflows)
+                                frontendReadyForDeploy = await _gitHubService.CreateFrontendOnlyCommitAsync(
+                                    frontendOwner, frontendRepoNameFromUrl, project.Title, githubToken, webApiUrl);
+                                if (frontendReadyForDeploy)
+                                    _logger.LogInformation("✅ [FRONTEND] Frontend-only commit created successfully");
+                                else
+                                    _logger.LogWarning("⚠️ [FRONTEND] Failed to create frontend commit");
+                            }
+
+                            if (frontendReadyForDeploy)
+                            {
                                 // Deploy frontend using DeploymentController
                                 try
                                 {
@@ -2182,13 +2328,13 @@ public class BoardsController : ControllerBase
                                         _gitHubService,
                                         _httpClientFactory,
                                         _configuration);
-                                    
+
                                     var deployResponse = await deploymentController.DeployFrontendRepositoryAsync(frontendRepositoryUrl);
                                     if (deployResponse.Success && !string.IsNullOrEmpty(deployResponse.DeploymentUrl))
                                     {
                                         publishUrl = deployResponse.DeploymentUrl;
                                         _logger.LogInformation("✅ [FRONTEND] Deployment triggered: {PagesUrl}", publishUrl);
-                                        _logger.LogInformation("📊 [FRONTEND] Workflow status: {Status}, Run ID: {RunId}", 
+                                        _logger.LogInformation("📊 [FRONTEND] Workflow status: {Status}, Run ID: {RunId}",
                                             deployResponse.Status, deployResponse.WorkflowRunId);
                                     }
                                     else
@@ -2208,10 +2354,6 @@ public class BoardsController : ControllerBase
                                         $"Failed to trigger frontend deployment: {deployEx.Message}. " +
                                         "Frontend deployment is required - board creation cannot proceed.");
                                 }
-                            }
-                            else
-                            {
-                                _logger.LogWarning("⚠️ [FRONTEND] Failed to create frontend commit");
                             }
                         }
                     }
@@ -2725,12 +2867,15 @@ public class BoardsController : ControllerBase
                 throw;
             }
 
-            // Upsert ProjectBoardSprintMerge for ALL sprints on the board; sprints 1..VisibleSprints (overridden from SystemBoard) get MergedAt set (FK requires ProjectBoard to exist first)
+            // Upsert ProjectBoardSprintMerge for ALL sprints on the board; sprints 1..VisibleSprints (overridden from SystemBoard) get MergedAt set (FK requires ProjectBoard to exist first). MergeType=Add: only VisibleSprints lists on board + one row for next sprint (no list yet).
             var sprintCount = trelloRequest?.SprintPlan?.Lists?.Count ?? 0;
             if (sprintCount <= 0 && overriddenSprints.Count > 0)
                 sprintCount = overriddenSprints.Keys.Max();
+            if (isMergeTypeAdd)
+                sprintCount = visibleSprints + 1; // Rows for 1..VisibleSprints (have lists) and VisibleSprints+1 (no list yet)
             if (sprintCount > 0)
             {
+                var offsetMin = (int)localOffset.TotalMinutes;
                 try
                 {
                     for (var sprintNum = 1; sprintNum <= sprintCount; sprintNum++)
@@ -2738,11 +2883,16 @@ public class BoardsController : ControllerBase
                         string? listId = null;
                         DateTime? dueDateUtc = null;
                         DateTime? mergedAt = null;
-                        if (overriddenSprints.TryGetValue(sprintNum, out var overridden))
+                        if (isMergeTypeAdd && sprintNum == visibleSprints + 1)
+                        {
+                            // Next sprint: no list on board yet; DueDate = last day of that sprint
+                            dueDateUtc = GetSprintDueDateUtc(kickoffUtc, sprintNum, firstDayOfWeek, offsetMin, sprintLengthWeeks);
+                            mergedAt = null;
+                        }
+                        else if (overriddenSprints.TryGetValue(sprintNum, out var overridden))
                         {
                             listId = overridden.ListId;
                             mergedAt = DateTime.UtcNow;
-                            // DueDate for row N = this sprint's own first card DueDate (trigger for merging N+1 is row N.DueDate has passed).
                             dueDateUtc = overridden.DueDateUtc;
                         }
                         else
@@ -2752,10 +2902,11 @@ public class BoardsController : ControllerBase
                             if (snapshot == null)
                                 continue;
                             listId = snapshot.ListId;
-                            // DueDate for row N = this sprint's own first card DueDate.
                             dueDateUtc = snapshot.Cards?.Count > 0 && snapshot.Cards[0].DueDate.HasValue
                                 ? ToUtcForDb(snapshot.Cards[0].DueDate.Value)
-                                : (DateTime?)null;
+                                : GetSprintDueDateUtc(kickoffUtc, sprintNum, firstDayOfWeek, offsetMin, sprintLengthWeeks);
+                            if (isMergeTypeAdd && sprintNum <= visibleSprints)
+                                mergedAt = DateTime.UtcNow;
                         }
                         var mergeRecord = await _context.ProjectBoardSprintMerges
                             .FirstOrDefaultAsync(m => m.ProjectBoardId == trelloBoardId && m.SprintNumber == sprintNum);
@@ -2994,16 +3145,17 @@ public class BoardsController : ControllerBase
     }
 
     /// <summary>
-    /// Add a message to the board's group chat
+    /// Add a message to the board's group chat or to a private chat (when Email2 is provided).
     /// </summary>
-    /// <param name="request">Chat message request</param>
+    /// <param name="request">Chat message request; optional Email2 for private chat between Email and Email2</param>
     /// <returns>Success response</returns>
     [HttpPost("chat-add")]
     public async Task<ActionResult<object>> AddChatMessage([FromBody] AddChatMessageRequest request)
     {
         try
         {
-            _logger.LogInformation("Adding chat message for BoardId {BoardId} from {Email}", request.BoardId, request.Email);
+            var isPrivate = !string.IsNullOrWhiteSpace(request.Email2);
+            _logger.LogInformation("Adding chat message for BoardId {BoardId} from {Email} ({Mode})", request.BoardId, request.Email, isPrivate ? "private" : "group");
 
             var board = await _context.ProjectBoards
                 .FirstOrDefaultAsync(pb => pb.Id == request.BoardId);
@@ -3018,14 +3170,54 @@ public class BoardsController : ControllerBase
                 });
             }
 
-            // Get current chat content
-            var currentChat = board.GroupChat ?? "";
-            
-            // Create new chat message
             var timestamp = DateTime.UtcNow.ToString("yyyy-MM-dd HH:mm:ss");
             var newMessage = $"[{timestamp}] {request.Email}: {request.Text}\n";
-            
-            // Append to existing chat
+
+            if (isPrivate)
+            {
+                // Normalize emails to alphabetical order so we have a single record per pair
+                var e1 = request.Email.Trim();
+                var e2 = request.Email2!.Trim();
+                if (string.Compare(e1, e2, StringComparison.OrdinalIgnoreCase) > 0)
+                    (e1, e2) = (e2, e1);
+
+                var privateChat = await _context.PrivateChats
+                    .FirstOrDefaultAsync(pc => pc.BoardId == request.BoardId && pc.Email1 == e1 && pc.Email2 == e2);
+
+                if (privateChat == null)
+                {
+                    privateChat = new PrivateChat
+                    {
+                        BoardId = request.BoardId,
+                        Email1 = e1,
+                        Email2 = e2,
+                        UpdatedAt = DateTime.UtcNow,
+                        ChatHistory = newMessage
+                    };
+                    _context.PrivateChats.Add(privateChat);
+                }
+                else
+                {
+                    privateChat.ChatHistory = (privateChat.ChatHistory ?? "") + newMessage;
+                    privateChat.UpdatedAt = DateTime.UtcNow;
+                }
+
+                await _context.SaveChangesAsync();
+
+                _logger.LogInformation("Successfully added private chat message for BoardId {BoardId} ({Email1}, {Email2})", request.BoardId, e1, e2);
+
+                return Ok(new
+                {
+                    success = true,
+                    message = "Private chat message added successfully",
+                    boardId = request.BoardId,
+                    timestamp = timestamp,
+                    privateChat = true
+                });
+            }
+
+            // Group chat
+            var currentChat = board.GroupChat ?? "";
             board.GroupChat = currentChat + newMessage;
             board.UpdatedAt = DateTime.UtcNow;
 
@@ -3049,23 +3241,47 @@ public class BoardsController : ControllerBase
     }
 
     /// <summary>
-    /// Get chat information for a board
+    /// Get chat information for a board. Optionally return private chat when email1 and email2 are provided.
     /// </summary>
     /// <param name="boardId">The Board ID to retrieve chat for</param>
-    /// <returns>Chat information</returns>
+    /// <param name="email1">Optional. When provided with email2, returns private chat for this pair (order normalized alphabetically).</param>
+    /// <param name="email2">Optional. When provided with email1, returns private chat for this pair.</param>
+    /// <returns>Chat information (groupChat or private chat content)</returns>
     [HttpGet("chat")]
-    public async Task<ActionResult<object>> GetChat([FromQuery] string boardId)
+    public async Task<ActionResult<object>> GetChat([FromQuery] string boardId, [FromQuery] string? email1 = null, [FromQuery] string? email2 = null)
     {
         try
         {
-            // Check if GetChat logs should be disabled (default: true = disabled)
             var disableLogs = _configuration.GetValue<bool>("Logging:DisableGetChatLogs", true);
 
             if (!disableLogs)
+                _logger.LogInformation("Getting chat information for BoardId {BoardId}", boardId);
+
+            // Private chat: both email1 and email2 provided
+            if (!string.IsNullOrWhiteSpace(email1) && !string.IsNullOrWhiteSpace(email2))
             {
-            _logger.LogInformation("Getting chat information for BoardId {BoardId}", boardId);
+                var e1 = email1.Trim();
+                var e2 = email2.Trim();
+                if (string.Compare(e1, e2, StringComparison.OrdinalIgnoreCase) > 0)
+                    (e1, e2) = (e2, e1);
+
+                var privateChat = await _context.PrivateChats
+                    .AsNoTracking()
+                    .FirstOrDefaultAsync(pc => pc.BoardId == boardId && pc.Email1 == e1 && pc.Email2 == e2);
+
+                return Ok(new
+                {
+                    success = true,
+                    boardId = boardId,
+                    privateChat = true,
+                    email1 = e1,
+                    email2 = e2,
+                    chatHistory = privateChat?.ChatHistory ?? "",
+                    updatedAt = privateChat?.UpdatedAt
+                });
             }
 
+            // Group chat
             var board = await _context.ProjectBoards
                 .Include(pb => pb.Project)
                 .Include(pb => pb.Admin)
@@ -3074,9 +3290,7 @@ public class BoardsController : ControllerBase
             if (board == null)
             {
                 if (!disableLogs)
-            {
-                _logger.LogWarning("Board with ID {BoardId} not found", boardId);
-                }
+                    _logger.LogWarning("Board with ID {BoardId} not found", boardId);
                 return NotFound(new
                 {
                     success = false,
@@ -3095,7 +3309,6 @@ public class BoardsController : ControllerBase
         }
         catch (Exception ex)
         {
-            // Always log errors, even if other logs are disabled
             _logger.LogError(ex, "Error getting chat information for board {BoardId}", boardId);
             return StatusCode(500, "An error occurred while retrieving chat information");
         }
@@ -3253,6 +3466,70 @@ public class BoardsController : ControllerBase
     }
 
     /// <summary>
+    /// Get sprint schedule for a board and sprint: DueDate and StartDate.
+    /// StartDate = MergedAt for Sprint 1; otherwise start of sprint window (inclusive: DueDate - (sprint length in days - 1)).
+    /// Route: GET /api/Boards/use/sprint-schedule?boardId=...&amp;sprintNumber=...
+    /// </summary>
+    /// <param name="boardId">The project board ID (Trello board ID)</param>
+    /// <param name="sprintNumber">Sprint number (1, 2, 3, ...)</param>
+    /// <returns>DueDate (from ProjectBoardSprintMerge.DueDate), StartDate (MergedAt for sprint 1, else DueDate - (sprint days - 1) for inclusive window)</returns>
+    [HttpGet("sprint-schedule")]
+    public async Task<ActionResult<object>> GetSprintSchedule([FromQuery] string boardId, [FromQuery] int sprintNumber)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(boardId))
+            {
+                return BadRequest(new { Success = false, Message = "boardId is required." });
+            }
+            if (sprintNumber < 1)
+            {
+                return BadRequest(new { Success = false, Message = "sprintNumber must be at least 1." });
+            }
+
+            var merge = await _context.ProjectBoardSprintMerges
+                .AsNoTracking()
+                .FirstOrDefaultAsync(m => m.ProjectBoardId == boardId && m.SprintNumber == sprintNumber);
+
+            if (merge == null)
+            {
+                _logger.LogWarning("ProjectBoardSprintMerge not found for BoardId {BoardId}, SprintNumber {SprintNumber}", boardId, sprintNumber);
+                return NotFound(new
+                {
+                    Success = false,
+                    Message = $"Sprint schedule not found for board {boardId}, sprint {sprintNumber}."
+                });
+            }
+
+            var dueDate = merge.DueDate;
+            DateTime? startDate;
+            if (sprintNumber == 1)
+            {
+                startDate = merge.MergedAt;
+            }
+            else
+            {
+                var sprintLengthInWeeks = _configuration.GetValue<int>("BusinessLogicConfig:SprintLengthInWeeks", 1);
+                // Sprint window is inclusive (start and due both count): 1 week = 7 days = due - 6 days for start
+                var sprintDays = Math.Max(1, sprintLengthInWeeks * 7);
+                startDate = dueDate.HasValue ? dueDate.Value.AddDays(-(sprintDays - 1)) : (DateTime?)null;
+            }
+
+            return Ok(new
+            {
+                Success = true,
+                DueDate = dueDate,
+                StartDate = startDate
+            });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error getting sprint schedule for BoardId {BoardId}, SprintNumber {SprintNumber}", boardId, sprintNumber);
+            return StatusCode(500, new { Success = false, Message = ex.Message });
+        }
+    }
+
+    /// <summary>
     /// Get comprehensive Trello board statistics
     /// </summary>
     /// <param name="boardId">The Trello board ID to get stats for</param>
@@ -3383,6 +3660,54 @@ public class BoardsController : ControllerBase
                 Success = false,
                 Message = $"Error getting Trello stats: {ex.Message}"
             });
+        }
+    }
+
+    /// <summary>
+    /// Get only the User Stories list and its cards (including checklists and custom fields) for a board.
+    /// Optional: studentId and sprintNumber — when both are provided, returns the single User Story card for that student's role (via ModuleId on the sprint card).
+    /// GET /api/Boards/use/stats/get-user-stories?boardId=...&amp;studentId=...&amp;sprintNumber=...
+    /// </summary>
+    [HttpGet("stats/get-user-stories")]
+    public async Task<ActionResult<object>> GetUserStoriesList([FromQuery] string boardId, [FromQuery] int? studentId, [FromQuery] int? sprintNumber)
+    {
+        if (string.IsNullOrWhiteSpace(boardId))
+            return BadRequest(new { Success = false, Message = "boardId is required." });
+
+        try
+        {
+            if (studentId.HasValue && sprintNumber.HasValue)
+            {
+                var student = await _context.Students
+                    .Include(s => s.StudentRoles)
+                    .ThenInclude(sr => sr.Role)
+                    .FirstOrDefaultAsync(s => s.Id == studentId.Value);
+                if (student == null)
+                    return NotFound(new { Success = false, Message = "Student not found." });
+                var roleName = student.StudentRoles?.FirstOrDefault(sr => sr.IsActive)?.Role?.Name
+                    ?? student.StudentRoles?.FirstOrDefault()?.Role?.Name
+                    ?? "Team Member";
+                // Treat Fullstack / Full Stack Developer as Backend Developer for sprint card (label) lookup
+                if (string.Equals(roleName, "Fullstack Developer", StringComparison.OrdinalIgnoreCase) || string.Equals(roleName, "Full Stack Developer", StringComparison.OrdinalIgnoreCase))
+                    roleName = "Backend Developer";
+                var moduleId = await _trelloService.GetModuleIdFromSprintCardAsync(boardId.Trim(), sprintNumber.Value, roleName);
+                if (string.IsNullOrWhiteSpace(moduleId))
+                    return NotFound(new { Success = false, Message = "No ModuleId on sprint card for this role." });
+                var singleResult = await _trelloService.GetUserStoryCardByModuleIdAsync(boardId.Trim(), moduleId);
+                if (singleResult == null)
+                    return StatusCode(500, new { Success = false, Message = "Failed to get User Story by ModuleId." });
+                return Ok(singleResult);
+            }
+
+            var result = await _trelloService.GetUserStoriesListAsync(boardId.Trim());
+            if (result == null)
+                return StatusCode(500, new { Success = false, Message = "Failed to get User Stories list." });
+            return Ok(result);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error getting User Stories list for Board {BoardId}", boardId);
+            return StatusCode(500, new { Success = false, Message = ex.Message });
         }
     }
 
@@ -7168,19 +7493,33 @@ INSERT INTO ""TestProjects"" (""Name"") VALUES
             var mentorApiBaseUrl = _configuration["ApiBaseUrl"];
             var newConfigJs = _gitHubService.GenerateConfigJs(serviceUrl, mentorApiBaseUrl);
             
-            // Update the file in GitHub (config.js is now at root, not in frontend/ subdirectory)
+            // Rich frontend (Vite) has config at public/config.js; vanilla frontend has config.js at root. Try both.
             var success = await _gitHubService.UpdateFileAsync(
-                repoOwner, 
-                repoName, 
-                "config.js", 
-                newConfigJs, 
+                repoOwner,
+                repoName,
+                "public/config.js",
+                newConfigJs,
                 "Update config.js with Railway service URL after deployment",
                 githubAccessToken
             );
-            
+            if (!success)
+            {
+                success = await _gitHubService.UpdateFileAsync(
+                    repoOwner,
+                    repoName,
+                    "config.js",
+                    newConfigJs,
+                    "Update config.js with Railway service URL after deployment",
+                    githubAccessToken
+                );
+            }
             if (success)
             {
                 _logger.LogInformation("[FRONTEND] Updated config.js with service URL");
+            }
+            else
+            {
+                _logger.LogWarning("[FRONTEND] Could not update config.js (tried public/config.js and config.js)");
             }
         }
         catch (Exception ex)
@@ -7295,5 +7634,7 @@ public class AddChatMessageRequest
 {
     public string BoardId { get; set; } = string.Empty;
     public string Email { get; set; } = string.Empty;
+    /// <summary>Optional. When set, message is added to private chat between Email and Email2 (pair normalized alphabetically).</summary>
+    public string? Email2 { get; set; }
     public string Text { get; set; } = string.Empty;
 }

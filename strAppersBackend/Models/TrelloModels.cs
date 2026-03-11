@@ -35,6 +35,18 @@ namespace strAppersBackend.Models
         /// Number of "system" sprints to create with full content. Board gets Sprint 1..VisibleSprints (system), Sprint (VisibleSprints+1) (empty), and Bugs. Default 2 = Sprint1, Sprint2 (system), Sprint3 (empty), Bugs.
         /// </summary>
         public int VisibleSprints { get; set; } = 2;
+        /// <summary>
+        /// "Merge" (default): use System Board and merge/override sprints. "Add": no System Board; create only VisibleSprints lists + Bugs at board creation; each time a sprint ends, add one new sprint list.
+        /// </summary>
+        public string MergeType { get; set; } = "Merge";
+        /// <summary>
+        /// First sprint number (1-based) for which to add a "User Story" card in the User Stories list. Default 3.
+        /// </summary>
+        public int UserStoryFirstSprint { get; set; } = 3;
+        /// <summary>
+        /// When true (default), add the "User Stories" list to the board template (Projects.TrelloBoardJson) when using the add-user-story-list utility.
+        /// </summary>
+        public bool UserStoryList { get; set; } = true;
     }
 
     public class TrelloUserRegistrationRequest
@@ -151,6 +163,10 @@ namespace strAppersBackend.Models
         public List<string> Dependencies { get; set; } = new List<string>();
         public bool? Branched { get; set; }
         public List<string> ChecklistItems { get; set; } = new List<string>();
+        /// <summary>Optional checklist name (e.g. "Acceptance Criteria") when different from default "Checklist".</summary>
+        public string? ChecklistName { get; set; }
+        /// <summary>Optional sprint number for user-story cards in the User Stories list (custom field in template).</summary>
+        public int? SprintNumber { get; set; }
     }
 
     public class TrelloProjectCreationResponse

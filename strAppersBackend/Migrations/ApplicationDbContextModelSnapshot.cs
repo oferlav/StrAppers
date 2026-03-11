@@ -1136,6 +1136,11 @@ namespace strAppersBackend.Migrations
                         .HasColumnType("TEXT")
                         .HasColumnName("CustomerPastStory");
 
+                    b.Property<string>("ShortBrief")
+                        .HasMaxLength(1000)
+                        .HasColumnType("character varying(1000)")
+                        .HasColumnName("ShortBrief");
+
                     b.Property<string>("Description")
                         .HasMaxLength(1000)
                         .HasColumnType("character varying(1000)");
@@ -1340,6 +1345,30 @@ namespace strAppersBackend.Migrations
                         });
                 });
 
+            modelBuilder.Entity("strAppersBackend.Models.ProjectInstance", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
+
+                    b.Property<int>("InstanceId")
+                        .HasColumnType("integer");
+
+                    b.Property<int>("ProjectId")
+                        .HasColumnType("integer");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("InstanceId")
+                        .IsUnique();
+
+                    b.HasIndex("ProjectId");
+
+                    b.ToTable("ProjectInstances");
+                });
+
             modelBuilder.Entity("strAppersBackend.Models.ProjectBoard", b =>
                 {
                     b.Property<string>("Id")
@@ -1486,6 +1515,56 @@ namespace strAppersBackend.Migrations
                         .HasColumnType("character varying(1000)")
                         .HasColumnName("YoutubeUrl");
 
+                    b.Property<string>("CollectionJourneyUrl")
+                        .HasMaxLength(1000)
+                        .HasColumnType("character varying(1000)")
+                        .HasColumnName("CollectionJourneyUrl");
+
+                    b.Property<string>("DatabaseSchemaUrl")
+                        .HasMaxLength(1000)
+                        .HasColumnType("character varying(1000)")
+                        .HasColumnName("DatabaseSchemaUrl");
+
+                    b.Property<string>("Document1Url")
+                        .HasMaxLength(1000)
+                        .HasColumnType("character varying(1000)")
+                        .HasColumnName("Document1Url");
+
+                    b.Property<string>("Document2Url")
+                        .HasMaxLength(1000)
+                        .HasColumnType("character varying(1000)")
+                        .HasColumnName("Document2Url");
+
+                    b.Property<string>("Document3Url")
+                        .HasMaxLength(1000)
+                        .HasColumnType("character varying(1000)")
+                        .HasColumnName("Document3Url");
+
+                    b.Property<string>("Document4Url")
+                        .HasMaxLength(1000)
+                        .HasColumnType("character varying(1000)")
+                        .HasColumnName("Document4Url");
+
+                    b.Property<string>("Document1Name")
+                        .HasMaxLength(50)
+                        .HasColumnType("character varying(50)")
+                        .HasColumnName("Document1Name");
+
+                    b.Property<string>("Document2Name")
+                        .HasMaxLength(50)
+                        .HasColumnType("character varying(50)")
+                        .HasColumnName("Document2Name");
+
+                    b.Property<string>("Document3Name")
+                        .HasMaxLength(50)
+                        .HasColumnType("character varying(50)")
+                        .HasColumnName("Document3Name");
+
+                    b.Property<string>("Document4Name")
+                        .HasMaxLength(50)
+                        .HasColumnType("character varying(50)")
+                        .HasColumnName("Document4Name");
+
                     b.HasKey("Id");
 
                     b.HasIndex("AdminId");
@@ -1528,6 +1607,51 @@ namespace strAppersBackend.Migrations
                     b.HasIndex("SprintNumber");
 
                     b.ToTable("ProjectBoardSprintMerge");
+                });
+
+            modelBuilder.Entity("strAppersBackend.Models.PrivateChat", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer")
+                        .HasColumnName("Id");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
+
+                    b.Property<string>("BoardId")
+                        .IsRequired()
+                        .HasMaxLength(50)
+                        .HasColumnType("character varying(50)")
+                        .HasColumnName("BoardId");
+
+                    b.Property<string>("ChatHistory")
+                        .HasColumnType("text")
+                        .HasColumnName("ChatHistory");
+
+                    b.Property<string>("Email1")
+                        .IsRequired()
+                        .HasMaxLength(255)
+                        .HasColumnType("character varying(255)")
+                        .HasColumnName("Email1");
+
+                    b.Property<string>("Email2")
+                        .IsRequired()
+                        .HasMaxLength(255)
+                        .HasColumnType("character varying(255)")
+                        .HasColumnName("Email2");
+
+                    b.Property<DateTime>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("UpdatedAt");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("BoardId");
+
+                    b.HasIndex("BoardId", "Email1", "Email2")
+                        .IsUnique();
+
+                    b.ToTable("PrivateChats");
                 });
 
             modelBuilder.Entity("strAppersBackend.Models.ProjectCriteria", b =>
@@ -2082,6 +2206,9 @@ namespace strAppersBackend.Migrations
                     b.Property<bool>("IsAvailable")
                         .HasColumnType("boolean");
 
+                    b.Property<int?>("InstanceId")
+                        .HasColumnType("integer");
+
                     b.Property<string>("LastName")
                         .IsRequired()
                         .HasMaxLength(100)
@@ -2180,6 +2307,8 @@ namespace strAppersBackend.Migrations
 
                     b.HasIndex("Email")
                         .IsUnique();
+
+                    b.HasIndex("InstanceId");
 
                     b.HasIndex("MajorId");
 
@@ -2735,6 +2864,17 @@ namespace strAppersBackend.Migrations
                     b.Navigation("Organization");
                 });
 
+            modelBuilder.Entity("strAppersBackend.Models.ProjectInstance", b =>
+                {
+                    b.HasOne("strAppersBackend.Models.Project", "Project")
+                        .WithMany()
+                        .HasForeignKey("ProjectId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.Navigation("Project");
+                });
+
             modelBuilder.Entity("strAppersBackend.Models.ProjectBoard", b =>
                 {
                     b.HasOne("strAppersBackend.Models.Student", "Admin")
@@ -2765,6 +2905,17 @@ namespace strAppersBackend.Migrations
                     b.HasOne("strAppersBackend.Models.ProjectBoard", "ProjectBoard")
                         .WithMany("SprintMerges")
                         .HasForeignKey("ProjectBoardId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("ProjectBoard");
+                });
+
+            modelBuilder.Entity("strAppersBackend.Models.PrivateChat", b =>
+                {
+                    b.HasOne("strAppersBackend.Models.ProjectBoard", "ProjectBoard")
+                        .WithMany()
+                        .HasForeignKey("BoardId")
                         .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();
 
@@ -2832,6 +2983,12 @@ namespace strAppersBackend.Migrations
                         .HasForeignKey("BoardId")
                         .OnDelete(DeleteBehavior.SetNull);
 
+                    b.HasOne("strAppersBackend.Models.ProjectInstance", "ProjectInstance")
+                        .WithMany()
+                        .HasForeignKey("InstanceId")
+                        .HasPrincipalKey("InstanceId")
+                        .OnDelete(DeleteBehavior.SetNull);
+
                     b.HasOne("strAppersBackend.Models.Major", "Major")
                         .WithMany("Students")
                         .HasForeignKey("MajorId")
@@ -2886,6 +3043,8 @@ namespace strAppersBackend.Migrations
                     b.Navigation("Project");
 
                     b.Navigation("ProjectBoard");
+
+                    b.Navigation("ProjectInstance");
 
                     b.Navigation("ProjectPriority1Project");
 

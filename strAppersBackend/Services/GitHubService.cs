@@ -24,6 +24,8 @@ public interface IGitHubService
     Task<string?> ExchangeCodeForTokenAsync(string code);
     Task<GitHubUserInfo?> GetGitHubUserInfoAsync(string accessToken);
     Task<CreateRepositoryResponse> CreateRepositoryAsync(CreateRepositoryRequest request);
+    /// <summary>Creates a new repository from a GitHub template repo. Use when GitHub:FrontendTemplateOwner and FrontendTemplateRepo are set. Returns null on failure.</summary>
+    Task<CreateRepositoryResponse?> CreateRepositoryFromTemplateAsync(string templateOwner, string templateRepo, string newRepoName, string? owner, string description, bool isPrivate, List<string> collaborators, string accessToken);
     Task<bool> AddCollaboratorAsync(string owner, string repositoryName, string collaboratorUsername, string accessToken);
     /// <summary>Lists pending repository invitations (admin). Each item has Id and InviteeLogin.</summary>
     Task<List<GitHubRepoInvitation>> ListRepositoryInvitationsAsync(string owner, string repo, string accessToken);
@@ -33,6 +35,8 @@ public interface IGitHubService
     Task<ResendInvitationResult> ResendCollaboratorInvitationAsync(string owner, string repo, string collaboratorUsername, string accessToken);
     Task<bool> CreateInitialCommitAsync(string owner, string repositoryName, string projectTitle, string accessToken, string? databaseConnectionString = null, string? webApiUrl = null, string? swaggerUrl = null, string? programmingLanguage = null);
     Task<bool> CreateFrontendOnlyCommitAsync(string owner, string repositoryName, string projectTitle, string accessToken, string? webApiUrl = null);
+    /// <summary>Creates initial commit with hardcoded rich frontend (React + Vite). Use when GitHub:UseHardcodedFrontendTemplate is true.</summary>
+    Task<bool> CreateRichFrontendOnlyCommitAsync(string owner, string repositoryName, string projectTitle, string accessToken, string? webApiUrl = null);
     Task<bool> CreateBackendOnlyCommitAsync(string owner, string repositoryName, string projectTitle, string accessToken, string programmingLanguage, string? databaseConnectionString = null, string? webApiUrl = null, string? swaggerUrl = null);
     Task<bool> CreateInitialReadmeAsync(string owner, string repositoryName, string projectTitle, string accessToken, bool isFrontend = false, string? webApiUrl = null, string? databaseConnectionString = null, string? swaggerUrl = null);
     /// <summary>Updates backend README.md with full Web API and Swagger URLs (e.g. after Railway domain is created).</summary>
@@ -591,6 +595,104 @@ public class GitHubService : IGitHubService
     }
 
     /// <summary>
+    /// Creates a new repository from a GitHub template repository (POST /repos/{templateOwner}/{templateRepo}/generate).
+    /// Use for frontend repos when GitHub:FrontendTemplateOwner and FrontendTemplateRepo are configured.
+    /// </summary>
+    public async Task<CreateRepositoryResponse?> CreateRepositoryFromTemplateAsync(string templateOwner, string templateRepo, string newRepoName, string? owner, string description, bool isPrivate, List<string> collaborators, string accessToken)
+    {
+        try
+        {
+            _logger.LogInformation("Creating repository from template: {TemplateOwner}/{TemplateRepo} -> {NewRepoName}", templateOwner, templateRepo, newRepoName);
+
+            var organizationName = owner ?? _configuration["GitHub:Organization"];
+            if (string.IsNullOrWhiteSpace(organizationName))
+            {
+                var userInfo = await GetGitHubUserInfoAsync(accessToken);
+                if (userInfo == null)
+                {
+                    _logger.LogError("Cannot determine repository owner: no GitHub:Organization and failed to get current user");
+                    return null;
+                }
+                organizationName = userInfo.Login;
+            }
+
+            var payload = new
+            {
+                owner = organizationName,
+                name = newRepoName,
+                description = description ?? "",
+                @private = isPrivate
+            };
+            var jsonContent = JsonSerializer.Serialize(payload);
+            var content = new StringContent(jsonContent, System.Text.Encoding.UTF8, "application/json");
+
+            var request = new HttpRequestMessage(HttpMethod.Post,
+                $"{GitHubApiBaseUrl}/repos/{templateOwner}/{templateRepo}/generate");
+            request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", accessToken);
+            request.Headers.TryAddWithoutValidation("Accept", "application/vnd.github+json");
+            request.Content = content;
+
+            var httpResponse = await _httpClient.SendAsync(request);
+            var responseContent = await httpResponse.Content.ReadAsStringAsync();
+
+            if (!httpResponse.IsSuccessStatusCode)
+            {
+                _logger.LogError("Template generate failed: {StatusCode} - {Response}", httpResponse.StatusCode, responseContent);
+                return null;
+            }
+
+            var repository = JsonSerializer.Deserialize<GitHubRepository>(responseContent, new JsonSerializerOptions
+            {
+                PropertyNameCaseInsensitive = true
+            });
+            if (repository == null)
+            {
+                _logger.LogError("Failed to deserialize template-generated repository");
+                return null;
+            }
+
+            string repositoryOwner = organizationName;
+            if (!string.IsNullOrEmpty(repository.FullName) && repository.FullName.Contains('/'))
+                repositoryOwner = repository.FullName.Split('/')[0];
+
+            var response = new CreateRepositoryResponse
+            {
+                RepositoryUrl = repository.HtmlUrl,
+                RepositoryName = repository.Name,
+                Success = true,
+                InitialCommitCreated = false,
+                GitHubPagesEnabled = false,
+                GitHubPagesUrl = GetGitHubPagesUrl(repositoryOwner, repository.Name)
+            };
+
+            foreach (var collaborator in collaborators ?? new List<string>())
+            {
+                try
+                {
+                    var added = await AddCollaboratorAsync(repositoryOwner, repository.Name, collaborator, accessToken);
+                    if (added)
+                        response.AddedCollaborators.Add(collaborator);
+                    else
+                        response.FailedCollaborators.Add(collaborator);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "Error adding collaborator {Collaborator}", collaborator);
+                    response.FailedCollaborators.Add(collaborator);
+                }
+            }
+
+            _logger.LogInformation("Successfully created repository from template: {RepositoryUrl}", response.RepositoryUrl);
+            return response;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error creating repository from template: {Message}", ex.Message);
+            return null;
+        }
+    }
+
+    /// <summary>
     /// Adds a collaborator to a GitHub repository
     /// </summary>
     public async Task<bool> AddCollaboratorAsync(string owner, string repositoryName, string collaboratorUsername, string accessToken)
@@ -1128,6 +1230,75 @@ public class GitHubService : IGitHubService
     }
 
     /// <summary>
+    /// Creates initial commit with hardcoded rich frontend (React + Vite). Used when GitHub:UseHardcodedFrontendTemplate is true.
+    /// </summary>
+    public async Task<bool> CreateRichFrontendOnlyCommitAsync(string owner, string repositoryName, string projectTitle, string accessToken, string? webApiUrl = null)
+    {
+        try
+        {
+            _logger.LogInformation("[FRONTEND] Creating rich frontend (React+Vite) commit for repository {Owner}/{Repository}", owner, repositoryName);
+            var pagesUrl = GetGitHubPagesUrl(owner, repositoryName);
+            var fileContents = GenerateRichFrontendFiles(projectTitle, pagesUrl, webApiUrl, repositoryName);
+            var branchInfo = await GetDefaultBranchAsync(owner, repositoryName, accessToken);
+            if (branchInfo == null)
+            {
+                _logger.LogError("[FRONTEND] Failed to get default branch information");
+                return false;
+            }
+            // Preserve existing index.html from repo if present (avoid overwriting template/custom version)
+            var branchName = branchInfo.BranchName ?? "main";
+            _logger.LogInformation("[FRONTEND] Checking for existing index.html on branch {Branch} to preserve (avoid overwrite)", branchName);
+            var existingIndexHtml = await GetFileContentAsync(owner, repositoryName, "index.html", accessToken, branchName);
+            if (string.IsNullOrWhiteSpace(existingIndexHtml))
+                existingIndexHtml = await GetFileContentAsync(owner, repositoryName, "public/index.html", accessToken, branchName);
+            if (string.IsNullOrWhiteSpace(existingIndexHtml))
+                existingIndexHtml = await GetFileContentAsync(owner, repositoryName, "frontend/index.html", accessToken, branchName);
+            if (!string.IsNullOrWhiteSpace(existingIndexHtml))
+            {
+                fileContents["index.html"] = existingIndexHtml;
+                _logger.LogInformation("[FRONTEND] Preserving existing index.html from repository (latest GitHub version), length={Length}", existingIndexHtml.Length);
+            }
+            else
+                _logger.LogInformation("[FRONTEND] No existing index.html found in repo (root, public/, or frontend/) - using generated index.html");
+            var treeItems = new List<object>();
+            foreach (var kv in fileContents)
+            {
+                var path = kv.Key;
+                var content = kv.Value;
+                var sha = await CreateBlobAsync(owner, repositoryName, content, accessToken);
+                if (string.IsNullOrEmpty(sha))
+                {
+                    _logger.LogError("[FRONTEND] Failed to create blob for {Path}", path);
+                    return false;
+                }
+                treeItems.Add(new { path, mode = "100644", type = "blob", sha });
+            }
+            var tree = await CreateTreeAsync(owner, repositoryName, branchInfo.TreeSha, treeItems.ToArray(), accessToken);
+            if (string.IsNullOrEmpty(tree))
+            {
+                _logger.LogWarning("[FRONTEND] Git Trees API failed, falling back to Contents API");
+                return await CreateFilesUsingContentsApiAsync(owner, repositoryName, fileContents, accessToken, null);
+            }
+            var commitMessage = "Initial commit: Add React + Vite frontend";
+            var commit = await CreateCommitAsync(owner, repositoryName, tree, branchInfo.CommitSha, commitMessage, accessToken);
+            if (string.IsNullOrEmpty(commit))
+            {
+                _logger.LogError("[FRONTEND] Failed to create commit");
+                return false;
+            }
+            var updated = await UpdateReferenceAsync(owner, repositoryName, branchInfo.BranchName, commit, accessToken);
+            if (updated)
+                _logger.LogInformation("[FRONTEND] ✅ Rich frontend commit created for {Owner}/{Repository} with {Count} files", owner, repositoryName, fileContents.Count);
+            return updated;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "[FRONTEND] Error creating rich frontend commit for {Owner}/{Repository}: {Message}", owner, repositoryName, ex.Message);
+            return false;
+        }
+    }
+
+    /// <summary>
     /// Creates initial commit with backend files only (at root level, no workflows)
     /// </summary>
     public async Task<bool> CreateBackendOnlyCommitAsync(string owner, string repositoryName, string projectTitle, string accessToken, string programmingLanguage, string? databaseConnectionString = null, string? webApiUrl = null, string? swaggerUrl = null)
@@ -1390,8 +1561,7 @@ public class GitHubService : IGitHubService
             
             if (workflowExists)
             {
-                // Try to enable Pages without source - GitHub should detect workflow automatically
-                // Note: GitHub API may still require source, so we'll fall back if this fails
+                _logger.LogInformation("[GithubPages] Attempting to set Pages source to GitHub Actions (POST with no source) for {Owner}/{Repository}", owner, repositoryName);
                 pagesPayload = new { };
             }
             else
@@ -1416,11 +1586,17 @@ public class GitHubService : IGitHubService
             request.Content = content;
 
             var response = await _httpClient.SendAsync(request);
-            
+            var responseBody = await response.Content.ReadAsStringAsync();
+
+            if (workflowExists && response.IsSuccessStatusCode)
+            {
+                _logger.LogInformation("[GithubPages] GitHub API accepted: Pages source set to GitHub Actions for {Owner}/{Repository}. Status={StatusCode}", owner, repositoryName, response.StatusCode);
+            }
+
             // If we tried without source (workflow exists) and got 422 (Unprocessable Entity), fall back to enabling with source
             if (workflowExists && response.StatusCode == System.Net.HttpStatusCode.UnprocessableEntity)
             {
-                _logger.LogInformation("Enabling Pages without source failed (422). Falling back to legacy mode with source branch/path.");
+                _logger.LogWarning("[GithubPages] GitHub API rejected GitHub Actions source (422). Response: {ResponseBody}. Falling back to branch source.", responseBody ?? "(empty)");
                 pagesPayload = new
                 {
                     source = new
@@ -1439,61 +1615,50 @@ public class GitHubService : IGitHubService
                 fallbackRequest.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", accessToken);
                 fallbackRequest.Content = content;
                 response = await _httpClient.SendAsync(fallbackRequest);
+                responseBody = await response.Content.ReadAsStringAsync();
+                if (response.IsSuccessStatusCode)
+                    _logger.LogInformation("[GithubPages] Pages enabled with branch source (fallback) for {Owner}/{Repository}.", owner, repositoryName);
             }
 
             if (response.IsSuccessStatusCode || response.StatusCode == System.Net.HttpStatusCode.Conflict)
             {
-                // 201 Created means success, 409 Conflict means pages already enabled
-                _logger.LogInformation("GitHub Pages enabled successfully for {Owner}/{Repository}. " +
-                    "If a workflow file exists, GitHub will use workflow-based deployment.", 
-                    owner, repositoryName);
-                
-                // If we got 409, Pages is already enabled - try to update it to workflow-based deployment
-                if (response.StatusCode == System.Net.HttpStatusCode.Conflict)
+                _logger.LogInformation("GitHub Pages enabled successfully for {Owner}/{Repository}. Status={StatusCode}.", owner, repositoryName, response.StatusCode);
+
+                // Try to set build_type to "workflow" (GitHub Actions) via PUT so Pages uses the workflow artifact instead of branch
+                if (workflowExists)
                 {
-                    _logger.LogInformation("GitHub Pages was already enabled (409 Conflict) for {Owner}/{Repository}. " +
-                        "Attempting to update to workflow-based deployment if workflow file exists.", 
-                        owner, repositoryName);
-                    
-                    // Try to update Pages configuration to remove source (this allows workflow-based deployment)
-                    // GitHub will automatically detect and use the workflow if source is not set
                     try
                     {
-                        var updatePayload = new
+                        _logger.LogInformation("[GithubPages] Attempting to set Pages to GitHub Actions (PUT build_type=workflow) for {Owner}/{Repository}.", owner, repositoryName);
+                        var putPayload = new
                         {
-                            // Empty payload - GitHub will detect workflow and use workflow-based deployment
-                            // Note: GitHub API may not support this, but we try
+                            build_type = "workflow",
+                            source = new { branch = "main", path = "/" }
                         };
-                        
-                        var updateJson = JsonSerializer.Serialize(updatePayload);
-                        var updateContent = new StringContent(updateJson, System.Text.Encoding.UTF8, "application/json");
-                        
-                        var updateRequest = new HttpRequestMessage(HttpMethod.Put, 
+                        var putJson = JsonSerializer.Serialize(putPayload);
+                        var putContent = new StringContent(putJson, System.Text.Encoding.UTF8, "application/json");
+                        var putRequest = new HttpRequestMessage(HttpMethod.Put,
                             $"{GitHubApiBaseUrl}/repos/{owner}/{repositoryName}/pages");
-                        updateRequest.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", accessToken);
-                        updateRequest.Content = updateContent;
-                        
-                        var updateResponse = await _httpClient.SendAsync(updateRequest);
-                        if (updateResponse.IsSuccessStatusCode)
+                        putRequest.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", accessToken);
+                        putRequest.Content = putContent;
+
+                        var putResponse = await _httpClient.SendAsync(putRequest);
+                        var putResponseBody = await putResponse.Content.ReadAsStringAsync();
+                        if (putResponse.IsSuccessStatusCode)
                         {
-                            _logger.LogInformation("Successfully updated GitHub Pages configuration for {Owner}/{Repository} to workflow-based deployment.", 
-                                owner, repositoryName);
+                            _logger.LogInformation("[GithubPages] PUT succeeded: Pages build_type set to workflow (GitHub Actions) for {Owner}/{Repository}. Status={StatusCode}.", owner, repositoryName, putResponse.StatusCode);
                         }
                         else
                         {
-                            _logger.LogWarning("Could not update GitHub Pages configuration (Status: {StatusCode}). " +
-                                "Pages may remain in legacy mode. GitHub should auto-detect workflow on next deployment.", 
-                                updateResponse.StatusCode);
+                            _logger.LogWarning("[GithubPages] PUT failed to set GitHub Actions. Status={StatusCode}, Response: {Response}. Pages will use branch source.", putResponse.StatusCode, putResponseBody ?? "(empty)");
                         }
                     }
                     catch (Exception ex)
                     {
-                        _logger.LogWarning(ex, "Failed to update GitHub Pages configuration for {Owner}/{Repository}. " +
-                            "Pages may remain in legacy mode, but GitHub should auto-detect workflow on next deployment.", 
-                            owner, repositoryName);
+                        _logger.LogWarning(ex, "[GithubPages] Exception while setting Pages to GitHub Actions for {Owner}/{Repository}. Pages will use branch source.", owner, repositoryName);
                     }
                 }
-                
+
                 return true;
             }
 
@@ -9718,6 +9883,186 @@ jobs:
     }
 
     /// <summary>
+    /// Generates file contents for hardcoded rich frontend (React + Vite). Config uses GenerateConfigJs.
+    /// </summary>
+    private Dictionary<string, string> GenerateRichFrontendFiles(string projectTitle, string pagesUrl, string? webApiUrl, string repositoryName)
+    {
+        var mentorApiBaseUrl = _configuration["ApiBaseUrl"];
+        _logger.LogInformation("[FRONTEND] Binding API_URL for config.js: {ApiUrl} (empty={Empty})", 
+            string.IsNullOrEmpty(webApiUrl) ? "(null or empty)" : webApiUrl, string.IsNullOrEmpty(webApiUrl));
+        var configJsContent = GenerateConfigJs(webApiUrl, mentorApiBaseUrl);
+        var basePath = "/" + repositoryName + "/";
+        var files = new Dictionary<string, string>();
+
+        files["package.json"] = @"{
+  ""name"": ""frontend"",
+  ""private"": true,
+  ""version"": ""0.0.0"",
+  ""type"": ""module"",
+  ""scripts"": {
+    ""start"": ""vite"",
+    ""dev"": ""vite"",
+    ""build"": ""vite build"",
+    ""preview"": ""vite preview"",
+    ""lint"": ""eslint . --ext js,jsx --report-unused-disable-directives --max-warnings 0"",
+    ""format"": ""prettier --write .""
+  },
+  ""dependencies"": {
+    ""react"": ""^18.2.0"",
+    ""react-dom"": ""^18.2.0""
+  },
+  ""devDependencies"": {
+    ""@vitejs/plugin-react"": ""^4.2.1"",
+    ""eslint"": ""^8.57.0"",
+    ""eslint-plugin-react"": ""^7.34.0"",
+    ""eslint-plugin-react-hooks"": ""^4.6.0"",
+    ""eslint-plugin-react-refresh"": ""^0.4.5"",
+    ""prettier"": ""^3.2.0"",
+    ""vite"": ""^5.0.0""
+  }
+}
+";
+
+        files["vite.config.js"] = $@"import {{ defineConfig }} from 'vite'
+import react from '@vitejs/plugin-react'
+
+export default defineConfig({{
+  plugins: [react()],
+  base: '{basePath.Replace("'", "\\'")}',
+}})
+";
+
+        files[".eslintrc.cjs"] = @"module.exports = {
+  root: true,
+  env: { browser: true, es2020: true },
+  extends: [
+    ""eslint:recommended"",
+    ""plugin:react/recommended"",
+    ""plugin:react/jsx-runtime"",
+    ""plugin:react-hooks/recommended"",
+  ],
+  ignorePatterns: [""dist"", ""node_modules"", ""*.cjs""],
+  parserOptions: { ecmaVersion: ""latest"", sourceType: ""module"", ecmaFeatures: { jsx: true } },
+  settings: { react: { version: ""18.2"" } },
+  plugins: [""react-refresh""],
+  rules: {
+    ""react-refresh/only-export-components"": [""warn"", { allowConstantExport: true }],
+    ""react/prop-types"": ""off"",
+  },
+};
+";
+
+        files[".prettierrc"] = @"{
+  ""semi"": true,
+  ""singleQuote"": false,
+  ""tabWidth"": 2,
+  ""trailingComma"": ""es5""
+}
+";
+
+        files[".prettierignore"] = @"dist
+node_modules
+";
+
+        files["index.html"] = GetRichFrontendIndexHtmlTemplate()
+            .Replace("{{PROJECT_TITLE}}", projectTitle)
+            .Replace("{{PAGES_URL}}", pagesUrl);
+        files["public/foundations.css"] = GenerateFoundationsCss();
+        files["public/style.css"] = GenerateStyleCss();
+
+        files["src/main.jsx"] = @"import React from 'react'
+import ReactDOM from 'react-dom/client'
+import App from './App.jsx'
+
+ReactDOM.createRoot(document.getElementById('root')).render(
+  <React.StrictMode>
+    <App />
+  </React.StrictMode>,
+)
+";
+
+        files["src/App.jsx"] = @"import { useState } from 'react'
+
+export default function App() {
+  const [message] = useState(
+    typeof window !== 'undefined' && window.CONFIG?.API_URL
+      ? 'Backend: ' + window.CONFIG.API_URL
+      : 'Loading config...'
+  )
+  return (
+    <div style={{ padding: '2rem', fontFamily: 'sans-serif' }}>
+      <h1>Project Frontend</h1>
+      <p>{message}</p>
+    </div>
+  )
+}
+";
+
+        files["public/config.js"] = configJsContent;
+
+        var readme = $"# {projectTitle} - Frontend\n\n";
+        readme += $"## GitHub Pages\n\n**URL:** {pagesUrl}\n\n";
+        if (!string.IsNullOrWhiteSpace(webApiUrl))
+            readme += $"## Backend API\n\n**API URL:** {webApiUrl}\n\n";
+        readme += "## Stack\n\nReact + Vite. Run `npm install` then `npm run dev` or `npm start`. Use `npm run lint` and `npm run format` for ESLint and Prettier.\n";
+        files["README.md"] = readme;
+
+        files[".gitignore"] = GenerateGitIgnore("nodejs");
+        files[".github/workflows/deploy-frontend.yml"] = GenerateRichFrontendGitHubActionsWorkflow();
+        _logger.LogInformation("[FRONTEND] Deploy workflow generated without npm cache (no lock file in repo) - Pages deploy will succeed in Actions");
+
+        return files;
+    }
+
+    private string GenerateRichFrontendGitHubActionsWorkflow()
+    {
+        return @"name: Deploy Frontend to GitHub Pages
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: ""pages""
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Install and build
+        run: |
+          npm install
+          npm run build
+      - name: Setup Pages
+        uses: actions/configure-pages@v4
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: 'dist'
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
+";
+    }
+
+    /// <summary>
     /// Generates GitHub Actions workflow for deploying backend to Railway
     /// </summary>
     private string GenerateRailwayDeploymentWorkflow(string programmingLanguage)
@@ -9850,7 +10195,8 @@ jobs:
         // Don't use Railway project URLs - they're not valid API endpoints
         var isProjectUrl = !string.IsNullOrEmpty(webApiUrl) && webApiUrl.Contains("railway.app/project/");
         var apiUrl = !string.IsNullOrEmpty(webApiUrl) && !isProjectUrl ? webApiUrl : "";
-        
+        _logger.LogInformation("[FRONTEND] GenerateConfigJs: API_URL={ApiUrl} (input webApiUrl empty={Empty}, isProjectUrl={IsProject})",
+            string.IsNullOrEmpty(apiUrl) ? "(empty)" : apiUrl, string.IsNullOrEmpty(webApiUrl), isProjectUrl);
         // Convert HTTP to HTTPS for Railway URLs (required for Mixed Content security)
         if (!string.IsNullOrEmpty(apiUrl) && apiUrl.StartsWith("http://") && apiUrl.Contains("railway.app"))
         {
@@ -10065,6 +10411,505 @@ button:disabled {
     display: block;
 }
 ";
+    }
+
+    /// <summary>
+    /// Minimal design tokens for the rich frontend landing page (foundations.css).
+    /// </summary>
+    private string GenerateFoundationsCss()
+    {
+        return @"/* Design tokens for landing page */
+:root {
+    --font-family-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+    --font-family-mono: 'Courier New', Consolas, monospace;
+    --font-bold: 700;
+    --font-semibold: 600;
+    --color-primary: #667eea;
+    --color-neutral-100: #f7fafc;
+    --color-neutral-700: #2d3748;
+    --color-surface: #ffffff;
+    --color-surface-muted: #f7fafc;
+    --color-border: #e2e8f0;
+    --color-text-muted: #4a5568;
+    --color-text-subtle: #718096;
+    --gradient-primary: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    --shadow-lg: 0 20px 60px rgba(0, 0, 0, 0.15);
+    --radius-md: 8px;
+    --radius-lg: 12px;
+    --radius-full: 50%;
+    --border-width-medium: 2px;
+    --border-width-accent: 4px;
+    --container-narrow: 800px;
+    --leading-relaxed: 1.75;
+    --space-0: 0;
+    --space-2: 0.125rem;
+    --space-3: 0.25rem;
+    --space-4: 0.5rem;
+    --space-5: 0.75rem;
+    --space-8: 1rem;
+    --space-10: 1.5rem;
+    --space-15: 2rem;
+    --space-20: 3rem;
+    --text-sm: 0.875rem;
+    --text-base: 1rem;
+    --text-lg: 1.125rem;
+    --text-xl: 1.25rem;
+    --text-3xl: 1.875rem;
+    --text-4xl: 2.25rem;
+    --text-5xl: 3rem;
+}
+";
+    }
+
+    /// <summary>
+    /// Returns the rich frontend landing page index.html template (old look with config.js and test backend button).
+    /// Use .Replace("{{PROJECT_TITLE}}", projectTitle).Replace("{{PAGES_URL}}", pagesUrl) when calling.
+    /// </summary>
+    private string GetRichFrontendIndexHtmlTemplate()
+    {
+        return GetRichFrontendIndexHtmlTemplateContent();
+    }
+
+    private string GetRichFrontendIndexHtmlTemplateContent()
+    {
+        // Template: {{PROJECT_TITLE}} and {{PAGES_URL}} are replaced in GenerateRichFrontendFiles
+        var t = @"<!DOCTYPE html>
+<html lang=""en"">
+<head>
+    <meta charset=""UTF-8"">
+    <meta name=""viewport"" content=""width=device-width, initial-scale=1.0"">
+    <title>{{PROJECT_TITLE}} - Project Page</title>
+    <link rel=""stylesheet"" href=""foundations.css"">
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+            padding: var(--space-5);
+            font-family: var(--font-family-sans);
+            background: var(--gradient-primary);
+        }
+        
+        .container {
+            max-width: var(--container-narrow);
+            padding: var(--space-15) var(--space-10);
+            border-radius: var(--radius-lg);
+            background: var(--color-surface);
+            box-shadow: var(--shadow-lg);
+            text-align: center;
+            animation: fadeIn 0.8s ease-in;
+        }
+        
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(var(--space-5)); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        
+        .icon {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            width: var(--space-20);
+            height: var(--space-20);
+            margin: 0 auto var(--space-8);
+            border-radius: var(--radius-full);
+            background: var(--gradient-primary);
+            font-size: var(--text-5xl);
+        }
+        
+        h1 {
+            margin-bottom: var(--space-5);
+            color: var(--color-neutral-700);
+            font-size: var(--text-4xl);
+            font-weight: var(--font-bold);
+        }
+        
+        .subtitle {
+            color: var(--color-primary);
+            font-size: var(--text-xl);
+            margin-bottom: var(--space-8);
+            font-weight: var(--font-semibold);
+        }
+        
+        p {
+            color: var(--color-text-muted);
+            line-height: var(--leading-relaxed);
+            margin-bottom: var(--space-5);
+            font-size: var(--text-lg);
+        }
+        
+        .highlight {
+            background: var(--gradient-primary);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+            font-weight: var(--font-semibold);
+        }
+        
+        .info-box {
+            margin: var(--space-8) 0;
+            padding: var(--space-5);
+            border-left: var(--border-width-accent) solid var(--color-primary);
+            border-radius: var(--radius-md);
+            background: var(--color-surface-muted);
+            text-align: left;
+        }
+        
+        .info-box h3 {
+            margin-bottom: var(--space-4);
+            color: var(--color-neutral-700);
+            font-size: var(--text-xl);
+        }
+        
+        .info-box ul {
+            padding-left: var(--space-0);
+            list-style: none;
+        }
+        
+        .info-box li {
+            position: relative;
+            margin-bottom: var(--space-2);
+            padding-left: var(--space-8);
+            color: var(--color-text-muted);
+        }
+        
+        .info-box li:before {
+            content: ""✓"";
+            position: absolute;
+            left: 0;
+            color: var(--color-primary);
+            font-size: var(--text-xl);
+            font-weight: var(--font-bold);
+        }
+        
+        .footer {
+            margin-top: var(--space-10);
+            padding-top: var(--space-8);
+            border-top: var(--border-width-medium) solid var(--color-border);
+            color: var(--color-text-subtle);
+            font-size: var(--text-sm);
+        }
+        
+        .url-box {
+            display: inline-block;
+            margin: var(--space-2) 0;
+            padding: var(--space-3) var(--space-5);
+            border-radius: var(--radius-md);
+            background: var(--color-neutral-100);
+            font-family: var(--font-family-mono);
+            font-weight: var(--font-semibold);
+            color: var(--color-primary);
+            word-break: break-all;
+        }
+        
+        @media (max-width: 600px) {
+            .container {
+                padding: var(--space-10) var(--space-5);
+            }
+            
+            h1 {
+                font-size: var(--text-3xl);
+            }
+            
+            .subtitle {
+                font-size: var(--text-base);
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class=""container"">
+        <div class=""icon"">🚀</div>
+        
+        <h1>{{PROJECT_TITLE}}</h1>
+        <p class=""subtitle"">Your Project Landing Page</p>
+        
+        <p>
+            Welcome to your project's <span class=""highlight"">default landing page</span>! 
+            This is the beginning of something amazing.
+        </p>
+        
+        <p>
+            This page is hosted on <span class=""highlight"">GitHub Pages</span> and is ready to showcase 
+            your project to the world. As you develop your prototype, this page will evolve into 
+            your final product presentation.
+        </p>
+        
+        <div class=""info-box"">
+            <h3>📚 About This Repository</h3>
+            <ul>
+                <li>Use this repository to collaborate with your team</li>
+                <li>Commit your code and track changes using Git</li>
+                <li>Deploy your final prototype automatically with GitHub Pages</li>
+                <li>Share your progress with stakeholders</li>
+            </ul>
+        </div>
+        
+        <p>
+            Your project is accessible at:<br>
+            <span class=""url-box"">{{PAGES_URL}}</span>
+        </p>
+        
+        <div class=""info-box"">
+            <h3>🎯 Next Steps</h3>
+            <ul>
+                <li>Clone this repository to your local machine</li>
+                <li>Start building your prototype</li>
+                <li>Push your changes to see them live instantly</li>
+                <li>Replace this page with your amazing end product!</li>
+            </ul>
+        </div>
+
+        <button id=""testButton"" onclick=""testBackend()"">Click Me</button>
+        <div id=""response""></div>
+        
+        <div class=""footer"">
+            <p>
+                This page will be automatically replaced when you push your project files.<br>
+                <strong>Happy coding! 🎉</strong>
+            </p>
+        </div>
+    </div>
+    <script>
+        // Load config.js and ensure it's available
+        let configLoaded = false;
+        const configScript = document.createElement('script');
+        configScript.src = 'config.js';
+        configScript.onload = function() {
+            configLoaded = true;
+            console.log('✅ config.js loaded successfully');
+            console.log('📋 CONFIG:', typeof CONFIG !== 'undefined' ? CONFIG : 'CONFIG not defined');
+            console.log('📋 window.CONFIG:', typeof window !== 'undefined' && window.CONFIG ? window.CONFIG : 'window.CONFIG not defined');
+        };
+        configScript.onerror = function() {
+            console.error('❌ Failed to load config.js');
+            configLoaded = false;
+        };
+        document.head.appendChild(configScript);
+    </script>
+    <script>
+        // Debug: Log config on load
+        window.addEventListener('DOMContentLoaded', function() {
+            console.log('📋 Config loaded:', typeof CONFIG !== 'undefined' ? CONFIG : 'CONFIG not defined');
+            console.log('📋 window.CONFIG:', typeof window !== 'undefined' && window.CONFIG ? window.CONFIG : 'window.CONFIG not defined');
+            console.log('📋 API_URL from config:', typeof CONFIG !== 'undefined' ? CONFIG?.API_URL : (window.CONFIG?.API_URL || 'not found'));
+        });
+        
+        async function testBackend() {
+            const button = document.getElementById('testButton');
+            const responseDiv = document.getElementById('response');
+            
+            button.disabled = true;
+            button.textContent = 'Loading...';
+            responseDiv.className = '';
+            responseDiv.textContent = '';
+            
+            try {
+                // Wait a moment for config.js to load if it hasn't yet
+                if (!configLoaded) {
+                    await new Promise(resolve => setTimeout(resolve, 100));
+                }
+                
+                // Try multiple ways to access CONFIG (handle scope issues)
+                let config = typeof CONFIG !== 'undefined' ? CONFIG : (typeof window !== 'undefined' && window.CONFIG ? window.CONFIG : null);
+                let apiUrl = config?.API_URL || '';
+                
+                console.log('🔍 CONFIG object:', config);
+                console.log('🔍 Original API_URL from config:', apiUrl);
+                console.log('🔍 typeof CONFIG:', typeof CONFIG);
+                console.log('🔍 window.CONFIG:', typeof window !== 'undefined' ? window.CONFIG : 'window not available');
+                console.log('🔍 configLoaded flag:', configLoaded);
+                
+                if (!apiUrl) {
+                    const errorMsg = 'API URL not configured in config.js. ' +
+                        'CONFIG object: ' + JSON.stringify(config) + 
+                        ', window.CONFIG: ' + JSON.stringify(typeof window !== 'undefined' ? window.CONFIG : 'N/A') +
+                        ', configLoaded: ' + configLoaded;
+                    throw new Error(errorMsg);
+                }
+                
+                // Ensure HTTPS for Railway domains (fix Mixed Content errors)
+                if (apiUrl.includes('railway.app')) {
+                    if (apiUrl.startsWith('http://')) {
+                        apiUrl = apiUrl.replace('http://', 'https://');
+                        console.warn('⚠️ Converted HTTP to HTTPS for Railway domain');
+                    }
+                    if (!apiUrl.startsWith('https://')) {
+                        apiUrl = 'https://' + apiUrl.replace(/^https?:\/\//, '');
+                        console.warn('⚠️ Added HTTPS protocol to Railway domain');
+                    }
+                }
+                
+                // Remove trailing slash from base URL if present
+                apiUrl = apiUrl.replace(/\/$/, '');
+                console.log('✅ Final API_URL (after normalization):', apiUrl);
+                
+                // Add trailing slash to prevent Railway redirect (Railway redirects /api/test to /api/test/)
+                // This prevents Railway from redirecting HTTPS to HTTP
+                const fullUrl = apiUrl + '/api/test/';
+                console.log('🌐 Attempting to fetch:', fullUrl);
+                console.log('🌐 Full URL type check:', typeof fullUrl, 'Starts with https?:', fullUrl.startsWith('https://'));
+                
+                // Check if URL is a Railway project URL (not a service URL)
+                if (apiUrl.includes('railway.app/project/')) {
+                    responseDiv.className = 'error';
+                    responseDiv.innerHTML = `
+                        <strong>❌ Configuration Error:</strong><br>
+                        <strong>The API URL is pointing to a Railway project page, not a service URL.</strong><br><br>
+                        <strong>Current URL:</strong> <code>${apiUrl}</code><br><br>
+                        <strong>Issue:</strong><br>
+                        Railway project pages (<code>railway.app/project/...</code>) are not API endpoints.<br>
+                        Your backend service needs to be deployed first to get a real API URL.<br><br>
+                        <strong>Solution:</strong><br>
+                        1. Deploy your backend code to Railway (push to GitHub and connect to Railway)<br>
+                        2. After deployment, Railway will generate a service URL like: <code>https://your-service-name.railway.app</code><br>
+                        3. Update <code>config.js</code> with the actual service URL<br>
+                        4. The service URL can be found in Railway dashboard: Service → Settings → Domains<br><br>
+                        <strong>Note:</strong> The backend code already includes CORS configuration, so once deployed with the correct URL, it will work.
+                    `;
+                    console.error('Invalid API URL (Railway project URL):', apiUrl);
+                    return;
+                }
+                
+                // Final validation - ensure URL is definitely HTTPS
+                if (!fullUrl.startsWith('https://')) {
+                    throw new Error('❌ CRITICAL: URL is not HTTPS! URL: ' + fullUrl);
+                }
+                
+                let response;
+                try {
+                    // Use fetch with explicit options
+                    console.log('📡 Making fetch request with explicit options...');
+                    console.log('📡 Full URL before fetch (stringified):', String(fullUrl));
+                    console.log('📡 Full URL type:', typeof fullUrl);
+                    console.log('📡 Full URL startsWith https?:', String(fullUrl).startsWith('https://'));
+                    
+                    const controller = new AbortController();
+                    const timeoutId = setTimeout(() => controller.abort(), 10000); // 10 second timeout
+                    
+                    // Create URL object to ensure it's valid and has correct protocol
+                    const urlObj = new URL(fullUrl);
+                    console.log('📡 URL object protocol:', urlObj.protocol);
+                    console.log('📡 URL object href:', urlObj.href);
+                    
+                    // Force HTTPS protocol
+                    if (urlObj.protocol !== 'https:') {
+                        urlObj.protocol = 'https:';
+                        console.warn('⚠️ FORCED protocol to HTTPS:', urlObj.href);
+                    }
+                    
+                    const finalFetchUrl = urlObj.href;
+                    console.log('📡 Final fetch URL:', finalFetchUrl);
+                    
+                    response = await fetch(finalFetchUrl, {
+                        method: 'GET',
+                        mode: 'cors',
+                        credentials: 'omit',
+                        redirect: 'error', // Fail on redirect to catch HTTPS->HTTP redirects
+                        signal: controller.signal,
+                        headers: {
+                            'Accept': 'application/json'
+                        }
+                    });
+                    
+                    clearTimeout(timeoutId);
+                    console.log('✅ Fetch completed, status:', response.status, 'Final URL:', response.url);
+                } catch (fetchError) {
+                    // Network error - check if it's a CORS error or connection error
+                    const isCorsError = fetchError.message.includes('CORS') || 
+                                       (fetchError.name === 'TypeError' && fetchError.message.includes('Failed to fetch'));
+                    
+                    let errorDetails = '';
+                    if (isCorsError) {
+                        errorDetails = `
+                            <strong>❌ CORS Error:</strong><br>
+                            <strong>The API server is not allowing requests from this origin.</strong><br><br>
+                            <strong>Details:</strong><br>
+                            • URL: <code>${fullUrl}</code><br>
+                            • Origin: <code>${window.location.origin}</code><br>
+                            • Error: ${fetchError.message}<br><br>
+                            <strong>Possible causes:</strong><br>
+                            • Backend CORS is not configured correctly<br>
+                            • Service is not deployed or offline<br>
+                            • Wrong API URL (might be pointing to project page instead of service)<br><br>
+                            <strong>Note:</strong> If your backend is deployed, make sure CORS allows your GitHub Pages domain.<br>
+                        `;
+                    } else {
+                        errorDetails = `
+                            <strong>❌ Connection Error:</strong><br>
+                            <strong>Cannot connect to the API server</strong><br><br>
+                            <strong>Details:</strong><br>
+                            • URL: <code>${fullUrl}</code><br>
+                            • Error: ${fetchError.message}<br><br>
+                            <strong>Possible causes:</strong><br>
+                            • Railway service is not deployed yet<br>
+                            • Service is offline or crashed<br>
+                            • Network connectivity problem<br>
+                            • Wrong API URL<br><br>
+                            <strong>Next steps:</strong><br>
+                            1. Check Railway dashboard - is the service deployed?<br>
+                            2. Check service logs in Railway<br>
+                            3. Verify the API URL in config.js is the service URL (not project URL)<br>
+                            4. Service URL should be like: <code>https://your-service-name.railway.app</code><br>
+                        `;
+                    }
+                    
+                    responseDiv.className = 'error';
+                    responseDiv.innerHTML = errorDetails;
+                    console.error('Fetch error:', fetchError);
+                    return;
+                }
+                
+                console.log('Response status:', response.status, response.statusText);
+                
+                if (response.ok) {
+                    const data = await response.json();
+                    responseDiv.className = 'success';
+                    responseDiv.innerHTML = '<strong>✅ Success!</strong><br>Backend API is working. Received ' + data.length + ' test projects.';
+                } else {
+                    // HTTP error response
+                    let errorText = '';
+                    try {
+                        errorText = await response.text();
+                    } catch (e) {
+                        errorText = 'Could not read error response';
+                    }
+                    
+                    responseDiv.className = 'error';
+                    responseDiv.innerHTML = `
+                        <strong>❌ API Error:</strong><br>
+                        <strong>HTTP Status: ${response.status} ${response.statusText}</strong><br><br>
+                        <strong>URL:</strong> <code>${fullUrl}</code><br>
+                        <strong>Response:</strong> <pre>${errorText.substring(0, 200)}</pre>
+                    `;
+                    console.error('API error:', response.status, errorText);
+                }
+            } catch (error) {
+                responseDiv.className = 'error';
+                responseDiv.innerHTML = `
+                    <strong>❌ Unexpected Error:</strong><br>
+                    <strong>${error.name || 'Error'}:</strong> ${error.message}<br><br>
+                    <strong>Stack trace:</strong><br>
+                    <pre style=""font-size: 10px; max-height: 200px; overflow: auto;"">${error.stack || 'No stack trace available'}</pre>
+                `;
+                console.error('Unexpected error:', error);
+            } finally {
+                button.disabled = false;
+                button.textContent = 'Click Me';
+            }
+        }
+    </script>
+    <link rel=""stylesheet"" href=""style.css"">
+</body>
+</html>";
+        return t;
     }
 
     private string GenerateGitIgnore(string programmingLanguage)

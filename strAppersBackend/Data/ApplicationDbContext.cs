@@ -12,6 +12,7 @@ public class ApplicationDbContext : DbContext
     public DbSet<Student> Students { get; set; }
     public DbSet<Organization> Organizations { get; set; }
     public DbSet<Project> Projects { get; set; }
+    public DbSet<ProjectInstance> ProjectInstances { get; set; }
     public DbSet<ProjectStatus> ProjectStatuses { get; set; }
     public DbSet<ProjectCriteria> ProjectCriterias { get; set; }
     public DbSet<Role> Roles { get; set; }
@@ -44,6 +45,7 @@ public class ApplicationDbContext : DbContext
     public DbSet<StakeholderCategory> StakeholderCategories { get; set; }
     public DbSet<StakeholderStatus> StakeholderStatuses { get; set; }
     public DbSet<Stakeholder> Stakeholders { get; set; }
+    public DbSet<PrivateChat> PrivateChats { get; set; }
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -215,6 +217,13 @@ public class ApplicationDbContext : DbContext
                   .HasForeignKey(e => e.BoardId)
                   .OnDelete(DeleteBehavior.SetNull);
 
+            // Foreign key relationship to ProjectInstance (Student.InstanceId -> ProjectInstances.InstanceId)
+            entity.HasOne(e => e.ProjectInstance)
+                  .WithMany()
+                  .HasForeignKey(e => e.InstanceId)
+                  .HasPrincipalKey(pi => pi.InstanceId)
+                  .OnDelete(DeleteBehavior.SetNull);
+
             // Foreign key relationship to ProgrammingLanguage
             entity.HasOne(e => e.ProgrammingLanguage)
                   .WithMany(pl => pl.Students)
@@ -247,6 +256,7 @@ public class ApplicationDbContext : DbContext
             entity.Property(e => e.CriteriaIds).HasColumnName("CriteriaIds").HasMaxLength(500);
             entity.Property(e => e.TrelloBoardJson).HasColumnName("TrelloBoardJson").HasColumnType("TEXT");
             entity.Property(e => e.CustomerPastStory).HasColumnName("CustomerPastStory").HasColumnType("TEXT");
+            entity.Property(e => e.ShortBrief).HasColumnName("ShortBrief").HasMaxLength(1000);
 
             // Foreign key relationships
             entity.HasOne(e => e.Organization)
@@ -267,6 +277,19 @@ public class ApplicationDbContext : DbContext
                 new Project { Id = 8, Title = "Blockchain Voting System", Description = "Secure voting system using blockchain technology", Priority = "High", OrganizationId = 1, IsAvailable = true, CreatedAt = DateTime.UtcNow.AddDays(-1) },
                 new Project { Id = 9, Title = "IoT Smart Campus", Description = "Internet of Things system for campus management", Priority = "Medium", OrganizationId = 2, IsAvailable = true, CreatedAt = DateTime.UtcNow.AddDays(-2) }
             );
+        });
+
+        // Configure ProjectInstance entity
+        modelBuilder.Entity<ProjectInstance>(entity =>
+        {
+            entity.HasKey(e => e.Id);
+            entity.ToTable("ProjectInstances");
+            entity.Property(e => e.InstanceId).IsRequired();
+            entity.HasIndex(e => e.InstanceId).IsUnique();
+            entity.HasOne(e => e.Project)
+                  .WithMany()
+                  .HasForeignKey(e => e.ProjectId)
+                  .OnDelete(DeleteBehavior.Restrict);
         });
 
         // Configure Role entity
@@ -401,6 +424,16 @@ public class ApplicationDbContext : DbContext
             entity.Property(e => e.LinkedInUrl).HasColumnName("LinkedInUrl").HasMaxLength(1000);
             entity.Property(e => e.InstagramUrl).HasColumnName("InstagramUrl").HasMaxLength(1000);
             entity.Property(e => e.YoutubeUrl).HasColumnName("YoutubeUrl").HasMaxLength(1000);
+            entity.Property(e => e.CollectionJourneyUrl).HasColumnName("CollectionJourneyUrl").HasMaxLength(1000);
+            entity.Property(e => e.DatabaseSchemaUrl).HasColumnName("DatabaseSchemaUrl").HasMaxLength(1000);
+            entity.Property(e => e.Document1Url).HasColumnName("Document1Url").HasMaxLength(1000);
+            entity.Property(e => e.Document2Url).HasColumnName("Document2Url").HasMaxLength(1000);
+            entity.Property(e => e.Document3Url).HasColumnName("Document3Url").HasMaxLength(1000);
+            entity.Property(e => e.Document4Url).HasColumnName("Document4Url").HasMaxLength(1000);
+            entity.Property(e => e.Document1Name).HasColumnName("Document1Name").HasMaxLength(50);
+            entity.Property(e => e.Document2Name).HasColumnName("Document2Name").HasMaxLength(50);
+            entity.Property(e => e.Document3Name).HasColumnName("Document3Name").HasMaxLength(50);
+            entity.Property(e => e.Document4Name).HasColumnName("Document4Name").HasMaxLength(50);
             entity.Property(e => e.GroupChat).HasColumnName("GroupChat").HasColumnType("text");
             entity.Property(e => e.Observed).HasColumnName("Observed").HasDefaultValue(0);
             entity.Property(e => e.DBPassword).HasColumnName("DBPassword").HasMaxLength(200);
@@ -549,6 +582,26 @@ public class ApplicationDbContext : DbContext
             entity.HasIndex(e => e.CategoryId);
             entity.HasIndex(e => e.StatusId);
             entity.HasIndex(e => e.BoardId);
+        });
+
+        // Configure PrivateChat entity (Email1/Email2 always stored in alphabetical order; unique per board + pair)
+        modelBuilder.Entity<PrivateChat>(entity =>
+        {
+            entity.HasKey(e => e.Id);
+            entity.Property(e => e.Id).ValueGeneratedOnAdd();
+            entity.ToTable("PrivateChats");
+            entity.Property(e => e.BoardId).HasMaxLength(50).IsRequired();
+            entity.Property(e => e.Email1).HasMaxLength(255).IsRequired();
+            entity.Property(e => e.Email2).HasMaxLength(255).IsRequired();
+            entity.Property(e => e.UpdatedAt).HasColumnType("timestamp with time zone");
+            entity.Property(e => e.ChatHistory).HasColumnType("text");
+            entity.HasOne(e => e.ProjectBoard)
+                .WithMany()
+                .HasForeignKey(e => e.BoardId)
+                .HasPrincipalKey(pb => pb.Id)
+                .OnDelete(DeleteBehavior.Cascade);
+            entity.HasIndex(e => e.BoardId);
+            entity.HasIndex(e => new { e.BoardId, e.Email1, e.Email2 }).IsUnique();
         });
 
         // Configure MentorChatHistory entity (Id is identity; ensure value-generated on add to avoid duplicate key when sequence is out of sync)

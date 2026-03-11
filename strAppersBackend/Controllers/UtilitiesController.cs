@@ -1593,6 +1593,811 @@ jobs:
     }
 
     /// <summary>
+    /// Adds the "User Stories" list to the project's TrelloBoardJson (template). Requires Trello:UserStoryList = true.
+    /// Takes ProjectId; appends a list "User Stories" after "Bugs" with one card per sprint from UserStoryFirstSprint to the last sprint in the template (excluding Bugs). Each card: title "Sprint X User Story", description "Add User Story here", checklist "Acceptance Criteria" with one item "Add Acceptance Criteria here", SprintNumber = X.
+    /// POST api/Utilities/trello/add-user-story-list
+    /// </summary>
+    [HttpPost("trello/add-user-story-list")]
+    public async Task<ActionResult<object>> AddUserStoryList([FromBody] AddUserStoryListRequest request)
+    {
+        if (request == null || request.ProjectId <= 0)
+            return BadRequest(new { Success = false, Message = "ProjectId is required and must be greater than 0." });
+
+        var userStoryListEnabled = _configuration.GetValue<bool>("Trello:UserStoryList", true);
+        if (!userStoryListEnabled)
+            return Ok(new { Success = true, Message = "Trello:UserStoryList is false; no change applied.", Updated = false });
+
+        var project = await _context.Projects.FirstOrDefaultAsync(p => p.Id == request.ProjectId);
+        if (project == null)
+            return NotFound(new { Success = false, Message = $"Project {request.ProjectId} not found." });
+        if (string.IsNullOrWhiteSpace(project.TrelloBoardJson))
+            return BadRequest(new { Success = false, Message = "Project has no TrelloBoardJson. Use POST api/Utilities/trello/store-board-json first." });
+
+        TrelloProjectCreationRequest? trelloRequest;
+        try
+        {
+            trelloRequest = JsonSerializer.Deserialize<TrelloProjectCreationRequest>(project.TrelloBoardJson);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to deserialize TrelloBoardJson for project {ProjectId}", project.Id);
+            return BadRequest(new { Success = false, Message = "Invalid TrelloBoardJson." });
+        }
+        if (trelloRequest?.SprintPlan?.Lists == null)
+            return BadRequest(new { Success = false, Message = "TrelloBoardJson has no SprintPlan or Lists." });
+
+        var userStoryFirstSprint = _configuration.GetValue<int>("Trello:UserStoryFirstSprint", 3);
+        if (userStoryFirstSprint < 1)
+            userStoryFirstSprint = 1;
+
+        // Last sprint number in template = max N among lists named "Sprint N" (exclude Bugs).
+        int? lastSprintNumber = null;
+        foreach (var list in trelloRequest.SprintPlan.Lists)
+        {
+            var match = System.Text.RegularExpressions.Regex.Match(list.Name ?? "", @"Sprint\s*(\d+)", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+            if (match.Success && int.TryParse(match.Groups[1].Value, out var n))
+            {
+                if (lastSprintNumber == null || n > lastSprintNumber.Value)
+                    lastSprintNumber = n;
+            }
+        }
+        if (!lastSprintNumber.HasValue || lastSprintNumber.Value < userStoryFirstSprint)
+        {
+            return Ok(new
+            {
+                Success = true,
+                Message = "No sprint range for User Stories (template has no Sprint N lists or last sprint < UserStoryFirstSprint).",
+                Updated = false
+            });
+        }
+
+        const string userStoriesListName = "User Stories";
+        if (trelloRequest.SprintPlan.Lists.Any(l => string.Equals(l.Name, userStoriesListName, StringComparison.OrdinalIgnoreCase)))
+        {
+            return Ok(new { Success = true, Message = "User Stories list already exists in template.", Updated = false });
+        }
+
+        var maxPosition = trelloRequest.SprintPlan.Lists.Count > 0
+            ? trelloRequest.SprintPlan.Lists.Max(l => l.Position)
+            : 0;
+        trelloRequest.SprintPlan.Lists.Add(new TrelloList
+        {
+            Name = userStoriesListName,
+            BoardName = trelloRequest.SprintPlan.Lists.FirstOrDefault()?.BoardName ?? "",
+            Position = maxPosition + 1
+        });
+
+        for (var sprintNum = userStoryFirstSprint; sprintNum <= lastSprintNumber.Value; sprintNum++)
+        {
+            trelloRequest.SprintPlan.Cards ??= new List<TrelloCard>();
+            trelloRequest.SprintPlan.Cards.Add(new TrelloCard
+            {
+                Name = $"Sprint {sprintNum} User Story",
+                Description = "Add User Story here",
+                ListName = userStoriesListName,
+                ChecklistItems = new List<string> { "Add Acceptance Criteria here" },
+                ChecklistName = "Acceptance Criteria",
+                SprintNumber = sprintNum
+            });
+        }
+
+        var newJson = JsonSerializer.Serialize(trelloRequest);
+        project.TrelloBoardJson = newJson;
+        project.UpdatedAt = DateTime.UtcNow;
+        await _context.SaveChangesAsync();
+
+        _logger.LogInformation("[AddUserStoryList] Project {ProjectId}: added list '{ListName}' with {CardCount} cards (sprints {First}..{Last}).", project.Id, userStoriesListName, lastSprintNumber.Value - userStoryFirstSprint + 1, userStoryFirstSprint, lastSprintNumber.Value);
+        return Ok(new
+        {
+            Success = true,
+            Message = $"Added list '{userStoriesListName}' with {lastSprintNumber.Value - userStoryFirstSprint + 1} card(s) (Sprint {userStoryFirstSprint}..{lastSprintNumber}).",
+            Updated = true,
+            ProjectId = project.Id,
+            ListName = userStoriesListName,
+            CardCount = lastSprintNumber.Value - userStoryFirstSprint + 1,
+            SprintRange = new { First = userStoryFirstSprint, Last = lastSprintNumber.Value }
+        });
+    }
+
+    /// <summary>
+    /// Modifies a User Story card in the project's TrelloBoardJson (template). Finds the card in the "User Stories" list by SprintNumber and updates Title and/or ModuleId.
+    /// POST api/Utilities/trello/modify-user-story-list
+    /// </summary>
+    [HttpPost("trello/modify-user-story-list")]
+    public async Task<ActionResult<object>> ModifyUserStoryList([FromBody] ModifyUserStoryListRequest request)
+    {
+        if (request == null || request.ProjectId <= 0)
+            return BadRequest(new { Success = false, Message = "ProjectId is required and must be greater than 0." });
+        if (request.SprintNumber <= 0)
+            return BadRequest(new { Success = false, Message = "SprintNumber is required and must be greater than 0." });
+        if (string.IsNullOrWhiteSpace(request.Title) && string.IsNullOrWhiteSpace(request.ModuleId))
+            return BadRequest(new { Success = false, Message = "At least one of Title or ModuleId must be provided." });
+
+        var project = await _context.Projects.FirstOrDefaultAsync(p => p.Id == request.ProjectId);
+        if (project == null)
+            return NotFound(new { Success = false, Message = $"Project {request.ProjectId} not found." });
+        if (string.IsNullOrWhiteSpace(project.TrelloBoardJson))
+            return BadRequest(new { Success = false, Message = "Project has no TrelloBoardJson." });
+
+        TrelloProjectCreationRequest? trelloRequest;
+        try
+        {
+            trelloRequest = JsonSerializer.Deserialize<TrelloProjectCreationRequest>(project.TrelloBoardJson);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to deserialize TrelloBoardJson for project {ProjectId}", project.Id);
+            return BadRequest(new { Success = false, Message = "Invalid TrelloBoardJson." });
+        }
+        if (trelloRequest?.SprintPlan?.Cards == null)
+            return BadRequest(new { Success = false, Message = "TrelloBoardJson has no SprintPlan or Cards." });
+
+        const string userStoriesListName = "User Stories";
+        var card = trelloRequest.SprintPlan.Cards.FirstOrDefault(c =>
+            string.Equals(c.ListName, userStoriesListName, StringComparison.OrdinalIgnoreCase) &&
+            c.SprintNumber == request.SprintNumber);
+        if (card == null)
+            return NotFound(new { Success = false, Message = $"User Story card for Sprint {request.SprintNumber} not found in template (list '{userStoriesListName}')." });
+
+        var updated = false;
+        if (!string.IsNullOrWhiteSpace(request.Title))
+        {
+            card.Name = request.Title!.Trim();
+            updated = true;
+        }
+        if (request.ModuleId != null)
+        {
+            card.ModuleId = request.ModuleId.Trim();
+            updated = true;
+        }
+
+        if (!updated)
+            return Ok(new { Success = true, Message = "No changes applied.", Updated = false });
+
+        var newJson = JsonSerializer.Serialize(trelloRequest);
+        project.TrelloBoardJson = newJson;
+        project.UpdatedAt = DateTime.UtcNow;
+        await _context.SaveChangesAsync();
+
+        _logger.LogInformation("[ModifyUserStoryList] Project {ProjectId}: updated User Story card SprintNumber={SprintNumber} (Title={Title}, ModuleId={ModuleId}).", project.Id, request.SprintNumber, !string.IsNullOrWhiteSpace(request.Title), request.ModuleId != null);
+        return Ok(new
+        {
+            Success = true,
+            Message = "User Story card updated in template.",
+            Updated = true,
+            ProjectId = project.Id,
+            SprintNumber = request.SprintNumber,
+            Title = card.Name,
+            ModuleId = card.ModuleId
+        });
+    }
+
+    /// <summary>
+    /// Removes from the project's TrelloBoardJson (template) any card in the "User Stories" list that has null or empty SprintNumber (custom field). Keeps cards that have a valid SprintNumber.
+    /// POST api/Utilities/trello/clean-user-story-list
+    /// </summary>
+    [HttpPost("trello/clean-user-story-list")]
+    public async Task<ActionResult<object>> CleanUserStoryList([FromBody] CleanUserStoryListRequest? request)
+    {
+        if (request == null || request.ProjectId <= 0)
+            return BadRequest(new { Success = false, Message = "ProjectId is required and must be greater than 0." });
+
+        var project = await _context.Projects.FirstOrDefaultAsync(p => p.Id == request.ProjectId);
+        if (project == null)
+            return NotFound(new { Success = false, Message = $"Project {request.ProjectId} not found." });
+        if (string.IsNullOrWhiteSpace(project.TrelloBoardJson))
+            return BadRequest(new { Success = false, Message = "Project has no TrelloBoardJson." });
+
+        TrelloProjectCreationRequest? trelloRequest;
+        try
+        {
+            trelloRequest = JsonSerializer.Deserialize<TrelloProjectCreationRequest>(project.TrelloBoardJson);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to deserialize TrelloBoardJson for project {ProjectId}", project.Id);
+            return BadRequest(new { Success = false, Message = "Invalid TrelloBoardJson." });
+        }
+        if (trelloRequest?.SprintPlan?.Cards == null)
+            return BadRequest(new { Success = false, Message = "TrelloBoardJson has no SprintPlan or Cards." });
+
+        const string userStoriesListName = "User Stories";
+        var cards = trelloRequest.SprintPlan.Cards;
+        var toRemove = cards
+            .Where(c => string.Equals(c.ListName, userStoriesListName, StringComparison.OrdinalIgnoreCase) &&
+                        (!c.SprintNumber.HasValue || c.SprintNumber.Value <= 0))
+            .ToList();
+        var removedCount = toRemove.Count;
+        foreach (var card in toRemove)
+            cards.Remove(card);
+
+        if (removedCount == 0)
+        {
+            return Ok(new
+            {
+                Success = true,
+                Message = "No User Story cards with null or empty SprintNumber found; no change.",
+                ProjectId = project.Id,
+                RemovedCount = 0
+            });
+        }
+
+        var newJson = JsonSerializer.Serialize(trelloRequest);
+        project.TrelloBoardJson = newJson;
+        project.UpdatedAt = DateTime.UtcNow;
+        await _context.SaveChangesAsync();
+
+        _logger.LogInformation("[CleanUserStoryList] Project {ProjectId}: removed {Count} User Story card(s) with null or empty SprintNumber from template.", project.Id, removedCount);
+        return Ok(new
+        {
+            Success = true,
+            Message = $"Removed {removedCount} User Story card(s) with null or empty SprintNumber from template.",
+            ProjectId = project.Id,
+            RemovedCount = removedCount
+        });
+    }
+
+    /// <summary>
+    /// Goes through all cards in the project's TrelloBoardJson (template) and replaces double line breaks ("\n\n", "\n \n", etc.) with a single line break in card Description and ChecklistItems.
+    /// POST api/Utilities/trello/remove-double-line-break
+    /// </summary>
+    [HttpPost("trello/remove-double-line-break")]
+    public async Task<ActionResult<object>> RemoveDoubleLineBreak([FromBody] RemoveDoubleLineBreakRequest? request)
+    {
+        if (request == null || request.ProjectId <= 0)
+            return BadRequest(new { Success = false, Message = "ProjectId is required and must be greater than 0." });
+
+        var project = await _context.Projects.FirstOrDefaultAsync(p => p.Id == request.ProjectId);
+        if (project == null)
+            return NotFound(new { Success = false, Message = $"Project {request.ProjectId} not found." });
+        if (string.IsNullOrWhiteSpace(project.TrelloBoardJson))
+            return BadRequest(new { Success = false, Message = "Project has no TrelloBoardJson." });
+
+        TrelloProjectCreationRequest? trelloRequest;
+        try
+        {
+            trelloRequest = JsonSerializer.Deserialize<TrelloProjectCreationRequest>(project.TrelloBoardJson);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to deserialize TrelloBoardJson for project {ProjectId}", project.Id);
+            return BadRequest(new { Success = false, Message = "Invalid TrelloBoardJson." });
+        }
+        if (trelloRequest?.SprintPlan?.Cards == null)
+            return BadRequest(new { Success = false, Message = "TrelloBoardJson has no SprintPlan or Cards." });
+
+        var cards = trelloRequest.SprintPlan.Cards;
+        var cardsUpdated = 0;
+        foreach (var card in cards)
+        {
+            var changed = false;
+            if (!string.IsNullOrEmpty(card.Description))
+            {
+                var normalized = NormalizeDoubleLineBreaksToSingle(card.Description);
+                if (normalized != card.Description)
+                {
+                    card.Description = normalized;
+                    changed = true;
+                }
+            }
+            if (card.ChecklistItems != null && card.ChecklistItems.Count > 0)
+            {
+                for (var i = 0; i < card.ChecklistItems.Count; i++)
+                {
+                    var item = card.ChecklistItems[i];
+                    if (string.IsNullOrEmpty(item)) continue;
+                    var normalized = NormalizeDoubleLineBreaksToSingle(item);
+                    if (normalized != item)
+                    {
+                        card.ChecklistItems[i] = normalized;
+                        changed = true;
+                    }
+                }
+            }
+            if (changed) cardsUpdated++;
+        }
+
+        if (cardsUpdated == 0)
+        {
+            return Ok(new
+            {
+                Success = true,
+                Message = "No double line breaks found in any card; no change.",
+                ProjectId = project.Id,
+                CardsUpdated = 0,
+                TotalCards = cards.Count
+            });
+        }
+
+        var newJson = JsonSerializer.Serialize(trelloRequest);
+        project.TrelloBoardJson = newJson;
+        project.UpdatedAt = DateTime.UtcNow;
+        await _context.SaveChangesAsync();
+
+        _logger.LogInformation("[RemoveDoubleLineBreak] Project {ProjectId}: normalized double line breaks to single in {Count} card(s).", project.Id, cardsUpdated);
+        return Ok(new
+        {
+            Success = true,
+            Message = $"Replaced double line breaks with single in {cardsUpdated} card(s).",
+            ProjectId = project.Id,
+            CardsUpdated = cardsUpdated,
+            TotalCards = cards.Count
+        });
+    }
+
+    private static string NormalizeDoubleLineBreaksToSingle(string text)
+    {
+        if (string.IsNullOrEmpty(text)) return text;
+        var s = text
+            .Replace("\r\n\r\n", "\n")
+            .Replace("\r\n \r\n", "\n")
+            .Replace("\n \n", "\n")
+            .Replace("\n\n", "\n");
+        return s;
+    }
+
+    /// <summary>
+    /// Syncs a single card from the live Trello board into the project's TrelloBoardJson. Finds the card on the board by CardId (custom field), then updates the matching card in Projects.TrelloBoardJson with name, description, list name, checklist items, and custom fields (CardId, ModuleId).
+    /// POST api/Utilities/trello/sync-with-live-board
+    /// </summary>
+    [HttpPost("trello/sync-with-live-board")]
+    public async Task<ActionResult<object>> SyncWithLiveBoard([FromBody] SyncWithLiveBoardRequest? request)
+    {
+        if (request == null || request.ProjectId <= 0)
+            return BadRequest(new { Success = false, Message = "ProjectId is required and must be greater than 0." });
+        if (string.IsNullOrWhiteSpace(request.BoardId))
+            return BadRequest(new { Success = false, Message = "BoardId is required." });
+        if (string.IsNullOrWhiteSpace(request.CardId))
+            return BadRequest(new { Success = false, Message = "CardId is required." });
+
+        var project = await _context.Projects.FirstOrDefaultAsync(p => p.Id == request.ProjectId);
+        if (project == null)
+            return NotFound(new { Success = false, Message = $"Project {request.ProjectId} not found." });
+        if (string.IsNullOrWhiteSpace(project.TrelloBoardJson))
+            return BadRequest(new { Success = false, Message = "Project has no TrelloBoardJson." });
+
+        TrelloProjectCreationRequest? trelloRequest;
+        try
+        {
+            trelloRequest = JsonSerializer.Deserialize<TrelloProjectCreationRequest>(project.TrelloBoardJson);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to deserialize TrelloBoardJson for project {ProjectId}", project.Id);
+            return BadRequest(new { Success = false, Message = "Invalid TrelloBoardJson." });
+        }
+        if (trelloRequest?.SprintPlan?.Cards == null)
+            return BadRequest(new { Success = false, Message = "TrelloBoardJson has no SprintPlan or Cards." });
+
+        var cardIdTrim = request.CardId.Trim();
+        var jsonCardIndex = trelloRequest.SprintPlan.Cards.FindIndex(c => string.Equals((c.CardId ?? "").Trim(), cardIdTrim, StringComparison.OrdinalIgnoreCase));
+        if (jsonCardIndex < 0)
+            return NotFound(new { Success = false, Message = $"Card with CardId '{request.CardId}' not found in project TrelloBoardJson." });
+
+        var liveCard = await _trelloService.GetCardByCardIdAsync(request.BoardId.Trim(), cardIdTrim);
+        if (liveCard == null)
+            return NotFound(new { Success = false, Message = $"Card with CardId '{request.CardId}' not found on Trello board {request.BoardId}." });
+
+        var cardEl = liveCard.Value;
+        var listId = cardEl.TryGetProperty("idList", out var idListProp) ? idListProp.GetString() : null;
+        var listName = !string.IsNullOrEmpty(listId) ? await _trelloService.GetListNameAsync(listId) : null;
+        var fieldNames = await _trelloService.GetBoardCustomFieldNamesAsync(request.BoardId.Trim());
+        var customValues = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        if (cardEl.TryGetProperty("customFieldItems", out var cfProp) && cfProp.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var item in cfProp.EnumerateArray())
+            {
+                if (item.ValueKind != JsonValueKind.Object) continue;
+                var id = item.TryGetProperty("idCustomField", out var idF) ? idF.GetString() : null;
+                if (string.IsNullOrEmpty(id) || !fieldNames.TryGetValue(id, out var fieldName)) continue;
+                if (item.TryGetProperty("value", out var v) && v.ValueKind == JsonValueKind.Object && v.TryGetProperty("text", out var t))
+                    customValues[fieldName] = t.GetString() ?? "";
+            }
+        }
+        var name = cardEl.TryGetProperty("name", out var nameProp) ? nameProp.GetString() ?? "" : "";
+        var desc = cardEl.TryGetProperty("desc", out var descProp) ? descProp.GetString() ?? "" : "";
+        var checklistItems = new List<string>();
+        if (cardEl.TryGetProperty("checklists", out var clProp) && clProp.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var cl in clProp.EnumerateArray())
+            {
+                if (cl.ValueKind != JsonValueKind.Object) continue;
+                if (!cl.TryGetProperty("checkItems", out var itemsProp) || itemsProp.ValueKind != JsonValueKind.Array) continue;
+                foreach (var item in itemsProp.EnumerateArray())
+                {
+                    if (item.ValueKind != JsonValueKind.Object) continue;
+                    var itemName = item.TryGetProperty("name", out var inProp) ? inProp.GetString() : null;
+                    if (!string.IsNullOrEmpty(itemName)) checklistItems.Add(itemName);
+                }
+            }
+        }
+        var dueDate = (DateTime?)null;
+        if (cardEl.TryGetProperty("due", out var dueProp))
+        {
+            var dueStr = dueProp.GetString();
+            if (!string.IsNullOrEmpty(dueStr) && DateTime.TryParse(dueStr, out var d)) dueDate = d;
+        }
+        var roleName = "";
+        if (cardEl.TryGetProperty("labels", out var labelsProp) && labelsProp.ValueKind == JsonValueKind.Array && labelsProp.GetArrayLength() > 0)
+        {
+            var first = labelsProp[0];
+            if (first.ValueKind == JsonValueKind.Object)
+                roleName = first.TryGetProperty("name", out var ln) ? ln.GetString() ?? "" : "";
+        }
+        var syncedCard = new TrelloCard
+        {
+            Name = name ?? "",
+            Description = desc ?? "",
+            ListName = listName ?? "",
+            CardId = customValues.GetValueOrDefault("CardId") ?? cardIdTrim,
+            ModuleId = customValues.GetValueOrDefault("ModuleId") ?? "",
+            ChecklistItems = checklistItems,
+            DueDate = dueDate,
+            RoleName = roleName ?? "",
+            AssignedToEmail = trelloRequest.SprintPlan.Cards[jsonCardIndex].AssignedToEmail,
+            AssignedToName = trelloRequest.SprintPlan.Cards[jsonCardIndex].AssignedToName,
+            Labels = trelloRequest.SprintPlan.Cards[jsonCardIndex].Labels ?? new List<string>(),
+            Priority = trelloRequest.SprintPlan.Cards[jsonCardIndex].Priority,
+            EstimatedHours = trelloRequest.SprintPlan.Cards[jsonCardIndex].EstimatedHours,
+            Status = trelloRequest.SprintPlan.Cards[jsonCardIndex].Status ?? "To Do",
+            Risk = trelloRequest.SprintPlan.Cards[jsonCardIndex].Risk ?? "Medium",
+            Dependencies = trelloRequest.SprintPlan.Cards[jsonCardIndex].Dependencies ?? new List<string>(),
+            Branched = trelloRequest.SprintPlan.Cards[jsonCardIndex].Branched,
+            ChecklistName = trelloRequest.SprintPlan.Cards[jsonCardIndex].ChecklistName,
+            SprintNumber = trelloRequest.SprintPlan.Cards[jsonCardIndex].SprintNumber
+        };
+        trelloRequest.SprintPlan.Cards[jsonCardIndex] = syncedCard;
+
+        var newJson = JsonSerializer.Serialize(trelloRequest);
+        project.TrelloBoardJson = newJson;
+        project.UpdatedAt = DateTime.UtcNow;
+        await _context.SaveChangesAsync();
+
+        _logger.LogInformation("[SyncWithLiveBoard] Project {ProjectId}: synced card CardId={CardId} from board {BoardId} into TrelloBoardJson.", project.Id, request.CardId, request.BoardId);
+        return Ok(new
+        {
+            Success = true,
+            Message = $"Synced card '{syncedCard.Name}' (CardId={request.CardId}) from live board into TrelloBoardJson.",
+            ProjectId = project.Id,
+            BoardId = request.BoardId,
+            CardId = request.CardId,
+            CardName = syncedCard.Name
+        });
+    }
+
+    /// <summary>
+    /// Creates a new TrelloBoardJson for the target project from the source project's template. For each card with a ModuleId that matches a pair [sourceModuleId, targetModuleId], fetches ProjectModules.Description for the source ModuleId and sends the card content plus that description to AI to adapt the content to the target context; the card's ModuleId is set to targetModuleId. Cards without a matching ModuleId are copied as-is. Result is saved to Projects.TrelloBoardJson for the target project.
+    /// POST api/Utilities/trello/create-board-from-template
+    /// </summary>
+    [HttpPost("trello/create-board-from-template")]
+    public async Task<ActionResult<object>> CreateBoardFromTemplate([FromBody] CreateBoardFromTemplateRequest? request)
+    {
+        if (request == null)
+            return BadRequest(new { Success = false, Message = "Request body is required." });
+        if (request.SourceProjectId <= 0 || request.TargetProjectId <= 0)
+            return BadRequest(new { Success = false, Message = "SourceProjectId and TargetProjectId are required and must be greater than 0." });
+
+        var sourceProject = await _context.Projects.FirstOrDefaultAsync(p => p.Id == request.SourceProjectId);
+        if (sourceProject == null)
+            return NotFound(new { Success = false, Message = $"Source project {request.SourceProjectId} not found." });
+        if (string.IsNullOrWhiteSpace(sourceProject.TrelloBoardJson))
+            return BadRequest(new { Success = false, Message = "Source project has no TrelloBoardJson." });
+
+        var targetProject = await _context.Projects.FirstOrDefaultAsync(p => p.Id == request.TargetProjectId);
+        if (targetProject == null)
+            return NotFound(new { Success = false, Message = $"Target project {request.TargetProjectId} not found." });
+
+        TrelloProjectCreationRequest? sourceRequest;
+        try
+        {
+            sourceRequest = JsonSerializer.Deserialize<TrelloProjectCreationRequest>(sourceProject.TrelloBoardJson);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to deserialize source TrelloBoardJson for project {ProjectId}", request.SourceProjectId);
+            return BadRequest(new { Success = false, Message = "Invalid TrelloBoardJson in source project." });
+        }
+        if (sourceRequest?.SprintPlan?.Cards == null)
+            return BadRequest(new { Success = false, Message = "Source TrelloBoardJson has no SprintPlan or Cards." });
+
+        var sourceToTargetModule = new Dictionary<int, int>();
+        if (request.ModuleIds != null)
+        {
+            foreach (var pair in request.ModuleIds)
+            {
+                if (pair != null && pair.Length >= 2)
+                    sourceToTargetModule[pair[0]] = pair[1];
+            }
+        }
+
+        var targetProjectModuleTitles = await _context.ProjectModules
+            .Where(pm => pm.ProjectId == request.TargetProjectId)
+            .Select(pm => pm.Title ?? "")
+            .Where(t => !string.IsNullOrWhiteSpace(t))
+            .ToListAsync();
+        var targetModuleTitlesList = string.Join(", ", targetProjectModuleTitles);
+
+        var targetProjectDescriptionFormatted = await AdaptProjectDescriptionToSourceFormatAsync(
+            sourceRequest.ProjectDescription ?? "",
+            targetProject.Description ?? "",
+            targetModuleTitlesList);
+        if (targetProjectDescriptionFormatted != null)
+            _logger.LogInformation("[CreateBoardFromTemplate] ProjectDescription adapted to source format for target project.");
+        else
+            _logger.LogWarning("[CreateBoardFromTemplate] ProjectDescription AI formatting failed; using target Projects.Description as plain text.");
+
+        var targetRequest = new TrelloProjectCreationRequest
+        {
+            ProjectId = request.TargetProjectId,
+            ProjectTitle = targetProject.Title,
+            ProjectDescription = targetProjectDescriptionFormatted ?? targetProject.Description ?? sourceRequest.ProjectDescription,
+            StudentEmails = new List<string>(),
+            ProjectLengthWeeks = sourceRequest.ProjectLengthWeeks,
+            SprintLengthWeeks = sourceRequest.SprintLengthWeeks,
+            DueDate = sourceRequest.DueDate,
+            TeamMembers = new List<TrelloTeamMember>(),
+            SprintPlan = new TrelloSprintPlan
+            {
+                Boards = sourceRequest.SprintPlan.Boards?.Select(b => new TrelloBoard { Name = b.Name, Description = b.Description, DueDate = b.DueDate, MemberEmails = new List<string>(b.MemberEmails ?? new List<string>()) }).ToList() ?? new List<TrelloBoard>(),
+                Lists = sourceRequest.SprintPlan.Lists?.Select(l => new TrelloList
+                {
+                    Name = l.Name,
+                    BoardName = l.BoardName,
+                    Position = l.Position,
+                    StartDate = l.StartDate,
+                    EndDate = l.EndDate,
+                    Description = l.Description,
+                    ChecklistItems = l.ChecklistItems != null ? new List<string>(l.ChecklistItems) : new List<string>()
+                }).ToList() ?? new List<TrelloList>(),
+                Cards = new List<TrelloCard>(),
+                TotalSprints = sourceRequest.SprintPlan.TotalSprints,
+                TotalTasks = sourceRequest.SprintPlan.TotalTasks,
+                EstimatedWeeks = sourceRequest.SprintPlan.EstimatedWeeks
+            }
+        };
+
+        var cardsAdapted = 0;
+        var cardsCopied = 0;
+        foreach (var card in sourceRequest.SprintPlan.Cards)
+        {
+            var newCard = new TrelloCard
+            {
+                Name = card.Name,
+                Description = card.Description ?? "",
+                ListName = card.ListName ?? "",
+                AssignedToEmail = card.AssignedToEmail ?? "",
+                AssignedToName = card.AssignedToName ?? "",
+                Labels = card.Labels != null ? new List<string>(card.Labels) : new List<string>(),
+                DueDate = card.DueDate,
+                Priority = card.Priority,
+                EstimatedHours = card.EstimatedHours,
+                RoleName = card.RoleName ?? "",
+                Status = card.Status ?? "To Do",
+                Risk = card.Risk ?? "Medium",
+                ModuleId = card.ModuleId ?? "",
+                CardId = card.CardId ?? "",
+                Dependencies = card.Dependencies != null ? new List<string>(card.Dependencies) : new List<string>(),
+                Branched = card.Branched,
+                ChecklistItems = card.ChecklistItems != null ? new List<string>(card.ChecklistItems) : new List<string>(),
+                ChecklistName = card.ChecklistName,
+                SprintNumber = card.SprintNumber
+            };
+
+            var sourceModuleIdParsed = int.TryParse(card.ModuleId?.Trim(), out var sourceModuleId) ? sourceModuleId : (int?)null;
+            if (sourceModuleIdParsed.HasValue && sourceToTargetModule.TryGetValue(sourceModuleIdParsed.Value, out var targetModuleId))
+            {
+                var sourceModule = await _context.ProjectModules.Include(pm => pm.ModuleTypeNavigation).FirstOrDefaultAsync(pm => pm.Id == sourceModuleIdParsed.Value);
+                var targetModule = await _context.ProjectModules.Include(pm => pm.ModuleTypeNavigation).FirstOrDefaultAsync(pm => pm.Id == targetModuleId);
+                var sourceContextDescription = sourceModule?.Description ?? "";
+                var targetContextDescription = targetModule?.Description ?? "";
+                var sourceModuleTitle = sourceModule?.Title ?? "";
+                var sourceModuleTypeName = sourceModule?.ModuleTypeNavigation?.Name ?? "";
+                var targetModuleTitle = targetModule?.Title ?? "";
+                var targetModuleTypeName = targetModule?.ModuleTypeNavigation?.Name ?? "";
+                try
+                {
+                    var adapted = await AdaptCardContentToContextAsync(card.Name, card.Description ?? "", card.ChecklistItems ?? new List<string>(), sourceContextDescription, targetContextDescription, sourceModuleTitle, sourceModuleTypeName, targetModuleTitle, targetModuleTypeName, targetModuleTitlesList);
+                    if (adapted.HasValue)
+                    {
+                        newCard.Name = adapted.Value.Name;
+                        newCard.Description = adapted.Value.Description;
+                        newCard.ChecklistItems = adapted.Value.ChecklistItems ?? new List<string>();
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "[CreateBoardFromTemplate] AI adaptation failed for card {CardName} (ModuleId={ModuleId}); using original content.", card.Name, card.ModuleId);
+                }
+                newCard.ModuleId = targetModuleId.ToString();
+                cardsAdapted++;
+            }
+            else
+            {
+                cardsCopied++;
+            }
+            targetRequest.SprintPlan.Cards.Add(newCard);
+        }
+
+        var newJson = JsonSerializer.Serialize(targetRequest);
+        targetProject.TrelloBoardJson = newJson;
+        targetProject.UpdatedAt = DateTime.UtcNow;
+        await _context.SaveChangesAsync();
+
+        _logger.LogInformation("[CreateBoardFromTemplate] SourceProjectId={Source}, TargetProjectId={Target}: adapted {Adapted} cards, copied {Copied} as-is.", request.SourceProjectId, request.TargetProjectId, cardsAdapted, cardsCopied);
+        return Ok(new
+        {
+            Success = true,
+            Message = $"Created board template for target project: {cardsAdapted} card(s) adapted to target context, {cardsCopied} card(s) copied as-is.",
+            SourceProjectId = request.SourceProjectId,
+            TargetProjectId = request.TargetProjectId,
+            CardsAdapted = cardsAdapted,
+            CardsCopied = cardsCopied,
+            TotalCards = targetRequest.SprintPlan.Cards.Count
+        });
+    }
+
+    /// <summary>Formats the target project description in the same format (e.g. JSON structure) as the source ProjectDescription, using AI with both source and target description.</summary>
+    private async Task<string?> AdaptProjectDescriptionToSourceFormatAsync(string sourceFormattedDescription, string targetRawDescription, string targetProjectModuleTitlesList = "")
+    {
+        if (string.IsNullOrWhiteSpace(targetRawDescription))
+            return sourceFormattedDescription;
+        var prompt = $@"You are given two project descriptions:
+1) SOURCE (already in its display/storage format - may be plain text or JSON with a ""content"" array of objects with ""type"" and ""text"" etc.): use this ONLY as the format/structure template.
+2) TARGET (the new project's description, raw or plain): use this for the actual content to output.
+
+Your task: output the TARGET project's description in the EXACT SAME format as the SOURCE. If the source is JSON (e.g. {{\""content\"":[{{\""type\"":\""paragraph\"",\""text\"":\""...\""}}]}}), return valid JSON with the same structure but with the target's content. If the source is plain text, return plain text. Preserve structure and formatting; only the substantive content should reflect the target description.
+
+CRITICAL RULES: (1) Keep the exact terms ""AI Customer"" and ""AI Mentor"" everywhere they appear; do not replace with ""AI User"" or similar. (2) When referring to modules, use ONLY these exact official names: [{targetProjectModuleTitlesList}]. Do not invent or paraphrase module names.
+
+Return ONLY the formatted output, no explanation or markdown wrapper.
+
+SOURCE (format template):
+{sourceFormattedDescription}
+
+TARGET (content to put in that format):
+{targetRawDescription}
+
+Output (same format as SOURCE, content from TARGET):";
+        _logger.LogInformation("[CreateBoardFromTemplate] AI ProjectDescription format prompt: {Prompt}", prompt);
+        try
+        {
+            var response = await _aiService.GenerateTextResponseAsync(prompt);
+            if (string.IsNullOrWhiteSpace(response)) return null;
+            var cleaned = response.Trim();
+            if (cleaned.StartsWith("```")) cleaned = cleaned.Replace("```json", "").Replace("```", "").Trim();
+            return cleaned;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[CreateBoardFromTemplate] AdaptProjectDescriptionToSourceFormatAsync failed.");
+            return null;
+        }
+    }
+
+    /// <summary>Returns adapted Name, Description, ChecklistItems for a card given source and target module context (ProjectModules.Description).</summary>
+    private async Task<(string Name, string Description, List<string> ChecklistItems)?> AdaptCardContentToContextAsync(string name, string description, List<string> checklistItems, string sourceContextDescription, string targetContextDescription, string sourceModuleTitle, string sourceModuleTypeName, string targetModuleTitle, string targetModuleTypeName, string targetProjectModuleTitlesList)
+    {
+        var cardJson = JsonSerializer.Serialize(new { Name = name, Description = description, ChecklistItems = checklistItems });
+        var prompt = $@"You are given a Trello card's content (Name, Description, ChecklistItems) that was written for a SOURCE module, and you must adapt it for a TARGET module. The target module may be a different TYPE (e.g. input form, management dashboard, backend service, API, Frontend, Backend, Database). You must read and understand the target module's type before changing the card content, and adapt the wording and tasks so they fit that type.
+
+SOURCE MODULE: Title=""{sourceModuleTitle}"", Type=""{sourceModuleTypeName}"" (e.g. Frontend, Backend, Database, API).
+TARGET MODULE: Title=""{targetModuleTitle}"", Type=""{targetModuleTypeName}"". Adapt the card so it fits THIS module type (e.g. if target is Frontend, use UI/form/dashboard language; if Backend, use API/service language; if the target is a management dashboard, refer to dashboards and management flows; if an input form, refer to forms and fields).
+
+Your task: return the EXACT SAME STRUCTURE (same keys, same number of checklist items) but with the text adapted from the source context to the target context and to the TARGET MODULE TYPE. Keep the same tone and format. Only change the content so it fits the target context and module type. Do not add or remove checklist items.
+
+CRITICAL RULES (must be followed):
+1) PLATFORM ENTITIES: The terms ""AI Customer"" and ""AI Mentor"" are platform entity names. You MUST keep them exactly as written everywhere they appear. Do NOT replace them with ""AI User"", ""AI Assistant"", or any other variant.
+2) MODULE NAMES: When naming or referring to modules, use ONLY these exact official names (from ProjectModules.Title): [{targetProjectModuleTitlesList}]. The module this card belongs to is ""{targetModuleTitle}"". Do not invent or paraphrase (e.g. use ""Job Posting Module"" not ""Job Matching Module""). If the list is empty, keep any module references from the source or use the target module title above.
+
+Return ONLY a valid JSON object with exactly these keys: ""Name"", ""Description"", ""ChecklistItems"" (array of strings). No markdown, no explanation.
+
+Card content (written for source context):
+{cardJson}
+
+Source module context (the card was written for this):
+{sourceContextDescription}
+
+Target module context (adapt the card to this):
+{targetContextDescription}
+
+Return only the JSON object:";
+        _logger.LogInformation("[CreateBoardFromTemplate] AI system prompt generated (card Name={CardName}): {Prompt}", name, prompt);
+        var response = await _aiService.GenerateTextResponseAsync(prompt);
+        if (string.IsNullOrWhiteSpace(response)) return null;
+        try
+        {
+            var cleaned = response.Trim();
+            if (cleaned.StartsWith("```")) cleaned = cleaned.Replace("```json", "").Replace("```", "").Trim();
+            using var doc = JsonDocument.Parse(cleaned);
+            var root = doc.RootElement;
+            var nameOut = root.TryGetProperty("Name", out var n) ? n.GetString() ?? name : name;
+            var descOut = root.TryGetProperty("Description", out var d) ? d.GetString() ?? description : description;
+            var listOut = new List<string>();
+            if (root.TryGetProperty("ChecklistItems", out var arr) && arr.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var item in arr.EnumerateArray())
+                    listOut.Add(item.GetString() ?? "");
+            }
+            else
+                listOut = new List<string>(checklistItems);
+            return (nameOut ?? name, descOut ?? description, listOut);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Injects a list from the project's TrelloBoardJson into the live Trello board. Finds the list by name in Projects.TrelloBoardJson, creates that list on the board at the end (last position), and creates all template cards on it.
+    /// POST api/Utilities/trello/inject-list-from-json
+    /// </summary>
+    [HttpPost("trello/inject-list-from-json")]
+    public async Task<ActionResult<object>> InjectListFromJson([FromBody] InjectListFromJsonRequest request)
+    {
+        if (request == null)
+            return BadRequest(new { Success = false, Message = "Request body is required." });
+        if (string.IsNullOrWhiteSpace(request.BoardId))
+            return BadRequest(new { Success = false, Message = "BoardId is required." });
+        if (request.ProjectId <= 0)
+            return BadRequest(new { Success = false, Message = "ProjectId is required and must be greater than 0." });
+        if (string.IsNullOrWhiteSpace(request.ListName))
+            return BadRequest(new { Success = false, Message = "ListName is required." });
+
+        var project = await _context.Projects.FirstOrDefaultAsync(p => p.Id == request.ProjectId);
+        if (project == null)
+            return NotFound(new { Success = false, Message = $"Project {request.ProjectId} not found." });
+        if (string.IsNullOrWhiteSpace(project.TrelloBoardJson))
+            return BadRequest(new { Success = false, Message = "Project has no TrelloBoardJson. Use POST api/Utilities/trello/store-board-json first." });
+
+        TrelloProjectCreationRequest? trelloRequest;
+        try
+        {
+            trelloRequest = JsonSerializer.Deserialize<TrelloProjectCreationRequest>(project.TrelloBoardJson);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to deserialize TrelloBoardJson for project {ProjectId}", request.ProjectId);
+            return BadRequest(new { Success = false, Message = "Invalid TrelloBoardJson in project." });
+        }
+
+        if (trelloRequest?.SprintPlan?.Lists == null)
+            return BadRequest(new { Success = false, Message = "TrelloBoardJson has no SprintPlan or Lists." });
+
+        var listName = request.ListName.Trim();
+        var templateList = trelloRequest.SprintPlan.Lists.FirstOrDefault(l => string.Equals(l.Name, listName, StringComparison.OrdinalIgnoreCase));
+        if (templateList == null)
+            return NotFound(new { Success = false, Message = $"List '{listName}' not found in TrelloBoardJson. Available: {string.Join(", ", trelloRequest.SprintPlan.Lists.Select(l => l.Name ?? ""))}" });
+
+        var listsWithPos = await _trelloService.GetBoardListsWithPositionsAsync(request.BoardId.Trim());
+        double? positionLast = null;
+        if (listsWithPos.Count > 0)
+        {
+            var lastPos = listsWithPos.Max(x => x.Pos);
+            positionLast = lastPos + 65535.0;
+        }
+
+        var newListId = await _trelloService.AddListToBoardAsync(request.BoardId.Trim(), templateList.Name, positionLast);
+        if (string.IsNullOrEmpty(newListId))
+            return StatusCode(500, new { Success = false, Message = "Failed to add list to Trello board." });
+
+        var (cardsCreated, createError) = await _trelloService.CreateSprintCardsOnListAsync(request.BoardId.Trim(), newListId, trelloRequest, templateList.Name, null);
+
+        _logger.LogInformation("[InjectListFromJson] Board {BoardId}, Project {ProjectId}: injected list '{ListName}' (listId={ListId}, cardsCreated={CardsCreated}).", request.BoardId, request.ProjectId, templateList.Name, newListId, cardsCreated);
+        return Ok(new
+        {
+            Success = true,
+            Message = $"List '{templateList.Name}' added to board at the end with {cardsCreated} card(s).",
+            BoardId = request.BoardId,
+            ProjectId = request.ProjectId,
+            ListName = templateList.Name,
+            ListId = newListId,
+            CardsCreated = cardsCreated,
+            CardCreateError = createError
+        });
+    }
+
+    /// <summary>
     /// Invite one or more members to an existing Trello board by email (e.g. to add PM to a board created before the allowBillableGuest fix).
     /// POST api/Utilities/trello/invite-to-board
     /// </summary>
@@ -1924,16 +2729,43 @@ jobs:
                 {
                     return BadRequest(new { Success = false, Message = "TrelloBoardJson has no Lists. Use SprintNumber=0 to create the first list." });
                 }
+                // Resolve only by list name "Sprint N" so we don't match e.g. "User Stories" that has Position=8
                 list = trelloRequest.SprintPlan.Lists.FirstOrDefault(l =>
-                    l.Position == request.SprintNumber ||
                     string.Equals(l.Name, $"Sprint {request.SprintNumber}", StringComparison.OrdinalIgnoreCase));
                 if (list == null)
                 {
-                    list = trelloRequest.SprintPlan.Lists.ElementAtOrDefault(request.SprintNumber - 1);
-                }
-                if (list == null)
-                {
-                    return NotFound(new { Success = false, Message = $"Sprint {request.SprintNumber} not found in TrelloBoardJson (Lists count: {trelloRequest.SprintPlan.Lists.Count})." });
+                    // Create a new list for this sprint number and insert it in the right place (after last Sprint N, before Bugs)
+                    var lists = trelloRequest.SprintPlan.Lists;
+                    var boardName = lists.FirstOrDefault()?.BoardName ?? "";
+                    var newList = new TrelloList
+                    {
+                        Name = $"Sprint {request.SprintNumber}",
+                        BoardName = boardName,
+                        Position = 0,
+                        Description = request.Description ?? "",
+                        ChecklistItems = new List<string>()
+                    };
+                    int insertIndex = lists.Count;
+                    var bugsIndex = lists.FindIndex(l => string.Equals(l.Name, "Bugs", StringComparison.OrdinalIgnoreCase));
+                    if (bugsIndex >= 0)
+                        insertIndex = bugsIndex;
+                    else
+                    {
+                        var lastSprintIndex = -1;
+                        for (int i = 0; i < lists.Count; i++)
+                        {
+                            var n = ParseSprintNumberFromListName(lists[i].Name);
+                            if (n.HasValue && n.Value < request.SprintNumber)
+                                lastSprintIndex = i;
+                        }
+                        if (lastSprintIndex >= 0)
+                            insertIndex = lastSprintIndex + 1;
+                    }
+                    lists.Insert(insertIndex, newList);
+                    for (var i = 0; i < lists.Count; i++)
+                        lists[i].Position = i;
+                    list = newList;
+                    _logger.LogInformation("[SprintOverride] Created new list 'Sprint {SprintNumber}' at index {Index} (no matching list existed).", request.SprintNumber, insertIndex);
                 }
             }
 
@@ -2221,6 +3053,19 @@ jobs:
                     used.Add(found);
                     ordered.Add(found);
                 }
+            }
+            // Insert any "Sprint N" lists (N > 7) in numeric order after Sprint 7 and before Bugs
+            var extraSprints = lists
+                .Where(l => !used.Contains(l) && ParseSprintNumberFromListName(l.Name) is int n && n > 7)
+                .OrderBy(l => ParseSprintNumberFromListName(l.Name) ?? 0)
+                .ToList();
+            var bugsIndex = ordered.FindIndex(l => string.Equals(l.Name, "Bugs", StringComparison.OrdinalIgnoreCase));
+            var insertAt = bugsIndex >= 0 ? bugsIndex : ordered.Count;
+            foreach (var sprintList in extraSprints)
+            {
+                used.Add(sprintList);
+                ordered.Insert(insertAt, sprintList);
+                insertAt++;
             }
             foreach (var l in lists)
                 if (!used.Contains(l))
@@ -3194,6 +4039,75 @@ public class ResendGitHubInvitationRequest
 
     /// <summary>Must be "Frontend" or "Backend" when using BoardId. Frontend repo = BoardId; backend repo = backend_{BoardId}.</summary>
     public string? RepoType { get; set; }
+}
+
+/// <summary>Request for POST api/Utilities/trello/add-user-story-list</summary>
+public class AddUserStoryListRequest
+{
+    /// <summary>Project ID whose TrelloBoardJson will be updated with the User Stories list.</summary>
+    public int ProjectId { get; set; }
+}
+
+/// <summary>Request for POST api/Utilities/trello/modify-user-story-list</summary>
+public class ModifyUserStoryListRequest
+{
+    /// <summary>Project ID whose TrelloBoardJson contains the User Stories list.</summary>
+    public int ProjectId { get; set; }
+    /// <summary>Sprint number identifying which User Story card to modify (e.g. 3 for "Sprint 3 User Story").</summary>
+    public int SprintNumber { get; set; }
+    /// <summary>New card title. Optional.</summary>
+    public string? Title { get; set; }
+    /// <summary>Value for the ModuleId custom field on the card. Optional.</summary>
+    public string? ModuleId { get; set; }
+}
+
+/// <summary>Request for POST api/Utilities/trello/clean-user-story-list</summary>
+public class CleanUserStoryListRequest
+{
+    /// <summary>Project ID whose TrelloBoardJson will be cleaned (User Stories cards with null/empty SprintNumber removed).</summary>
+    public int ProjectId { get; set; }
+}
+
+/// <summary>Request for POST api/Utilities/trello/remove-double-line-break</summary>
+public class RemoveDoubleLineBreakRequest
+{
+    /// <summary>Project ID whose TrelloBoardJson will be processed (double line breaks in all cards replaced with single).</summary>
+    public int ProjectId { get; set; }
+}
+
+/// <summary>Request for POST api/Utilities/trello/sync-with-live-board</summary>
+public class SyncWithLiveBoardRequest
+{
+    /// <summary>Project ID whose TrelloBoardJson will be updated with the synced card.</summary>
+    public int ProjectId { get; set; }
+
+    /// <summary>Trello board ID to fetch the card from.</summary>
+    public string? BoardId { get; set; }
+
+    /// <summary>CardId custom field value (unique on the board) identifying the card to sync.</summary>
+    public string? CardId { get; set; }
+}
+
+/// <summary>Request for POST api/Utilities/trello/create-board-from-template. ModuleIds: list of [sourceModuleId, targetModuleId] pairs; cards whose ModuleId matches a source are adapted via AI using the target project's module description.</summary>
+public class CreateBoardFromTemplateRequest
+{
+    /// <summary>Project ID whose TrelloBoardJson is the source template.</summary>
+    public int SourceProjectId { get; set; }
+    /// <summary>Project ID that will receive the new TrelloBoardJson (same structure, content adapted to target context).</summary>
+    public int TargetProjectId { get; set; }
+    /// <summary>List of pairs [sourceModuleId, targetModuleId]. Cards with matching ModuleId are adapted using ProjectModules.Description for the source ModuleId; card ModuleId is set to targetModuleId.</summary>
+    public List<int[]>? ModuleIds { get; set; }
+}
+
+/// <summary>Request for POST api/Utilities/trello/inject-list-from-json</summary>
+public class InjectListFromJsonRequest
+{
+    /// <summary>Trello board ID (live board to add the list to).</summary>
+    public string? BoardId { get; set; }
+    /// <summary>Project ID whose Projects.TrelloBoardJson contains the list definition.</summary>
+    public int ProjectId { get; set; }
+    /// <summary>Name of the list to find in TrelloBoardJson and inject (e.g. "Sprint 4", "User Stories").</summary>
+    public string? ListName { get; set; }
 }
 
 /// <summary>Request for POST api/Utilities/trello/invite-to-board</summary>

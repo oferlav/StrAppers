@@ -44,6 +44,160 @@ namespace strAppersBackend.Services
             if (sprintNumber <= 0)
                 return (false, "SprintNumber is required and must be greater than 0.", 0);
 
+            var mergeType = string.Equals(_trelloConfig.MergeType, "Add", StringComparison.OrdinalIgnoreCase) ? "Add" : "Merge";
+
+            // MergeType=Add: just add a new sprint list to the board (after the previous sprint list) and upsert ProjectBoardSprintMerge (no SystemBoard, no AI merge).
+            // Stops when the template (TrelloBoardJson) has no list/cards for this sprint — no empty sprints.
+            if (mergeType == "Add")
+            {
+                var listName = $"Sprint {sprintNumber}";
+
+                // Load template first: do not add a sprint that isn't in the template (avoids empty sprints).
+                var project = await _context.Projects.AsNoTracking().FirstOrDefaultAsync(p => p.Id == projectId);
+                if (project == null || string.IsNullOrWhiteSpace(project.TrelloBoardJson))
+                {
+                    _logger.LogInformation("[MERGE-SPRINT] Add mode: project {ProjectId} has no TrelloBoardJson; skipping sprint {SprintNumber}.", projectId, sprintNumber);
+                    return (false, "Project has no TrelloBoardJson; cannot add sprint.", 0);
+                }
+                TrelloProjectCreationRequest? trelloRequest = null;
+                try
+                {
+                    trelloRequest = JsonSerializer.Deserialize<TrelloProjectCreationRequest>(project.TrelloBoardJson);
+                }
+                catch (Exception exJson)
+                {
+                    _logger.LogWarning(exJson, "[MERGE-SPRINT] Add mode: could not deserialize TrelloBoardJson for project {ProjectId}.", projectId);
+                    return (false, "Invalid TrelloBoardJson; cannot add sprint.", 0);
+                }
+                if (!TemplateHasSprint(trelloRequest, listName))
+                {
+                    _logger.LogInformation("[MERGE-SPRINT] Add mode: template has no list/cards for '{ListName}'; stopping (no empty sprints).", listName);
+                    return (false, $"Sprint {sprintNumber} not in template; no more sprints to add.", 0);
+                }
+
+                var listsWithPos = await _trelloService.GetBoardListsWithPositionsAsync(boardId);
+                var existingList = listsWithPos.FirstOrDefault(l => string.Equals(l.Name, listName, StringComparison.OrdinalIgnoreCase));
+                var sprintLengthWeeks = _configuration.GetValue<int>("BusinessLogicConfig:SprintLengthInWeeks", 1);
+                DateTime? addModeDueDateUtc = null;
+                if (sprintNumber > 1)
+                {
+                    var prevRow = await _context.ProjectBoardSprintMerges
+                        .AsNoTracking()
+                        .FirstOrDefaultAsync(m => m.ProjectBoardId == boardId && m.SprintNumber == sprintNumber - 1);
+                    if (prevRow?.DueDate != null)
+                        addModeDueDateUtc = prevRow.DueDate.Value.AddDays(sprintLengthWeeks * 7);
+                }
+                if (!addModeDueDateUtc.HasValue)
+                    addModeDueDateUtc = DateTime.UtcNow.Date.AddDays((sprintNumber * sprintLengthWeeks * 7) - 1);
+
+                string? newListId;
+                int cardsCreated;
+                if (!string.IsNullOrEmpty(existingList.Id))
+                {
+                    // Board already has a list with this name: skip creating list and cards, but still update ProjectBoardSprintMerge.
+                    newListId = existingList.Id;
+                    cardsCreated = 0;
+                    _logger.LogInformation("[MERGE-SPRINT] Add mode: list '{ListName}' already exists on board {BoardId}; skipping list/card creation, updating ProjectBoardSprintMerge only.", listName, boardId);
+                }
+                else
+                {
+                    double? posAfterPrevSprint = null;
+                    if (sprintNumber > 1)
+                    {
+                        var prevListName = $"Sprint {sprintNumber - 1}";
+                        var idx = -1;
+                        for (var i = 0; i < listsWithPos.Count; i++)
+                        {
+                            if (string.Equals(listsWithPos[i].Name, prevListName, StringComparison.OrdinalIgnoreCase))
+                            { idx = i; break; }
+                        }
+                        if (idx >= 0)
+                        {
+                            if (idx + 1 < listsWithPos.Count)
+                                posAfterPrevSprint = (listsWithPos[idx].Pos + listsWithPos[idx + 1].Pos) / 2.0;
+                            else
+                                posAfterPrevSprint = listsWithPos[idx].Pos + 65535.0;
+                        }
+                    }
+                    newListId = await _trelloService.AddListToBoardAsync(boardId, listName, posAfterPrevSprint);
+                    if (string.IsNullOrEmpty(newListId))
+                        return (false, $"Failed to add list '{listName}' to board.", 0);
+
+                    cardsCreated = 0;
+                    if (trelloRequest != null)
+                    {
+                        var (created, createError) = await _trelloService.CreateSprintCardsOnListAsync(boardId, newListId, trelloRequest, listName, addModeDueDateUtc);
+                        cardsCreated = created;
+                        if (!string.IsNullOrEmpty(createError))
+                            _logger.LogWarning("[MERGE-SPRINT] Add mode: created {Count} cards on list '{ListName}', some errors: {Error}", created, listName, createError);
+                    }
+                }
+
+                try
+                {
+                    var mergeRecord = await _context.ProjectBoardSprintMerges
+                        .FirstOrDefaultAsync(m => m.ProjectBoardId == boardId && m.SprintNumber == sprintNumber);
+                    if (mergeRecord == null)
+                    {
+                        mergeRecord = new ProjectBoardSprintMerge
+                        {
+                            ProjectBoardId = boardId,
+                            SprintNumber = sprintNumber,
+                            MergedAt = DateTime.UtcNow,
+                            ListId = newListId,
+                            DueDate = addModeDueDateUtc
+                        };
+                        _context.ProjectBoardSprintMerges.Add(mergeRecord);
+                    }
+                    else
+                    {
+                        mergeRecord.MergedAt = DateTime.UtcNow;
+                        mergeRecord.ListId = newListId;
+                        mergeRecord.DueDate = addModeDueDateUtc ?? mergeRecord.DueDate;
+                    }
+
+                    var nextSprintNum = sprintNumber + 1;
+                    var nextListName = $"Sprint {nextSprintNum}";
+                    var nextDueDateUtc = addModeDueDateUtc?.AddDays(sprintLengthWeeks * 7);
+                    // Only add a row for the next sprint if the template has that sprint — otherwise we stop (no more "due" merges).
+                    var addNextRow = trelloRequest != null && TemplateHasSprint(trelloRequest, nextListName);
+                    if (addNextRow)
+                    {
+                        var nextMergeRecord = await _context.ProjectBoardSprintMerges
+                            .FirstOrDefaultAsync(m => m.ProjectBoardId == boardId && m.SprintNumber == nextSprintNum);
+                        if (nextMergeRecord == null)
+                        {
+                            _context.ProjectBoardSprintMerges.Add(new ProjectBoardSprintMerge
+                            {
+                                ProjectBoardId = boardId,
+                                SprintNumber = nextSprintNum,
+                                ListId = null,
+                                DueDate = nextDueDateUtc,
+                                MergedAt = null
+                            });
+                        }
+                        else
+                        {
+                            nextMergeRecord.DueDate = nextDueDateUtc ?? nextMergeRecord.DueDate;
+                        }
+                    }
+                    else
+                    {
+                        _logger.LogInformation("[MERGE-SPRINT] Add mode: template has no sprint '{NextListName}'; not adding next row (chain stops).", nextListName);
+                    }
+
+                    await _context.SaveChangesAsync();
+                    _logger.LogInformation("[MERGE-SPRINT] Add mode: added list '{ListName}' for BoardId={BoardId}, SprintNumber={SprintNumber}, next sprint row {NextSprint} created/updated={AddNext}, {CardsCreated} cards.", listName, boardId, sprintNumber, nextSprintNum, addNextRow, cardsCreated);
+                    return (true, null, cardsCreated);
+                }
+                catch (Exception exDb)
+                {
+                    _logger.LogError(exDb, "[MERGE-SPRINT] Add mode: failed to upsert ProjectBoardSprintMerge for BoardId={BoardId}, SprintNumber={SprintNumber}", boardId, sprintNumber);
+                    return (false, exDb.Message, 0);
+                }
+            }
+
+            // Merge mode: require SystemBoard and merge/override
             var projectBoard = await _context.ProjectBoards
                 .FirstOrDefaultAsync(pb => pb.Id == boardId && pb.ProjectId == projectId);
             if (projectBoard == null)
@@ -204,6 +358,18 @@ namespace strAppersBackend.Services
             }
 
             return (true, null, cardsToApply.Count);
+        }
+
+        /// <summary>Returns true if the template has a list or any cards for the given sprint list name (e.g. "Sprint 2").</summary>
+        private static bool TemplateHasSprint(TrelloProjectCreationRequest? request, string listName)
+        {
+            if (request?.SprintPlan == null)
+                return false;
+            if (request.SprintPlan.Lists != null && request.SprintPlan.Lists.Any(l => string.Equals(l.Name, listName, StringComparison.OrdinalIgnoreCase)))
+                return true;
+            if (request.SprintPlan.Cards != null && request.SprintPlan.Cards.Any(c => string.Equals(c.ListName, listName, StringComparison.OrdinalIgnoreCase)))
+                return true;
+            return false;
         }
 
         private static DateTime ToUtcForDb(DateTime value)

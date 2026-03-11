@@ -57,6 +57,13 @@ public class Project
     [Column("CustomerPastStory", TypeName = "TEXT")]
     public string? CustomerPastStory { get; set; }
 
+    /// <summary>
+    /// Short brief/summary of the project (max 1000 characters).
+    /// </summary>
+    [MaxLength(1000)]
+    [Column("ShortBrief")]
+    public string? ShortBrief { get; set; }
+
     // IDE Generation fields
     [Column("deployment_manifest", TypeName = "TEXT")]
     public string? DeploymentManifest { get; set; }
@@ -100,6 +107,9 @@ public class CreateProjectRequest
     [Column(TypeName = "TEXT")]
     public string? ExtendedDescription { get; set; }
     
+    [MaxLength(1000)]
+    public string? ShortBrief { get; set; }
+    
     [MaxLength(50)]
     public string Priority { get; set; } = "Medium";
     
@@ -124,6 +134,9 @@ public class CreateProjectSimpleRequest
     [Column(TypeName = "TEXT")]
     public string? ExtendedDescription { get; set; }
     
+    [MaxLength(1000)]
+    public string? ShortBrief { get; set; }
+    
     [MaxLength(500)]
     public string? CriteriaIds { get; set; }
 }
@@ -138,6 +151,9 @@ public class UpdateProjectRequest
     
     [Column(TypeName = "TEXT")]
     public string? ExtendedDescription { get; set; }
+    
+    [MaxLength(1000)]
+    public string? ShortBrief { get; set; }
     
     [MaxLength(50)]
     public string? Priority { get; set; }

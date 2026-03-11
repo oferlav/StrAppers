@@ -161,24 +161,10 @@ public class Worker : BackgroundService
                 var resp = await client.PostAsJsonAsync($"{baseUrl}/api/Boards/use/create", body, ct);
                 if (!resp.IsSuccessStatusCode)
                 {
-                    var errorText = await resp.Content.ReadAsStringAsync(ct);
+                    // Rollback first so students are reset even if reading/logging the body fails (e.g. huge HTML)
+                    await RollbackStudentsAsync(conn, ids, ct);
+                    var errorText = await ReadErrorBodyTruncatedAsync(resp, 2048, ct);
                     _logger.LogWarning("[CREATE_BOARD] Failed for project {ProjectId}. Status={Status}. Body={Body}", projectId, resp.StatusCode, errorText);
-                    
-                    // Before rolling back, check if board was actually created (might have succeeded before error response)
-                    var boardExists = await conn.ExecuteScalarAsync<int?>(new CommandDefinition(
-                        "SELECT COUNT(*) FROM \"ProjectBoards\" WHERE \"ProjectId\"=@ProjectId",
-                        new { ProjectId = projectId }, cancellationToken: ct));
-                    
-                    if (boardExists > 0)
-                    {
-                        _logger.LogWarning("[CREATE_BOARD] Board exists for project {ProjectId} despite error response. NOT rolling back students.", projectId);
-                        return 1; // Board was created, consider it success
-                    }
-                    
-                    await conn.ExecuteAsync(new CommandDefinition(
-                        "UPDATE \"Students\" SET \"Status\"=1, \"ProjectId\"=NULL, \"UpdatedAt\"=NOW() WHERE \"Id\" = ANY(@Ids)",
-                        new { Ids = ids }, cancellationToken: ct));
-                    _logger.LogInformation("[ROLLBACK] Reset {Count} students: Status=1, ProjectId=NULL", ids.Length);
                     continue;
                 }
                 var okText = await resp.Content.ReadAsStringAsync(ct);
@@ -188,29 +174,52 @@ public class Worker : BackgroundService
             catch (Exception ex)
             {
                 _logger.LogError(ex, "[CREATE_BOARD] Exception for project {ProjectId}: {Message}", projectId, ex.Message);
-                
-                // Before rolling back, check if board was actually created (might have succeeded before timeout)
-                // This prevents rollback when board creation succeeded but HTTP response timed out
-                var boardExists = await conn.ExecuteScalarAsync<int?>(new CommandDefinition(
-                    "SELECT COUNT(*) FROM \"ProjectBoards\" WHERE \"ProjectId\"=@ProjectId",
-                    new { ProjectId = projectId }, cancellationToken: ct));
-                
-                if (boardExists > 0)
-                {
-                    _logger.LogWarning("[CREATE_BOARD] Board exists for project {ProjectId} despite exception (likely timeout). NOT rolling back students. Exception: {Exception}", 
-                        projectId, ex.Message);
-                    return 1; // Board was created, consider it success despite timeout
-                }
-                
-                _logger.LogInformation("[CREATE_BOARD] No board found for project {ProjectId}. Rolling back students.", projectId);
-                await conn.ExecuteAsync(new CommandDefinition(
-                    "UPDATE \"Students\" SET \"Status\"=1, \"ProjectId\"=NULL, \"UpdatedAt\"=NOW() WHERE \"Id\" = ANY(@Ids)",
-                    new { Ids = ids }, cancellationToken: ct));
-                _logger.LogInformation("[ROLLBACK] Reset {Count} students: Status=1, ProjectId=NULL", ids.Length);
+                await RollbackStudentsAsync(conn, ids, ct);
             }
         }
 
         return 0;
+    }
+
+    /// <summary>Resets selected students to Status=1 and ProjectId=NULL. Retries up to 3 times on failure so students are not left stuck at Status=2 when board creation fails.</summary>
+    private async Task RollbackStudentsAsync(NpgsqlConnection conn, int[] ids, CancellationToken ct)
+    {
+        const int maxAttempts = 3;
+        for (var attempt = 1; attempt <= maxAttempts; attempt++)
+        {
+            try
+            {
+                await conn.ExecuteAsync(new CommandDefinition(
+                    "UPDATE \"Students\" SET \"Status\"=1, \"ProjectId\"=NULL, \"UpdatedAt\"=NOW() WHERE \"Id\" = ANY(@Ids)",
+                    new { Ids = ids }, cancellationToken: ct));
+                _logger.LogInformation("[ROLLBACK] Reset {Count} students: Status=1, ProjectId=NULL", ids.Length);
+                return;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "[ROLLBACK] Attempt {Attempt}/{MaxAttempts} failed for {Count} students: {Message}", attempt, maxAttempts, ids.Length, ex.Message);
+                if (attempt == maxAttempts)
+                    _logger.LogError("[ROLLBACK] All {MaxAttempts} attempts failed. Students may remain at Status=2. Fix manually or retry next iteration.", maxAttempts);
+                else
+                    await Task.Delay(500 * attempt, ct);
+            }
+        }
+    }
+
+    /// <summary>Reads response body up to maxChars to avoid huge HTML error pages blocking or filling logs.</summary>
+    private static async Task<string> ReadErrorBodyTruncatedAsync(HttpResponseMessage resp, int maxChars, CancellationToken ct)
+    {
+        try
+        {
+            var full = await resp.Content.ReadAsStringAsync(ct);
+            if (string.IsNullOrEmpty(full)) return "(empty)";
+            if (full.Length <= maxChars) return full;
+            return full.Substring(0, maxChars) + "... [truncated]";
+        }
+        catch (Exception)
+        {
+            return "(failed to read body)";
+        }
     }
 
     private async Task CallRunDueSprintMergesAsync(string baseUrl, CancellationToken ct)

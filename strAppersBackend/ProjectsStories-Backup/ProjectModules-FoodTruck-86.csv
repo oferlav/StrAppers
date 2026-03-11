@@ -1,0 +1,1932 @@
+"Id","ProjectId","ModuleType","Title","Description","Sequence"
+45,19,2,"Patient Inquiry Reception","Current Module Description:
+Feedback on Existing Module:
+Module for receiving initial inquiries from patients, collecting basic contact details for sending a detailed questionnaire via email.
+
+Inputs: Patient's contact details, source of inquiry (HMO or private).
+Outputs: Confirmation of inquiry receipt, email sent with a link to the questionnaire.
+
+Improved and Detailed Module Description:
+This module is designed to handle initial inquiries from patients and provide a seamless process for collecting initial information. The module will serve as the initial point of contact between the medical institution and potential patients, ensuring that the necessary information is collected efficiently and accurately.
+
+Functionality:
+1. Inquiry Reception: The module will receive inquiries from patients through online forms, phone calls, or other platforms.
+2. Contact Information Collection: The module will collect basic contact details such as full name, email address, phone number, and source of inquiry (e.g., HMO or private inquiry).
+3. Data Verification: The collected information will be verified to ensure accuracy, including checking the validity of the email address and phone number.
+4. Email Dispatch: The module will automatically send an email with a link to a detailed questionnaire, allowing patients to provide additional information required for further treatment.
+5. Inquiry Receipt Confirmation: After the email is sent, the patient will receive a notification confirming the receipt of the inquiry and the continuation of the process.
+
+Implementation Considerations:
+- Language Support: The module will support multiple languages, including Hebrew, to ensure ease of use for all users.
+- Data Security: It is essential to ensure that patients' personal information is secured and protected in accordance with relevant privacy regulations.
+- System Integration: The module will integrate with existing systems such as CRM or patient management systems to streamline workflow and prevent duplication.",1
+46,19,2,"Questionnaire Management","Módulo de Descripción Mejorada:
+
+El módulo está diseñado para gestionar eficientemente el ciclo completo de los cuestionarios utilizados en el ámbito clínico. Su objetivo principal es facilitar la creación, distribución y recopilación de cuestionarios detallados que permitan obtener datos exhaustivos de los pacientes para un diagnóstico clínico preciso.
+
+Funcionalidades:
+
+1. **Creación de Cuestionarios:**
+   - Permite a los profesionales de la salud diseñar cuestionarios personalizados utilizando plantillas predefinidas o creando nuevas desde cero.
+   - Ofrece la posibilidad de incluir preguntas de diferentes tipos, como opción múltiple, respuesta abierta, escala de Likert, entre otras, para obtener información variada y detallada.
+   - Integra un editor intuitivo que facilita la personalización de preguntas, secciones y flujos lógicos dentro del cuestionario.
+
+2. **Distribución:**
+   - El sistema automatiza el envío de los cuestionarios a los pacientes mediante correo electrónico o mensajes SMS, utilizando los datos de contacto proporcionados.
+   - Incluye opciones para programar envíos en fechas y horas específicas, así como para enviar recordatorios automáticos a los pacientes que no han completado el cuestionario.
+
+3. **Recopilación de Datos:**
+   - Los pacientes pueden completar los cuestionarios a través de un portal seguro y accesible desde cualquier dispositivo con conexión a internet.
+   - El módulo asegura la protección de los datos mediante el uso de protocolos de seguridad avanzados para garantizar la confidencialidad de la información médica.
+
+4. **Almacenamiento y Análisis:**
+   - Los datos recopilados se almacenan automáticamente en una base de datos centralizada, donde se organizan y están disponibles para su análisis.
+   - Ofrece herramientas de análisis integradas que permiten a los profesionales de la salud revisar y extraer conclusiones útiles a partir de los datos recopilados, apoyando así el proceso de diagnóstico y tratamiento.
+
+Consideraciones de Implementación:
+- Asegurar la compatibilidad con sistemas de gestión hospitalaria existentes para una integración fluida y la interoperabilidad de datos.
+- Cumplir con las normativas vigentes de protección de datos y privacidad, como el GDPR, para mantener la confidencialidad y seguridad de la información de los pacientes.
+- Proporcionar soporte multilingüe para facilitar el uso del módulo en diferentes regiones y entre diversas poblaciones de pacientes.",2
+47,19,2,"Data Integration Module","**Descripción Mejorada del Módulo:**
+
+**Nombre del Módulo:** Integración de Datos de Cuestionarios Completados
+
+**Descripción General:**
+Este módulo está diseñado para gestionar de manera eficiente la integración de datos de cuestionarios completados. Su función principal es almacenar estos datos en una base de datos centralizada y, al mismo tiempo, proporcionar un acceso rápido a través de una hoja de cálculo de Google. Esta dualidad asegura que los datos estén seguros y organizados, mientras que también ofrece una forma accesible y simplificada de visualización y análisis.
+
+**Funcionalidades:**
+1. **Almacenamiento en Base de Datos:**
+   - Se integra con la base de datos central del sistema, conocida como W.P Database, para almacenar cada entrada de cuestionario completado.
+   - Implementa validaciones de datos previas al almacenamiento para garantizar la integridad y consistencia de la información.
+
+2. **Generación de Resúmenes en Google Sheets:**
+   - Transfiere automáticamente un resumen de los datos del cuestionario a una hoja de cálculo de Google, facilitando el acceso y análisis rápido.
+   - La hoja de cálculo se actualiza en tiempo real o con una frecuencia configurada para asegurar que los datos reflejen de manera precisa el estado más reciente.
+
+**Entradas:**
+- **Datos del Cuestionario Completado:** Datos estructurados provenientes de cuestionarios realizados por los usuarios. Estos datos pueden incluir respuestas en formato de texto, selección múltiple o escala.
+
+**Salidas:**
+- **Base de Datos W.P:**
+  - Datos completos de cuestionarios almacenados de forma segura.
+- **Hoja de Cálculo de Google:**
+  - Resumen de datos, que puede incluir estadísticas básicas, gráficos generados automáticamente y tablas dinámicas para facilitar la comprensión de resultados.
+
+**Consideraciones de Implementación:**
+- **Seguridad:** Asegurar que los datos sensibles sean manejados conforme a las regulaciones de protección de datos, empleando técnicas de cifrado y controles de acceso.
+- **Escalabilidad:** Diseñar el módulo para manejar un volumen creciente de datos y cuestionarios sin degradar el rendimiento.
+- **Integración Continua:** Facilitar la integración con otros módulos del sistema que puedan requerir acceso a los datos del cuestionario.
+
+Este módulo es esencial para organizaciones que buscan optimizar el manejo de sus datos de cuestionarios, permitiendo una gestión centralizada y accesible.",3
+48,19,2,"First Clinical Review","Module for clinical evaluators to assess questionnaire data and determine initial treatment needs and urgency.
+
+Inputs: Completed questionnaire data from W.P database and Google Sheet.
+Outputs: Initial treatment recommendations, urgency level identification, and evaluator notes.",4
+49,19,2,"Second Clinical Review","Facilitates a secondary review by clinical managers to finalize treatment plans and group therapy allocations.
+
+Inputs: Evaluations and recommendations from the first clinical review.
+Outputs: Finalized treatment plans, group therapy allocations, and clinical manager notes.",5
+50,19,2,"Smart Waiting List Management","Creates and manages a smart waiting list that allows filtering and matching of therapists to patients, and forming treatment groups.
+
+Inputs: Patient treatment urgency, therapist availability, and group therapy requirements.
+Outputs: Optimized waiting list with matched therapists and treatment group assignments.",6
+51,19,2,"Treatment Assignment and Tracking","Assigns patients to treatment plans and tracks their progress, integrating with the existing Typolog system.
+
+Inputs: Finalized treatment plans, patient and therapist details.
+Outputs: Treatment assignments in Typolog system, tracking and progress updates.",7
+52,19,2,"Machine Learning Integration","Optional module for implementing machine learning to enhance rapid diagnostic capabilities and treatment recommendations.
+
+Inputs: Historical patient data, completed questionnaires.
+Outputs: Automated diagnostic insights and treatment suggestions.",8
+53,19,2,"User Authentication and Authorization","Manages user authentication and authorization levels to ensure secure access to patient data.
+
+Inputs: User credentials, role definitions.
+Outputs: Access tokens, user session data, access control enforcement.",9
+54,19,2,"Data Privacy and Security","Ensures the protection of sensitive clinical data through encryption, secure storage, and compliance with data protection regulations.
+
+Inputs: All patient and clinical data.
+Outputs: Encrypted data storage, audit logs, compliance reports.",10
+55,19,2,"Patient Referral Intake","Module for receiving initial patient referrals from health funds or private sources. It collects basic contact information to facilitate further communication and questionnaire distribution.
+
+Inputs: Patient's basic contact information (name, email, phone number)
+Outputs: Confirmation of referral receipt and initiation of questionnaire distribution",1
+56,19,2,"Questionnaire Distribution and Collection","Improved Module Description:
+The Patient Questionnaire Module is designed to facilitate the assessment of clinical conditions and treatment needs by sending detailed questionnaires to patients via email and collecting their responses efficiently. This module plays a crucial role in enabling healthcare providers to gather essential patient information remotely, ensuring that clinical decisions are informed by up-to-date patient data.
+
+**Functionality:**
+1. **Email Delivery System:** The module includes a robust email delivery system that ensures questionnaires are sent to patients' email addresses reliably. It supports scheduling features to send questionnaires at optimal times based on patient preferences or clinical schedules.
+   
+2. **Customizable Questionnaire Templates:** Healthcare providers can create and customize questionnaire templates to suit different clinical requirements. The module supports a wide range of question types, including multiple-choice, Likert scales, and open-ended questions to capture comprehensive patient data.
+
+3. **Response Collection and Management:** Patient responses are collected automatically and stored securely within the system. The module provides tools for healthcare providers to review and analyze responses, facilitating the identification of clinical conditions and treatment needs.
+
+4. **Data Security and Compliance:** The module is designed with patient data security in mind, ensuring compliance with relevant regulations such as HIPAA. All data transmissions are encrypted, and access controls are implemented to protect patient privacy.
+
+**Inputs:**
+- **Patient's Email Address:** The module requires the patient's email address for sending the questionnaire. This can be entered manually by healthcare providers or integrated from existing patient management systems.
+- **Detailed Clinical Questionnaire Template:** Providers can upload or create questionnaire templates within the module. Templates should include all necessary questions to gather detailed clinical information.
+
+**Outputs:**
+- **Completed Patient Questionnaires:** Once patients complete the questionnaires, the responses are compiled into comprehensive reports. These reports include detailed clinical information that healthcare providers can use for further analysis and decision-making.
+
+**Implementation Considerations:**
+- Ensure that email delivery systems are configured to prevent emails from being marked as spam.
+- Regularly update questionnaire templates to reflect current clinical practices and guidelines.
+- Train healthcare providers on how to create effective questionnaires and interpret patient data.",2
+57,19,2,"Data Storage and Management","Module for storing patient data securely in a database and ensuring synchronization between a full database and a Google Sheet for quick access.
+
+Inputs: Completed patient questionnaires, patient contact information
+Outputs: Stored patient data in a database, summarized data in Google Sheet",3
+58,19,2,"Clinical Assessment and Prioritization","Module for clinicians to assess the clinical data and prioritize treatment urgency, including identifying high-risk patients requiring immediate attention.
+
+Inputs: Patient questionnaire data, clinician assessment criteria
+Outputs: Assessment reports with treatment recommendations and urgency levels",4
+59,19,2,"Patient Treatment Matching","Module for matching patients with appropriate therapists or treatment groups based on clinical assessments and availability.
+
+Inputs: Assessment reports, therapist availability, treatment group criteria
+Outputs: Patient-therapist matches and treatment group assignments",5
+60,19,2,"Smart Waiting List Management","Module to create and manage a dynamic waiting list that allows filtering and quick actions for patient management.
+
+Inputs: Patient data, priority levels, therapist and group availability
+Outputs: Filtered and prioritized waiting list with quick action capabilities",6
+61,19,2,"Integration with Treatment System","Module to transfer patient data to the treatment system (Tipulog) after clinical assessments for treatment initiation.
+
+Inputs: Patient treatment assignment data
+Outputs: Transfer of patient data to Tipulog for treatment processing",7
+62,19,2,"Machine Learning and Data Analysis","Module for developing machine learning models to assist in rapid clinical assessment and treatment recommendation based on accumulated data.
+
+Inputs: Historical patient data, clinical outcomes
+Outputs: Predictive models for clinical assessment and treatment recommendations",8
+63,19,2,"User Authentication and Authorization","Module for managing user access levels and ensuring secure login for different roles such as assessors, clinical psychologists, and administrative staff.
+
+Inputs: User credentials, role definitions
+Outputs: Authenticated user sessions and role-based access control",9
+64,19,2,"Data Privacy and Security Management","Module for ensuring compliance with data privacy regulations and implementing security measures for sensitive clinical data.
+
+Inputs: Patient data, security policies
+Outputs: Data encryption, access logs, and privacy compliance reports",10
+65,21,2,"User Authentication Module","**Healthcare User Authentication and Authorization Module**
+
+The Healthcare User Authentication and Authorization Module is a specialized component tailored to the unique security and privacy requirements of the healthcare industry. This module plays a pivotal role in safeguarding patient data and ensuring compliance with healthcare regulations such as HIPAA (Health Insurance Portability and Accountability Act). By verifying user credentials and managing access permissions, this module ensures that only authorized personnel can access sensitive medical information, thereby maintaining patient confidentiality and system integrity.
+
+**Functionality Overview:**
+
+1. **User Authentication:**
+   - Validates healthcare provider credentials against secure, encrypted databases to confirm identity.
+   - Utilizes advanced cryptographic hashing algorithms to protect password information, ensuring compliance with healthcare data protection standards.
+   - Implements multi-factor authentication (MFA), including biometric verification and smart card access, to enhance security and meet regulatory requirements.
+
+2. **Session Management:**
+   - Generates a secure, healthcare-compliant session token upon successful authentication, ensuring traceability and auditability of user actions.
+   - Manages user sessions with features such as automatic logout and session timeout to prevent unauthorized access, particularly in shared or public environments.
+   - Provides session tracking and logging to support compliance audits and incident investigations.
+
+3. **Role-Based Access Control (RBAC):**
+   - Assigns roles to healthcare professionals based on their credentials, specialization, and organizational hierarchy, such as doctors, nurses, and administrative staff.
+   - Enforces access policies that align with healthcare regulations, granting permissions to view, edit, or manage patient records and other sensitive information.
+   - Allows healthcare administrators to dynamically configure and update role definitions, ensuring that access controls remain current with changing healthcare practices and policies.
+
+**Inputs:**
+
+- **Username:** A unique identifier assigned to each healthcare professional within the system.
+- **Password:** A secure string known only to the user and the authentication system, following best practices in password complexity and storage.
+- **Optional MFA Code:** A temporary code or biometric verification sent to or required from the user's registered device or identity verification system for additional security.
+
+**Outputs:**
+
+- **Authentication Status:** A boolean value or detailed status message indicating the success or failure of the authentication process, with specific error codes for troubleshooting.
+- **User Session Token:** A cryptographic token that uniquely identifies and maintains the user's session, with embedded metadata for audit trails.
+- **User Role Information:** Detailed role data that determines the user's access level and permissions within the healthcare system, ensuring compliance with regulatory standards.
+
+**Implementation Considerations:**
+
+- Ensure compatibility with existing electronic health record (EHR) systems, patient management systems, and healthcare directory services (e.g., LDAP, Active Directory).
+- Regularly update cryptographic algorithms and security protocols to counteract evolving cyber threats, with a focus on protecting patient data.
+- Conduct periodic security audits, penetration testing, and compliance checks to identify and mitigate vulnerabilities, ensuring adherence to healthcare regulations.
+- Provide a user-friendly interface for healthcare professionals and administrators to manage authentication settings, monitor access logs, and generate compliance reports.
+
+This module is designed to be both robust and adaptable, addressing the stringent security and privacy needs of the healthcare sector while ensuring a seamless user experience. By integrating advanced security measures and maintaining a patient-centric approach, the Healthcare User Authentication and Authorization Module enhances system reliability, regulatory compliance, and user trust.",1
+66,21,2,"User Registration Module","Allows new users to create an account by providing necessary personal and contact information.
+
+Inputs: User's personal details such as name, email, and password.
+Outputs: Confirmation of successful registration and a welcome email.",2
+67,21,2,"User Profile Management Module","Enables users to view and update their profile information, including contact details and preferences.
+
+Inputs: User ID and updated profile information.
+Outputs: Confirmation of profile update and the updated profile data.",3
+68,21,2,"Dashboard Module","Provides users with an overview of their account activities, notifications, and system status.
+
+Inputs: User ID and session token.
+Outputs: User-specific dashboard data including notifications and recent activities.",4
+69,21,2,"Data Processing Module","Processes raw data according to specific business rules and logic to produce meaningful insights.
+
+Inputs: Raw data and processing parameters.
+Outputs: Processed data and analysis results.",5
+70,21,2,"Settings Module","Allows users to configure application settings and preferences according to their needs.
+
+Inputs: User ID and new configuration settings.
+Outputs: Confirmation of updated settings and the new configuration details.",6
+71,21,2,"Notification Module","Manages and delivers notifications to users based on their preferences and system events.
+
+Inputs: User ID, notification content, and delivery preferences.
+Outputs: Delivery status and logs of sent notifications.",7
+72,21,2,"Reporting Module","Generates various reports based on user activities and system data.
+
+Inputs: Report criteria and parameters.
+Outputs: Generated report in the specified format (e.g., PDF, Excel).",8
+73,21,2,"Help and Support Module","Provides users with assistance and information about using the system, including FAQs and support contact options.
+
+Inputs: User queries or issues.
+Outputs: Help articles, FAQs, and contact information for further support.",9
+613,61,2,"ממשק תיעוד כאבים","מודול זה מספק למשתמשת כלי חכם ואינטואיטיבי לניהול ותיעוד כאבים יומיומיים, תוך דגש על חווית משתמש חלקה, דיוק ואבטחת מידע ברמה הגבוהה ביותר.
+
+**פונקציונליות המודול כוללת:**
+
+1. **בחירת יום ושעה**:
+   - ממשק לוח שנה אינטראקטיבי המאפשר בחירה מדויקת של תאריך ושעה להופעת הכאב. כולל תצוגה חודשית ושנתית עם אפשרות ניווט נוחה.
+   - התאמה אישית של פורמט השעה (12 או 24 שעות) עם אפשרות להזנה ידנית וביצוע תיקונים בזמן אמת.
+
+2. **זיהוי אזור הכאב**:
+   - מפת גוף תלת-ממדית אינטראקטיבית לזיהוי מדויק של אזור הכאב, כולל תכונות זום, סיבוב ותצוגה מפורטת של חלקי הגוף.
+   - קטגוריות מוגדרות מראש לזיהוי מהיר של אזורים נפוצים כגון ראש, גב וגפיים, עם אפשרות להוספת אזורים מותאמים אישית.
+
+3. **עוצמת הכאב ותיעוד תופעות נוספות**:
+   - סליידר גרפי מדורג מ-1 עד 10 למדידת עוצמת הכאב, עם תצוגה דינמית ומיידית של הערך הנבחר.
+   - שדות מותאמים אישית לתיעוד תופעות קשורות, כולל תיאורים מילוליים, תדירות ההופעה והקשר לפעילויות יומיומיות.
+
+4. **תיאורים נוספים**:
+   - קטגוריות לבחירה כמו סוג הכאב (חד, עמום, דוקר), משך הכאב, טריגרים ותסמינים נלווים, עם אפשרות להוספת פרטים נוספים.
+   - יכולת להעלות הערות חופשיות וקבצים מצורפים כגון תמונות, דוחות רפואיים או מסמכים נוספים.
+
+5. **רשימות תיוג מותאמות אישית**:
+   - יצירה וניהול של רשימות מותאמות אישית לתיעוד תרופות, פעולות להקלה והשפעות נוספות.
+   - ממשק לעריכת הרשימות ושמירתן, עם אפשרות לשיתוף ושיתוף פעולה עם אנשי מקצוע בתחום הבריאות.
+
+**ניהול וניתוח נתונים:**
+
+- כל המידע נשמר במסד נתונים מוצפן להבטחת סודיות ושלמות המידע האישי.
+- ניתוח דפוסי כאב ותופעות נלוות באמצעות גרפים וסטטיסטיקות מתקדמות, כולל הפקת דוחות חזותיים עם תובנות ייחודיות.
+- מערכת התראות חכמה למעקב אחר שינויים בדפוסי הכאב והתופעות, עם אפשרות להתאמה אישית של תנאי ההתראה.
+
+**כלים לשיתוף וייצוא נתונים:**
+
+- ייצוא נתונים לקובצי PDF או CSV לשיתוף קל ונוח עם אנשי מקצוע בתחום הבריאות.
+- הפקת דוחות תקופתיים עם סיכום נתונים ותובנות עיקריות, המוצגים בצורה ידידותית למשתמש.
+- אפשרות לשיתוף דוחות בצורה מאובטחת דרך דואר אלקטרוני, מערכות ניהול רפואיות או פלטפורמות דיגיטליות אחרות, עם אבטחת מידע מתקדמת.",1
+614,61,2,"צפייה בהיסטוריית כאבים","תיאור משופר ומקיף של מודול לניהול והיסטוריית תיעוד כאבים ותופעות נוספות:
+
+המודול לניהול והיסטוריית תיעוד כאבים ותופעות נוספות נועד לספק למשתמשת כלים מתקדמים לניהול ותיעוד מידע רפואי אישי. המודול מתמקד לא רק בכאבים, אלא גם בתיעוד של תופעות נוספות כמו נפילות, גירודים ומחלות מין, תוך מתן כלים לניתוח נתונים לאורך זמן ושיפור איכות החיים. המודול מעניק תמונה ברורה ומקיפה של דפוסי התופעות והכאבים של המשתמשת, כולל כלים לתכנון טיפולים עתידיים.
+
+**פונקציונליות מפורטת:**
+
+1. **גישה להיסטוריה מלאה ומפורטת של תיעוד תופעות וכאבים**: 
+   - המשתמשת יכולה לגשת לכל רשומות תיעוד התופעות והכאבים שלה, המסודרות באופן כרונולוגי לפי תאריך ושעה. המערכת כוללת אפשרויות סינון מתקדמות לפי סוג תופעה או כאב, עוצמתם ומיקום בגוף, כדי לאפשר חיפוש מהיר וממוקד במידע היסטורי.
+
+2. **עריכה ומחיקה של רשומות תיעוד**:
+   - המשתמשת יכולה לערוך או למחוק רשומות קיימות, עם אפשרות להוסיף הערות או תיאורים נוספים לשיפור דיוק ועדכניות המידע. כל פעולה נשמרת בהיסטוריית שינויים לצורך מעקב.
+
+3. **כלים לניתוח סטטיסטי מתקדם של תופעות וכאבים**:
+   - המודול מציע ניתוחים סטטיסטיים מתקדמים, כולל חישוב ממוצעים של תופעות וכאבים לפי תקופות מוגדרות, זיהוי דפוסים עונתיים והצגת גרפים וויזואליזציות שממחישות את הנתונים בצורה ברורה ומובנת.
+
+4. **מעקב תובנות לאורך זמן**:
+   - המשתמשת מקבלת תובנות על דפוסי התופעות והכאבים שלה לאורך זמן, כולל השוואות לתקופות קודמות, זיהוי מגמות והשפעת טיפולים או שינויים באורח החיים.
+
+5. **הכנה לפגישות רפואיות**:
+   - המודול מאפשר יצירת דוחות מסכמים, עם אפשרות להתאים את הפורמט והתוכן לצרכי הפגישה הרפואית, כולל היסטוריה, סטטיסטיקות ותובנות מרכזיות.
+
+**קלטים (Inputs):**
+- בקשת המשתמשת לצפות בהיסטוריה מפורטת של תופעות וכאבים
+- בקשה לערוך או למחוק רשומה קיימת עם אפשרות להוספת הערות
+- בקשה לקבל ניתוח סטטיסטי מתקדם על בסיס נתונים קיימים
+
+**פלטים (Outputs):**
+- רשומות היסטוריות מפורטות של תיעוד תופעות וכאבים
+- גרפים, סטטיסטיקות ותובנות ויזואליות
+- דוחות מסכמים מותאמים אישית לשימוש בפגישות רפואיות
+
+**שיקולי מימוש:**
+- יש לוודא שמירה על פרטיות המשתמשת ואבטחת המידע הרפואי באמצעות שיטות הצפנה מתקדמות וגישה מבוקרת.
+- הממשק צריך להיות ידידותי ונגיש, עם דגש על חווית משתמש נוחה, כולל תמיכה בשפות שונות והתאמה למכשירים ניידים.
+- תמיכה בהתאמות אישיות בהתאם לצרכים הספציפיים של המשתמשת, כולל אפשרות להתראות והתראות מותאמות אישית.
+
+האם זה מה שהתכוונת? אנא ידעי אותי אם יש צורך בהתאמות נוספות.",2
+615,61,2,"יצירת דוחות מעקב","מודול זה מספק את היכולת ליצור דוחות מעקב על בסיס שבועי או חודשי. הדוחות כוללים מידע מפורט על הכאבים שתועדו, עם סיכומים גרפיים וטבלאות המאפשרים למשתמשת ולרופא לקבל תמונה ברורה של המצב. המודול מאפשר למשתמשת להוריד את הדוחות בפורמטים שונים כמו PDF או Excel, ולהעבירם לרופא לצורך פגישות מעקב. המודול גם כולל אפשרויות התאמה אישית של הדוחות, כמו בחירת תאריכים, סוגי כאבים, ופרטים נוספים שיכולים להיות רלוונטיים.
+
+Inputs: בקשת משתמשת ליצירת דוח לפי טווח תאריכים
+Outputs: דוח מעקב בפורמט נבחר",3
+616,61,2,"ניהול אזורים בגוף","מודול ניהול אזורי גוף:
+
+מודול זה מספק כלים מתקדמים לניהול והתאמה אישית של רשימת אזורי הגוף בהם המשתמשת חווה כאבים. המשתמשת יכולה להוסיף אזורים חדשים, לערוך שמות של אזורים קיימים, או להסיר אזורים שכבר אינם רלוונטיים. המודול כולל ממשק משתמש ידידותי המשלב מפה אינטראקטיבית של הגוף, המאפשרת למשתמשת לבחור בצורה מדויקת את האזור בו היא חווה כאב מתוך מגוון אזורי גוף מוגדרים מראש או מותאמים אישית.
+
+פונקציונליות זו נועדה להבטיח התאמה אישית מקסימלית של המערכת לצרכים הייחודיים של כל משתמשת, ולהגביר את הדיוק והאפקטיביות של תיעוד וניהול הכאבים. המודול תומך בהזנה ובעריכה של נתוני אזורים באמצעות ממשק גרפי אינטואיטיבי, כולל תמיכה בחיפוש וסינון מתקדמים, ומציע משוב מיידי על שינויים שבוצעו.
+
+קלטים: בקשות משתמשת לניהול והגדרת אזורי גוף, כולל הוספת אזורים חדשים.
+פלטים: רשימת אזורים מעודכנת ומותאמת אישית.",4
+617,61,2,"אימות ואבטחת משתמשות","תיאור משופר של המודול:
+
+מודול אימות המשתמשות ואבטחת המידע האישי אחראי על הגנה על גישת המערכת ועל המידע הרגיש של המשתמשות. המודול מאפשר הרשמה וכניסה למערכת באמצעות שם משתמש וסיסמה מאובטחים, ומציע אימות דו-שלבי להוספת שכבת אבטחה נוספת. המידע האישי של המשתמשות מוגן באמצעות הצפנה חזקה ואחסון מאובטח, בהתאם לסטנדרטים הגבוהים ביותר של אבטחת מידע.
+
+כחלק משיפור חווית המשתמשת והגברת האבטחה, המודול תומך גם באוטנתיקציה דרך שירותי צד שלישי כגון Google Authentication. תכונה זו מאפשרת למשתמשות להתחבר למערכת בבטחה באמצעות חשבון גוגל שלהן, תוך שימוש בהצפנה ואימות מתקדם.
+
+יכולות ניהול המשתמשות כוללות איפוס סיסמה, שחזור חשבון, וניהול פרופיל משתמשת. המודול מבטיח שרק המשתמשת המאומתת תוכל לגשת לנתונים הרגישים שלה, תוך שמירה על פרטיות ואבטחת המידע.
+
+פרטי קלט: פרטי התחברות, בקשות לאיפוס סיסמה, בקשות לאוטנתיקציה בגוגל
+פלטים: מצב אימות משתמשת, גישה לנתונים מאובטחים, אישור גישה דרך Google Authentication
+
+שיקולי מימוש: 
+- יש לוודא שהאינטגרציה עם Google Authentication תואמת את כל הפרוטוקולים והסטנדרטים הנדרשים.
+- יש לשמור על תאימות מלאה עם מערכות האבטחה הקיימות ולהבטיח אחסון בטוח של כל המידע האישי.
+- תהליך האימות הדו-שלבי צריך להיות נגיש ונוח לשימוש, תוך שמירה על רמת אבטחה גבוהה.
+
+האם זה מה שהתכוונת? אנא ידעי אותי אם יש צורך בהתאמות נוספות.",5
+618,61,2,"התראות ותזכורות","מודול זה מספק למשתמשת התראות ותזכורות לתיעוד כאבים. המשתמשת יכולה להגדיר תזכורות יומיות או שבועיות כדי לא לשכוח לתעד את הכאבים שהיא חווה. המודול שולח התראות בזמן אמת לסמארטפון של המשתמשת או דרך דואר אלקטרוני, בהתאם להעדפות המשתמשת. תכונה זו מסייעת לשמירה על עקביות בתיעוד ומבטיחה שהנתונים יהיו מקיפים ומדויקים ככל האפשר. המודול גם מאפשר למשתמשת להגדיר התראות מיוחדות לפגישות עם הרופא או לתזכורות אחרות שקשורות לניהול הכאבים שלה.
+
+Inputs: העדפות תזכורות של המשתמשת
+Outputs: התראות ותזכורות מתוזמנות",6
+619,61,2,"תמיכה טכנית ושירות לקוחות","מודול זה מספק תמיכה טכנית ושירות לקוחות למשתמשות. הוא כולל מערכת תמיכה עם שאלות נפוצות, מדריכים לשימוש באפליקציה, וטפסים ליצירת קשר עם צוות התמיכה. המשתמשות יכולות לפתוח קריאות תמיכה במידה והן נתקלות בבעיות טכניות או אם יש להן שאלות לגבי השימוש באפליקציה. המודול מאפשר לצוות התמיכה לעקוב אחר הקריאות, לספק פתרונות ולהגיב במהירות לבעיות המשתמשות. כך ניתן להבטיח חווית משתמש חלקה ומספקת.
+
+Inputs: בקשות עזרה או קריאות תמיכה מהמשתמשות
+Outputs: פתרונות תמיכה וטיפול בבעיות",7
+620,61,1,"Database Schema","CREATE TABLE Users (
+    user_id INT AUTO_INCREMENT PRIMARY KEY,
+    username VARCHAR(50) NOT NULL UNIQUE,
+    password_hash VARCHAR(255) NOT NULL,
+    email VARCHAR(100) NOT NULL UNIQUE,
+    two_factor_enabled BOOLEAN DEFAULT FALSE,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    CONSTRAINT chk_email_format CHECK (email LIKE '%_@__%.__%'),
+    COMMENT 'Stores user authentication and personal information'
+);
+
+CREATE TABLE BodyRegions (
+    region_id INT AUTO_INCREMENT PRIMARY KEY,
+    user_id INT NOT NULL,
+    region_name VARCHAR(100) NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES Users(user_id) ON DELETE CASCADE,
+    UNIQUE (user_id, region_name),
+    COMMENT 'Stores customizable body regions for each user'
+);
+
+CREATE TABLE PainRecords (
+    record_id INT AUTO_INCREMENT PRIMARY KEY,
+    user_id INT NOT NULL,
+    region_id INT NOT NULL,
+    pain_date DATE NOT NULL,
+    pain_time TIME NOT NULL,
+    pain_intensity INT CHECK (pain_intensity BETWEEN 0 AND 10),
+    additional_description TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES Users(user_id) ON DELETE CASCADE,
+    FOREIGN KEY (region_id) REFERENCES BodyRegions(region_id) ON DELETE CASCADE,
+    INDEX (user_id, pain_date, pain_time),
+    COMMENT 'Records daily pain entries with details for each user'
+);
+
+CREATE TABLE PainHistory (
+    history_id INT AUTO_INCREMENT PRIMARY KEY,
+    user_id INT NOT NULL,
+    record_id INT NOT NULL,
+    action_type ENUM('view', 'edit', 'delete') NOT NULL,
+    action_timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES Users(user_id) ON DELETE CASCADE,
+    FOREIGN KEY (record_id) REFERENCES PainRecords(record_id) ON DELETE CASCADE,
+    COMMENT 'Logs user actions on pain records for historical tracking'
+);
+
+CREATE TABLE Reports (
+    report_id INT AUTO_INCREMENT PRIMARY KEY,
+    user_id INT NOT NULL,
+    report_type ENUM('weekly', 'monthly') NOT NULL,
+    start_date DATE NOT NULL,
+    end_date DATE NOT NULL,
+    report_format ENUM('PDF', 'Excel') NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES Users(user_id) ON DELETE CASCADE,
+    COMMENT 'Stores generated reports for pain tracking over specified periods'
+);
+
+CREATE TABLE Reminders (
+    reminder_id INT AUTO_INCREMENT PRIMARY KEY,
+    user_id INT NOT NULL,
+    reminder_type ENUM('daily', 'weekly', 'special') NOT NULL,
+    reminder_time TIME NOT NULL,
+    reminder_message VARCHAR(255),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES Users(user_id) ON DELETE CASCADE,
+    COMMENT 'Stores user-defined reminders for pain documentation and appointments'
+);
+
+CREATE TABLE SupportTickets (
+    ticket_id INT AUTO_INCREMENT PRIMARY KEY,
+    user_id INT NOT NULL,
+    issue_description TEXT NOT NULL,
+    status ENUM('open', 'in_progress', 'resolved', 'closed') DEFAULT 'open',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES Users(user_id) ON DELETE CASCADE,
+    COMMENT 'Tracks support tickets submitted by users for technical assistance'
+);
+
+CREATE INDEX idx_user_id ON PainRecords(user_id);
+CREATE INDEX idx_pain_date_time ON PainRecords(pain_date, pain_time);
+CREATE INDEX idx_report_user ON Reports(user_id);
+CREATE INDEX idx_reminder_user ON Reminders(user_id);
+CREATE INDEX idx_ticket_user ON SupportTickets(user_id);",NULL
+621,62,2,"מודול הזנת משפט","מודול זה מאפשר למשתמש להזין משפט ראשוני למערכת כדי להתחיל את התהליך של יצירת משפט קשור. המודול תוכנן כך שיאפשר ממשק משתמש ידידותי שבו המשתמש יוכל להקליד את המשפט ישירות או להעתיק ולהדביק אותו לתוך תיבת קלט ייעודית. המודול אחראי על אימות תקינות הקלט, כגון בדיקת אורך משפט מינימלי ומקסימלי, וניטור תווים לא תקינים שעלולים להשפיע על עיבוד המידע בהמשך. לאחר אימות הקלט, המודול מעביר את המידע למודול עיבוד משפטים להמשך טיפול.
+
+Inputs: משפט ראשוני שהוזן על ידי המשתמש
+Outputs: המשפט הראשוני המאומת והמעובד",1
+622,62,2,"מודול עיבוד משפטים","מודול זה אחראי על עיבוד המשפט הראשוני שהוזן על ידי המשתמש, ומציאת משפט קשור לנושא שלו. העיבוד כולל שימוש באלגוריתמים של עיבוד שפה טבעית (NLP) ומודלים של למידת מכונה כדי להבין את התוכן וההקשר של המשפט. המודול מבצע ניתוח סמנטי ותחבירי, ולאחר מכן מחפש במסד נתונים של משפטים אפשריים את המשפט המתאים ביותר להקשר. המודול מתחשב גם בציוני תחביר ותחביר של המשפטים כדי להבטיח שהמשפט המוצע יהיה בעל משמעות וקשור לנושא.
+
+Inputs: המשפט הראשוני המאומת
+Outputs: משפט חדש שקשור לנושא של המשפט המקורי",2
+623,62,2,"מודול ניקוד","מודול זה מיועד להערכת איכות המשפט החדש שנוצר והשוואתו למשפט המקורי. המודול מתבסס על קריטריונים כמו רלוונטיות לנושא, מורכבות תחבירית ויכולת הבנה. הוא משתמש במנגנוני בינה מלאכותית להערכת ניקוד, תוך התחשבות גם באספקטים כמו דיוק המילים והשימוש בהן. המודול מקצה ציון לכל משפט שנוצר, המבוסס על פרמטרים שנקבעו מראש, ומצהיר על כמות הנקודות שהמשתמש צבר. כל נקודה שווה לדולר אחד, מה שמאפשר להעריך את הערך המוניטרי של כל תוצאה.
+
+Inputs: המשפט החדש שנוצר והמשפט המקורי
+Outputs: ניקוד למשפט החדש ומספר נקודות שהוקצו",3
+624,62,2,"מודול חישוב רווחים","מודול זה מחשב את הרווחים של המשתמש על סמך הנקודות שצבר בתהליך יצירת המשפטים. הוא מקבל כקלט את מספר הנקודות שהוקצו לכל משפט ומבצע חישוב מצטבר של הרווח הכספי. כל נקודה שווה לדולר אחד, ולכן המודול מסכם את מספר הנקודות כדי לקבוע את הסכום הכספי הסופי שהמשתמש זכאי לקבל. המודול מציג למשתמש את הרווחים המצטברים שלו בצורה ברורה, כולל פירוט של מספר הנקודות והסכום הכספי המקביל.
+
+Inputs: מספר הנקודות שצבר המשתמש
+Outputs: סכום הרווחים הכספיים של המשתמש",4
+625,62,2,"מודול ניהול משתמשים","מודול זה אחראי על ניהול פרופילי המשתמשים במערכת, כולל יצירה ועדכון פרופילים, ניהול פרטי כניסה והרשאות. משתמשים יכולים להירשם למערכת על ידי הזנת פרטים אישיים כגון שם, דואר אלקטרוני וסיסמה. המודול מאמת את תקינות המידע ומנהל את תהליך אישור ההרשמה באמצעות שליחת הודעות אימות לדואר האלקטרוני. בנוסף, המודול מאפשר למשתמשים לעדכן את פרטי הפרופיל שלהם ולנהל את ההגדרות האישיות שלהם, כולל אפשרויות לשחזור סיסמה במקרה של אובדן גישה.
+
+Inputs: פרטי משתמש, כולל שם, דואר אלקטרוני וסיסמה
+Outputs: פרופיל משתמש מאומת ומעודכן במערכת",5
+626,62,2,"מודול אימות ובקרת גישה","מודול זה מטפל בתהליך האימות והבקרה על גישת משתמשים למערכת. הוא מבצע אימות של פרטי ההתחברות שהוזנו על ידי המשתמשים, כולל בדיקת שם משתמש וסיסמה מול מסד נתונים של משתמשים רשומים. במידה והנתונים תקינים, המודול מאפשר גישה למערכת ומעניק למשתמש את ההרשאות המתאימות. המודול כולל גם מנגנונים לניהול סשן, שמירה על אבטחת המידע ופרטיות המשתמשים, ויכולת ניהול הרשאות למשתמשים ברמות גישה שונות בהתאם לתפקידם במערכת.
+
+Inputs: פרטי התחברות של המשתמש (שם משתמש וסיסמה)
+Outputs: גישה מאומתת למערכת והקצאת הרשאות מתאימות",6
+627,62,2,"מודול ממשק משתמש","מודול זה מספק את הממשק הגרפי שבו משתמשים יכולים לתקשר עם המערכת. הוא כולל דפים שונים להצגת תכנים, הזנת משפטים, צפייה בניקוד ורווחים, וניהול פרופיל משתמש. המודול תוכנן להיות אינטואיטיבי וידידותי למשתמש, עם דגש על חוויית משתמש חלקה ונוחה. הוא כולל אלמנטים גרפיים כמו כפתורים, תיבות קלט והודעות שגיאה, שמנחים את המשתמשים במהלך השימוש במערכת. המודול גם מתממשק עם מודולים אחרים במערכת כדי להציג מידע מעודכן בצורה דינמית.
+
+Inputs: פעולות משתמש כמו הזנת משפטים וניהול פרופיל
+Outputs: תצוגה גרפית של תכני המערכת ותגובות לפעולות המשתמש",7
+628,62,2,"מודול מסד נתונים","מודול זה אחראי על ניהול כל המידע הנדרש לפעולת המערכת, כולל משפטים, פרופילי משתמשים, וניקוד. הוא מנהל מסד נתונים רלציוני שבו נשמרים כל הנתונים בצורה מאורגנת וניתנת לשאילתה. המודול מתממשק עם מודולים אחרים לצורך אחזור ועדכון מידע בזמן אמת, ומבטיח שהמידע המאוחסן מעודכן, מדויק וזמין בכל רגע נתון. המודול כולל גם מנגנונים לגיבוי ושחזור נתונים, כדי לשמור על שלמות המידע במקרה של תקלות או אובדן נתונים.
+
+Inputs: בקשות אחזור ועדכון מידע ממודולים אחרים
+Outputs: מידע מעובד ומעודכן ממסד הנתונים",8
+629,62,2,"מודול התראות והודעות","מודול זה משמש לשליחת התראות והודעות למשתמשים, כגון הודעות אימות, עדכונים על ניקוד, ותזכורות שונות. הוא מתממשק עם מודול ניהול המשתמשים ומודול ממשק המשתמש כדי להבטיח שהודעות יגיעו ליעדן בצורה מהירה ויעילה. המודול תומך בשליחת הודעות דרך מספר ערוצים, כולל דואר אלקטרוני והודעות פוש, ומאפשר התאמה אישית של סוגי ההודעות שהמשתמש מעוניין לקבל. המודול גם עוקב אחר היסטוריית ההודעות שנשלחו כדי לנהל מעקב ולשפר את חוויית המשתמש.
+
+Inputs: אירועים או טריגרים כמו שינוי ניקוד או תזכורות
+Outputs: הודעות והתראות שנשלחו למשתמשים",9
+630,62,2,"מודול ניתוח ושיפור ביצועים","מודול זה מיועד לניתוח הביצועים של המערכת ולהצעת דרכים לשיפור. הוא אוסף נתונים לגבי שימוש במערכת, דפוסי פעולה של משתמשים, וזמני תגובה של מודולים שונים. המודול מנתח את הנתונים בעזרת אלגוריתמים סטטיסטיים וכלי ניתוח נתונים, כדי לזהות מגמות ותקלות. הוא מספק דוחות ותרשימים שמאפשרים לצוות הפיתוח להבין את ביצועי המערכת ולהציע שיפורים. המודול גם מתממשק עם מודול המסד נתונים כדי לאחזר מידע רלוונטי לצורך ניתוחים מתקדמים.
+
+Inputs: נתוני שימוש במערכת ודפוסי פעולה של משתמשים
+Outputs: דוחות ותרשימים לניתוח ביצועים והצעות לשיפור",10
+631,62,1,"Database Schema","CREATE TABLE Users (
+    UserID INT PRIMARY KEY AUTO_INCREMENT,
+    UserName VARCHAR(50) NOT NULL,
+    Email VARCHAR(100) NOT NULL UNIQUE,
+    PasswordHash VARCHAR(255) NOT NULL,
+    CreatedAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UpdatedAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    -- Additional fields for user profile management
+    CONSTRAINT chk_email_format CHECK (Email LIKE '%_@__%.__%')
+);
+
+CREATE TABLE Sentences (
+    SentenceID INT PRIMARY KEY AUTO_INCREMENT,
+    UserID INT NOT NULL,
+    OriginalSentence TEXT NOT NULL,
+    ProcessedSentence TEXT,
+    CreatedAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (UserID) REFERENCES Users(UserID) ON DELETE CASCADE,
+    -- Ensure sentence length constraints
+    CONSTRAINT chk_sentence_length CHECK (CHAR_LENGTH(OriginalSentence) BETWEEN 5 AND 1000)
+);
+
+CREATE TABLE SentenceScores (
+    ScoreID INT PRIMARY KEY AUTO_INCREMENT,
+    SentenceID INT NOT NULL,
+    OriginalSentence TEXT NOT NULL,
+    NewSentence TEXT NOT NULL,
+    RelevanceScore DECIMAL(5, 2) NOT NULL CHECK (RelevanceScore BETWEEN 0 AND 100),
+    ComplexityScore DECIMAL(5, 2) NOT NULL CHECK (ComplexityScore BETWEEN 0 AND 100),
+    UnderstandabilityScore DECIMAL(5, 2) NOT NULL CHECK (UnderstandabilityScore BETWEEN 0 AND 100),
+    TotalPoints INT NOT NULL,
+    CreatedAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (SentenceID) REFERENCES Sentences(SentenceID) ON DELETE CASCADE
+);
+
+CREATE TABLE UserEarnings (
+    EarningsID INT PRIMARY KEY AUTO_INCREMENT,
+    UserID INT NOT NULL,
+    TotalPoints INT NOT NULL,
+    TotalEarnings DECIMAL(10, 2) GENERATED ALWAYS AS (TotalPoints * 1.0) STORED,
+    CreatedAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (UserID) REFERENCES Users(UserID) ON DELETE CASCADE
+);
+
+CREATE TABLE UserSessions (
+    SessionID INT PRIMARY KEY AUTO_INCREMENT,
+    UserID INT NOT NULL,
+    SessionToken VARCHAR(255) NOT NULL,
+    ExpiresAt TIMESTAMP NOT NULL,
+    CreatedAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (UserID) REFERENCES Users(UserID) ON DELETE CASCADE
+);
+
+CREATE TABLE Notifications (
+    NotificationID INT PRIMARY KEY AUTO_INCREMENT,
+    UserID INT NOT NULL,
+    Message TEXT NOT NULL,
+    SentAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (UserID) REFERENCES Users(UserID) ON DELETE CASCADE
+);
+
+CREATE TABLE PerformanceMetrics (
+    MetricID INT PRIMARY KEY AUTO_INCREMENT,
+    MetricName VARCHAR(100) NOT NULL,
+    MetricValue DECIMAL(10, 2) NOT NULL,
+    RecordedAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX idx_user_email ON Users(Email);
+CREATE INDEX idx_sentence_user ON Sentences(UserID);
+CREATE INDEX idx_score_sentence ON SentenceScores(SentenceID);
+CREATE INDEX idx_earnings_user ON UserEarnings(UserID);
+CREATE INDEX idx_session_user ON UserSessions(UserID);
+CREATE INDEX idx_notification_user ON Notifications(UserID);
+
+-- Comments explaining the purpose of each table and column
+-- Users: Stores user information and credentials
+-- Sentences: Stores original and processed sentences submitted by users
+-- SentenceScores: Stores scores for processed sentences based on various criteria
+-- UserEarnings: Tracks the total points and earnings for each user
+-- UserSessions: Manages user session tokens for authentication
+-- Notifications: Stores messages and notifications sent to users
+-- PerformanceMetrics: Records various performance metrics of the system",NULL
+632,63,2,"מודול ניהול משתמשים ואימות","מודול זה מיועד לניהול משתמשים ואימות זהותם במערכת. המודול מאפשר יצירה, עריכה ומחיקת פרופילים של משתמשים, כולל אנשי צוות וגורמי חינוך בפנימייה. בנוסף, המודול מספק מערכת אימות מבוססת שם משתמש וסיסמה, וכן תמיכה באימות דו-שלבי להבטחת אבטחת מידע. המודול משתלב עם מערכות קיימות לניהול זהויות ויכול לייבא נתונים ממערכות חיצוניות כמו מערכת סליספורס. המשתמשים יכולים לשנות את סיסמתם או לאחזר אותה במקרה של שכחה. המודול מוודא גישה מאובטחת ומנוהלת לכל הפונקציות והמידע במערכת.
+
+Inputs: פרטי משתמש כמו שם משתמש, סיסמה, ותפקיד במערכת.
+Outputs: אימות גישה למשתמשים, הרשאות לפי תפקיד, ויומן פעילות למעקב אחר שימוש.",1
+633,63,2,"מודול יצירת טיקטים","מודול זה מאפשר יצירת ומעקב אחר טיקטים הקשורים להתנהגות הנוער בפנימייה. ניתן לתעד אירועים שונים כגון עישון, גניבה, התנהגות יפה או אכילה בחדר האוכל. כל טיקט כולל מידע מפורט על התאריך, השעה, ומיקום האירוע, יחד עם הערות ממלא הטיקט. המודול מאפשר לעדכן את מצב הטיקט, להוסיף הערות נוספות, ולסגור טיקטים לאחר טיפול. הוא משתלב עם מערכת סליספורס כדי להעשיר את המידע האישי של כל נער. המשתמשים יכולים לייצר דוחות סטטיסטיים על בסיס המידע שנאסף לטובת קבלת החלטות מבוססות נתונים.
+
+Inputs: פרטי האירוע כמו תאריך, שעה, מיקום, וסוג התנהגות.
+Outputs: טיקטים מתועדים ומעודכנים, דוחות סטטיסטיים, ועדכון מידע אישי בנוגע לנער.",2
+634,63,2,"מודול אינטגרציה עם סליספורס","מודול זה מספק אינטגרציה חלקה עם מערכת סליספורס, המאפשרת גישה למידע אישי על כל נער בפנימייה. המודול מושך נתונים כמו פרטי התקשרות, היסטוריית אירועים, ותמונת מצב כללית של הנער. הוא מאפשר עדכון מידע בסליספורס בהתאם לשינויים ולמקרים חדשים שמתועדים במערכת המעקב. המודול משתמש ב-API של סליספורס להעברת נתונים בצורה מאובטחת ושקופה, ומבטיח שהמידע תמיד מעודכן ומתואם בין המערכות. זה מסייע למשתמשים להבין את הקשר בין אירועי ההתנהגות למידע האישי המורחב של הנער.
+
+Inputs: בקשות מידע אישי על נערים, אירועים חדשים לתיעוד.
+Outputs: מידע אישי מעודכן ומסונכרן, תיעוד אירועים במערכת סליספורס.",3
+635,63,2,"מודול דוחות וניתוח נתונים","מודול זה מאפשר למשתמשים ליצור דוחות מפורטים וניתוחים סטטיסטיים על בסיס הנתונים שנאספו במערכת. ניתן לייצר דוחות יומיים, שבועיים או חודשיים, המציגים מגמות בהתנהגות הנוער, אירועים חריגים, ושינויים בתדירות התקריות. המודול מציע כלים גרפיים להצגת הנתונים, כמו גרפים, טבלאות ודיאגרמות. המשתמשים יכולים לבחור קריטריונים ספציפיים לניתוח ולהתאים את הדוחות לצרכים שונים. המודול מספק תובנות לשיפור קבלת ההחלטות והבנת מצבים בעייתיים. הדוחות מהווים כלי עזר חיוני עבור צוות ההנהלה והחינוך בפנימייה.
+
+Inputs: נתוני טיקטים, קריטריוני ניתוח נבחרים.
+Outputs: דוחות גרפיים, ניתוחים סטטיסטיים, תובנות לפעולה.",4
+636,63,2,"מודול התראות והודעות","מודול זה אחראי על יצירת ושליחת התראות והודעות למשתמשים במערכת בהתאם לאירועים מסוימים. לדוגמה, בעת יצירת טיקט חדש או שינוי במצב של טיקט קיים, המודול שולח התראה למשתמשים הרלוונטיים. הוא מאפשר התאמה אישית של התראות לפי העדפות המשתמש, כולל בחירה בין התראות בזמן אמת או תקופתיות. המודול תומך בשליחת הודעות דרך דוא""ל או SMS, ומבטיח שהמידע מגיע בזמן אמת לגורמים המתאימים. זה מסייע למשתמשים להיות מעודכנים ולהגיב במהירות לאירועים קריטיים.
+
+Inputs: אירועים חדשים, שינויים בטיקטים, העדפות משתמש.
+Outputs: התראות והודעות מותאמות אישית בזמן אמת.",5
+637,63,2,"מודול ניהול הרשאות ואבטחה","מודול זה מספק מערכת ניהול הרשאות ואבטחת מידע עבור כל המשתמשים במערכת. הוא מאפשר להגדיר תפקידים והרשאות גישה ספציפיות לכל משתמש בהתאם לתפקידו בפנימייה. המודול מוודא שמידע רגיש נגיש אך ורק לגורמים המורשים. הוא עוקב אחר פעולות משתמשים ומייצר יומני פעילות לצרכי אבטחה וביקורת. המערכת כוללת תכונות כמו הצפנה, בקרת גישה, וניהול סיסמאות. המודול משתלב עם מערכות אבטחה קיימות ומבטיח שהמערכת עומדת בתקני האבטחה המחמירים ביותר.
+
+Inputs: פרטי משתמשים ותפקידים, בקשות גישה ומשימות.
+Outputs: הרשאות גישה מותאמות, יומני פעילות, אבטחת מידע.",6
+638,63,2,"מודול תמיכה ושירות לקוחות","מודול זה מספק תמיכה טכנית ושירות לקוחות למשתמשי המערכת. הוא כולל מערכת לניהול פניות, המאפשרת למשתמשים לדווח על בעיות, לשאול שאלות, ולקבל תמיכה טכנית. הפניות מתועדות במערכת, והמשתמשים יכולים לעקוב אחר מצב הטיפול בפנייה שלהם. המודול מאפשר לצוות התמיכה לנהל את הפניות בצורה יעילה, להקצות אנשי צוות לטיפול בפניות, ולספק פתרונות מהירים. הוא כולל גם מאגר ידע עם תשובות לשאלות נפוצות ומדריכים לשימוש במערכת. המודול שואף לשפר את חווית המשתמש ולהבטיח תמיכה מתמשכת.
+
+Inputs: פניות משתמשים, שאלות ובעיות טכניות.
+Outputs: פתרונות ותשובות לפניות, מדריכים ותמיכה טכנית.",7
+639,63,2,"מודול ממשק משתמש ראשי","מודול זה מספק את הממשק הראשי שבו משתמשים יכולים לגשת לכל הפונקציות של המערכת. הוא כולל תפריטים, דשבורדים, ואפשרויות ניווט המאפשרות גישה קלה ומהירה לתכונות השונות. הממשק מתוכנן להיות ידידותי למשתמש, עם עיצוב נקי וברור, המאפשר למשתמשים לבצע פעולות בצורה אינטואיטיבית. הממשק תומך בהתאמה אישית, כך שכל משתמש יכול להגדיר את סביבת העבודה לפי העדפותיו. הוא משתלב עם המודולים השונים ומספק חווית משתמש קוהרנטית ואחידה. כל משתמש ניגש למידע ולדוחות הרלוונטיים לו בהתבסס על ההרשאות שניתנו לו.
+
+Inputs: בקשות משתמשים לניווט וביצוע פעולות.
+Outputs: ממשק משתמש אינטואיטיבי, גישה לפונקציות ודוחות מותאמים.",8
+640,63,1,"Database Schema","CREATE TABLE Users (
+    user_id INT AUTO_INCREMENT PRIMARY KEY,
+    username VARCHAR(50) NOT NULL UNIQUE,
+    password_hash VARCHAR(255) NOT NULL,
+    role VARCHAR(50) NOT NULL,
+    two_factor_enabled BOOLEAN DEFAULT FALSE,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    CONSTRAINT chk_role CHECK (role IN ('Staff', 'Educator', 'Admin'))
+);
+
+CREATE TABLE UserProfiles (
+    profile_id INT AUTO_INCREMENT PRIMARY KEY,
+    user_id INT NOT NULL,
+    first_name VARCHAR(100),
+    last_name VARCHAR(100),
+    email VARCHAR(100) UNIQUE,
+    phone VARCHAR(15),
+    FOREIGN KEY (user_id) REFERENCES Users(user_id) ON DELETE CASCADE
+);
+
+CREATE TABLE Tickets (
+    ticket_id INT AUTO_INCREMENT PRIMARY KEY,
+    user_id INT NOT NULL,
+    event_date DATETIME NOT NULL,
+    location VARCHAR(255),
+    behavior_type VARCHAR(100),
+    notes TEXT,
+    status VARCHAR(50) DEFAULT 'Open',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES Users(user_id) ON DELETE SET NULL,
+    CONSTRAINT chk_status CHECK (status IN ('Open', 'In Progress', 'Closed'))
+);
+
+CREATE TABLE SalesforceIntegration (
+    integration_id INT AUTO_INCREMENT PRIMARY KEY,
+    user_id INT NOT NULL,
+    contact_info JSON,
+    event_history JSON,
+    last_sync TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES Users(user_id) ON DELETE CASCADE
+);
+
+CREATE TABLE Reports (
+    report_id INT AUTO_INCREMENT PRIMARY KEY,
+    user_id INT NOT NULL,
+    report_type VARCHAR(50),
+    criteria JSON,
+    generated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES Users(user_id) ON DELETE CASCADE
+);
+
+CREATE TABLE Alerts (
+    alert_id INT AUTO_INCREMENT PRIMARY KEY,
+    user_id INT NOT NULL,
+    ticket_id INT,
+    alert_type VARCHAR(50),
+    message TEXT,
+    sent_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES Users(user_id) ON DELETE CASCADE,
+    FOREIGN KEY (ticket_id) REFERENCES Tickets(ticket_id) ON DELETE SET NULL
+);
+
+CREATE TABLE Permissions (
+    permission_id INT AUTO_INCREMENT PRIMARY KEY,
+    user_id INT NOT NULL,
+    permission_type VARCHAR(50),
+    granted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES Users(user_id) ON DELETE CASCADE
+);
+
+CREATE TABLE ActivityLogs (
+    log_id INT AUTO_INCREMENT PRIMARY KEY,
+    user_id INT NOT NULL,
+    action VARCHAR(255),
+    performed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES Users(user_id) ON DELETE CASCADE
+);
+
+CREATE TABLE SupportTickets (
+    support_ticket_id INT AUTO_INCREMENT PRIMARY KEY,
+    user_id INT NOT NULL,
+    issue_description TEXT,
+    status VARCHAR(50) DEFAULT 'Open',
+    assigned_to INT,
+    FOREIGN KEY (user_id) REFERENCES Users(user_id) ON DELETE CASCADE,
+    FOREIGN KEY (assigned_to) REFERENCES Users(user_id) ON DELETE SET NULL,
+    CONSTRAINT chk_support_status CHECK (status IN ('Open', 'In Progress', 'Resolved'))
+);
+
+CREATE TABLE KnowledgeBase (
+    article_id INT AUTO_INCREMENT PRIMARY KEY,
+    title VARCHAR(255),
+    content TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX idx_users_username ON Users(username);
+CREATE INDEX idx_tickets_event_date ON Tickets(event_date);
+CREATE INDEX idx_alerts_sent_at ON Alerts(sent_at);
+CREATE INDEX idx_support_tickets_status ON SupportTickets(status);
+
+-- Comments explaining the purpose of each table and column
+-- Users: Stores user credentials and roles
+-- UserProfiles: Stores additional user profile information
+-- Tickets: Records behavioral events and their statuses
+-- SalesforceIntegration: Manages integration data with Salesforce
+-- Reports: Stores generated report data and criteria
+-- Alerts: Manages alerts and notifications for users
+-- Permissions: Manages user permissions and access rights
+-- ActivityLogs: Tracks user actions for auditing
+-- SupportTickets: Manages user support requests and their statuses
+-- KnowledgeBase: Stores articles and guides for user support",NULL
+651,67,2,"User Authentication Module","The User Authentication Module is responsible for managing user identities within the system. It allows users to register, log in, and manage their profiles securely. This module utilizes OAuth 2.0 for secure authentication, ensuring that user credentials are encrypted and stored safely. It also includes features for password recovery and multi-factor authentication to enhance security. The module interacts with a user database to verify credentials and maintain user sessions. Upon successful authentication, users are granted access to the main features of the application, ensuring a personalized experience tailored to their needs.
+
+Inputs: {
+        ""username"": ""String representing the user's chosen username"",
+        ""password"": ""String representing the user's password"",
+        ""action"": ""String indicating the action (login, register, recover password)""
+      }
+Outputs: {
+        ""success"": ""Boolean indicating whether the authentication was successful"",
+        ""message"": ""String providing feedback on the authentication process"",
+        ""userData"": ""Object containing user profile information upon successful login""
+      }",1
+652,67,2,"Activity Reminder Module","The Activity Reminder Module is designed to send timely reminders to users about their scheduled activities, integrated with soothing music to enhance the experience. Users can set specific times for reminders, choose preferred music tracks from a library, and receive notifications through the app or via push notifications. The module uses a scheduling algorithm to trigger reminders at the appropriate times, ensuring users are prompted to engage in their activities. Additionally, it allows users to customize reminder intervals and music preferences, creating a personalized and enjoyable experience that encourages adherence to their health routines.
+
+Inputs: {
+        ""userId"": ""String representing the unique identifier of the user"",
+        ""activityTime"": ""DateTime indicating when the reminder should be sent"",
+        ""musicTrack"": ""String representing the selected music track for the reminder"",
+        ""repeatInterval"": ""String indicating how often the reminder should repeat""
+      }
+Outputs: {
+        ""reminderId"": ""String representing the unique identifier for the reminder"",
+        ""status"": ""Boolean indicating whether the reminder was successfully set"",
+        ""nextReminder"": ""DateTime indicating when the next reminder will occur""
+      }",2
+653,67,2,"Nearby Patients Locator Module","The Nearby Patients Locator Module enables users to find and connect with other patients in their vicinity, particularly those with similar health conditions, such as diabetes. Utilizing GPS and location services, this module displays a map interface showing the locations of nearby users who have opted to share their information. Users can view profiles of nearby patients, including their health conditions and interests, facilitating connections for support and advice. This module promotes community engagement and allows users to request assistance or share resources, enhancing their overall health management experience through peer support.
+
+Inputs: {
+        ""userId"": ""String representing the unique identifier of the user"",
+        ""location"": ""Object containing latitude and longitude coordinates of the user's current location"",
+        ""radius"": ""Integer specifying the search radius in kilometers""
+      }
+Outputs: {
+        ""nearbyPatients"": ""Array of objects containing information about nearby patients, including userId, health condition, and distance"",
+        ""status"": ""Boolean indicating whether the location search was successful""
+      }",3
+654,67,2,"Medication Request Module","The Medication Request Module allows users to request medications from nearby patients or caregivers when they are in need. This module provides a user-friendly interface where patients can specify the medication they require, the quantity, and any additional notes. It integrates with the Nearby Patients Locator Module to identify potential helpers within the vicinity. Once a request is made, notifications are sent to nearby users who can respond to the request. This module aims to foster a supportive community among patients, ensuring that individuals can access necessary medications promptly and efficiently, thereby improving health outcomes.
+
+Inputs: {
+        ""userId"": ""String representing the unique identifier of the user making the request"",
+        ""medicationName"": ""String representing the name of the medication requested"",
+        ""quantity"": ""Integer indicating the amount of medication needed"",
+        ""notes"": ""String containing any additional information or special instructions""
+      }
+Outputs: {
+        ""requestId"": ""String representing the unique identifier for the medication request"",
+        ""status"": ""Boolean indicating whether the request was successfully submitted"",
+        ""notificationSent"": ""Boolean indicating whether notifications were sent to nearby patients""
+      }",4
+655,67,2,"User Profile Management Module","The User Profile Management Module allows users to create, view, and edit their personal profiles within the application. This module includes fields for entering personal information such as name, age, health conditions, and medication history. Users can also upload profile pictures and set preferences for notifications and reminders. The module ensures data validation and security, protecting sensitive health information. It integrates with the User Authentication Module to ensure that only authorized users can access and modify their profiles. This module enhances user engagement by allowing personalization of the application experience based on individual health needs.
+
+Inputs: {
+        ""userId"": ""String representing the unique identifier of the user"",
+        ""profileData"": ""Object containing user profile information to be updated, such as name, age, health conditions, and preferences""
+      }
+Outputs: {
+        ""success"": ""Boolean indicating whether the profile update was successful"",
+        ""updatedProfile"": ""Object containing the updated user profile information"",
+        ""message"": ""String providing feedback on the profile update process""
+      }",5
+656,67,2,"Music Library Module","The Music Library Module serves as a repository for soothing music tracks that users can select for their activity reminders. This module allows users to browse, search, and listen to various music tracks categorized by genre, mood, or purpose. It includes features for users to upload their own music or suggest new tracks for inclusion in the library. The module integrates with the Activity Reminder Module to provide users with a seamless way to select music for their reminders. By enhancing the reminder experience with music, this module aims to improve user satisfaction and adherence to health activities.
+
+Inputs: {
+        ""userId"": ""String representing the unique identifier of the user"",
+        ""searchQuery"": ""String representing the search term for finding specific music tracks"",
+        ""action"": ""String indicating the action (browse, upload, suggest)""
+      }
+Outputs: {
+        ""musicTracks"": ""Array of objects containing information about available music tracks, including trackId, title, and artist"",
+        ""status"": ""Boolean indicating whether the action was successful"",
+        ""message"": ""String providing feedback on the action taken""
+      }",6
+657,67,2,"Notification Management Module","The Notification Management Module is responsible for handling all notifications sent to users within the application. This includes reminders for activities, alerts for medication requests, and updates from nearby patients. The module allows users to customize their notification preferences, such as choosing between push notifications, in-app alerts, or email notifications. It integrates with the Activity Reminder and Medication Request Modules to ensure timely and relevant notifications are delivered. By managing notifications effectively, this module enhances user engagement and ensures that users remain informed about important activities and interactions within the community.
+
+Inputs: {
+        ""userId"": ""String representing the unique identifier of the user"",
+        ""notificationPreferences"": ""Object containing user preferences for notification types and delivery methods""
+      }
+Outputs: {
+        ""success"": ""Boolean indicating whether the notification preferences were successfully updated"",
+        ""currentPreferences"": ""Object containing the current notification preferences for the user"",
+        ""message"": ""String providing feedback on the update process""
+      }",7
+658,67,2,"Community Support Forum Module","The Community Support Forum Module provides a platform for users to engage in discussions, share experiences, and seek advice from other patients. This module includes features for creating posts, commenting, and liking posts, fostering a sense of community among users. It allows users to categorize discussions by topics, such as diabetes management, medication tips, and emotional support. The module integrates with user profiles to display user information alongside posts, encouraging accountability and connection. By facilitating open communication, this module aims to empower users to share knowledge and support each other in their health journeys.
+
+Inputs: {
+        ""userId"": ""String representing the unique identifier of the user"",
+        ""postContent"": ""String containing the content of the forum post or comment"",
+        ""category"": ""String indicating the category of the discussion""
+      }
+Outputs: {
+        ""postId"": ""String representing the unique identifier for the forum post"",
+        ""status"": ""Boolean indicating whether the post was successfully created"",
+        ""message"": ""String providing feedback on the post creation process""
+      }",8
+659,67,2,"Analytics and Reporting Module","The Analytics and Reporting Module collects and analyzes user data to provide insights into user engagement, activity adherence, and community interactions. This module generates reports on various metrics, such as the number of reminders set, medication requests made, and forum activity levels. It utilizes data visualization techniques to present findings in an easily digestible format, helping administrators and users understand trends and areas for improvement. The module integrates with all other modules to gather comprehensive data, ensuring that insights are based on real user interactions. By providing actionable analytics, this module aims to enhance the overall effectiveness of the application.
+
+Inputs: {
+        ""userId"": ""String representing the unique identifier of the user (optional for aggregated data)"",
+        ""reportType"": ""String indicating the type of report requested (e.g., activity, community engagement)"",
+        ""timeFrame"": ""String indicating the time period for the report (e.g., daily, weekly, monthly)""
+      }
+Outputs: {
+        ""reportData"": ""Object containing the requested analytics data, including metrics and visualizations"",
+        ""status"": ""Boolean indicating whether the report generation was successful"",
+        ""message"": ""String providing feedback on the report generation process""
+      }",9
+660,67,1,"Database Schema","CREATE TABLE Users (
+    user_id SERIAL PRIMARY KEY,
+    username VARCHAR(255) UNIQUE NOT NULL,
+    password_hash VARCHAR(255) NOT NULL,
+    email VARCHAR(255) UNIQUE NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT chk_email_format CHECK (email LIKE '%@%.%')
+);
+
+CREATE TABLE UserProfiles (
+    profile_id SERIAL PRIMARY KEY,
+    user_id INT NOT NULL,
+    name VARCHAR(255),
+    age INT CHECK (age >= 0),
+    health_conditions TEXT,
+    medication_history TEXT,
+    profile_picture VARCHAR(255),
+    notification_preferences JSON,
+    FOREIGN KEY (user_id) REFERENCES Users(user_id) ON DELETE CASCADE
+);
+
+CREATE TABLE ActivityReminders (
+    reminder_id SERIAL PRIMARY KEY,
+    user_id INT NOT NULL,
+    activity_time TIMESTAMP NOT NULL,
+    music_track VARCHAR(255),
+    repeat_interval VARCHAR(50),
+    next_reminder TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES Users(user_id) ON DELETE CASCADE
+);
+
+CREATE TABLE MusicLibrary (
+    track_id SERIAL PRIMARY KEY,
+    title VARCHAR(255) NOT NULL,
+    artist VARCHAR(255),
+    genre VARCHAR(100),
+    mood VARCHAR(100),
+    file_path VARCHAR(255) NOT NULL,
+    uploaded_by INT,
+    FOREIGN KEY (uploaded_by) REFERENCES Users(user_id) ON DELETE SET NULL
+);
+
+CREATE TABLE Notifications (
+    notification_id SERIAL PRIMARY KEY,
+    user_id INT NOT NULL,
+    notification_type VARCHAR(50),
+    message TEXT,
+    delivery_method VARCHAR(50),
+    sent_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES Users(user_id) ON DELETE CASCADE
+);
+
+CREATE TABLE Locations (
+    location_id SERIAL PRIMARY KEY,
+    user_id INT NOT NULL,
+    latitude DECIMAL(9,6) NOT NULL,
+    longitude DECIMAL(9,6) NOT NULL,
+    radius INT CHECK (radius > 0),
+    FOREIGN KEY (user_id) REFERENCES Users(user_id) ON DELETE CASCADE
+);
+
+CREATE TABLE MedicationRequests (
+    request_id SERIAL PRIMARY KEY,
+    user_id INT NOT NULL,
+    medication_name VARCHAR(255) NOT NULL,
+    quantity INT CHECK (quantity > 0),
+    notes TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES Users(user_id) ON DELETE CASCADE
+);
+
+CREATE TABLE ForumPosts (
+    post_id SERIAL PRIMARY KEY,
+    user_id INT NOT NULL,
+    content TEXT NOT NULL,
+    category VARCHAR(100),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES Users(user_id) ON DELETE CASCADE
+);
+
+CREATE TABLE AnalyticsReports (
+    report_id SERIAL PRIMARY KEY,
+    user_id INT,
+    report_type VARCHAR(50),
+    time_frame VARCHAR(50),
+    report_data JSON,
+    generated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES Users(user_id) ON DELETE SET NULL
+);
+
+CREATE INDEX idx_users_username ON Users(username);
+CREATE INDEX idx_user_profiles_user_id ON UserProfiles(user_id);
+CREATE INDEX idx_activity_reminders_user_id ON ActivityReminders(user_id);
+CREATE INDEX idx_music_library_title ON MusicLibrary(title);
+CREATE INDEX idx_notifications_user_id ON Notifications(user_id);
+CREATE INDEX idx_locations_user_id ON Locations(user_id);
+CREATE INDEX idx_medication_requests_user_id ON MedicationRequests(user_id);
+CREATE INDEX idx_forum_posts_user_id ON ForumPosts(user_id);
+CREATE INDEX idx_analytics_reports_user_id ON AnalyticsReports(user_id);
+
+COMMENT ON TABLE Users IS 'Stores user authentication details and credentials.';
+COMMENT ON COLUMN Users.username IS 'Unique username chosen by the user.';
+COMMENT ON COLUMN Users.password_hash IS 'Encrypted password for user authentication.';
+COMMENT ON TABLE UserProfiles IS 'Contains personal and health-related information for each user.';
+COMMENT ON TABLE ActivityReminders IS 'Stores scheduled activity reminders for users.';
+COMMENT ON TABLE MusicLibrary IS 'Repository of music tracks available for activity reminders.';
+COMMENT ON TABLE Notifications IS 'Manages notifications sent to users based on their preferences.';
+COMMENT ON TABLE Locations IS 'Stores user location data for finding nearby patients.';
+COMMENT ON TABLE MedicationRequests IS 'Records requests for medications made by users.';
+COMMENT ON TABLE ForumPosts IS 'Contains posts and discussions in the community support forum.';
+COMMENT ON TABLE AnalyticsReports IS 'Stores generated analytics and reports for user activities.';",NULL
+826,79,2,"מודול רישום משתמש","מודול זה אחראי על תהליך רישום המשתמשים לאפליקציה ""חתול לבית"". המשתמשים יכולים להירשם באמצעות כתובת דוא""ל וסיסמה, או באמצעות חשבון רשת חברתית. המודול כולל אימות נתונים כדי לוודא שהפרטים שהוזנו תקינים, כמו גם בדיקות אבטחה כדי להגן על המידע האישי של המשתמשים. לאחר ההרשמה, המשתמש מקבל הודעת אישור בדוא""ל. המודול גם מאפשר למשתמשים לשחזר סיסמאות במקרה של שכחה. תהליך זה כולל שליחת קישור לאיפוס סיסמה לדוא""ל של המשתמש. המודול משולב עם מסד הנתונים של האפליקציה כדי לשמור את פרטי המשתמשים בצורה מאובטחת.
+
+Inputs: כתובת דוא""ל, סיסמה, פרטי רשת חברתית (אם נדרש)
+Outputs: הודעת אישור רישום, קישור לאיפוס סיסמה (אם נדרש)",1
+827,79,2,"מודול פרופיל משתמש","מודול זה מאפשר למשתמשים לנהל את הפרופיל האישי שלהם באפליקציה. המשתמשים יכולים לעדכן את המידע האישי שלהם, כמו שם, כתובת, מספר טלפון והעדפות אימוץ. המודול כולל ממשק משתמש נוח שמציג את כל המידע בצורה ברורה ומאפשר עריכה קלה. בנוסף, המודול מציע למשתמשים להוסיף תמונות של עצמם או של החתולים שאימצו. המידע נשמר במסד הנתונים ומעודכן בזמן אמת, כך שהמשתמשים יכולים לראות את השינויים מיד. המודול גם מספק אפשרות למחוק את הפרופיל במידה והמשתמש רוצה להפסיק להשתמש באפליקציה.
+
+Inputs: נתוני פרופיל (שם, כתובת, טלפון, העדפות אימוץ)
+Outputs: הודעת הצלחה על עדכון הפרופיל, נתוני פרופיל מעודכנים",2
+828,79,2,"מודול כרטיס חתול","מודול זה מציג את כרטיסי החתולים המיועדים לאימוץ. כל חתול מקבל כרטיס אישי שמכיל תמונה, גיל, מצב רפואי, אופי והתאמות מיוחדות. המודול מאפשר למשתמשים לסנן את החתולים לפי קריטריונים שונים כמו גיל, גזע, מצב בריאותי ועוד. המשתמשים יכולים ללחוץ על כרטיס חתול כדי לראות פרטים נוספים, כולל היסטוריית בריאות, המלצות מעמותות, ותמונות נוספות. המודול גם כולל אפשרות לשיתוף כרטיסי חתול ברשתות חברתיות כדי להגביר את החשיפה של חתולים הזקוקים לבית. כל המידע נשמר ומנוהל במסד הנתונים של האפליקציה.
+
+Inputs: קריטריונים לסינון חתולים (גיל, גזע, מצב בריאותי)
+Outputs: רשימת כרטיסי חתולים מתאימים, פרטי חתול נבחר",3
+829,79,2,"מודול מנוע התאמה","מודול זה אחראי על התאמת חתולים למשתמשים על סמך העדפותיהם האישיות. המשתמשים יכולים להזין את העדפותיהם, כמו סוג בית, ניסיון קודם עם חתולים, זמני שהייה בבית ועוד. המודול משתמש באלגוריתמים חכמים כדי לנתח את הנתונים ולהציע את החתולים המתאימים ביותר לכל משתמש. המנוע מתחשב גם בפרמטרים כמו אופי החתול והצרכים המיוחדים שלו, כך שגם חתולים ביישנים או עם בעיות רפואיות יקבלו חשיפה מתאימה. המודול משולב עם מודול כרטיס חתול כדי להציג את התוצאות בצורה נוחה וברורה למשתמש.
+
+Inputs: העדפות משתמש (סוג בית, ניסיון, זמני שהייה)
+Outputs: רשימת חתולים מתאימים, פרטי חתולים מוצעים",4
+830,79,2,"מודול התראות לעמותות","מודול זה מאפשר לעמותות לעקוב אחרי בקשות אימוץ בזמן אמת. כאשר משתמש מגיש בקשה לאימוץ חתול, המודול שולח התראה לעמותה הרלוונטית. העמותות יכולות לראות את כל הבקשות שהתקבלו, לקבוע פגישות היכרות עם המאמץ הפוטנציאלי, ולעדכן את מצב החתול במערכת. המודול כולל ממשק ניהול שמציג את כל הבקשות בצורה מסודרת, עם אפשרות לסנן ולחפש בקשות לפי חתולים או משתמשים. המודול גם מאפשר לעמותות לשלוח עדכונים למשתמשים על מצב החתולים, כך שהתקשורת נשמרת ברורה ויעילה.
+
+Inputs: בקשות אימוץ מחתולים, פרטי משתמשים
+Outputs: התראות לעמותות, רשימת בקשות אימוץ",5
+831,79,2,"מודול מאגר ידע","מודול זה מספק למשתמשים מידע חשוב על תהליך האימוץ והכנה לאימוץ חתול. המודול כולל מאמרים, טיפים והנחיות כיצד להתכונן לאימוץ, איך לעזור לחתול להסתגל לבית החדש, ומהם הצעדים הראשונים בתהליך. המשתמשים יכולים לחפש מידע לפי נושאים, כמו טיפול רפואי, התנהגות חתולים, והכנה לבית. המודול כולל גם אפשרות לשאול שאלות ולקבל תשובות ממומחים בתחום. כל המידע מאוחסן בצורה מסודרת ומעודכן באופן קבוע כדי להבטיח שהמשתמשים יקבלו את המידע העדכני והמדויק ביותר.
+
+Inputs: נושאים לחיפוש במאגר הידע
+Outputs: מאמרים ומידע רלוונטי, תשובות לשאלות",6
+832,79,2,"מודול ניהול פגישות","מודול זה מאפשר למשתמשים לקבוע פגישות היכרות עם חתולים שהם מעוניינים לאמץ. המשתמשים יכולים לבחור את החתול, לבחור תאריך ושעה, ולשלוח בקשה לפגישה לעמותה. המודול כולל לוח שנה שמציג את הזמינות של העמותה, כך שהמשתמשים יכולים לבחור מועד נוח. לאחר קביעת הפגישה, המודול שולח אישור למשתמש ולעמותה, ומעדכן את המערכת בהתאם. המודול גם מאפשר לעמותות לנהל את הפגישות, לראות את כל הפגישות המתוכננות, ולבצע שינויים במידת הצורך. כל המידע נשמר במסד הנתונים של האפליקציה.
+
+Inputs: פרטי חתול, תאריך ושעה לפגישה
+Outputs: אישור פגישה, עדכון מערכת הפגישות",7
+833,79,2,"מודול ניהול משוב","מודול זה מאפשר למשתמשים לספק משוב על החתולים שאימצו ועל תהליך האימוץ עצמו. המשתמשים יכולים לדרג את החתול, לכתוב חוות דעת ולשתף את החוויה שלהם עם אחרים. המודול כולל ממשק נוח שמציג את כל המשובים בצורה מסודרת, כך שהעמותות יכולות לראות את המשובים ולשפר את תהליך האימוץ בהתאם. המודול גם מאפשר לעמותות להגיב למשובים, כך שנשמרת תקשורת פתוחה עם המאמץ. כל המשובים נשמרים במסד הנתונים, ומאפשרים למערכת לנתח את הנתונים ולשפר את השירותים המוצעים.
+
+Inputs: דרוג חתול, חוות דעת ממשתמשים
+Outputs: אישור על קבלת משוב, עדכון מערכת המשובים",8
+834,79,1,"Database Schema","CREATE TABLE Users (
+    user_id INT AUTO_INCREMENT PRIMARY KEY,
+    email VARCHAR(255) UNIQUE NOT NULL,
+    password_hash VARCHAR(255) NOT NULL,
+    social_network_id VARCHAR(255),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    is_active BOOLEAN DEFAULT TRUE,
+    -- Foreign key to social networks table if needed
+    -- FOREIGN KEY (social_network_id) REFERENCES SocialNetworks(id),
+    CONSTRAINT chk_email_format CHECK (email LIKE '%_@__%.__%'),
+    COMMENT 'Stores user registration details including email and password or social network ID'
+);
+
+CREATE TABLE UserProfile (
+    profile_id INT AUTO_INCREMENT PRIMARY KEY,
+    user_id INT NOT NULL,
+    name VARCHAR(255),
+    address VARCHAR(255),
+    phone VARCHAR(20),
+    adoption_preferences TEXT,
+    profile_picture VARCHAR(255),
+    FOREIGN KEY (user_id) REFERENCES Users(user_id) ON DELETE CASCADE,
+    COMMENT 'Stores personal profile information of users'
+);
+
+CREATE TABLE Cats (
+    cat_id INT AUTO_INCREMENT PRIMARY KEY,
+    name VARCHAR(255),
+    age INT,
+    breed VARCHAR(255),
+    health_status VARCHAR(255),
+    personality TEXT,
+    special_needs TEXT,
+    picture VARCHAR(255),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    COMMENT 'Stores information about cats available for adoption'
+);
+
+CREATE TABLE AdoptionRequests (
+    request_id INT AUTO_INCREMENT PRIMARY KEY,
+    user_id INT NOT NULL,
+    cat_id INT NOT NULL,
+    request_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    status ENUM('Pending', 'Approved', 'Rejected') DEFAULT 'Pending',
+    FOREIGN KEY (user_id) REFERENCES Users(user_id),
+    FOREIGN KEY (cat_id) REFERENCES Cats(cat_id),
+    COMMENT 'Stores adoption requests made by users for specific cats'
+);
+
+CREATE TABLE Meetings (
+    meeting_id INT AUTO_INCREMENT PRIMARY KEY,
+    user_id INT NOT NULL,
+    cat_id INT NOT NULL,
+    meeting_date DATETIME NOT NULL,
+    status ENUM('Scheduled', 'Completed', 'Cancelled') DEFAULT 'Scheduled',
+    FOREIGN KEY (user_id) REFERENCES Users(user_id),
+    FOREIGN KEY (cat_id) REFERENCES Cats(cat_id),
+    COMMENT 'Stores scheduled meetings between users and cats for adoption'
+);
+
+CREATE TABLE Feedback (
+    feedback_id INT AUTO_INCREMENT PRIMARY KEY,
+    user_id INT NOT NULL,
+    cat_id INT NOT NULL,
+    rating INT CHECK (rating BETWEEN 1 AND 5),
+    comments TEXT,
+    feedback_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES Users(user_id),
+    FOREIGN KEY (cat_id) REFERENCES Cats(cat_id),
+    COMMENT 'Stores feedback from users about cats and the adoption process'
+);
+
+CREATE TABLE KnowledgeBase (
+    article_id INT AUTO_INCREMENT PRIMARY KEY,
+    title VARCHAR(255) NOT NULL,
+    content TEXT NOT NULL,
+    category VARCHAR(255),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    COMMENT 'Stores articles and information related to cat adoption and care'
+);
+
+CREATE TABLE Notifications (
+    notification_id INT AUTO_INCREMENT PRIMARY KEY,
+    user_id INT,
+    request_id INT,
+    message TEXT NOT NULL,
+    sent_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES Users(user_id),
+    FOREIGN KEY (request_id) REFERENCES AdoptionRequests(request_id),
+    COMMENT 'Stores notifications sent to users and organizations regarding adoption requests'
+);
+
+CREATE INDEX idx_users_email ON Users(email);
+CREATE INDEX idx_user_profile_user_id ON UserProfile(user_id);
+CREATE INDEX idx_cats_age ON Cats(age);
+CREATE INDEX idx_adoption_requests_user_id ON AdoptionRequests(user_id);
+CREATE INDEX idx_adoption_requests_cat_id ON AdoptionRequests(cat_id);
+CREATE INDEX idx_meetings_user_id ON Meetings(user_id);
+CREATE INDEX idx_meetings_cat_id ON Meetings(cat_id);
+CREATE INDEX idx_feedback_user_id ON Feedback(user_id);
+CREATE INDEX idx_feedback_cat_id ON Feedback(cat_id);
+CREATE INDEX idx_knowledge_base_category ON KnowledgeBase(category);
+CREATE INDEX idx_notifications_user_id ON Notifications(user_id);",NULL
+835,80,2,"מסך הבית","מסך הבית של האפליקציה ""לומדים ביחד"" מציע ממשק ידידותי ונגיש להורים, שבו הם יכולים לגשת לכל הכלים והמידע הנדרשים להערכה ראשונית של לקויות למידה. במסך זה מוצגים שאלונים פשוטים, דוגמאות להתנהגויות שכיחות, והסברים על מתי כדאי לפנות לגורם מקצועי. הממשק מעוצב כך שיהיה קל לשימוש, עם כפתורים ברורים והנחיות פשוטות. ההורים יכולים למלא את השאלונים, לקרוא את ההסברים ולצפות בדוגמאות, מה שמסייע להם להבין את המידע בצורה מעשית. המידע המוצג במסך הבית מתעדכן באופן שוטף כדי להבטיח שההורים מקבלים את המידע העדכני ביותר.
+
+Inputs: אין קלטים ישירים, אך המידע המוצג מתבסס על נתוני משתמשים קודמים וסטטיסטיקות.
+Outputs: הצגת שאלונים, דוגמאות להתנהגויות והסברים על לקויות למידה.",1
+836,80,2,"שאלונים להערכה ראשונית","מודול זה כולל סדרת שאלונים שנועדו לסייע להורים להעריך את התנהגות ילדיהם ולזהות סימנים אפשריים ללקויות למידה. השאלונים מעוצבים בצורה אינטראקטיבית, עם שאלות פתוחות וסגורות, ומספקים להורים תובנות לגבי התנהגויות מסוימות. לאחר שההורים ממלאים את השאלונים, המערכת מנתחת את התשובות ומספקת להם משוב מיידי. המידע שנאסף יכול לשמש כבסיס לפגישות עם אנשי מקצוע, כמו מורים או מאבחנים. השאלונים מעודכנים באופן שוטף כדי לשקף את המידע החדש ביותר בתחום החינוך המיוחד.
+
+Inputs: תשובות לשאלות השאלון, כולל מידע על התנהגויות, גיל הילד, והקשר בין ההורים לילד.
+Outputs: דו""ח הערכה ראשוני עם תובנות והמלצות לפעולה.",2
+837,80,2,"ספריית תוכן","מודול ספריית התוכן מציע גישה למגוון רחב של משאבים, כולל סרטונים קצרים, טיפים מעשיים וכתבות בנושאים שונים הקשורים ללקויות למידה. המידע בספרייה מתעדכן באופן שוטף, כך שההורים יכולים למצוא תוכן חדש ומעניין בכל פעם שהם נכנסים לאפליקציה. המודול כולל קטגוריות שונות, כך שההורים יכולים לחפש תוכן לפי נושא, כמו דיסלקסיה או הפרעת קשב. כל פריט תוכן כולל תיאור קצר, תאריך עדכון, וקישורים למקורות נוספים, מה שמסייע להורים להעמיק את הידע שלהם בתחום.
+
+Inputs: חיפוש לפי מילות מפתח, קטגוריות נבחרות, והעדפות משתמש.
+Outputs: רשימת תוצאות חיפוש עם קישורים לתוכן רלוונטי.",3
+838,80,2,"מערכת התראות","מודול מערכת ההתראות נועד להזכיר להורים לבדוק התקדמות, לשמור הערות ולתעד תצפיות על ילדיהם. המערכת מאפשרת להורים להגדיר התראות מותאמות אישית, כך שהם יכולים לבחור את התדירות ואת סוגי ההתראות שברצונם לקבל. ההתראות יכולות לכלול תזכורות לבדוק התקדמות, להוסיף הערות על התנהגויות מסוימות, או להזכיר להם לפנות לגורם מקצועי במקרים מסוימים. המודול משולב עם שאר המודולים באפליקציה, כך שההורים יכולים לגשת למידע הרלוונטי בקלות.
+
+Inputs: הגדרות התראה מההורים, כולל תדירות וסוגי התראות.
+Outputs: התראות מותאמות אישית המופיעות בזמן אמת באפליקציה.",4
+839,80,2,"קהילת ההורים","מודול קהילת ההורים מספק פלטפורמה לשיח בטוח בין הורים המתמודדים עם לקויות למידה. ההורים יכולים לשאול שאלות, לשתף ניסיון ולקבל תמיכה מאחרים. המודול כולל פורומים, קבוצות דיון, ואפשרות לשליחת הודעות פרטיות. כל ההודעות והתגובות נבדקות על ידי צוות המנהלים כדי להבטיח סביבה בטוחה ותומכת. המטרה היא ליצור קהילה שבה הורים יכולים לחלוק מידע, לשתף טיפים, ולתמוך זה בזה, מה שמחזק את תחושת השייכות והבנה בין ההורים.
+
+Inputs: שאלות, תגובות, ופוסטים מההורים בקהילה.
+Outputs: תוכן חדש בקהילה, כולל שאלות ותשובות, פוסטים ותגובות.",5
+840,80,2,"ממשק משתמש","מודול ממשק המשתמש אחראי על כל האינטראקציה בין ההורים לאפליקציה. הממשק מעוצב כך שיהיה נגיש וידידותי, עם דגש על חוויית משתמש חיובית. המודול כולל כפתורים, תפריטים, ואלמנטים גרפיים שמנחים את ההורים בתהליך השימוש באפליקציה. כל מסך באפליקציה נבנה כך שיתמוך במידע המוצג ויאפשר ניווט קל בין המודולים השונים. הממשק מתעדכן באופן שוטף כדי לשפר את חוויית המשתמש ולהתאים לצרכים המשתנים של ההורים.
+
+Inputs: קלטים מהמשתמשים, כולל לחיצות על כפתורים וניווט בין המסכים.
+Outputs: הצגת תוכן רלוונטי בהתאם לפעולות המשתמש.",6
+841,80,2,"מערכת ניהול משתמשים","מודול מערכת ניהול המשתמשים אחראי על ניהול פרטי ההורים והילדים באפליקציה. המודול כולל אפשרויות לרישום, כניסה, ושחזור סיסמאות. כל הורה יכול ליצור פרופיל אישי שבו הוא יכול לשמור מידע על ילדיו, כולל התנהגויות, תצפיות, והערות. המערכת מבטיחה שהמידע נשמר בצורה מאובטחת ומוגן, תוך שימוש בטכנולוגיות הצפנה מתקדמות. המודול גם מאפשר למנהלי האפליקציה לעקוב אחרי פעילות המשתמשים ולבצע שיפורים בהתאם לצרכים שנחשפים.
+
+Inputs: פרטי רישום מההורים, כולל שם, דוא""ל, וסיסמה.
+Outputs: פרופיל משתמש חדש או עדכון פרופיל קיים.",7
+842,80,2,"דו""ח התקדמות","מודול דו""ח ההתקדמות מאפשר להורים לעקוב אחרי התקדמות ילדיהם בתחום הלמידה. המודול אוסף נתונים מהשאלונים, התצפיות, והערות שההורים שמרו, ומציג את המידע בצורה גרפית וברורה. ההורים יכולים לראות מגמות, שיפורים או קשיים, ולקבל המלצות לפעולה על סמך הנתונים שנאספו. המודול גם מאפשר להורים לשתף את הדו""ח עם אנשי מקצוע, כמו מורים או יועצים, כדי לקבל תמיכה נוספת. המידע בדו""ח מתעדכן באופן שוטף כדי לשקף את ההתקדמות האמיתית של הילד.
+
+Inputs: נתוני תצפיות, שאלונים והערות מההורים.
+Outputs: דו""ח התקדמות מפורט עם גרפים והמלצות.",8
+843,80,1,"Database Schema","CREATE TABLE Users (
+    user_id INT AUTO_INCREMENT PRIMARY KEY,
+    name VARCHAR(100) NOT NULL,
+    email VARCHAR(100) UNIQUE NOT NULL,
+    password_hash VARCHAR(255) NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    CONSTRAINT chk_email_format CHECK (email LIKE '%_@__%.__%'),
+    COMMENT 'Stores user information including authentication details'
+);
+
+CREATE TABLE Children (
+    child_id INT AUTO_INCREMENT PRIMARY KEY,
+    user_id INT NOT NULL,
+    name VARCHAR(100) NOT NULL,
+    birth_date DATE,
+    FOREIGN KEY (user_id) REFERENCES Users(user_id) ON DELETE CASCADE,
+    COMMENT 'Stores information about children linked to users'
+);
+
+CREATE TABLE Observations (
+    observation_id INT AUTO_INCREMENT PRIMARY KEY,
+    child_id INT NOT NULL,
+    observation_date DATE NOT NULL,
+    details TEXT,
+    FOREIGN KEY (child_id) REFERENCES Children(child_id) ON DELETE CASCADE,
+    COMMENT 'Stores observational data about children'
+);
+
+CREATE TABLE Questionnaires (
+    questionnaire_id INT AUTO_INCREMENT PRIMARY KEY,
+    title VARCHAR(255) NOT NULL,
+    description TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    COMMENT 'Stores information about questionnaires available in the system'
+);
+
+CREATE TABLE Questions (
+    question_id INT AUTO_INCREMENT PRIMARY KEY,
+    questionnaire_id INT NOT NULL,
+    question_text TEXT NOT NULL,
+    question_type ENUM('open', 'closed') NOT NULL,
+    FOREIGN KEY (questionnaire_id) REFERENCES Questionnaires(questionnaire_id) ON DELETE CASCADE,
+    COMMENT 'Stores individual questions linked to questionnaires'
+);
+
+CREATE TABLE QuestionnaireResponses (
+    response_id INT AUTO_INCREMENT PRIMARY KEY,
+    questionnaire_id INT NOT NULL,
+    child_id INT NOT NULL,
+    response_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (questionnaire_id) REFERENCES Questionnaires(questionnaire_id) ON DELETE CASCADE,
+    FOREIGN KEY (child_id) REFERENCES Children(child_id) ON DELETE CASCADE,
+    COMMENT 'Stores responses to questionnaires for each child'
+);
+
+CREATE TABLE Answers (
+    answer_id INT AUTO_INCREMENT PRIMARY KEY,
+    response_id INT NOT NULL,
+    question_id INT NOT NULL,
+    answer_text TEXT,
+    FOREIGN KEY (response_id) REFERENCES QuestionnaireResponses(response_id) ON DELETE CASCADE,
+    FOREIGN KEY (question_id) REFERENCES Questions(question_id) ON DELETE CASCADE,
+    COMMENT 'Stores individual answers to questions within a questionnaire response'
+);
+
+CREATE TABLE ContentLibrary (
+    content_id INT AUTO_INCREMENT PRIMARY KEY,
+    title VARCHAR(255) NOT NULL,
+    description TEXT,
+    category VARCHAR(100),
+    update_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    url VARCHAR(255),
+    COMMENT 'Stores content resources available in the library'
+);
+
+CREATE TABLE Alerts (
+    alert_id INT AUTO_INCREMENT PRIMARY KEY,
+    user_id INT NOT NULL,
+    alert_type ENUM('progress_check', 'note_reminder', 'professional_contact') NOT NULL,
+    frequency ENUM('daily', 'weekly', 'monthly') NOT NULL,
+    FOREIGN KEY (user_id) REFERENCES Users(user_id) ON DELETE CASCADE,
+    COMMENT 'Stores user-defined alerts for various reminders'
+);
+
+CREATE TABLE CommunityPosts (
+    post_id INT AUTO_INCREMENT PRIMARY KEY,
+    user_id INT NOT NULL,
+    post_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    content TEXT NOT NULL,
+    FOREIGN KEY (user_id) REFERENCES Users(user_id) ON DELETE CASCADE,
+    COMMENT 'Stores posts made by users in the community'
+);
+
+CREATE TABLE CommunityReplies (
+    reply_id INT AUTO_INCREMENT PRIMARY KEY,
+    post_id INT NOT NULL,
+    user_id INT NOT NULL,
+    reply_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    content TEXT NOT NULL,
+    FOREIGN KEY (post_id) REFERENCES CommunityPosts(post_id) ON DELETE CASCADE,
+    FOREIGN KEY (user_id) REFERENCES Users(user_id) ON DELETE CASCADE,
+    COMMENT 'Stores replies to community posts'
+);
+
+CREATE INDEX idx_user_email ON Users(email);
+CREATE INDEX idx_child_user ON Children(user_id);
+CREATE INDEX idx_observation_child ON Observations(child_id);
+CREATE INDEX idx_questionnaire_title ON Questionnaires(title);
+CREATE INDEX idx_questionnaire_response ON QuestionnaireResponses(questionnaire_id, child_id);
+CREATE INDEX idx_content_category ON ContentLibrary(category);
+CREATE INDEX idx_alert_user ON Alerts(user_id);
+CREATE INDEX idx_community_post_user ON CommunityPosts(user_id);
+CREATE INDEX idx_community_reply_post ON CommunityReplies(post_id);",NULL
+844,81,2,"מודול רישום משתמש","מודול זה אחראי על רישום משתמשים חדשים לאפליקציה ""קהילה מחברת"". המשתמשים יכולים למלא טופס רישום הכולל פרטים כמו שם, תחומי עניין, תחביבים ורמת התמיכה הנדרשת. המודול כולל בדיקות אימות כדי לוודא שהנתונים שהוזנו תקינים ואינם מכילים מידע אישי רגיש. לאחר מכן, המידע נשמר בבסיס הנתונים של האפליקציה. המודול גם מספק ממשק משתמש ידידותי שמנחה את המשתמשים בתהליך הרישום, כולל הסברים על כל שדה בטופס. בנוסף, המודול יכול לשלוח הודעת אישור למשתמש לאחר ההצלחה ברישום.
+
+Inputs: שם משתמש, תחומי עניין, תחביבים, רמת תמיכה נדרשת.
+Outputs: הודעת אישור רישום, פרופיל משתמש חדש שנשמר בבסיס הנתונים.",1
+845,81,2,"מודול חיפוש משתמשים","מודול זה מאפשר למשתמשים לחפש אנשים אחרים באפליקציה על פי קריטריונים שונים כמו תחומי עניין, מיקום גיאוגרפי ורמת התמיכה הנדרשת. המודול כולל מנוע חיפוש מתקדם שמבצע חיפושים בבסיס הנתונים ומחזיר תוצאות רלוונטיות. המשתמשים יכולים לסנן את התוצאות לפי קריטריונים שונים, כמו גיל, תחביבים או סוגי פעילויות. המודול מציע ממשק משתמש אינטואיטיבי שמקל על החיפוש ומציג את התוצאות בצורה ברורה ומסודרת. כמו כן, המודול כולל אפשרות לשלוח בקשות חברות למשתמשים אחרים.
+
+Inputs: קריטריונים לחיפוש (תחומי עניין, מיקום, רמת תמיכה).
+Outputs: רשימת משתמשים תואמים עם פרטי פרופיל בסיסיים.",2
+846,81,2,"מודול פרסום פעילויות","מודול זה מאפשר לעמותות, מרכזים קהילתיים ומתנדבים לפרסם פעילויות קהילתיות באפליקציה. המודול כולל טופס פרסום שבו ניתן להזין פרטים כמו תיאור הפעילות, תאריך, שעה, מיקום, ורמת נגישות. לאחר שהפעילות מתפרסמת, היא זמינה לכל המשתמשים באפליקציה, והם יכולים להירשם אליה. המודול כולל גם אפשרות לערוך או למחוק פעילויות קיימות. הממשק ידידותי למשתמש ומספק הנחיות ברורות על איך למלא את הטופס. המודול גם מאפשר למשתמשים לקבל עדכונים על פעילויות חדשות שמתפרסמות.
+
+Inputs: פרטי פעילות (תיאור, תאריך, שעה, מיקום, רמת נגישות).
+Outputs: הודעת אישור פרסום פעילות, פעילות חדשה שנשמרה בבסיס הנתונים.",3
+847,81,2,"מודול ניהול פרופיל משתמש","מודול זה מאפשר למשתמשים לערוך ולעדכן את פרטי הפרופיל האישי שלהם באפליקציה. המשתמשים יכולים לשנות את תחומי העניין, התחביבים ורמת התמיכה הנדרשת. המודול כולל ממשק משתמש נוח שמציג את הפרטים הנוכחיים ומאפשר עריכה קלה. לאחר שהמשתמש מבצע שינויים, המודול מעדכן את המידע בבסיס הנתונים ומחזיר הודעת אישור על כך שהשינויים בוצעו בהצלחה. המודול גם מספק אפשרות למחוק את הפרופיל במידה והמשתמש מעוניין בכך. כל השינויים מתבצעים בצורה מאובטחת.
+
+Inputs: פרטי פרופיל מעודכנים (תחומי עניין, תחביבים, רמת תמיכה).
+Outputs: הודעת אישור על עדכון פרופיל, פרופיל מעודכן בבסיס הנתונים.",4
+848,81,2,"מודול מערכת צ'קליסטים","מודול זה מספק למשתמשים כלים להנגשת מפגשים ופעילויות קהילתיות. המשתמשים יכולים ליצור צ'קליסטים מותאמים אישית עם פריטים שחשוב להם לזכור לפני המפגש, כמו ציוד נדרש, תזכורות או הסברים על הפעילות. המודול כולל ממשק פשוט שמאפשר הוספה, עריכה ומחיקה של פריטים בצ'קליסט. כמו כן, המודול יכול לשלוח תזכורות למשתמשים לפני המפגש, כדי לוודא שהם מגיעים מוכנים. המודול תורם לשיפור החוויה של המשתמשים ומסייע להם להרגיש בנוח במפגשים.
+
+Inputs: פרטי צ'קליסט (פריטים, תזכורות).
+Outputs: צ'קליסט מעודכן, הודעות תזכורת למשתמשים.",5
+849,81,2,"מודול הודעות","מודול זה מאפשר למשתמשים לתקשר אחד עם השני באמצעות הודעות פרטיות. המודול כולל ממשק משתמש שמציג את רשימת ההודעות והצ'אט עם משתמשים אחרים. המשתמשים יכולים לשלוח ולקבל הודעות טקסט, כמו גם תמונות או קבצים. המודול כולל גם אפשרות להודעות קבוצתיות, כך שמשתמשים יכולים לתקשר עם קבוצות של אנשים שמעוניינים באותה פעילות. המודול מבצע בדיקות אבטחה כדי להבטיח שהמידע המועבר נשאר פרטי ומאובטח. כל הודעה נשמרת בבסיס הנתונים כדי לאפשר גישה להיסטוריית ההודעות.
+
+Inputs: הודעת טקסט, תמונות או קבצים, מזהה משתמשים נמען.
+Outputs: הודעת אישור שליחה, היסטוריית הודעות מעודכנת.",6
+850,81,2,"מודול ניהול אירועים","מודול זה אחראי על ניהול האירועים הקהילתיים המפורסמים באפליקציה. המודול מאפשר למשתמשים להירשם לאירועים, לבטל את ההרשמה או לעדכן את פרטי ההשתתפות שלהם. המודול כולל ממשק שמציג את כל האירועים הקרובים, עם אפשרות לסנן לפי תאריך או סוג פעילות. לאחר ההרשמה לאירוע, המשתמשים מקבלים הודעת אישור ומידע נוסף על האירוע. המודול גם מספק למארגנים כלים לנהל את רשימת המשתתפים וליצור קשר עם המשתתפים לפני האירוע. כל המידע נשמר בבסיס הנתונים בצורה מאובטחת.
+
+Inputs: מזהה אירוע, פרטי הרשמה (שם, מספר משתתפים).
+Outputs: הודעת אישור הרשמה, רשימת משתתפים מעודכנת באירוע.",7
+851,81,2,"מודול ניתוח נתונים","מודול זה אחראי על ניתוח נתוני השימוש באפליקציה כדי לשפר את חוויית המשתמש. המודול אוסף נתונים על פעילויות המשתמשים, כמו מספר ההרשמות לאירועים, השימוש בצ'אט, והפעילויות הפופולריות ביותר. הנתונים מנותחים ומוצגים בדו""ח שמספק תובנות למנהלי האפליקציה. המודול כולל גם אפשרות להפיק גרפים ודיאגרמות כדי להציג את המידע בצורה ויזואלית. תובנות אלו יכולות לשמש לשיפור הפיצ'רים של האפליקציה ולהתאמת הצרכים של המשתמשים. כל הנתונים נשמרים בצורה מאובטחת בבסיס הנתונים.
+
+Inputs: נתוני שימוש מהאפליקציה (הרשמות, הודעות, פעילויות).
+Outputs: דו""ח ניתוח נתונים, גרפים ודיאגרמות.",8
+852,81,1,"Database Schema","CREATE TABLE Users (
+    user_id SERIAL PRIMARY KEY,
+    username VARCHAR(50) NOT NULL UNIQUE,
+    interests TEXT,
+    hobbies TEXT,
+    support_level VARCHAR(50),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT chk_support_level CHECK (support_level IN ('Low', 'Medium', 'High'))
+);
+
+CREATE TABLE UserSearchCriteria (
+    criteria_id SERIAL PRIMARY KEY,
+    user_id INT NOT NULL,
+    interests TEXT,
+    location VARCHAR(100),
+    support_level VARCHAR(50),
+    FOREIGN KEY (user_id) REFERENCES Users(user_id) ON DELETE CASCADE,
+    CONSTRAINT chk_support_level CHECK (support_level IN ('Low', 'Medium', 'High'))
+);
+
+CREATE TABLE Activities (
+    activity_id SERIAL PRIMARY KEY,
+    description TEXT NOT NULL,
+    date DATE NOT NULL,
+    time TIME NOT NULL,
+    location VARCHAR(255) NOT NULL,
+    accessibility_level VARCHAR(50),
+    created_by INT NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (created_by) REFERENCES Users(user_id) ON DELETE SET NULL,
+    CONSTRAINT chk_accessibility_level CHECK (accessibility_level IN ('Low', 'Medium', 'High'))
+);
+
+CREATE TABLE UserProfiles (
+    profile_id SERIAL PRIMARY KEY,
+    user_id INT NOT NULL,
+    interests TEXT,
+    hobbies TEXT,
+    support_level VARCHAR(50),
+    FOREIGN KEY (user_id) REFERENCES Users(user_id) ON DELETE CASCADE,
+    CONSTRAINT chk_support_level CHECK (support_level IN ('Low', 'Medium', 'High'))
+);
+
+CREATE TABLE Checklists (
+    checklist_id SERIAL PRIMARY KEY,
+    user_id INT NOT NULL,
+    item_description TEXT NOT NULL,
+    reminder_time TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES Users(user_id) ON DELETE CASCADE
+);
+
+CREATE TABLE Messages (
+    message_id SERIAL PRIMARY KEY,
+    sender_id INT NOT NULL,
+    receiver_id INT NOT NULL,
+    message_text TEXT,
+    message_type VARCHAR(50) CHECK (message_type IN ('Text', 'Image', 'File')),
+    sent_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (sender_id) REFERENCES Users(user_id) ON DELETE CASCADE,
+    FOREIGN KEY (receiver_id) REFERENCES Users(user_id) ON DELETE CASCADE
+);
+
+CREATE TABLE GroupMessages (
+    group_message_id SERIAL PRIMARY KEY,
+    sender_id INT NOT NULL,
+    group_id INT NOT NULL,
+    message_text TEXT,
+    message_type VARCHAR(50) CHECK (message_type IN ('Text', 'Image', 'File')),
+    sent_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (sender_id) REFERENCES Users(user_id) ON DELETE CASCADE
+);
+
+CREATE TABLE Events (
+    event_id SERIAL PRIMARY KEY,
+    activity_id INT NOT NULL,
+    participant_id INT NOT NULL,
+    participant_count INT DEFAULT 1,
+    registration_status VARCHAR(50) CHECK (registration_status IN ('Registered', 'Cancelled')),
+    registered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (activity_id) REFERENCES Activities(activity_id) ON DELETE CASCADE,
+    FOREIGN KEY (participant_id) REFERENCES Users(user_id) ON DELETE CASCADE
+);
+
+CREATE TABLE DataAnalysis (
+    analysis_id SERIAL PRIMARY KEY,
+    user_id INT NOT NULL,
+    event_registrations INT DEFAULT 0,
+    messages_sent INT DEFAULT 0,
+    popular_activities TEXT,
+    analysis_date DATE DEFAULT CURRENT_DATE,
+    FOREIGN KEY (user_id) REFERENCES Users(user_id) ON DELETE CASCADE
+);
+
+CREATE INDEX idx_user_interests ON Users USING GIN (to_tsvector('english', interests));
+CREATE INDEX idx_activity_location ON Activities(location);
+CREATE INDEX idx_event_participant ON Events(participant_id);
+
+COMMENT ON TABLE Users IS 'Stores user registration details including interests and support level.';
+COMMENT ON COLUMN Users.username IS 'Unique username for each user.';
+COMMENT ON TABLE UserSearchCriteria IS 'Stores search criteria for user searches.';
+COMMENT ON TABLE Activities IS 'Stores details of community activities.';
+COMMENT ON TABLE UserProfiles IS 'Stores user profile details for editing and updates.';
+COMMENT ON TABLE Checklists IS 'Stores user-specific checklists for events and activities.';
+COMMENT ON TABLE Messages IS 'Stores private messages between users.';
+COMMENT ON TABLE GroupMessages IS 'Stores messages sent to user groups.';
+COMMENT ON TABLE Events IS 'Stores event registration details and participant information.';
+COMMENT ON TABLE DataAnalysis IS 'Stores data analysis metrics for user activity in the application.';",NULL
+853,82,2,"מודול כניסה למערכת","מודול זה אחראי על תהליך הכניסה של המשתמשים לאפליקציה. הוא כולל ממשק משתמש שבו המשתמשים יכולים להזין את פרטי ההזדהות שלהם, כגון שם משתמש וסיסמה. המודול מבצע אימות של הפרטים מול בסיס הנתונים, ואם הם נכונים, הוא מאפשר למשתמש להיכנס לאפליקציה. במקרה של פרטים שגויים, המודול מספק הודעת שגיאה מתאימה. המודול גם כולל אפשרות לשחזור סיסמה במקרה של שכחה. תהליך זה חשוב לשמירה על פרטיות המשתמשים והבטחת חוויית שימוש חלקה. המודול מתממשק עם בסיס הנתונים לאחסון ואימות פרטי המשתמשים.
+
+Inputs: שם משתמש, סיסמה
+Outputs: הצלחה או כישלון של תהליך הכניסה, הודעת שגיאה במקרה של כישלון",1
+854,82,2,"מודול תמיכה רגשית","מודול זה מאפשר למשתמשים לשוחח באופן אנונימי עם קבוצת מנטורים מקצועיים, שנבחרו בקפידה על מנת לספק תמיכה רגשית איכותית. המנטורים עברו הכשרה מיוחדת כדי להקשיב ולספק תמיכה רגשית ללא שיפוטיות, והם מצוידים בכלים להתמודד עם מגוון רחב של בעיות רגשיות. 
+
+המודול כולל ממשק צ'אט אינטואיטיבי שבו המשתמשים יכולים לכתוב את בעיותיהם ולקבל תגובות מהירות מהמנטורים. המערכת מתממשקת עם מערכת ניהול המנטורים, אשר מקצה מנטור מתאים לכל משתמש מתוך קבוצת המנטורים המוגדרת, בהתאם לצרכיו האישיים ולזמינות המנטורים. 
+
+המטרה היא לספק תמיכה רגשית אמיתית וליצור תחושת ביטחון עבור המשתמשים. המודול כולל גם אפשרות לשמור שיחות לצורך מעקב ושיפור השירות, כך שהמשתמשים יכולים לחזור על שיחות קודמות ולראות את ההתקדמות שלהם. 
+
+פרטי המודול:
+- **קלטים**: הודעת משתמש, מזהה משתמש
+- **פלטים**: תגובה מהמנטור, היסטוריית שיחות
+
+שיקולי יישום כוללים את הצורך להבטיח זמינות של המנטורים, ניהול נכון של זמני התגובה, והגנה על פרטיות המשתמשים במהלך השיחות.",2
+855,82,2,"מודול למידה מותאמת אישית","מודול זה מציע למשתמשים תוכן לימודי מותאם אישית על בסיס רמת הידע והצרכים שלהם. המודול משתמש בבינה מלאכותית כדי לנתח את ביצועי המשתמשים ולהתאים את חומרי הלימוד בהתאם. המשתמשים יכולים לבחור את תחום הלימוד (מתמטיקה או אנגלית) ואת הכיתה שלהם, ולאחר מכן המודול מציע סרטונים מותאמים אישית שמתאימים לרמת הידע שלהם. הממשק כולל שאלות פשוטות שמנחות את המשתמשים בבחירת יחידות הלימוד המתאימות, ולאחר מכן מציג את הסרטונים הרלוונטיים.
+
+המודול כולל גם מערכת לניהול התקדמות המשתמשים, המאפשרת למורים ולעורכי תוכן לעקוב אחרי ההתקדמות של כל תלמיד ולספק משימות נוספות במידת הצורך. המטרה היא לסייע למשתמשים בהבנת החומר ולסגור פערים לימודיים באמצעות תוכן ויזואלי ואינטראקטיבי. 
+
+Inputs: תחום לימוד, כיתה, רמת ידע  
+Outputs: סרטונים מותאמים אישית, משימות נוספות, דוחות התקדמות  
+
+המודול מתממשק עם מערכת ניהול הלמידה כדי להבטיח חוויית למידה חלקה וממוקדת, תוך שמירה על נתוני המשתמשים והתקדמותם.",3
+856,82,2,"מודול ניהול משתמשים","מודול זה אחראי על ניהול פרטי המשתמשים באפליקציה. הוא כולל אפשרויות לרישום משתמשים חדשים, עדכון פרטי משתמש קיימים ומחיקת משתמשים. המודול מתממשק עם בסיס הנתונים כדי לאחסן את כל המידע הנדרש, כולל פרטי קשר, היסטוריית שיחות ותוכן לימודי. המודול גם כולל ממשק ניהול עבור מנהלי המערכת, שבו הם יכולים לעקוב אחרי פעילות המשתמשים ולבצע שינויים במידת הצורך. המטרה היא להבטיח שהמידע על המשתמשים יהיה מעודכן וזמין לצורך שיפור השירות.
+
+Inputs: פרטי משתמש, בקשות עדכון או מחיקה
+Outputs: הצלחה או כישלון של פעולות ניהול, מידע מעודכן על משתמשים",4
+857,82,2,"מודול משוב משתמשים","מודול זה מאפשר למשתמשים לספק משוב על חוויית השימוש שלהם באפליקציה. המשתמשים יכולים לדרג את השירותים שקיבלו, לספק הערות והצעות לשיפור. המודול כולל טופס משוב פשוט ונגיש, שבו ניתן להזין את המידע בקלות. כל המשובים נשמרים בבסיס הנתונים לצורך ניתוח ושיפור השירותים. המטרה היא להבין את הצרכים והעדפות של המשתמשים ולבצע שיפורים מתמידים באפליקציה. המודול מתממשק עם צוות הפיתוח כדי להעביר את המשובים ולבצע שינויים בהתאם.
+
+Inputs: דרגת שביעות רצון, הערות משתמש
+Outputs: אישור קבלת משוב, נתוני משוב לניתוח",5
+858,82,2,"מודול ניתוח נתונים","מודול זה אחראי על ניתוח נתוני השימוש באפליקציה כדי להבין את התנהגות המשתמשים. המודול אוסף נתונים על פעולות המשתמשים, כגון תדירות השימוש, סוגי השיחות עם המנטורים וההתקדמות בלמידה. הנתונים מנותחים כדי לזהות מגמות, בעיות פוטנציאליות והזדמנויות לשיפור. המודול כולל דוחות גרפיים שמציגים את המידע בצורה ברורה ומובנת. המטרה היא לספק לצוות הפיתוח והניהול תובנות שיכולות לשפר את חוויית המשתמש ולהתאים את השירותים לצרכים המשתנים של המשתמשים.
+
+Inputs: נתוני שימוש, נתוני משוב
+Outputs: דוחות ניתוח, תובנות לשיפור השירות",6
+859,82,2,"מודול אבטחת מידע","מודול זה מתמקד בהגנה על המידע של המשתמשים ובשמירה על פרטיותם. הוא כולל מנגנוני הצפנה עבור נתוני המשתמשים, כמו גם אמצעים לזיהוי גישה לא מורשית. המודול מבצע בדיקות אבטחה תקופתיות כדי לזהות פגיעויות ולמנוע התקפות. המטרה היא להבטיח שהמידע של המשתמשים יהיה בטוח ומוגן מפני גניבה או דליפה. המודול מתממשק עם כל המודולים האחרים כדי להבטיח שהמידע המועבר ביניהם יהיה מאובטח. בנוסף, המודול כולל ממשק לניהול הרשאות גישה עבור צוות המנהלה.
+
+Inputs: נתוני משתמש, בקשות גישה
+Outputs: אישור או דחיית גישה, דוחות אבטחה",7
+860,82,2,"מודול תמיכה טכנית","מודול זה מספק תמיכה טכנית למשתמשים באפליקציה. הוא כולל ממשק שבו המשתמשים יכולים לדווח על בעיות טכניות, לשאול שאלות ולקבל עזרה מיידית. המודול מתממשק עם צוות התמיכה הטכנית, שמקבל את הבקשות ומגיב להן בהתאם. המטרה היא להבטיח שהמשתמשים יקבלו את העזרה הנדרשת כדי להשתמש באפליקציה בצורה חלקה. המודול כולל גם אפשרות למעקב אחרי הבקשות שהוגשו, כך שהמשתמשים יכולים לראות את מצב הבקשה שלהם. המידע שנאסף מהמודול יכול לשמש לשיפור השירותים והפחתת בעיות טכניות בעתיד.
+
+Inputs: בקשות תמיכה, תיאור בעיות
+Outputs: אישור קבלת בקשה, תגובות מצוות התמיכה",8
+861,82,2,"מודול ניהול תוכן","מודול זה אחראי על ניהול התוכן הלימודי והרגשי באפליקציה. הוא כולל ממשק שבו ניתן להוסיף, לערוך ולמחוק תכנים, כמו גם לנהל את המנטורים והחומרים הלימודיים. המודול מתממשק עם בסיס הנתונים כדי לשמור את כל המידע הנדרש. המטרה היא להבטיח שהתוכן יהיה עדכני ורלוונטי לצרכים של המשתמשים. המודול כולל גם אפשרות לניתוח התוכן כדי להבין מהו התוכן הפופולרי ביותר ומהו התוכן שדורש שיפור. המידע שנאסף יכול לשמש לשיפור חוויית הלמידה וההנאה של המשתמשים.
+
+Inputs: תוכן חדש, בקשות עריכה או מחיקה
+Outputs: אישור פעולות ניהול תוכן, נתוני ניתוח תוכן",9
+862,82,1,"Database Schema","CREATE TABLE Users (
+    user_id INT AUTO_INCREMENT PRIMARY KEY,
+    username VARCHAR(50) NOT NULL UNIQUE,
+    password_hash VARCHAR(255) NOT NULL,
+    email VARCHAR(100) NOT NULL UNIQUE,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    CONSTRAINT chk_email_format CHECK (email LIKE '%@%.%')
+) COMMENT='Stores user credentials and personal information for login and management purposes.';
+
+CREATE TABLE Mentors (
+    mentor_id INT AUTO_INCREMENT PRIMARY KEY,
+    name VARCHAR(100) NOT NULL,
+    expertise VARCHAR(255),
+    available BOOLEAN DEFAULT TRUE,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+) COMMENT='Stores information about mentors available for emotional support.';
+
+CREATE TABLE EmotionalSupportChats (
+    chat_id INT AUTO_INCREMENT PRIMARY KEY,
+    user_id INT NOT NULL,
+    mentor_id INT NOT NULL,
+    message TEXT NOT NULL,
+    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES Users(user_id),
+    FOREIGN KEY (mentor_id) REFERENCES Mentors(mentor_id)
+) COMMENT='Stores chat messages between users and mentors for emotional support.';
+
+CREATE TABLE LearningContent (
+    content_id INT AUTO_INCREMENT PRIMARY KEY,
+    title VARCHAR(255) NOT NULL,
+    description TEXT,
+    level VARCHAR(50),
+    subject VARCHAR(100),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+) COMMENT='Stores educational content for personalized learning.';
+
+CREATE TABLE UserProgress (
+    progress_id INT AUTO_INCREMENT PRIMARY KEY,
+    user_id INT NOT NULL,
+    content_id INT NOT NULL,
+    progress_percentage DECIMAL(5,2) DEFAULT 0.00,
+    last_accessed TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES Users(user_id),
+    FOREIGN KEY (content_id) REFERENCES LearningContent(content_id)
+) COMMENT='Tracks user progress on educational content.';
+
+CREATE TABLE Feedback (
+    feedback_id INT AUTO_INCREMENT PRIMARY KEY,
+    user_id INT NOT NULL,
+    satisfaction_rating INT CHECK (satisfaction_rating BETWEEN 1 AND 5),
+    comments TEXT,
+    submitted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES Users(user_id)
+) COMMENT='Stores user feedback on their experience with the application.';
+
+CREATE TABLE UsageData (
+    usage_id INT AUTO_INCREMENT PRIMARY KEY,
+    user_id INT NOT NULL,
+    action VARCHAR(255) NOT NULL,
+    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES Users(user_id)
+) COMMENT='Logs user actions for data analysis purposes.';
+
+CREATE TABLE SecurityLogs (
+    log_id INT AUTO_INCREMENT PRIMARY KEY,
+    user_id INT,
+    action VARCHAR(255) NOT NULL,
+    success BOOLEAN,
+    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES Users(user_id)
+) COMMENT='Logs security-related actions and access attempts.';
+
+CREATE TABLE TechnicalSupportRequests (
+    request_id INT AUTO_INCREMENT PRIMARY KEY,
+    user_id INT NOT NULL,
+    description TEXT NOT NULL,
+    status VARCHAR(50) DEFAULT 'Pending',
+    submitted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES Users(user_id)
+) COMMENT='Stores technical support requests from users.';
+
+CREATE TABLE ContentManagement (
+    content_id INT AUTO_INCREMENT PRIMARY KEY,
+    title VARCHAR(255) NOT NULL,
+    content_type VARCHAR(50),
+    author_id INT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    FOREIGN KEY (author_id) REFERENCES Users(user_id)
+) COMMENT='Manages educational and emotional support content within the application.';
+
+CREATE INDEX idx_user_id ON EmotionalSupportChats(user_id);
+CREATE INDEX idx_mentor_id ON EmotionalSupportChats(mentor_id);
+CREATE INDEX idx_content_id ON UserProgress(content_id);
+CREATE INDEX idx_feedback_user_id ON Feedback(user_id);
+CREATE INDEX idx_usage_user_id ON UsageData(user_id);
+CREATE INDEX idx_security_user_id ON SecurityLogs(user_id);
+CREATE INDEX idx_support_user_id ON TechnicalSupportRequests(user_id);",NULL
+863,83,2,"User Authentication Module","The User Authentication Module is responsible for managing user registration, login, and identity verification processes within the application. This module ensures that users can create accounts securely by providing their audio profiles and personal information. It implements robust security measures, including password hashing and two-factor authentication, to protect user data. The module also integrates with third-party identity verification services to confirm user identities, enhancing trust within the community. Users interact with this module through voice commands and prompts, making it accessible. Outputs include authentication tokens and user profiles, enabling seamless navigation throughout the app.
+
+Inputs: User's audio profile, personal information (name, email), password, verification documents (if required)
+Outputs: Authentication token, user profile data, verification status.",1
+864,83,2,"Audio Profile Creation Module","The Audio Profile Creation Module allows users to create rich audio profiles that reflect their personality, interests, and values. Users can record their introductions and responses to structured prompts, which are then processed and stored in a secure database. This module emphasizes accessibility, providing clear audio guidance and prompts to assist users in crafting their profiles. It also includes features for editing and updating profiles as users evolve in their dating journey. The module ensures that all audio files are optimized for playback across various devices and are compatible with screen readers, enhancing user experience.
+
+Inputs: User's recorded audio clips, structured prompts, user preferences (interests, values)
+Outputs: Stored audio profile data, profile completion status, audio playback links.",2
+865,83,2,"Smart Matching Engine","The Smart Matching Engine is a core component of the application that focuses on connecting users based on compatibility rather than appearance. This module analyzes user profiles, including audio introductions and interests, to generate potential matches. It employs algorithms that consider user preferences, values, and conversation styles to ensure meaningful connections. The engine continuously learns from user interactions and feedback, refining its matching criteria over time. Users can receive match suggestions through voice notifications, and the module supports filtering options to help users find connections that align with their interests and relationship goals.
+
+Inputs: User profiles, user preferences, interaction history, feedback data
+Outputs: List of potential matches, compatibility scores, match suggestions.",3
+866,83,2,"Voice Interaction Module","The Voice Interaction Module facilitates seamless communication between users through voice-based interactions. This module is designed to support screen readers and voice commands, allowing users to engage in conversations without relying on visual cues. It includes features for initiating voice calls, sending voice messages, and participating in guided conversations. The module ensures that all interactions are moderated for safety, providing users with a secure environment to express themselves. Additionally, it incorporates audio feedback mechanisms to enhance user experience, ensuring that users receive confirmations and prompts throughout their interactions.
+
+Inputs: User's voice commands, selected match profiles, conversation topics
+Outputs: Voice call connections, sent voice messages, conversation transcripts.",4
+867,83,2,"Community Engagement Module","The Community Engagement Module fosters a sense of belonging among users by enabling them to join interest-based groups and participate in community activities. This module allows users to explore various groups based on shared interests, such as hobbies, values, or relationship goals. Users can engage in guided conversations, share experiences, and build social confidence in a supportive environment. The module includes features for creating and managing group discussions, scheduling events, and sending notifications to participants. It emphasizes accessibility, ensuring that all community interactions are inclusive and welcoming for blind and visually impaired users.
+
+Inputs: User interests, group preferences, event details
+Outputs: List of available groups, scheduled events, notifications for group activities.",5
+868,83,2,"Safety and Trust Module","The Safety and Trust Module is integral to ensuring a secure environment for users. This module implements identity verification processes, including audio confirmations and third-party checks, to enhance user trust. It also manages moderated interactions, where conversations are monitored for inappropriate behavior, ensuring that users feel respected and safe. The module includes features for reporting issues, blocking users, and providing resources for support. Users receive audio feedback regarding their safety settings and any actions taken. This module is crucial for building a community where users can connect without fear of harassment or abuse.
+
+Inputs: User reports, verification documents, interaction data
+Outputs: Verification status, incident reports, user safety settings.",6
+869,83,2,"User Profile Management Module","The User Profile Management Module allows users to view, edit, and manage their profiles within the application. This module provides a user-friendly interface that supports voice commands and screen reader compatibility, ensuring accessibility for all users. Users can update their audio profiles, change personal information, and adjust privacy settings. The module also includes features for managing visibility preferences, allowing users to control who can view their profiles and interact with them. It ensures that all changes are securely saved and provides audio confirmations for successful updates, enhancing user confidence in managing their profiles.
+
+Inputs: User's current profile data, updated audio clips, privacy preferences
+Outputs: Updated user profile data, confirmation of changes, visibility settings.",7
+870,83,2,"Feedback and Improvement Module","The Feedback and Improvement Module collects user feedback on their experiences within the application. This module allows users to provide insights on features, report issues, and suggest improvements through voice commands. It analyzes feedback data to identify trends and areas for enhancement, ensuring that the application evolves based on user needs. The module also includes mechanisms for users to rate their interactions and matches, contributing to the continuous improvement of the Smart Matching Engine. Outputs include aggregated feedback reports and prioritized improvement suggestions for the development team.
+
+Inputs: User feedback, interaction ratings, suggestions for improvement
+Outputs: Aggregated feedback data, improvement reports, user satisfaction metrics.",8
+871,83,2,"Accessibility Features Module","The Accessibility Features Module is designed to enhance the overall user experience by providing various tools and settings tailored for blind and visually impaired users. This module includes high-contrast modes, gesture-based controls, and customizable audio guidance options. Users can adjust settings according to their preferences, ensuring that navigation throughout the app is intuitive and user-friendly. The module also conducts regular assessments of accessibility features to ensure compliance with best practices and standards. Outputs include user-configured accessibility settings and recommendations for further enhancements based on user interactions and feedback.
+
+Inputs: User accessibility preferences, device settings
+Outputs: Configured accessibility settings, compliance reports, user feedback on accessibility features.",9
+872,83,1,"Database Schema","CREATE TABLE Users (
+    user_id SERIAL PRIMARY KEY,
+    name VARCHAR(255) NOT NULL,
+    email VARCHAR(255) UNIQUE NOT NULL,
+    password_hash VARCHAR(255) NOT NULL,
+    audio_profile_id INT,
+    verification_status BOOLEAN DEFAULT FALSE,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT chk_email_format CHECK (email ~* '^[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}$'),
+    COMMENT ON COLUMN Users.name IS 'User\'s full name',
+    COMMENT ON COLUMN Users.email IS 'User\'s email address',
+    COMMENT ON COLUMN Users.password_hash IS 'Hashed password for security',
+    COMMENT ON COLUMN Users.audio_profile_id IS 'Reference to user\'s audio profile',
+    COMMENT ON COLUMN Users.verification_status IS 'Verification status of the user'
+);
+
+CREATE TABLE AudioProfiles (
+    audio_profile_id SERIAL PRIMARY KEY,
+    user_id INT NOT NULL,
+    audio_clip BYTEA NOT NULL,
+    interests TEXT,
+    values TEXT,
+    profile_completion_status BOOLEAN DEFAULT FALSE,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES Users(user_id) ON DELETE CASCADE,
+    COMMENT ON COLUMN AudioProfiles.audio_clip IS 'User\'s recorded audio clip',
+    COMMENT ON COLUMN AudioProfiles.interests IS 'User\'s interests',
+    COMMENT ON COLUMN AudioProfiles.values IS 'User\'s values',
+    COMMENT ON COLUMN AudioProfiles.profile_completion_status IS 'Status of profile completion'
+);
+
+CREATE TABLE Matches (
+    match_id SERIAL PRIMARY KEY,
+    user_id INT NOT NULL,
+    matched_user_id INT NOT NULL,
+    compatibility_score DECIMAL(5,2),
+    match_suggestion BOOLEAN DEFAULT FALSE,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES Users(user_id) ON DELETE CASCADE,
+    FOREIGN KEY (matched_user_id) REFERENCES Users(user_id) ON DELETE CASCADE,
+    COMMENT ON COLUMN Matches.compatibility_score IS 'Score indicating compatibility between users',
+    COMMENT ON COLUMN Matches.match_suggestion IS 'Indicates if the match was suggested'
+);
+
+CREATE TABLE VoiceInteractions (
+    interaction_id SERIAL PRIMARY KEY,
+    user_id INT NOT NULL,
+    match_id INT NOT NULL,
+    voice_message BYTEA,
+    transcript TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES Users(user_id) ON DELETE CASCADE,
+    FOREIGN KEY (match_id) REFERENCES Matches(match_id) ON DELETE CASCADE,
+    COMMENT ON COLUMN VoiceInteractions.voice_message IS 'Recorded voice message',
+    COMMENT ON COLUMN VoiceInteractions.transcript IS 'Transcript of the voice interaction'
+);
+
+CREATE TABLE CommunityGroups (
+    group_id SERIAL PRIMARY KEY,
+    name VARCHAR(255) NOT NULL,
+    description TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    COMMENT ON COLUMN CommunityGroups.name IS 'Name of the community group',
+    COMMENT ON COLUMN CommunityGroups.description IS 'Description of the community group'
+);
+
+CREATE TABLE GroupMemberships (
+    membership_id SERIAL PRIMARY KEY,
+    user_id INT NOT NULL,
+    group_id INT NOT NULL,
+    joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES Users(user_id) ON DELETE CASCADE,
+    FOREIGN KEY (group_id) REFERENCES CommunityGroups(group_id) ON DELETE CASCADE,
+    COMMENT ON COLUMN GroupMemberships.joined_at IS 'Timestamp when the user joined the group'
+);
+
+CREATE TABLE SafetyReports (
+    report_id SERIAL PRIMARY KEY,
+    user_id INT NOT NULL,
+    reported_user_id INT,
+    report_details TEXT,
+    action_taken TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES Users(user_id) ON DELETE CASCADE,
+    FOREIGN KEY (reported_user_id) REFERENCES Users(user_id) ON DELETE SET NULL,
+    COMMENT ON COLUMN SafetyReports.report_details IS 'Details of the safety report',
+    COMMENT ON COLUMN SafetyReports.action_taken IS 'Actions taken in response to the report'
+);
+
+CREATE TABLE UserProfiles (
+    profile_id SERIAL PRIMARY KEY,
+    user_id INT NOT NULL,
+    privacy_settings TEXT,
+    visibility_settings TEXT,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES Users(user_id) ON DELETE CASCADE,
+    COMMENT ON COLUMN UserProfiles.privacy_settings IS 'User\'s privacy settings',
+    COMMENT ON COLUMN UserProfiles.visibility_settings IS 'User\'s visibility settings'
+);
+
+CREATE TABLE Feedback (
+    feedback_id SERIAL PRIMARY KEY,
+    user_id INT NOT NULL,
+    feedback_text TEXT,
+    rating INT CHECK (rating BETWEEN 1 AND 5),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES Users(user_id) ON DELETE CASCADE,
+    COMMENT ON COLUMN Feedback.feedback_text IS 'User feedback text',
+    COMMENT ON COLUMN Feedback.rating IS 'User rating from 1 to 5'
+);
+
+CREATE TABLE AccessibilitySettings (
+    setting_id SERIAL PRIMARY KEY,
+    user_id INT NOT NULL,
+    high_contrast_mode BOOLEAN DEFAULT FALSE,
+    gesture_controls BOOLEAN DEFAULT FALSE,
+    audio_guidance_options TEXT,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES Users(user_id) ON DELETE CASCADE,
+    COMMENT ON COLUMN AccessibilitySettings.high_contrast_mode IS 'High contrast mode setting',
+    COMMENT ON COLUMN AccessibilitySettings.gesture_controls IS 'Gesture controls setting',
+    COMMENT ON COLUMN AccessibilitySettings.audio_guidance_options IS 'Audio guidance options'
+);
+
+CREATE INDEX idx_user_email ON Users(email);
+CREATE INDEX idx_audio_profile_user ON AudioProfiles(user_id);
+CREATE INDEX idx_matches_user ON Matches(user_id);
+CREATE INDEX idx_voice_interaction_user ON VoiceInteractions(user_id);
+CREATE INDEX idx_group_membership_user ON GroupMemberships(user_id);
+CREATE INDEX idx_safety_report_user ON SafetyReports(user_id);
+CREATE INDEX idx_user_profile_user ON UserProfiles(user_id);
+CREATE INDEX idx_feedback_user ON Feedback(user_id);
+CREATE INDEX idx_accessibility_setting_user ON AccessibilitySettings(user_id);",NULL
+873,84,2,"NPO Portal Management Screen","The NPO Portal Management Screen serves as the central hub for managing daily orders and contributions. It allows users to view a list of daily orders, which can be drilled down to see individual contributions. Users can approve or reject orders with a simple button click, facilitating quick decision-making. Additionally, the screen includes a print functionality that generates stickers for OrderIds, streamlining the packaging process. The architecture integrates with the Orders and Contributions tables, ensuring real-time data updates. User interactions are intuitive, with clear navigation and feedback mechanisms to enhance usability and efficiency.
+
+Inputs: User authentication token, selected date for daily orders, filter criteria for contributions.
+Outputs: List of daily orders, detailed contributions for selected orders, print-ready format for OrderIds.",1
+874,84,2,"Contributions Approval Module","The Contributions Approval Module is designed to manage the approval process for contributions based on specific criteria. Users can filter contributions by date range and contributor, allowing for targeted reviews. Once the criteria are set, users can generate approval documents in PDF format, which serve as official records of approved contributions. This module integrates with the Contributions table and utilizes a robust backend service to ensure data integrity and compliance with approval standards. The user interface is designed for ease of use, providing clear options for filtering and generating reports, enhancing the overall contribution management process.
+
+Inputs: Date range, contributor ID, user authentication token.
+Outputs: PDF document of approved contributions, summary of contributions matching criteria.",2
+875,84,2,"Contributors Registration Module","The Contributors Registration Module facilitates the onboarding of new contributors into the system. It captures essential information such as name, type (business or personal), contact details, and kosher status. The module ensures data validation to maintain integrity, particularly for the kosher field. Upon submission, the data is stored in the Contributors table, and a unique contributor ID is generated. This module is crucial for expanding the contributor base and ensuring that all necessary information is collected upfront. The user interface is designed to be user-friendly, guiding contributors through the registration process with clear instructions and feedback.
+
+Inputs: Contributor name, type, phone number, address, kosher status, website URL.
+Outputs: Confirmation of successful registration, unique contributor ID, error messages for validation failures.",3
+876,84,2,"Orders Management Module","The Orders Management Module allows contributors to view their previous orders and create new ones. It displays a comprehensive list of past orders, including details such as order ID, date, and status. Contributors can initiate the creation of new contributions through a dedicated interface that opens the New Contributions screen. This module integrates with the Orders table, ensuring that all order data is up-to-date and accurately reflects the contributor's history. The user experience is enhanced with features like search and filter options, making it easy for contributors to navigate their order history and manage their contributions effectively.
+
+Inputs: Contributor ID, user authentication token.
+Outputs: List of previous orders, confirmation of new order creation, error messages for any issues encountered.",4
+877,84,2,"Google Maps Service Module","The Google Maps Service Module is responsible for generating daily routes for contributors based on their contributions and target stations. It utilizes the Google Maps API to create optimized routes that enhance delivery efficiency. The module takes into account various factors such as contributor location, target station address, and time constraints. Upon processing, it outputs a Google Maps URL that contributors can use to navigate their routes easily. This service is crucial for logistical planning and ensures that contributors can deliver their contributions in a timely manner. The integration with the Orders and Stations tables allows for dynamic route generation based on real-time data.
+
+Inputs: Contributor location, target station address, date of contributions.
+Outputs: Google Maps URL for the generated route, estimated travel time, and distance.",5
+878,84,2,"AI Service for Contribution Validation","The AI Service for Contribution Validation assesses the quality and freshness of food contributions based on parameters such as time made and item description. This module employs machine learning algorithms to analyze historical data and predict whether a contribution is suitable for distribution. It integrates with the Contributions table to provide real-time validation results. Users can receive recommendations on whether to approve or reject contributions based on the AI's assessment. This service enhances the overall quality of contributions and ensures that only suitable items are distributed, thereby maintaining the integrity of the food donation process.
+
+Inputs: Time made, item description, historical contribution data.
+Outputs: Validation result (recommended or not recommended), confidence score of the AI assessment.",6
+879,84,1,"Database Schema","CREATE TABLE Contributors (
+    ContributorID INT AUTO_INCREMENT PRIMARY KEY,
+    Name VARCHAR(255) NOT NULL,
+    Type ENUM('Business', 'Personal') NOT NULL,
+    PhoneNumber VARCHAR(15),
+    Address TEXT,
+    KosherStatus BOOLEAN NOT NULL,
+    WebsiteURL VARCHAR(255),
+    CreatedAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UpdatedAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE (PhoneNumber),
+    COMMENT 'Stores information about contributors including their type and contact details.'
+);
+
+CREATE TABLE Orders (
+    OrderID INT AUTO_INCREMENT PRIMARY KEY,
+    ContributorID INT NOT NULL,
+    OrderDate DATE NOT NULL,
+    Status ENUM('Pending', 'Approved', 'Rejected') DEFAULT 'Pending',
+    CreatedAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UpdatedAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    FOREIGN KEY (ContributorID) REFERENCES Contributors(ContributorID),
+    COMMENT 'Contains details of orders made by contributors, including status and dates.'
+);
+
+CREATE TABLE Contributions (
+    ContributionID INT AUTO_INCREMENT PRIMARY KEY,
+    OrderID INT NOT NULL,
+    ContributorID INT NOT NULL,
+    ContributionDate DATE NOT NULL,
+    ItemDescription TEXT,
+    TimeMade TIME,
+    Approved BOOLEAN DEFAULT FALSE,
+    CreatedAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UpdatedAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    FOREIGN KEY (OrderID) REFERENCES Orders(OrderID),
+    FOREIGN KEY (ContributorID) REFERENCES Contributors(ContributorID),
+    COMMENT 'Records individual contributions linked to orders, including approval status.'
+);
+
+CREATE TABLE Stations (
+    StationID INT AUTO_INCREMENT PRIMARY KEY,
+    Name VARCHAR(255) NOT NULL,
+    Address TEXT NOT NULL,
+    CreatedAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UpdatedAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    COMMENT 'Stores information about target stations for delivery routes.'
+);
+
+CREATE INDEX idx_contributor_order ON Orders (ContributorID);
+CREATE INDEX idx_order_contribution ON Contributions (OrderID);
+CREATE INDEX idx_contribution_date ON Contributions (ContributionDate);
+
+-- Additional comments for each table and column are included above in the COMMENT clauses.
+-- This schema supports the functionalities described in the project modules, including order management, contribution approval, contributor registration, and logistical planning.",NULL
+880,85,2,"Orders Management Screen","The Orders Management Screen module serves as the central hub for managing daily orders within the NPO Portal. It allows users to view all orders placed on a given day, providing a drill-down feature to inspect contributions associated with each order. Users can approve or reject orders with a simple button click, facilitating quick decision-making. Additionally, the module includes a Print Orders button, enabling users to generate and print stickers for approved OrderIds, which are essential for organizing food contributions. This module integrates with the Orders and Contributions tables, ensuring real-time data accuracy and updates.
+
+Inputs: Date for which orders are to be displayed, user credentials for authentication.
+Outputs: List of daily orders, detailed contributions for each order, approval/rejection status, and print-ready order stickers.",1
+881,85,2,"Reports Module","The Reports Module is designed to provide comprehensive reporting capabilities for the NPO Portal. It allows users to generate reports on daily contributions, offering insights into the volume and types of food contributed. Users can also access historical order data filtered by date range or contributor, enabling trend analysis and performance tracking. The module features a Weekly Champions report, highlighting top contributors over the week. This module pulls data from the Orders and Contributions tables, ensuring that reports are generated based on the most current and relevant data, facilitating informed decision-making and strategic planning.
+
+Inputs: Date range for historical orders, contributor ID for filtering, user role for access control.
+Outputs: Generated reports on daily contributions, historical orders by date and contributor, and a summary of weekly champions.",2
+882,85,2,"Contributors Registration Screen","The Contributors Registration Screen module allows new contributors to register their service centers within the system. This module captures essential information such as contact name, type (business or personal), phone number, address, pickup time, food type, kosher status, and website URL. The registration process is designed to be user-friendly, guiding contributors through each step. Once submitted, the data is validated and stored in the Contributor table, ensuring that all necessary information is collected for future orders. This module plays a critical role in expanding the contributor base and enhancing the overall efficiency of food donations.
+
+Inputs: Contributor details including contact name, type, phone, address, pickup time, food type, kosher status, and website URL.
+Outputs: Confirmation of successful registration, error messages for invalid inputs, and updated contributor list.",3
+883,85,2,"Orders Screen for Contributors","The Orders Screen for Contributors module provides an interface for contributors to manage their orders. It displays a list of previous orders, allowing contributors to view the status and details of each order. Contributors can create new orders by specifying a target date and adding line items, including item descriptions, quantities, and time made. The module also includes functionality for contributors to edit or delete existing line items. Upon submission, a new order is created in the Orders table. Additionally, contributors can generate a QR code linked to their service center's website URL, facilitating easy access to information.
+
+Inputs: Contributor ID for retrieving previous orders, target date for new orders, line item details for new contributions.
+Outputs: List of previous orders, confirmation of new order creation, QR code image for the service center.",4
+884,85,2,"GoogleMaps Service","The GoogleMaps Service module is responsible for generating daily routes for food pickups and deliveries. This module integrates with the Google Maps API to create optimized routes based on the locations of contributors and target centers. It takes into account factors such as traffic conditions and distance to ensure the most efficient route is provided. The output is a Google Maps URL that can be shared with drivers or volunteers responsible for pickups. This service enhances logistical efficiency, ensuring timely collection and delivery of food contributions, thereby improving the overall operational workflow of the NPO.
+
+Inputs: List of contributor addresses and target center addresses for route generation.
+Outputs: Generated Google Maps URL for the optimized daily route.",5
+885,85,2,"AI Service for Food Freshness","The AI Service module is designed to assess the freshness of food contributions based on the time made and item descriptions. Utilizing machine learning algorithms, this module analyzes historical data to determine the optimal freshness thresholds for various food items. When a new contribution is submitted, the AI evaluates the time made against these thresholds and provides a recommendation on whether the food is suitable for donation. This service not only ensures food safety but also enhances the quality of contributions, thereby maintaining the NPO's reputation for providing fresh and safe food to recipients.
+
+Inputs: Time made of the food item and description of the item for freshness evaluation.
+Outputs: Recommendation on the freshness of the food item (true/false) and any alerts for items that may be unsuitable.",6
+886,85,1,"Database Schema","CREATE TABLE Contributors (
+    ContributorID INT AUTO_INCREMENT PRIMARY KEY,
+    ContactName VARCHAR(255) NOT NULL,
+    Type ENUM('Business', 'Personal') NOT NULL,
+    PhoneNumber VARCHAR(15) NOT NULL,
+    Address VARCHAR(255) NOT NULL,
+    PickupTime TIME NOT NULL,
+    FoodType VARCHAR(255) NOT NULL,
+    KosherStatus BOOLEAN NOT NULL,
+    WebsiteURL VARCHAR(255),
+    CreatedAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UpdatedAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    CONSTRAINT chk_phone_number CHECK (PhoneNumber REGEXP '^[0-9]+$'),
+    CONSTRAINT chk_website_url CHECK (WebsiteURL REGEXP '^https?://')
+);
+
+CREATE TABLE Orders (
+    OrderID INT AUTO_INCREMENT PRIMARY KEY,
+    ContributorID INT NOT NULL,
+    OrderDate DATE NOT NULL,
+    Status ENUM('Pending', 'Approved', 'Rejected') DEFAULT 'Pending',
+    CreatedAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UpdatedAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    FOREIGN KEY (ContributorID) REFERENCES Contributors(ContributorID) ON DELETE CASCADE,
+    INDEX idx_order_date (OrderDate),
+    INDEX idx_contributor_id (ContributorID)
+);
+
+CREATE TABLE Contributions (
+    ContributionID INT AUTO_INCREMENT PRIMARY KEY,
+    OrderID INT NOT NULL,
+    ItemDescription VARCHAR(255) NOT NULL,
+    Quantity INT NOT NULL,
+    TimeMade TIME NOT NULL,
+    CreatedAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UpdatedAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    FOREIGN KEY (OrderID) REFERENCES Orders(OrderID) ON DELETE CASCADE,
+    INDEX idx_order_id (OrderID)
+);
+
+CREATE TABLE Reports (
+    ReportID INT AUTO_INCREMENT PRIMARY KEY,
+    ReportType ENUM('Daily Contributions', 'Historical Orders', 'Weekly Champions') NOT NULL,
+    DateRangeStart DATE,
+    DateRangeEnd DATE,
+    ContributorID INT,
+    GeneratedAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (ContributorID) REFERENCES Contributors(ContributorID),
+    INDEX idx_report_type (ReportType),
+    INDEX idx_contributor_id (ContributorID)
+);
+
+CREATE TABLE Routes (
+    RouteID INT AUTO_INCREMENT PRIMARY KEY,
+    GeneratedDate DATE NOT NULL,
+    RouteURL VARCHAR(255) NOT NULL,
+    CreatedAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UpdatedAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    CONSTRAINT chk_route_url CHECK (RouteURL REGEXP '^https?://maps.google.com')
+);
+
+CREATE TABLE FoodFreshness (
+    FreshnessID INT AUTO_INCREMENT PRIMARY KEY,
+    ContributionID INT NOT NULL,
+    IsFresh BOOLEAN NOT NULL,
+    AlertMessage VARCHAR(255),
+    EvaluatedAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (ContributionID) REFERENCES Contributions(ContributionID) ON DELETE CASCADE,
+    INDEX idx_contribution_id (ContributionID)
+);
+
+-- Comments explaining the purpose of each table and column
+-- Contributors: Stores information about contributors, including contact details and preferences.
+-- Orders: Manages orders placed by contributors, with status tracking.
+-- Contributions: Details of each contribution within an order, including item specifics.
+-- Reports: Stores generated reports for various analyses and insights.
+-- Routes: Holds data about generated routes for pickups and deliveries.
+-- FoodFreshness: Evaluates and stores the freshness status of food contributions.",NULL
+887,86,2,"Registration & Authentication","The Registration & Authentication module serves as the entry point for both Contributors and NPO Centres to register and authenticate themselves within the system. This module includes user-friendly registration screens where users can input their contact information, type (business or personal), and other relevant details. It also manages user authentication, ensuring secure access to the system through login credentials. The module will implement password hashing for security and may utilize OAuth for third-party authentication. Upon successful registration or login, users will receive a confirmation message, and their session will be initiated, allowing access to the NPO Portal or Contributors Portal. This module is crucial for maintaining the integrity and security of user data and ensuring that only authorized users can access sensitive functionalities.
+
+Inputs: User's contact name, type (business/personal), phone number, address, pickup time, food type, kosher status, and website URL for registration; username and password for authentication.
+Outputs: Confirmation of successful registration or authentication, session token for user access, and error messages for failed attempts.",1
+888,86,2,"Orders Management Screen","The Orders Management Screen module is designed for NPO staff to efficiently manage daily orders from Contributors. This module provides a comprehensive interface that displays all orders, allowing staff to drill down into individual contributions and view detailed line items. Users can approve or reject orders with a simple click of a button, and the system will update the order status accordingly. Additionally, a print functionality is included to generate stickers for approved orders, which can be used for packaging. The module integrates with the database to fetch real-time order data and ensures that all changes are reflected immediately. This module is essential for maintaining an organized workflow and ensuring that all contributions are processed accurately and efficiently.
+
+Inputs: Request for daily orders, including filters for date and status; user actions for approving or rejecting orders; request for print functionality.
+Outputs: List of daily orders with detailed contributions, updated order statuses, and printed order stickers.",2
+889,86,2,"Reports Module","The Reports Module is a powerful tool for generating various reports related to contributions and orders. This module allows users to view daily contributions, historical orders filtered by date range or contributor, and identify weekly champions based on contribution metrics. The module will utilize complex queries to aggregate data from the database, providing insightful analytics that can help improve operational efficiency. Users can specify parameters such as date ranges or contributor IDs to customize their reports. The output will be presented in a user-friendly format, such as tables or charts, and can be exported for further analysis. This module is crucial for tracking performance, identifying trends, and making informed decisions based on data-driven insights.
+
+Inputs: Parameters for report generation, including date range, contributor ID, and report type (daily contributions, historical orders, weekly champions).
+Outputs: Generated reports in tabular or graphical format, including data summaries and insights based on the specified parameters.",3
+890,86,2,"Orders Screen (For Contributors)","The Orders Screen module for Contributors provides a user-friendly interface for managing their contributions and orders. Contributors can view a list of their previous orders, which includes details such as order ID, date, and status. This module also allows users to create new orders by specifying a target date and adding line items, including item descriptions, quantities, and time made. Contributors can edit or delete line items as needed before submitting the order. Additionally, the module includes functionality to generate a QR code from the Centre's website URL, which can be printed for easy access. This module is essential for Contributors to track their contributions and ensure they meet the requirements for their orders.
+
+Inputs: Request to view previous orders; details for creating a new order, including target date, item descriptions, quantities, and time made; request to generate QR code.
+Outputs: List of previous orders, confirmation of new order creation, and generated QR code for the Centre's website.",4
+891,86,2,"GoogleMaps Service","The GoogleMaps Service module is responsible for generating a daily route for Contributors to deliver their food contributions efficiently. This module will integrate with the Google Maps API to calculate optimal routes based on the addresses of the Centres and the Contributors' pickup locations. Users will input their starting point and destination, and the module will return a Google Maps URL that displays the recommended route. This service is essential for ensuring timely deliveries and minimizing travel time, which is crucial for maintaining the quality of food contributions. The module will also consider factors such as traffic conditions and distance to provide the best possible route. This integration enhances the overall user experience by simplifying the logistics of food delivery.
+
+Inputs: Starting point (Contributor's address) and destination (Centre's address) for route generation.
+Outputs: Generated Google Maps URL with the optimal route for food delivery.",5
+892,86,2,"AI Service","The AI Service module is designed to enhance the system's ability to assess the quality of food contributions based on specific criteria. This module will analyze the time made and item descriptions of food items to determine if they are still suitable for donation. By utilizing machine learning algorithms, the AI can predict the freshness of food items and flag those that may be too old or unsuitable. This service will run in the background and provide recommendations to the Orders Management Screen, ensuring that only high-quality contributions are accepted. The AI Service is crucial for maintaining food safety standards and ensuring that the contributions meet the necessary quality requirements. This module will also learn from past data to improve its accuracy over time, making it an invaluable asset to the overall system.
+
+Inputs: Data regarding food contributions, including time made and item descriptions for analysis.
+Outputs: Recommendations on the suitability of food items for donation, including flags for items that may be too old.",6
+893,86,1,"Database Schema","CREATE TABLE Contributors (
+    contributor_id SERIAL PRIMARY KEY,
+    contact_name VARCHAR(255) NOT NULL,
+    email VARCHAR(255),
+    type ENUM('business', 'personal') NOT NULL,
+    phone VARCHAR(15),
+    address TEXT,
+    pickup_time TIME,
+    food_type VARCHAR(255),
+    kosher BOOLEAN,
+    website_url VARCHAR(255),
+    CONSTRAINT chk_contributor_type CHECK (type IN ('business', 'personal'))
+);
+
+CREATE TABLE Orders (
+    order_id SERIAL PRIMARY KEY,
+    contributor_id INT NOT NULL,
+    order_identifier VARCHAR(255) UNIQUE NOT NULL,
+    date DATE,
+    day_of_week ENUM('Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'),
+    target_centre VARCHAR(255) DEFAULT 'Gagon1',
+    status ENUM('new', 'approved', 'rejected') DEFAULT 'new',
+    google_maps_url VARCHAR(255),
+    FOREIGN KEY (contributor_id) REFERENCES Contributors(contributor_id),
+    CONSTRAINT chk_order_status CHECK (status IN ('new', 'approved', 'rejected')),
+    CONSTRAINT chk_target_centre CHECK (
+        target_centre = 'Gagon1' OR 
+        (type = 'personal' OR day_of_week IN ('Friday', 'Saturday') OR NOT kosher)
+    )
+);
+
+CREATE TABLE Contributions (
+    contribution_id SERIAL PRIMARY KEY,
+    order_id INT NOT NULL,
+    item_description TEXT NOT NULL,
+    quantity INT NOT NULL CHECK (quantity > 0),
+    time_made TIME NOT NULL,
+    recommended BOOLEAN,
+    FOREIGN KEY (order_id) REFERENCES Orders(order_id)
+);
+
+CREATE TABLE Centres (
+    centre_id SERIAL PRIMARY KEY,
+    contact_person VARCHAR(255),
+    phone VARCHAR(15),
+    email VARCHAR(255),
+    address TEXT NOT NULL,
+    type VARCHAR(255),
+    website_url VARCHAR(255)
+);
+
+CREATE INDEX idx_contributor_contact_name ON Contributors(contact_name);
+CREATE INDEX idx_order_contributor_id ON Orders(contributor_id);
+CREATE INDEX idx_contribution_order_id ON Contributions(order_id);
+CREATE INDEX idx_centre_address ON Centres(address);",NULL

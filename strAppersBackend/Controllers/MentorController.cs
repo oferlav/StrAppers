@@ -1330,7 +1330,9 @@ namespace strAppersBackend.Controllers
             return $"\n\n🛠 PLATFORM GITHUB & WORKFLOW RULES (Developer Role):\n" +
                 "1. Repository Access & Permissions\n" +
                 "- Collaborator Status: All developers are added as Collaborators to their respective project repositories. They must check their email and manually approve the GitHub invitation before they can access the repo or push code. When the user says they cannot edit the repo on GitHub, only see Fork, or get permission/push errors, remind them to check their email and accept the GitHub collaborator invitation.\n" +
-                "- Branch Protection: The main branch is strictly protected. Direct pushes to main are disabled. The \"Merge\" button is only enabled after a successful \"" + validationContext + "\" status check.\n\n" +
+                "- GitHub issues (push, pull, permission, clone, \"not working\"): Before suggesting any Git commands or debugging steps, first confirm that the user has cloned the repository locally. If they have not, direct them to clone first (e.g. git clone <repo-url>). Do not assume they have a local clone.\n" +
+                "- Branch Protection: The main branch is strictly protected. Direct pushes to main are disabled. The \"Merge\" button is only enabled after a successful \"" + validationContext + "\" status check.\n" +
+                "- 🚨 FORBIDDEN - main branch: You must NEVER suggest or show any command that pushes to main, renames the current branch to main, or sets upstream to origin main. FORBIDDEN examples: git branch -M main, git push -u origin main, git push origin main. Work is done only on sprint branches (e.g. 1-B, 1-F). Never instruct the user to use main for their work or initial push.\n\n" +
                 "2. Sprint & Branching Logic (Strict)\n" +
                 "- Platform-Only Branching: Users cannot create branches manually via Git CLI or the GitHub UI. Branching is handled ONLY by the platform backend.\n" +
                 "- Sprint Initialization: No work can begin until the developer initiates the Sprint via the platform's chat buttons.\n" +
@@ -1534,10 +1536,11 @@ Your intelligence is strictly tethered to the Current Project Context and the us
 
             var contextParts = new List<string>();
 
-            // Extract GitHub commit summary from context (if available)
+            // Extract GitHub commit summary from context (if available). Support both PascalCase and camelCase for property name.
             string? githubContextInfo = null;
-            if (contextData.TryGetProperty("GitHubCommitSummary", out var githubSummaryProp) && 
-                githubSummaryProp.ValueKind != JsonValueKind.Null && 
+            JsonElement githubSummaryProp;
+            if ((contextData.TryGetProperty("GitHubCommitSummary", out githubSummaryProp) || contextData.TryGetProperty("gitHubCommitSummary", out githubSummaryProp)) &&
+                githubSummaryProp.ValueKind != JsonValueKind.Null &&
                 githubSummaryProp.ValueKind != JsonValueKind.Undefined)
             {
                 githubContextInfo = FormatGitHubCommitSummary(githubSummaryProp);
@@ -1573,6 +1576,12 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                     {
                         contextParts.Add($"working with {programmingLanguage}");
                     }
+                }
+                // Developer roles only: frontend static landing is by design; minimal-change PRs get short review
+                if (isDeveloperRole)
+                {
+                    contextParts.Add("Frontend repos on this platform use a static landing page (index.html) by default; the React app in src/ is not loaded by index.html until the student wires it in. This is intentional—do not report 'index.html does not load the React app' or missing #root/main.jsx as a gap or defect.");
+                    contextParts.Add("PRs with minimal code changes (e.g. healthcheck, few lines) receive a short AI review instead of being blocked; merge is allowed if the review approves. If a student is stuck (e.g. cannot create next sprint branch because of an open minimal-change PR), they can re-run validation to get the short review and then merge.");
                 }
             }
 
@@ -1694,6 +1703,35 @@ Your intelligence is strictly tethered to the Current Project Context and the us
             {
                 contextInfo += $"\n\nTEAM MEMBER TASKS (Current Sprint):\n{teamMemberTasksInfo}";
             }
+
+            // CRM stakeholders (included only for Marketing/BizDev role)
+            if ((contextData.TryGetProperty("Stakeholders", out var stakeholdersProp) || contextData.TryGetProperty("stakeholders", out stakeholdersProp)) &&
+                stakeholdersProp.ValueKind == JsonValueKind.Array && stakeholdersProp.GetArrayLength() > 0)
+            {
+                var sb = new System.Text.StringBuilder();
+                foreach (var item in stakeholdersProp.EnumerateArray())
+                {
+                    var name = item.TryGetProperty("Name", out var n) ? n.GetString() ?? "" : (item.TryGetProperty("name", out n) ? n.GetString() ?? "" : "");
+                    var categoryName = item.TryGetProperty("CategoryName", out var c) ? c.GetString() ?? "" : (item.TryGetProperty("categoryName", out c) ? c.GetString() ?? "" : "");
+                    var statusName = item.TryGetProperty("StatusName", out var s) ? s.GetString() ?? "" : (item.TryGetProperty("statusName", out s) ? s.GetString() ?? "" : "");
+                    var delta = item.TryGetProperty("Delta", out var d) ? d.GetString() ?? "" : (item.TryGetProperty("delta", out d) ? d.GetString() ?? "" : "");
+                    var score = item.TryGetProperty("V1AlignmentScore", out var v) ? v.GetInt32() : (item.TryGetProperty("v1AlignmentScore", out v) ? v.GetInt32() : 0);
+                    if (!string.IsNullOrEmpty(name))
+                    {
+                        sb.Append($"- {name}");
+                        if (!string.IsNullOrEmpty(categoryName)) sb.Append($" | Category: {categoryName}");
+                        if (!string.IsNullOrEmpty(statusName)) sb.Append($" | Status: {statusName}");
+                        if (score != 0) sb.Append($" | V1 Score: {score}");
+                        if (!string.IsNullOrEmpty(delta)) sb.Append($" | Notes: {delta}");
+                        sb.AppendLine();
+                    }
+                }
+                if (sb.Length > 0)
+                {
+                    contextInfo += "\n\nCRM STAKEHOLDERS (Prospects):\n" + sb.ToString().TrimEnd();
+                    contextInfo += "\n\n⚠️ MANDATORY - USE THE DATA ABOVE: You HAVE access to the CRM stakeholders listed above. When the user asks for feedback on their prospects, ecosystem, or stakeholder map, you MUST use this data to give specific feedback (reference prospect names, categories, statuses, and notes). Never say you cannot provide feedback on their prospects—you can and must reference the listed stakeholders.";
+                }
+            }
             
             // Extract next team meeting information
             if (contextData.TryGetProperty("NextTeamMeeting", out var meetingProp) && meetingProp.ValueKind == JsonValueKind.Object)
@@ -1770,6 +1808,9 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                 var githubTemplate = _promptConfig.Mentor.EnhancedPrompt.GitHubContextTemplate ?? 
                     "GITHUB REPOSITORY STATUS:\n{0}\n\nUse this information to provide accurate, context-aware responses about the student's code and repository activity.";
                 githubContextSection = $"\n\n{DbgConfig("EnhancedPrompt.GitHubContextTemplate")}{string.Format(githubTemplate, githubContextInfo)}";
+                // When this section lists commits (Total commits > 0 or Recent commits), the model HAS access—do not say "I don't see any commits"
+                if (githubContextInfo.Contains("Total commits:") && !githubContextInfo.Contains("Total commits: 0"))
+                    githubContextSection += "\n\nWhen the GITHUB REPOSITORY STATUS above shows commits (Total commits > 0 or a Recent commits list), you HAVE access to their commit information. Do NOT say you don't see any commits—use the data above to answer questions about their code or changes.";
             }
 
             // Add database connection information only for developer roles (PM/UI-UX do not need DB connection strings)
@@ -1777,8 +1818,7 @@ Your intelligence is strictly tethered to the Current Project Context and the us
             if (isDeveloperRole && !string.IsNullOrEmpty(databasePassword))
             {
                 databaseInfoSection = $"\n\nDATABASE CONNECTION INFORMATION:\n" +
-                    $"The project has a Neon PostgreSQL database. " +
-                    $"If the user asks for connection details, use the PROJECT INFORMATION (FROM README) or DATABASE CONNECTION INFORMATION (FALLBACK) section provided later in this prompt; ignore any connection details from chat history. " +
+                    $"The project has a Neon PostgreSQL database. The connection string is configured on Railway (environment variables), NOT in appSettings.json or any backend config file. Do not tell the user to check appSettings for the connection string. You (the mentor) provide the exact connection details from the PROJECT INFORMATION (FROM README) or DATABASE CONNECTION INFORMATION (FALLBACK) section provided later in this prompt; the backend README also contains it. Do NOT tell the user to \"use this connection string in your code\" or to add it where they establish the connection—in deployment the database connection is transparent (Railway injects it via environment variables). It can be retrieved in code by reading the environment variable (e.g. DATABASE_URL). Ignore any connection details from chat history. " +
                     $"Parse the connection string and provide EXACT values - DO NOT use placeholders or generic formats. " +
                     $"Password for the isolated database role (fallback): {databasePassword}. " +
                     $"The full connection string with exact database name (AppDB_...), username (db_appdb_..._user), host, and port is in those sections.";
@@ -1829,8 +1869,9 @@ Your intelligence is strictly tethered to the Current Project Context and the us
         {
             try
             {
-                var hasCommits = githubSummary.TryGetProperty("HasCommits", out var hasCommitsProp) && 
-                                hasCommitsProp.GetBoolean();
+                JsonElement hasCommitsProp;
+                var hasCommits = (githubSummary.TryGetProperty("HasCommits", out hasCommitsProp) || githubSummary.TryGetProperty("hasCommits", out hasCommitsProp)) &&
+                                hasCommitsProp.ValueKind == JsonValueKind.True;
                 
                 if (!hasCommits)
                 {
@@ -4940,8 +4981,10 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                 var baseSystemPrompt = contextElement.TryGetProperty("SystemPrompt", out var sysProp) 
                     ? sysProp.GetString() ?? "" 
                     : "";
-                var contextData = contextElement.TryGetProperty("Context", out var ctxProp) 
-                    ? ctxProp 
+                // Support both PascalCase and camelCase so we get the inner context regardless of serialization (e.g. API response uses camelCase)
+                JsonElement ctxProp;
+                var contextData = (contextElement.TryGetProperty("Context", out ctxProp) || contextElement.TryGetProperty("context", out ctxProp))
+                    ? ctxProp
                     : default(JsonElement);
                 // Full user prompt includes CURRENT TASK DETAILS (checklist, progress) so the mentor can answer progress/percentage questions
                 var contextUserPrompt = contextElement.TryGetProperty("UserPrompt", out var userPromptProp) 
@@ -5111,26 +5154,67 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                         var (frontendRepoUrl, backendRepoUrl, isFullStack) = GetRepositoryUrlsByRole(student);
                         var hasAnyCommits = false;
 
-                        if (!string.IsNullOrEmpty(student.GithubUser))
+                        // If context already has commit summary with HasCommits true, trust it (avoids false "no commits" when API check uses wrong branch or author)
+                        JsonElement ctxSummary;
+                        if (contextData.ValueKind != JsonValueKind.Undefined && contextData.ValueKind != JsonValueKind.Null &&
+                            (contextData.TryGetProperty("GitHubCommitSummary", out ctxSummary) || contextData.TryGetProperty("gitHubCommitSummary", out ctxSummary)))
                         {
-                            // For Full Stack, check BOTH repos so we don't say "no commits" when they have commits on the other repo
-                            var urlsToCheck = new List<string>();
-                            if (!string.IsNullOrEmpty(backendRepoUrl)) urlsToCheck.Add(backendRepoUrl);
-                            if (!string.IsNullOrEmpty(frontendRepoUrl) && frontendRepoUrl != backendRepoUrl) urlsToCheck.Add(frontendRepoUrl);
-                            if (urlsToCheck.Count == 0 && !string.IsNullOrEmpty(frontendRepoUrl)) urlsToCheck.Add(frontendRepoUrl);
+                            JsonElement hasCommitsProp;
+                            if ((ctxSummary.TryGetProperty("HasCommits", out hasCommitsProp) || ctxSummary.TryGetProperty("hasCommits", out hasCommitsProp)) &&
+                                hasCommitsProp.ValueKind == JsonValueKind.True)
+                                hasAnyCommits = true;
+                        }
 
-                            foreach (var url in urlsToCheck)
+                        if (!hasAnyCommits && !string.IsNullOrEmpty(student.GithubUser))
+                        {
+                            // Sprint branch for current context so we check the branch the student is working on (e.g. 1-F, 1-B), not default
+                            var sprintBranch = request.SprintId > 0 ? $"{request.SprintId}-{(request.IsBackend == true ? "B" : "F")}" : null;
+                            if (isFullStack && !string.IsNullOrEmpty(backendRepoUrl) && !string.IsNullOrEmpty(frontendRepoUrl) && backendRepoUrl != frontendRepoUrl)
                             {
-                                var repoParts = url.Replace("https://github.com/", "").Replace("http://github.com/", "").TrimEnd('/').Split('/');
-                                if (repoParts.Length >= 2)
+                                var backendBranch = request.SprintId > 0 ? $"{request.SprintId}-B" : null;
+                                var frontendBranch = request.SprintId > 0 ? $"{request.SprintId}-F" : null;
+                                var backendParts = backendRepoUrl.Replace("https://github.com/", "").Replace("http://github.com/", "").TrimEnd('/').Split('/');
+                                if (backendParts.Length >= 2)
                                 {
-                                    var owner = repoParts[0];
-                                    var repo = repoParts[1];
-                                    var recentCommits = await _githubService.GetRecentCommitsAsync(owner, repo, student.GithubUser, 5, accessToken);
-                                    if (recentCommits.Any())
+                                    var recentBackend = await _githubService.GetRecentCommitsAsync(backendParts[0], backendParts[1], student.GithubUser, 5, accessToken, backendBranch);
+                                    if (!recentBackend.Any() && !string.IsNullOrEmpty(backendBranch))
+                                        recentBackend = await _githubService.GetRecentCommitsOnBranchAsync(backendParts[0], backendParts[1], backendBranch, 5, accessToken);
+                                    if (recentBackend.Any()) { hasAnyCommits = true; }
+                                }
+                                if (!hasAnyCommits)
+                                {
+                                    var frontendParts = frontendRepoUrl.Replace("https://github.com/", "").Replace("http://github.com/", "").TrimEnd('/').Split('/');
+                                    if (frontendParts.Length >= 2)
                                     {
-                                        hasAnyCommits = true;
-                                        break;
+                                        var recentFrontend = await _githubService.GetRecentCommitsAsync(frontendParts[0], frontendParts[1], student.GithubUser, 5, accessToken, frontendBranch);
+                                        if (!recentFrontend.Any() && !string.IsNullOrEmpty(frontendBranch))
+                                            recentFrontend = await _githubService.GetRecentCommitsOnBranchAsync(frontendParts[0], frontendParts[1], frontendBranch, 5, accessToken);
+                                        if (recentFrontend.Any()) { hasAnyCommits = true; }
+                                    }
+                                }
+                            }
+                            else
+                            {
+                                var urlsToCheck = new List<string>();
+                                if (!string.IsNullOrEmpty(backendRepoUrl)) urlsToCheck.Add(backendRepoUrl);
+                                if (!string.IsNullOrEmpty(frontendRepoUrl) && frontendRepoUrl != backendRepoUrl) urlsToCheck.Add(frontendRepoUrl);
+                                if (urlsToCheck.Count == 0 && !string.IsNullOrEmpty(frontendRepoUrl)) urlsToCheck.Add(frontendRepoUrl);
+
+                                foreach (var url in urlsToCheck)
+                                {
+                                    var repoParts = url.Replace("https://github.com/", "").Replace("http://github.com/", "").TrimEnd('/').Split('/');
+                                    if (repoParts.Length >= 2)
+                                    {
+                                        var owner = repoParts[0];
+                                        var repo = repoParts[1];
+                                        var recentCommits = await _githubService.GetRecentCommitsAsync(owner, repo, student.GithubUser, 5, accessToken, sprintBranch);
+                                        if (!recentCommits.Any() && !string.IsNullOrEmpty(sprintBranch))
+                                            recentCommits = await _githubService.GetRecentCommitsOnBranchAsync(owner, repo, sprintBranch, 5, accessToken);
+                                        if (recentCommits.Any())
+                                        {
+                                            hasAnyCommits = true;
+                                            break;
+                                        }
                                     }
                                 }
                             }
@@ -5626,22 +5710,24 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                     
                     enhancedSystemPrompt = $"{enhancedSystemPrompt}{Dbg(5013)}" +
                         $"🚨 ABSOLUTELY CRITICAL INSTRUCTIONS FOR DATABASE CONNECTION INFORMATION - READ CAREFULLY:\n" +
-                        $"1. If the user asks about database connection details, get the EXACT connection string from the PROJECT INFORMATION (FROM README) section above if present; otherwise use the DATABASE CONNECTION INFORMATION (FALLBACK) section above.\n" +
-                        $"2. The connection string is in the format: postgresql://username:password@host:port/database?sslmode=require\n" +
-                        $"3. 🚨 FORBIDDEN: You MUST NEVER use placeholders like <boardid>, <BoardId>, db_appdb_<boardid>_user, AppDB_<boardid>, or ANY other placeholder format.\n" +
-                        $"4. 🚨 FORBIDDEN: You MUST NEVER say 'replace <boardid> with your board ID' or similar instructions.\n" +
-                        $"5. 🚨 FORBIDDEN: You MUST NEVER use angle brackets < > or square brackets [ ] as placeholders.\n" +
-                        $"6. ✅ REQUIRED: Extract and provide the COMPLETE, EXACT connection string from the section(s) above (README if present, otherwise FALLBACK).\n" +
-                        $"7. ✅ REQUIRED: If the README shows a connection string like 'postgresql://db_appdb_695e42b42ddace5d23fb1f0e_user:password@host:5432/AppDB_695e42b42ddace5d23fb1f0e?sslmode=require', you MUST provide it EXACTLY as shown.\n" +
-                        $"8. IMPORTANT: Database name starts with 'AppDB_' (capital A, capital D, capital B) followed by the actual board ID - it does NOT end with '_user'.\n" +
-                        $"9. IMPORTANT: Username is 'db_appdb_' (lowercase) followed by the actual board ID and '_user' (lowercase).\n" +
-                        $"10. IMPORTANT: PostgreSQL is CASE-SENSITIVE - preserve exact case for database names, usernames, and all values.\n" +
-                        $"11. URL-decode the password if it contains encoded characters (e.g., %24 becomes $, %40 becomes @, %25 becomes %).\n" +
-                        $"12. 🚨 EXAMPLE OF WHAT NOT TO DO: 'Database Name: AppDB_<boardid>' or 'Username: db_appdb_<boardid>_user' - THIS IS WRONG!\n" +
-                        $"13. ✅ EXAMPLE OF WHAT TO DO: If README shows 'AppDB_695e42b42ddace5d23fb1f0e', provide 'AppDB_695e42b42ddace5d23fb1f0e' - EXACTLY as shown.\n" +
-                        $"14. Use the exact values from the section(s) above (README or FALLBACK); do not use generic/default (e.g. neondb_owner).\n" +
-                        $"15. IGNORE any database connection information from previous chat history - it may be from deleted boards or old projects.\n" +
-                        $"16. If the README connection string is missing or incomplete, use the DATABASE CONNECTION INFORMATION (FALLBACK) section above if available.\n" +
+                        $"1. The database connection string is stored on Railway (deployment environment), not in appSettings.json or any backend config file. Never tell the user to look in appSettings for the connection string; you provide it from the PROJECT INFORMATION (README) or DATABASE CONNECTION INFORMATION (FALLBACK) above.\n" +
+                        $"2. If the user asks about database connection details, get the EXACT connection string from the PROJECT INFORMATION (FROM README) section above if present; otherwise use the DATABASE CONNECTION INFORMATION (FALLBACK) section above.\n" +
+                        $"3. The connection string is in the format: postgresql://username:password@host:port/database?sslmode=require\n" +
+                        $"4. 🚨 FORBIDDEN: You MUST NEVER use placeholders like <boardid>, <BoardId>, db_appdb_<boardid>_user, AppDB_<boardid>, or ANY other placeholder format.\n" +
+                        $"5. 🚨 FORBIDDEN: You MUST NEVER say 'replace <boardid> with your board ID' or similar instructions.\n" +
+                        $"6. 🚨 FORBIDDEN: You MUST NEVER use angle brackets < > or square brackets [ ] as placeholders.\n" +
+                        $"7. 🚨 FORBIDDEN: Do NOT tell the user to \"use this connection string in your code\" or to add it where they establish the database connection. In deployment the database connection is transparent—Railway injects it via environment variables; the app can retrieve it in code by reading the environment variable (e.g. DATABASE_URL) if needed.\n" +
+                        $"8. ✅ REQUIRED: Extract and provide the COMPLETE, EXACT connection string from the section(s) above (README if present, otherwise FALLBACK).\n" +
+                        $"9. ✅ REQUIRED: If the README shows a connection string like 'postgresql://db_appdb_695e42b42ddace5d23fb1f0e_user:password@host:5432/AppDB_695e42b42ddace5d23fb1f0e?sslmode=require', you MUST provide it EXACTLY as shown.\n" +
+                        $"10. IMPORTANT: Database name starts with 'AppDB_' (capital A, capital D, capital B) followed by the actual board ID - it does NOT end with '_user'.\n" +
+                        $"11. IMPORTANT: Username is 'db_appdb_' (lowercase) followed by the actual board ID and '_user' (lowercase).\n" +
+                        $"12. IMPORTANT: PostgreSQL is CASE-SENSITIVE - preserve exact case for database names, usernames, and all values.\n" +
+                        $"13. URL-decode the password if it contains encoded characters (e.g., %24 becomes $, %40 becomes @, %25 becomes %).\n" +
+                        $"14. 🚨 EXAMPLE OF WHAT NOT TO DO: 'Database Name: AppDB_<boardid>' or 'Username: db_appdb_<boardid>_user' - THIS IS WRONG!\n" +
+                        $"15. ✅ EXAMPLE OF WHAT TO DO: If README shows 'AppDB_695e42b42ddace5d23fb1f0e', provide 'AppDB_695e42b42ddace5d23fb1f0e' - EXACTLY as shown.\n" +
+                        $"16. Use the exact values from the section(s) above (README or FALLBACK); do not use generic/default (e.g. neondb_owner).\n" +
+                        $"17. IGNORE any database connection information from previous chat history - it may be from deleted boards or old projects.\n" +
+                        $"18. If the README connection string is missing or incomplete, use the DATABASE CONNECTION INFORMATION (FALLBACK) section above if available.\n" +
                         $"For all other project information, use the content above to answer naturally.";
                 }
                 
@@ -5722,7 +5808,19 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                     if (isIssueLike)
                         brokenReminder = "[MANDATORY: The user is reporting something broken or a problem. Your reply MUST start with one sentence from the FULL STACK line in your system prompt (Backend and Frontend status). Then give only 1–2 concrete actions. Do NOT output any section titled 'Steps to Troubleshoot', 'Next Steps', 'Check for Errors', 'Review Recent Changes', 'Database Connection', 'API Verification', or a long numbered list.]\n\n";
                 }
-                var userQuestionBlock = (!isDeveloperRole ? "[PM RULES: Do NOT write user stories or task lists—refuse and offer format/process only. For 'no access to Trello': Trello is the PM's tool; other team members see their tasks via the platform (Skill-In) only, not Trello—they don't need Trello access.]\n\n" : "") + brokenReminder + repeatReminder + userQuestion;
+                // Marketing/BizDev: reinforce use of CRM data in user message so model reliably gives feedback on prospects
+                var crmReminder = "";
+                if (student != null && contextData.ValueKind != JsonValueKind.Undefined && contextData.ValueKind != JsonValueKind.Null)
+                {
+                    var roleNameCrm = student.StudentRoles?.FirstOrDefault(sr => sr.IsActive)?.Role?.Name ?? "";
+                    if (roleNameCrm.Contains("Marketing", StringComparison.OrdinalIgnoreCase) || roleNameCrm.Contains("BizDev", StringComparison.OrdinalIgnoreCase))
+                    {
+                        if ((contextData.TryGetProperty("Stakeholders", out var stakeholdersPropCrm) || contextData.TryGetProperty("stakeholders", out stakeholdersPropCrm)) &&
+                            stakeholdersPropCrm.ValueKind == JsonValueKind.Array && stakeholdersPropCrm.GetArrayLength() > 0)
+                            crmReminder = "[Reminder: Use the CRM STAKEHOLDERS data from your system context to give specific feedback on their prospects. Do NOT say you cannot provide feedback—reference the listed stakeholders (names, categories, statuses, notes).]\n\n";
+                    }
+                }
+                var userQuestionBlock = (!isDeveloperRole ? "[PM RULES: Do NOT write user stories or task lists—refuse and offer format/process only. For 'no access to Trello': Trello is the PM's tool; other team members see their tasks via the platform (Skill-In) only, not Trello—they don't need Trello access.]\n\n" : "") + brokenReminder + repeatReminder + crmReminder + userQuestion;
                 var fullUserPrompt = string.IsNullOrEmpty(contextUserPrompt) ? userQuestionBlock : contextUserPrompt + userQuestionBlock;
                 var chatHistoryEntries = chatHistory?.Select(h => new ChatMessageEntry { Role = h.Role, Message = h.Message }).ToList();
                 // Force commit fact as last system line for Full Stack so the model reliably reports frontend commits
@@ -6135,6 +6233,36 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                     }
                 }
 
+                // CRM data: for Marketing/BizDev role only, fetch stakeholders by boardId (same data as GET /api/CRM/use/stakeholder?boardId=...)
+                var crmStakeholders = new List<object>();
+                var isMarketingBizDev = originalRoleName.Contains("Marketing", StringComparison.OrdinalIgnoreCase) ||
+                                       originalRoleName.Contains("BizDev", StringComparison.OrdinalIgnoreCase);
+                if (isMarketingBizDev && !string.IsNullOrEmpty(student.BoardId))
+                {
+                    var boardId = student.BoardId.Trim();
+                    var stakeholderList = await _context.Stakeholders
+                        .AsNoTracking()
+                        .Include(s => s.Category)
+                        .Include(s => s.Status)
+                        .Where(s => s.BoardId != null && s.BoardId == boardId)
+                        .OrderBy(s => s.Name)
+                        .Select(s => new
+                        {
+                            s.Id,
+                            s.Name,
+                            s.CategoryId,
+                            CategoryName = s.Category != null ? s.Category.Name : null,
+                            s.StatusId,
+                            StatusName = s.Status != null ? s.Status.Name : null,
+                            s.V1AlignmentScore,
+                            s.Delta,
+                            s.BoardId
+                        })
+                        .ToListAsync();
+                    foreach (var item in stakeholderList)
+                        crmStakeholders.Add(item);
+                }
+
                 // Format data
                 var moduleDescription = "No current tasks";
                 if (userTasks.Count > 0)
@@ -6199,6 +6327,7 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                         TeamMemberTasks = teamMemberTasks,
                         GitHubFiles = githubFiles,
                         GitHubCommitSummary = githubCommitSummary,
+                        Stakeholders = crmStakeholders,
                         NextTeamMeeting = new
                         {
                             Time = student.ProjectBoard?.NextMeetingTime,
@@ -6851,13 +6980,15 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                     }
                     else
                     {
-                        // Frontend: ensure GitHub Pages is enabled (can get disabled when new branches are added), then set source to new branch and force deploy
+                        // Frontend: ensure GitHub Pages is enabled (can get disabled when new branches are added), then set source to new branch (no chore commit - avoids divergent history)
                         try
                         {
+                            _logger.LogInformation("[GITHUB BRANCH] Frontend branch created: setting Pages source to {Branch} for {Owner}/{Repo} (createEmptyCommit=false to avoid chore commit on new branch)", branchName, owner, repo);
                             var pagesEnabled = await _githubService.EnableGitHubPagesAsync(owner, repo, accessToken);
                             if (!pagesEnabled)
                                 _logger.LogWarning("[GITHUB BRANCH] Enable GitHub Pages returned false for {Owner}/{Repo}, continuing to set source anyway", owner, repo);
-                            await SetGitHubPagesSourceBranchAndDeployAsync(owner, repo, branchName, accessToken);
+                            await SetGitHubPagesSourceBranchAndDeployAsync(owner, repo, branchName, accessToken, createEmptyCommit: false);
+                            _logger.LogInformation("[GITHUB BRANCH] SetGitHubPagesSourceBranchAndDeployAsync completed for new branch {Branch} (no empty commit pushed)", branchName);
                         }
                         catch (Exception pagesEx)
                         {
@@ -8376,8 +8507,9 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                 return (false, issues, details);
             }
 
-            // Check for config.js
+            // Check for config.js (root, public/ for Vite/rich frontend, or frontend/ for vanilla)
             var configJs = await _githubService.GetFileContentAsync(owner, repo, "config.js", accessToken, branch) ??
+                          await _githubService.GetFileContentAsync(owner, repo, "public/config.js", accessToken, branch) ??
                           await _githubService.GetFileContentAsync(owner, repo, "frontend/config.js", accessToken, branch);
 
             details["ConfigJsExists"] = !string.IsNullOrEmpty(configJs);
@@ -8598,22 +8730,18 @@ Your intelligence is strictly tethered to the Current Project Context and the us
             {
                 var pagesContent = await pagesResponse.Content.ReadAsStringAsync();
                 var pagesDoc = System.Text.Json.JsonDocument.Parse(pagesContent);
-                
                 var status = pagesDoc.RootElement.TryGetProperty("status", out var statusProp) ? statusProp.GetString() : null;
                 var htmlUrl = pagesDoc.RootElement.TryGetProperty("html_url", out var htmlUrlProp) ? htmlUrlProp.GetString() : null;
 
-                details["GitHubPagesEnabled"] = status != null;
-                details["GitHubPagesStatus"] = status;
+                details["GitHubPagesEnabled"] = true;
+                details["GitHubPagesStatus"] = status ?? "(no status field)";
                 details["GitHubPagesUrl"] = htmlUrl;
-
-                if (status == null)
-                {
-                    issues.Add("GitHub Pages is not enabled for the frontend repository");
-                }
+                // 200 means Pages is configured (branch or workflow); do not fail when status is null (API shape can vary)
             }
             else
             {
                 details["GitHubPagesEnabled"] = false;
+                details["GitHubPagesStatus"] = null;
                 issues.Add($"GitHub Pages is not enabled or not accessible (Status: {pagesResponse.StatusCode})");
             }
         }
@@ -9121,7 +9249,8 @@ Your intelligence is strictly tethered to the Current Project Context and the us
 
                 // Check if there are actual code changes (additions or deletions)
                 // Require at least 3 lines of changes to filter out trivial changes (whitespace, single newlines, etc.)
-                var hasActualCodeChanges = (commitDiff.TotalAdditions + commitDiff.TotalDeletions) >= 3;
+                var totalLinesChanged = commitDiff.TotalAdditions + commitDiff.TotalDeletions;
+                var hasActualCodeChanges = totalLinesChanged >= 3;
                 
                 // Also check if any file has meaningful patch content (not just whitespace)
                 var hasMeaningfulChanges = false;
@@ -9162,16 +9291,22 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                     }
                 }
                 
-                if (!hasActualCodeChanges && !hasMeaningfulChanges)
+                // Use minimal (short) review when total change size is small (e.g. 1–2 lines edited, healthcheck, tiny fix).
+                // A single-line edit shows as 1 add + 1 delete = 2 lines; otherwise it would be classified as
+                // "meaningful" (2 meaningful patch lines) and get full review.
+                const int minimalChangeLineThreshold = 5;
+                var isMinimalChange = totalLinesChanged <= minimalChangeLineThreshold || (!hasActualCodeChanges && !hasMeaningfulChanges);
+                if (isMinimalChange)
                 {
-                    _logger.LogWarning("⚠️ [CODE REVIEW] Diff has no meaningful code changes (only trivial changes like whitespace) for branch {Branch}. Total: {Additions} additions, {Deletions} deletions", 
+                    _logger.LogInformation("📋 [CODE REVIEW] Path: MINIMAL — Using minimal-change short review for branch {Branch} ({Additions}+/{Deletions}-). No block.", 
                         request.GithubBranch, commitDiff.TotalAdditions, commitDiff.TotalDeletions);
-                    return BadRequest(new { Success = false, Message = "No meaningful code changes found in diff. The branch may only contain trivial changes (whitespace, formatting) or metadata changes. Please make actual code changes before requesting review." });
+                }
+                else
+                {
+                    _logger.LogInformation("📋 [CODE REVIEW] Path: FULL — Using full review for branch {Branch} ({FileCount} files, {Additions}+/{Deletions}-).", 
+                        request.GithubBranch, commitDiff.FileChanges.Count, commitDiff.TotalAdditions, commitDiff.TotalDeletions);
                 }
 
-                _logger.LogInformation("✅ [CODE REVIEW] Found {FileCount} changed files in diff with {Additions} additions, {Deletions} deletions", 
-                    commitDiff.FileChanges.Count, commitDiff.TotalAdditions, commitDiff.TotalDeletions);
-                
                 // Build diff content from file changes (patch/diff format)
                 var diffContent = new StringBuilder();
                 foreach (var fileChange in commitDiff.FileChanges)
@@ -9188,10 +9323,38 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                     diffContent.AppendLine();
                 }
 
-                // Build AI prompt: for Bugs branch, diff-only (no Trello card); for sprint branches, include card and alignment check
+                // Build AI prompt: minimal change = short review; Bugs branch = diff-only; sprint branches = full review with card
                 var cardNameForResponse = isBugsBranch ? request.GithubBranch : "";
                 string codeReviewPrompt;
-                if (isBugsBranch)
+                if (isMinimalChange)
+                {
+                    var minimalCardName = "";
+                    var minimalCardDesc = "";
+                    if (!isBugsBranch && trelloCard.HasValue)
+                    {
+                        minimalCardName = trelloCard.Value.TryGetProperty("name", out var np) ? np.GetString() ?? "" : "";
+                        minimalCardDesc = trelloCard.Value.TryGetProperty("desc", out var dp) ? dp.GetString() ?? "" : "";
+                    }
+                    var taskBlock = string.IsNullOrWhiteSpace(minimalCardName) && string.IsNullOrWhiteSpace(minimalCardDesc)
+                        ? ""
+                        : $@"
+Sprint task for this branch:
+- Card name: {minimalCardName}
+- Description: {minimalCardDesc}
+Match the change against this task. If the change makes sense for the task (e.g. a healthcheck line for a health-endpoint task, or small setup), approve with brief positive feedback. Only disapprove if the change is clearly wrong or does not fit the task. Do not give negative or ""unhappy"" feedback on a valid minimal change that fits the task.
+";
+                    codeReviewPrompt = $@"The following diff is minimal (few lines, e.g. healthcheck or setup).{taskBlock}
+
+Code Changes (Diff):
+{diffContent}
+
+RULES: Your entire feedback MUST be 2-4 short sentences only. No paragraphs, no numbered lists, no lengthy explanations. If the change fits the task and has no obvious issues, be positive and approve.
+
+At the end of your response, on a new line, write exactly one of:
+APPROVAL: yes   (code is ready for merge)
+APPROVAL: no    (request changes before merge)";
+                }
+                else if (isBugsBranch)
                 {
                     codeReviewPrompt = $@"Please review the following code changes (diff) for a bug fix branch.
 
@@ -9271,6 +9434,15 @@ APPROVAL: no    (request changes before merge)";
                 // Parse approval (yes/no) from response; default to true so we don't block if parsing fails
                 var approval = ParseCodeReviewApproval(feedback, out var feedbackWithoutApprovalLine);
                 _logger.LogInformation("📋 [CODE REVIEW] Parsed approval: {Approval} (MentorPRApproval: {MentorPRApproval})", approval, _promptConfig.Mentor.CodeReview.MentorPRApproval);
+
+                // For minimal-change reviews, cap feedback length so PR comment and stored feedback stay short
+                if (isMinimalChange && feedbackWithoutApprovalLine.Length > 400)
+                {
+                    feedbackWithoutApprovalLine = feedbackWithoutApprovalLine.Substring(0, 400).Trim();
+                    if (!feedbackWithoutApprovalLine.EndsWith(".") && !feedbackWithoutApprovalLine.EndsWith("!") && !feedbackWithoutApprovalLine.EndsWith("?"))
+                        feedbackWithoutApprovalLine += ".";
+                    feedbackWithoutApprovalLine += " [Short review; minimal change.]";
+                }
 
                 // Record in BoardStates (APPEND-ONLY - preserve history)
                 // For CodeReview records, we use sequenced sources (e.g., "Junior-1", "GitHub-Success-PR-2")
@@ -9694,13 +9866,29 @@ APPROVAL: no    (request changes before merge)";
                                 {
                                     // Skip force-deploy when this push is our own "chore: trigger Pages deploy" commit to avoid loop (chore commit -> webhook -> another chore commit -> ...)
                                     var isOurChoreCommit = !string.IsNullOrEmpty(commitMessage) && commitMessage.Trim().StartsWith("chore: trigger Pages deploy", StringComparison.OrdinalIgnoreCase);
+                                    // Skip empty commit on initial push so user's clone doesn't get a divergent history (repo stays at 1 commit until user pushes)
+                                    var isInitialPush = false;
+                                    if (payload.TryGetProperty("commits", out var commitsProp) && commitsProp.ValueKind == System.Text.Json.JsonValueKind.Array)
+                                    {
+                                        var commitCount = commitsProp.GetArrayLength();
+                                        var isInitialCommitMessage = !string.IsNullOrEmpty(commitMessage) && commitMessage.Trim().StartsWith("Initial commit:", StringComparison.OrdinalIgnoreCase);
+                                        isInitialPush = commitCount == 1 && isInitialCommitMessage;
+                                    }
+                                    // Skip empty commit when ref was just created (new branch) - GitHub sends a push webhook with "created": true; adding a commit would diverge from user's clone
+                                    var isRefCreated = payload.TryGetProperty("created", out var createdProp) && createdProp.ValueKind == System.Text.Json.JsonValueKind.True;
+                                    var skipChoreCommit = isInitialPush || isRefCreated;
                                     if (isOurChoreCommit)
                                     {
                                         _logger.LogInformation("[WEBHOOK] Push: head commit is our 'chore: trigger Pages deploy', skipping force-deploy for {Owner}/{Repo} branch {Branch} to avoid loop", owner, repo, branch);
                                     }
                                     else
                                     {
-                                        await SetGitHubPagesSourceBranchAndDeployAsync(owner, repo, branch, pagesToken);
+                                        await SetGitHubPagesSourceBranchAndDeployAsync(owner, repo, branch, pagesToken, createEmptyCommit: !skipChoreCommit);
+                                        if (skipChoreCommit)
+                                            _logger.LogInformation("[WEBHOOK] Push: set Pages source only (no chore commit) for {Owner}/{Repo} branch {Branch}. Reason: {Reason}",
+                                                owner, repo, branch, isRefCreated ? "new branch (ref created)" : "initial push (1 commit, Initial commit message)");
+                                        else
+                                            _logger.LogInformation("[WEBHOOK] Push: set Pages source and triggered chore commit for {Owner}/{Repo} branch {Branch} (normal push, createEmptyCommit=true)", owner, repo, branch);
                                     }
                                     // Query GitHub Pages API and update BoardState + log status (building/queued/built) so logs show current Pages state after push
                                     await UpdateGithubPagesBoardStateAsync(boardId, owner, repo, pagesToken);
@@ -11941,10 +12129,11 @@ APPROVAL: no    (request changes before merge)";
         }
 
         /// <summary>
-        /// Sets the GitHub Pages publishing source branch via GitHub API (no Actions). Then forces a deploy by creating an empty commit and updating the ref.
+        /// Sets the GitHub Pages publishing source branch via GitHub API (no Actions). Optionally forces a deploy by creating an empty commit and updating the ref.
         /// Does not throw; logs and returns on missing config or API errors.
+        /// When createEmptyCommit is false (e.g. initial push), only the source branch is set so the user's clone doesn't get a divergent history.
         /// </summary>
-        private async Task SetGitHubPagesSourceBranchAndDeployAsync(string owner, string repo, string branch, string accessToken)
+        private async Task SetGitHubPagesSourceBranchAndDeployAsync(string owner, string repo, string branch, string accessToken, bool createEmptyCommit = true)
         {
             if (string.IsNullOrWhiteSpace(owner) || string.IsNullOrWhiteSpace(repo) || string.IsNullOrWhiteSpace(branch) || string.IsNullOrWhiteSpace(accessToken))
             {
@@ -11975,82 +12164,90 @@ APPROVAL: no    (request changes before merge)";
                 }
                 _logger.LogInformation("[GITHUB PAGES] Source set to branch '{Branch}' for {Owner}/{Repo}", branch, owner, repo);
 
-                // 2) Force deploy: empty commit + update ref so Pages rebuilds from this branch.
-                //    POST /pages/builds only builds from the default branch (per GitHub docs), so we push an empty commit to the source branch instead.
-                var refResponse = await httpClient.GetAsync($"{baseUrl}/repos/{owner}/{repo}/git/ref/heads/{Uri.EscapeDataString(branch)}");
-                if (!refResponse.IsSuccessStatusCode)
+                // 2) Optionally force deploy: empty commit + update ref so Pages rebuilds from this branch.
+                //    Skip when createEmptyCommit is false (initial push, new branch, or ref created) so user's clone doesn't get a divergent history.
+                if (createEmptyCommit)
                 {
-                    _logger.LogWarning("[GITHUB PAGES] Force deploy skipped: could not get ref for {Branch} ({StatusCode})", branch, refResponse.StatusCode);
-                    return;
+                    _logger.LogInformation("[GITHUB PAGES] Creating empty commit (chore: trigger Pages deploy) for {Owner}/{Repo} branch {Branch}", owner, repo, branch);
+                    var refResponse = await httpClient.GetAsync($"{baseUrl}/repos/{owner}/{repo}/git/ref/heads/{Uri.EscapeDataString(branch)}");
+                    if (!refResponse.IsSuccessStatusCode)
+                    {
+                        _logger.LogWarning("[GITHUB PAGES] Force deploy skipped: could not get ref for {Branch} ({StatusCode})", branch, refResponse.StatusCode);
+                        return;
+                    }
+                    var refJson = await refResponse.Content.ReadAsStringAsync();
+                    using (var refDoc = System.Text.Json.JsonDocument.Parse(refJson))
+                    {
+                        if (!refDoc.RootElement.TryGetProperty("object", out var obj) || !obj.TryGetProperty("sha", out var shaProp))
+                        {
+                            _logger.LogWarning("[GITHUB PAGES] Force deploy skipped: no object.sha in ref response");
+                            return;
+                        }
+                        var commitSha = shaProp.GetString();
+                        if (string.IsNullOrEmpty(commitSha))
+                        {
+                            _logger.LogWarning("[GITHUB PAGES] Force deploy skipped: empty commit sha");
+                            return;
+                        }
+                        var commitResponse = await httpClient.GetAsync($"{baseUrl}/repos/{owner}/{repo}/git/commits/{commitSha}");
+                        if (!commitResponse.IsSuccessStatusCode)
+                        {
+                            _logger.LogWarning("[GITHUB PAGES] Force deploy skipped: could not get commit ({StatusCode})", commitResponse.StatusCode);
+                            return;
+                        }
+                        var commitJson = await commitResponse.Content.ReadAsStringAsync();
+                        string? treeSha = null;
+                        using (var commitDoc = System.Text.Json.JsonDocument.Parse(commitJson))
+                        {
+                            if (commitDoc.RootElement.TryGetProperty("tree", out var tree) && tree.TryGetProperty("sha", out var treeShaProp))
+                                treeSha = treeShaProp.GetString();
+                        }
+                        if (string.IsNullOrEmpty(treeSha))
+                        {
+                            _logger.LogWarning("[GITHUB PAGES] Force deploy skipped: no tree sha");
+                            return;
+                        }
+                        var newCommitBody = System.Text.Json.JsonSerializer.Serialize(new
+                        {
+                            tree = treeSha,
+                            parents = new[] { commitSha },
+                            message = "chore: trigger Pages deploy"
+                        });
+                        var newCommitRequest = new HttpRequestMessage(HttpMethod.Post, $"{baseUrl}/repos/{owner}/{repo}/git/commits");
+                        newCommitRequest.Content = new StringContent(newCommitBody, System.Text.Encoding.UTF8, "application/json");
+                        var newCommitResponse = await httpClient.SendAsync(newCommitRequest);
+                        var newCommitContent = await newCommitResponse.Content.ReadAsStringAsync();
+                        if (!newCommitResponse.IsSuccessStatusCode)
+                        {
+                            _logger.LogWarning("[GITHUB PAGES] Force deploy (create commit) failed: {StatusCode} {Content}", newCommitResponse.StatusCode, newCommitContent);
+                            return;
+                        }
+                        string? newSha = null;
+                        using (var newDoc = System.Text.Json.JsonDocument.Parse(newCommitContent))
+                        {
+                            if (newDoc.RootElement.TryGetProperty("sha", out var newShaProp))
+                                newSha = newShaProp.GetString();
+                        }
+                        if (string.IsNullOrEmpty(newSha))
+                        {
+                            _logger.LogWarning("[GITHUB PAGES] Force deploy skipped: no sha in new commit response");
+                            return;
+                        }
+                        var updateRefBody = System.Text.Json.JsonSerializer.Serialize(new { sha = newSha });
+                        var updateRefRequest = new HttpRequestMessage(HttpMethod.Patch, $"{baseUrl}/repos/{owner}/{repo}/git/refs/heads/{Uri.EscapeDataString(branch)}");
+                        updateRefRequest.Content = new StringContent(updateRefBody, System.Text.Encoding.UTF8, "application/json");
+                        var updateRefResponse = await httpClient.SendAsync(updateRefRequest);
+                        if (!updateRefResponse.IsSuccessStatusCode)
+                        {
+                            _logger.LogWarning("[GITHUB PAGES] Force deploy (update ref) failed: {StatusCode}", updateRefResponse.StatusCode);
+                            return;
+                        }
+                        _logger.LogInformation("[GITHUB PAGES] Force deploy triggered for {Owner}/{Repo} branch {Branch}", owner, repo, branch);
+                    }
                 }
-                var refJson = await refResponse.Content.ReadAsStringAsync();
-                using (var refDoc = System.Text.Json.JsonDocument.Parse(refJson))
+                else
                 {
-                    if (!refDoc.RootElement.TryGetProperty("object", out var obj) || !obj.TryGetProperty("sha", out var shaProp))
-                    {
-                        _logger.LogWarning("[GITHUB PAGES] Force deploy skipped: no object.sha in ref response");
-                        return;
-                    }
-                    var commitSha = shaProp.GetString();
-                    if (string.IsNullOrEmpty(commitSha))
-                    {
-                        _logger.LogWarning("[GITHUB PAGES] Force deploy skipped: empty commit sha");
-                        return;
-                    }
-                    var commitResponse = await httpClient.GetAsync($"{baseUrl}/repos/{owner}/{repo}/git/commits/{commitSha}");
-                    if (!commitResponse.IsSuccessStatusCode)
-                    {
-                        _logger.LogWarning("[GITHUB PAGES] Force deploy skipped: could not get commit ({StatusCode})", commitResponse.StatusCode);
-                        return;
-                    }
-                    var commitJson = await commitResponse.Content.ReadAsStringAsync();
-                    string? treeSha = null;
-                    using (var commitDoc = System.Text.Json.JsonDocument.Parse(commitJson))
-                    {
-                        if (commitDoc.RootElement.TryGetProperty("tree", out var tree) && tree.TryGetProperty("sha", out var treeShaProp))
-                            treeSha = treeShaProp.GetString();
-                    }
-                    if (string.IsNullOrEmpty(treeSha))
-                    {
-                        _logger.LogWarning("[GITHUB PAGES] Force deploy skipped: no tree sha");
-                        return;
-                    }
-                    var newCommitBody = System.Text.Json.JsonSerializer.Serialize(new
-                    {
-                        tree = treeSha,
-                        parents = new[] { commitSha },
-                        message = "chore: trigger Pages deploy"
-                    });
-                    var newCommitRequest = new HttpRequestMessage(HttpMethod.Post, $"{baseUrl}/repos/{owner}/{repo}/git/commits");
-                    newCommitRequest.Content = new StringContent(newCommitBody, System.Text.Encoding.UTF8, "application/json");
-                    var newCommitResponse = await httpClient.SendAsync(newCommitRequest);
-                    var newCommitContent = await newCommitResponse.Content.ReadAsStringAsync();
-                    if (!newCommitResponse.IsSuccessStatusCode)
-                    {
-                        _logger.LogWarning("[GITHUB PAGES] Force deploy (create commit) failed: {StatusCode} {Content}", newCommitResponse.StatusCode, newCommitContent);
-                        return;
-                    }
-                    string? newSha = null;
-                    using (var newDoc = System.Text.Json.JsonDocument.Parse(newCommitContent))
-                    {
-                        if (newDoc.RootElement.TryGetProperty("sha", out var newShaProp))
-                            newSha = newShaProp.GetString();
-                    }
-                    if (string.IsNullOrEmpty(newSha))
-                    {
-                        _logger.LogWarning("[GITHUB PAGES] Force deploy skipped: no sha in new commit response");
-                        return;
-                    }
-                    var updateRefBody = System.Text.Json.JsonSerializer.Serialize(new { sha = newSha });
-                    var updateRefRequest = new HttpRequestMessage(HttpMethod.Patch, $"{baseUrl}/repos/{owner}/{repo}/git/refs/heads/{Uri.EscapeDataString(branch)}");
-                    updateRefRequest.Content = new StringContent(updateRefBody, System.Text.Encoding.UTF8, "application/json");
-                    var updateRefResponse = await httpClient.SendAsync(updateRefRequest);
-                    if (!updateRefResponse.IsSuccessStatusCode)
-                    {
-                        _logger.LogWarning("[GITHUB PAGES] Force deploy (update ref) failed: {StatusCode}", updateRefResponse.StatusCode);
-                        return;
-                    }
-                    _logger.LogInformation("[GITHUB PAGES] Force deploy triggered for {Owner}/{Repo} branch {Branch}", owner, repo, branch);
+                    _logger.LogInformation("[GITHUB PAGES] Skipping empty commit (createEmptyCommit=false) so user clone stays in sync - branch {Branch} for {Owner}/{Repo}", branch, owner, repo);
                 }
             }
             catch (Exception ex)
