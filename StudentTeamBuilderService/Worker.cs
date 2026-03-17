@@ -316,9 +316,14 @@ public class Worker : BackgroundService
 
     private async Task ExpireOldPendingAsync(string connectionString, CancellationToken ct)
     {
+        var hours = _kickoffConfig.MaxPendingTime;
+        if (hours <= 0)
+        {
+            _logger.LogDebug("[EXPIRE] MaxPendingTime is {Hours}; skipping pending expiration.", hours);
+            return;
+        }
         using var conn = new NpgsqlConnection(connectionString);
         await conn.OpenAsync(ct);
-        var hours = _kickoffConfig.MaxPendingTime;
         var sql = @"UPDATE ""Students""
                    SET ""Status""=0,
                        ""ProjectId""=NULL,

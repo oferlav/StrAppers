@@ -109,4 +109,20 @@ public static class TrelloBoardScheduleHelper
     {
         return DateTime.SpecifyKind(utc.Add(localOffset), DateTimeKind.Unspecified);
     }
+
+    /// <summary>
+    /// Get the first day of next week (according to firstDayOfWeek) at 00:00 local time, returned as UTC.
+    /// Used e.g. for bug card due date.
+    /// </summary>
+    public static DateTime GetFirstDayOfNextWeekDateUtc(DayOfWeek firstDayOfWeek, TimeSpan localOffset)
+    {
+        var utcNow = DateTime.UtcNow;
+        var localNow = utcNow.Add(localOffset);
+        var localDate = localNow.Date;
+        var daysToAdd = ((int)firstDayOfWeek - (int)localDate.DayOfWeek + 7) % 7;
+        if (daysToAdd == 0)
+            daysToAdd = 7;
+        var nextFirstDayLocal = localDate.AddDays(daysToAdd);
+        return nextFirstDayLocal.Subtract(localOffset);
+    }
 }

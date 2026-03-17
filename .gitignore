@@ -407,6 +407,9 @@ appsettings.Development.json
 
 # Exclude publish and build artifacts
 **/publish-azure/
+StudentTeamBuilderService/publish-dev/
+StudentTeamBuilderService/publish-prod/
+StudentTeamBuilderService/_out/
 *.zip
 
 # Database files

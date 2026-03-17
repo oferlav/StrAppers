@@ -42,6 +42,16 @@ public class MentorIntentService : IMentorIntentService
         "review the file", "check the file", "review file", "check file"
     };
 
+    // Questions about the mentor's capabilities or how to share code → general intent, not code_review
+    private static readonly string[] CapabilityQuestionPatterns = {
+        "promised you would", "would be able to see", "explain that you", "what can you see",
+        "do you have access to", "can you see my code", "why can't you see", "why can you see",
+        "how can you explain", "you would be able to see", "don't have visibility", "don't see my code",
+        "cannot see my code", "can you see the code", "do you see the code",
+        "how can i show you", "how do i show you", "show you my code", "share my code with you",
+        "share code with you"
+    };
+
     private static readonly string[] GitHubHelpKeywords = {
         "github", "git", "commit", "push", "how to commit", "how to push",
         "git help", "github help", "how do i commit", "how do i push",
@@ -65,6 +75,16 @@ public class MentorIntentService : IMentorIntentService
         }
 
         var normalizedMessage = userMessage.ToLowerInvariant().Trim();
+
+        // If the user is asking about the mentor's capabilities (what you can see, promises, etc.), use general intent so the Capabilities section is used
+        foreach (var pattern in CapabilityQuestionPatterns)
+        {
+            if (normalizedMessage.Contains(pattern))
+            {
+                _logger.LogDebug("Capability question detected, routing to general intent");
+                return Task.FromResult(new MentorIntent { Type = "general", Confidence = 1.0 });
+            }
+        }
 
         // Check for code review intent - lower threshold to catch more cases
         var codeReviewScore = CalculateIntentScore(normalizedMessage, CodeReviewKeywords);

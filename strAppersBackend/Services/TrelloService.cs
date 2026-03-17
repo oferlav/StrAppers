@@ -47,6 +47,18 @@ namespace strAppersBackend.Services
         Task<(int CardsCreated, string? Error)> CreateSprintCardsOnListAsync(string boardId, string listId, TrelloProjectCreationRequest request, string sprintListName, DateTime? dueDateForCards = null);
         /// <summary>Invite a member to an existing Trello board by email (e.g. to add PM to a board created before allowBillableGuest fix).</summary>
         Task<(bool Success, string? Error)> InviteMemberToBoardByEmailAsync(string boardId, string email);
+        /// <summary>Gets board lists and cards with checklists for dashboard stats. Cards in the User Stories list are excluded.</summary>
+        Task<TrelloDashboardData?> GetBoardDashboardDataAsync(string boardId);
+        /// <summary>Gets all cards (including closed) in a list with checklists. Used for Bugs list so completed/archived bug cards are counted.</summary>
+        Task<IReadOnlyList<TrelloDashboardCardInfo>> GetListCardsWithChecklistsAsync(string listId);
+        /// <summary>Creates a bug card in the Bugs list with CardId, Status=To Do, Priority, title, description, due date. Returns (Success, Error, CardId, TrelloCardId).</summary>
+        Task<(bool Success, string? Error, string? CardId, string? TrelloCardId)> CreateBugCardAsync(string boardId, string title, string description, int priority, string cardIdValue, DateTime? dueDate);
+        /// <summary>Updates a bug card by CardId: optional Priority/Status custom fields, adds comment; if Status is Done, marks card complete.</summary>
+        Task<(bool Success, string? Error)> ModifyBugCardAsync(string boardId, string cardId, int? priority, string? status, string? comment);
+        /// <summary>Gets all bugs from the Bugs list in two sections: Open (not done) and Done (closed or dueComplete). Each item has Title, Priority, Status.</summary>
+        Task<BoardBugsResponse> GetBugsFromBoardAsync(string boardId);
+        /// <summary>Gets one bug by CardId custom field value. Returns Title, Description, Priority, Status. Null if not found.</summary>
+        Task<BugDetail?> GetBugDetailsByCardIdAsync(string boardId, string cardId);
     }
 
     public class TrelloService : ITrelloService
@@ -3138,6 +3150,532 @@ namespace strAppersBackend.Services
             {
                 _logger.LogError(ex, "GetBoardListsWithPositions: error for board {BoardId}.", boardId);
                 return Array.Empty<(string, string, double)>();
+            }
+        }
+
+        /// <inheritdoc />
+        public async Task<TrelloDashboardData?> GetBoardDashboardDataAsync(string boardId)
+        {
+            try
+            {
+                var listsUrl = $"https://api.trello.com/1/boards/{boardId}/lists?key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
+                var listsResponse = await _httpClient.GetAsync(listsUrl);
+                if (!listsResponse.IsSuccessStatusCode)
+                    return null;
+                var listsJson = await listsResponse.Content.ReadAsStringAsync();
+                var listsData = JsonSerializer.Deserialize<JsonElement[]>(listsJson);
+                var userStoryListIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                var lists = new List<TrelloDashboardListInfo>();
+                foreach (var l in listsData ?? Array.Empty<JsonElement>())
+                {
+                    var id = l.TryGetProperty("id", out var idProp) ? idProp.GetString() ?? "" : "";
+                    var name = (l.TryGetProperty("name", out var nameProp) ? nameProp.GetString() : null) ?? "";
+                    if (string.Equals(name, "User Stories", StringComparison.OrdinalIgnoreCase) && !string.IsNullOrEmpty(id))
+                        userStoryListIds.Add(id);
+                    lists.Add(new TrelloDashboardListInfo { Id = id, Name = name });
+                }
+
+                var membersUrl = $"https://api.trello.com/1/boards/{boardId}/members?key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
+                var membersResponse = await _httpClient.GetAsync(membersUrl);
+                var members = new List<TrelloDashboardMember>();
+                if (membersResponse.IsSuccessStatusCode)
+                {
+                    var membersJson = await membersResponse.Content.ReadAsStringAsync();
+                    var membersData = JsonSerializer.Deserialize<JsonElement[]>(membersJson);
+                    foreach (var m in membersData ?? Array.Empty<JsonElement>())
+                    {
+                        members.Add(new TrelloDashboardMember
+                        {
+                            Id = m.TryGetProperty("id", out var idP) ? idP.GetString() ?? "" : "",
+                            Email = m.TryGetProperty("email", out var emP) ? emP.GetString() : null,
+                            FullName = m.TryGetProperty("fullName", out var fnP) ? fnP.GetString() : null
+                        });
+                    }
+                }
+
+                var cardsUrl = $"https://api.trello.com/1/boards/{boardId}/cards?checklists=all&filter=all&key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
+                var cardsResponse = await _httpClient.GetAsync(cardsUrl);
+                if (!cardsResponse.IsSuccessStatusCode)
+                    return new TrelloDashboardData { Lists = lists, Cards = new List<TrelloDashboardCardInfo>(), Members = members };
+
+                var cardsJson = await cardsResponse.Content.ReadAsStringAsync();
+                var cardsData = JsonSerializer.Deserialize<JsonElement[]>(cardsJson);
+                var cards = new List<TrelloDashboardCardInfo>();
+                var now = DateTime.UtcNow;
+                foreach (var c in cardsData ?? Array.Empty<JsonElement>())
+                {
+                    var idList = c.TryGetProperty("idList", out var listProp) ? listProp.GetString() ?? "" : "";
+                    if (userStoryListIds.Contains(idList))
+                        continue;
+                    var dueStr = c.TryGetProperty("due", out var dueProp) ? dueProp.GetString() : null;
+                    DateTime? due = dueStr != null && DateTime.TryParse(dueStr, out var d) ? d : null;
+                    var idMembers = new List<string>();
+                    if (c.TryGetProperty("idMembers", out var membersProp))
+                    {
+                        foreach (var m in membersProp.EnumerateArray())
+                        {
+                            var mid = m.GetString();
+                            if (!string.IsNullOrEmpty(mid)) idMembers.Add(mid);
+                        }
+                    }
+                    var labelNames = new List<string>();
+                    if (c.TryGetProperty("labels", out var labelsProp))
+                    {
+                        foreach (var lb in labelsProp.EnumerateArray())
+                        {
+                            var lname = lb.TryGetProperty("name", out var ln) ? ln.GetString() : null;
+                            if (!string.IsNullOrEmpty(lname)) labelNames.Add(lname);
+                        }
+                    }
+                    var checklists = new List<TrelloDashboardChecklist>();
+                    if (c.TryGetProperty("checklists", out var clProp))
+                    {
+                        foreach (var cl in clProp.EnumerateArray())
+                        {
+                            var checkItems = new List<TrelloDashboardCheckItem>();
+                            if (cl.TryGetProperty("checkItems", out var ciProp))
+                            {
+                                foreach (var ci in ciProp.EnumerateArray())
+                                {
+                                    checkItems.Add(new TrelloDashboardCheckItem
+                                    {
+                                        Id = ci.TryGetProperty("id", out var ciId) ? ciId.GetString() ?? "" : "",
+                                        State = ci.TryGetProperty("state", out var ciState) ? ciState.GetString() ?? "incomplete" : "incomplete"
+                                    });
+                                }
+                            }
+                            checklists.Add(new TrelloDashboardChecklist
+                            {
+                                Id = cl.TryGetProperty("id", out var clId) ? clId.GetString() ?? "" : "",
+                                Name = cl.TryGetProperty("name", out var clName) ? clName.GetString() ?? "" : "",
+                                CheckItems = checkItems
+                            });
+                        }
+                    }
+                    var isClosed = (c.TryGetProperty("closed", out var closedP) || c.TryGetProperty("Closed", out closedP)) && closedP.ValueKind == JsonValueKind.True;
+                    var dueComplete = (c.TryGetProperty("dueComplete", out var dueCompleteP) || c.TryGetProperty("DueComplete", out dueCompleteP)) && dueCompleteP.ValueKind == JsonValueKind.True;
+                    cards.Add(new TrelloDashboardCardInfo
+                    {
+                        Id = c.TryGetProperty("id", out var idP) ? idP.GetString() ?? "" : "",
+                        IdList = idList,
+                        Closed = isClosed,
+                        DueComplete = dueComplete,
+                        Due = due,
+                        IdMembers = idMembers,
+                        LabelNames = labelNames,
+                        Checklists = checklists
+                    });
+                }
+                return new TrelloDashboardData { Lists = lists, Cards = cards, Members = members };
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "GetBoardDashboardData: error for board {BoardId}.", boardId);
+                return null;
+            }
+        }
+
+        /// <inheritdoc />
+        public async Task<IReadOnlyList<TrelloDashboardCardInfo>> GetListCardsWithChecklistsAsync(string listId)
+        {
+            if (string.IsNullOrEmpty(listId)) return Array.Empty<TrelloDashboardCardInfo>();
+            try
+            {
+                var url = $"https://api.trello.com/1/lists/{listId}/cards?filter=all&checklists=all&key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
+                var response = await _httpClient.GetAsync(url);
+                if (!response.IsSuccessStatusCode) return Array.Empty<TrelloDashboardCardInfo>();
+                var cardsJson = await response.Content.ReadAsStringAsync();
+                var cardsData = JsonSerializer.Deserialize<JsonElement[]>(cardsJson);
+                var cards = new List<TrelloDashboardCardInfo>();
+                foreach (var c in cardsData ?? Array.Empty<JsonElement>())
+                {
+                    var idList = c.TryGetProperty("idList", out var listProp) ? listProp.GetString() ?? "" : listId;
+                    var dueStr = c.TryGetProperty("due", out var dueProp) ? dueProp.GetString() : null;
+                    DateTime? due = dueStr != null && DateTime.TryParse(dueStr, out var d) ? d : null;
+                    var idMembers = new List<string>();
+                    if (c.TryGetProperty("idMembers", out var membersProp))
+                    {
+                        foreach (var m in membersProp.EnumerateArray())
+                        {
+                            var mid = m.GetString();
+                            if (!string.IsNullOrEmpty(mid)) idMembers.Add(mid);
+                        }
+                    }
+                    var labelNames = new List<string>();
+                    if (c.TryGetProperty("labels", out var labelsProp))
+                    {
+                        foreach (var lb in labelsProp.EnumerateArray())
+                        {
+                            var lname = lb.TryGetProperty("name", out var ln) ? ln.GetString() : null;
+                            if (!string.IsNullOrEmpty(lname)) labelNames.Add(lname);
+                        }
+                    }
+                    var checklists = new List<TrelloDashboardChecklist>();
+                    if (c.TryGetProperty("checklists", out var clProp))
+                    {
+                        foreach (var cl in clProp.EnumerateArray())
+                        {
+                            var checkItems = new List<TrelloDashboardCheckItem>();
+                            if (cl.TryGetProperty("checkItems", out var ciProp))
+                            {
+                                foreach (var ci in ciProp.EnumerateArray())
+                                {
+                                    checkItems.Add(new TrelloDashboardCheckItem
+                                    {
+                                        Id = ci.TryGetProperty("id", out var ciId) ? ciId.GetString() ?? "" : "",
+                                        State = ci.TryGetProperty("state", out var ciState) ? ciState.GetString() ?? "incomplete" : "incomplete"
+                                    });
+                                }
+                            }
+                            checklists.Add(new TrelloDashboardChecklist
+                            {
+                                Id = cl.TryGetProperty("id", out var clId) ? clId.GetString() ?? "" : "",
+                                Name = cl.TryGetProperty("name", out var clName) ? clName.GetString() ?? "" : "",
+                                CheckItems = checkItems
+                            });
+                        }
+                    }
+                    var isClosed = (c.TryGetProperty("closed", out var closedP) || c.TryGetProperty("Closed", out closedP)) && closedP.ValueKind == JsonValueKind.True;
+                    var dueComplete = (c.TryGetProperty("dueComplete", out var dueCompleteP) || c.TryGetProperty("DueComplete", out dueCompleteP)) && dueCompleteP.ValueKind == JsonValueKind.True;
+                    cards.Add(new TrelloDashboardCardInfo
+                    {
+                        Id = c.TryGetProperty("id", out var idP) ? idP.GetString() ?? "" : "",
+                        IdList = idList,
+                        Closed = isClosed,
+                        DueComplete = dueComplete,
+                        Due = due,
+                        IdMembers = idMembers,
+                        LabelNames = labelNames,
+                        Checklists = checklists
+                    });
+                }
+                return cards;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "GetListCardsWithChecklists: error for list {ListId}.", listId);
+                return Array.Empty<TrelloDashboardCardInfo>();
+            }
+        }
+
+        /// <inheritdoc />
+        public async Task<(bool Success, string? Error, string? CardId, string? TrelloCardId)> CreateBugCardAsync(string boardId, string title, string description, int priority, string cardIdValue, DateTime? dueDate)
+        {
+            var errors = new List<string>();
+            try
+            {
+                var lists = await GetBoardListsWithPositionsAsync(boardId);
+                var bugsList = lists.FirstOrDefault(l => string.Equals(l.Name, "Bugs", StringComparison.OrdinalIgnoreCase));
+                if (bugsList.Id == null)
+                {
+                    return (false, "Bugs list not found on board.", null, null);
+                }
+                var customFieldIds = await EnsureCustomFieldsExistAsync(boardId, errors);
+                if (!customFieldIds.ContainsKey("CardId") || !customFieldIds.ContainsKey("Status") || !customFieldIds.ContainsKey("Priority"))
+                {
+                    return (false, "Board is missing required custom fields (CardId, Status, Priority).", null, null);
+                }
+                var createCardUrl = $"https://api.trello.com/1/cards?name={Uri.EscapeDataString(title)}&desc={Uri.EscapeDataString(NormalizeDescriptionNewlinesForTrello(description))}&idList={bugsList.Id}&key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
+                if (dueDate.HasValue)
+                    createCardUrl += $"&due={dueDate.Value:yyyy-MM-ddTHH:mm:ssZ}";
+                var createResponse = await SendWithRateLimitRetryAsync(() => _httpClient.PostAsync(createCardUrl, null));
+                if (!createResponse.IsSuccessStatusCode)
+                {
+                    var err = await createResponse.Content.ReadAsStringAsync();
+                    return (false, $"Failed to create card: {err}", null, null);
+                }
+                var cardJson = await createResponse.Content.ReadAsStringAsync();
+                var cardData = JsonSerializer.Deserialize<JsonElement>(cardJson);
+                var trelloCardId = cardData.GetProperty("id").GetString();
+                await SetCustomFieldValueAsync(trelloCardId, customFieldIds["CardId"], "text", cardIdValue, errors);
+                await SetCustomFieldValueAsync(trelloCardId, customFieldIds["Status"], "list", "To Do", errors);
+                if (priority >= 1 && priority <= 4)
+                    await SetCustomFieldValueAsync(trelloCardId, customFieldIds["Priority"], "number", priority.ToString(), errors);
+                return (true, null, cardIdValue, trelloCardId);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "CreateBugCard: error for board {BoardId}.", boardId);
+                return (false, ex.Message, null, null);
+            }
+        }
+
+        /// <inheritdoc />
+        public async Task<(bool Success, string? Error)> ModifyBugCardAsync(string boardId, string cardId, int? priority, string? status, string? comment)
+        {
+            var errors = new List<string>();
+            try
+            {
+                var card = await GetCardByCardIdAsync(boardId, cardId);
+                if (card == null)
+                    return (false, $"Card with CardId '{cardId}' not found on board.");
+                if (!card.Value.TryGetProperty("id", out var idProp))
+                    return (false, "Card has no id.");
+                var trelloCardId = idProp.GetString();
+                if (string.IsNullOrEmpty(trelloCardId))
+                    return (false, "Card id is empty.");
+                var customFieldIds = await EnsureCustomFieldsExistAsync(boardId, errors);
+                if (priority.HasValue && priority.Value >= 1 && priority.Value <= 4 && customFieldIds.ContainsKey("Priority"))
+                    await SetCustomFieldValueAsync(trelloCardId, customFieldIds["Priority"], "number", priority.Value.ToString(), errors);
+                if (!string.IsNullOrWhiteSpace(status) && customFieldIds.ContainsKey("Status"))
+                    await SetCustomFieldValueAsync(trelloCardId, customFieldIds["Status"], "list", status.Trim(), errors);
+                if (!string.IsNullOrWhiteSpace(comment))
+                    await AddCommentToCardAsync(trelloCardId, comment.Trim());
+                if (!string.IsNullOrWhiteSpace(status))
+                {
+                    if (string.Equals(status.Trim(), "Done", StringComparison.OrdinalIgnoreCase))
+                        await MarkCardCompleteAsync(trelloCardId);
+                    else
+                        await MarkCardIncompleteAsync(trelloCardId);
+                }
+                return (true, null);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "ModifyBugCard: error for board {BoardId}, CardId {CardId}.", boardId, cardId);
+                return (false, ex.Message);
+            }
+        }
+
+        /// <summary>Gets board custom field id->name and, for list-type fields, fieldId->(optionId->text). Used to resolve Status (idValue) to display text.</summary>
+        private async Task<(IReadOnlyDictionary<string, string> FieldIdToName, IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>> ListOptionIdToTextByFieldId)> GetBoardCustomFieldsWithOptionsAsync(string boardId)
+        {
+            var fieldIdToName = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            var listOptionIdToTextByFieldId = new Dictionary<string, IReadOnlyDictionary<string, string>>(StringComparer.OrdinalIgnoreCase);
+            if (string.IsNullOrWhiteSpace(boardId))
+                return (fieldIdToName, listOptionIdToTextByFieldId);
+            try
+            {
+                var url = $"https://api.trello.com/1/boards/{boardId}/customFields?key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
+                var response = await _httpClient.GetAsync(url);
+                if (!response.IsSuccessStatusCode) return (fieldIdToName, listOptionIdToTextByFieldId);
+                var json = await response.Content.ReadAsStringAsync();
+                var arr = JsonSerializer.Deserialize<JsonElement[]>(json);
+                foreach (var field in arr ?? Array.Empty<JsonElement>())
+                {
+                    var fid = field.TryGetProperty("id", out var idP) ? idP.GetString() : null;
+                    var fname = (field.TryGetProperty("name", out var nameP) ? nameP.GetString() : null)?.Trim() ?? "";
+                    if (string.IsNullOrEmpty(fid) || string.IsNullOrEmpty(fname)) continue;
+                    fieldIdToName[fid] = fname;
+                    var fieldType = field.TryGetProperty("type", out var typeP) ? typeP.GetString() : null;
+                    if (!string.IsNullOrEmpty(fieldType) && string.Equals(fieldType, "list", StringComparison.OrdinalIgnoreCase)
+                        && field.TryGetProperty("options", out var optionsProp) && optionsProp.ValueKind == JsonValueKind.Array)
+                    {
+                        var optMap = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                        foreach (var opt in optionsProp.EnumerateArray())
+                        {
+                            var optId = opt.TryGetProperty("id", out var oid) ? oid.GetString() : null;
+                            var optText = opt.TryGetProperty("value", out var oval) && oval.TryGetProperty("text", out var otxt) ? otxt.GetString() : null;
+                            if (!string.IsNullOrEmpty(optId))
+                                optMap[optId] = optText ?? "";
+                        }
+                        listOptionIdToTextByFieldId[fid] = optMap;
+                    }
+                }
+                return (fieldIdToName, listOptionIdToTextByFieldId);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "GetBoardCustomFieldsWithOptions failed for board {BoardId}.", boardId);
+                return (fieldIdToName, listOptionIdToTextByFieldId);
+            }
+        }
+
+        /// <summary>Parses customFieldItems on a card into field name -> value (string). Resolves list-type idValue to option text when listOptionIdToTextByFieldId is provided.</summary>
+        private static Dictionary<string, string> GetCustomFieldValuesFromCard(JsonElement card, IReadOnlyDictionary<string, string> fieldIdToName, IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>>? listOptionIdToTextByFieldId = null)
+        {
+            var result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            if (!card.TryGetProperty("customFieldItems", out var items) || items.ValueKind != JsonValueKind.Array)
+                return result;
+            foreach (var item in items.EnumerateArray())
+            {
+                var idField = item.TryGetProperty("idCustomField", out var idProp) ? idProp.GetString() : null;
+                if (string.IsNullOrEmpty(idField) || !fieldIdToName.TryGetValue(idField, out var fieldName))
+                    continue;
+                string? val = null;
+                // List-type custom fields (e.g. Status) expose idValue at the TOP LEVEL of the item, not inside value (per Trello API).
+                if (item.TryGetProperty("idValue", out var topLevelIdValueProp))
+                {
+                    var idValue = topLevelIdValueProp.GetString();
+                    if (!string.IsNullOrEmpty(idValue) && listOptionIdToTextByFieldId != null
+                        && listOptionIdToTextByFieldId.TryGetValue(idField, out var optMap) && optMap.TryGetValue(idValue, out var text))
+                        val = text;
+                    else if (!string.IsNullOrEmpty(idValue))
+                        val = idValue;
+                }
+                if (val == null && item.TryGetProperty("value", out var valueProp))
+                {
+                    if (valueProp.ValueKind == JsonValueKind.String)
+                        val = UnquoteOptionalJsonString(valueProp.GetString());
+                    else if (valueProp.ValueKind == JsonValueKind.Number)
+                        val = valueProp.GetRawText();
+                    else if (valueProp.ValueKind == JsonValueKind.Object)
+                    {
+                        if (valueProp.TryGetProperty("idValue", out var idValueProp))
+                        {
+                            var idValue = idValueProp.GetString();
+                            if (listOptionIdToTextByFieldId != null && !string.IsNullOrEmpty(idValue)
+                                && listOptionIdToTextByFieldId.TryGetValue(idField, out var optMap) && optMap.TryGetValue(idValue, out var text))
+                                val = text;
+                            else
+                                val = idValue ?? "";
+                        }
+                        else if (valueProp.TryGetProperty("text", out var textProp))
+                            val = UnquoteOptionalJsonString(textProp.GetString());
+                        else if (valueProp.TryGetProperty("number", out var numProp))
+                            val = UnquoteOptionalJsonString(numProp.GetRawText());
+                    }
+                }
+                if (val != null)
+                    result[fieldName] = val;
+            }
+            return result;
+        }
+
+        /// <summary>Gets a value from the parsed custom-fields dictionary by key, case-insensitive; also tries keys that contain the preferred name (e.g. "Status" matches "Status" or "status").</summary>
+        private static string? GetFieldValueIgnoreCase(IReadOnlyDictionary<string, string> fields, string preferredKey)
+        {
+            if (fields.TryGetValue(preferredKey, out var v)) return v;
+            foreach (var kv in fields)
+            {
+                if (string.Equals(kv.Key, preferredKey, StringComparison.OrdinalIgnoreCase)) return kv.Value;
+                if (kv.Key.Contains(preferredKey, StringComparison.OrdinalIgnoreCase)) return kv.Value;
+            }
+            return null;
+        }
+
+        /// <summary>Strips surrounding quotes and optional JSON escaping (e.g. "\"1\"" -> "1") so we can parse numbers.</summary>
+        private static string? UnquoteOptionalJsonString(string? s)
+        {
+            if (string.IsNullOrEmpty(s)) return s;
+            s = s.Trim();
+            if (s.StartsWith("\"", StringComparison.Ordinal) && s.EndsWith("\"", StringComparison.Ordinal) && s.Length >= 2)
+            {
+                try { return JsonSerializer.Deserialize<string>(s) ?? s; }
+                catch { return s.Trim('"'); }
+            }
+            return s;
+        }
+
+        /// <summary>Parses priority string (possibly quoted, e.g. "\"1\"") to int. Returns 0 when missing or unparseable.</summary>
+        private static int ParsePriorityToInt(string? priorityStr)
+        {
+            var s = UnquoteOptionalJsonString(priorityStr);
+            if (string.IsNullOrEmpty(s)) return 0;
+            return int.TryParse(s, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var n) ? n : 0;
+        }
+
+        /// <inheritdoc />
+        public async Task<BoardBugsResponse> GetBugsFromBoardAsync(string boardId)
+        {
+            var empty = new BoardBugsResponse();
+            if (string.IsNullOrWhiteSpace(boardId))
+                return empty;
+            try
+            {
+                var lists = await GetBoardListsWithPositionsAsync(boardId);
+                var bugsList = lists.FirstOrDefault(l => string.Equals(l.Name, "Bugs", StringComparison.OrdinalIgnoreCase));
+                if (string.IsNullOrEmpty(bugsList.Id))
+                {
+                    _logger.LogWarning("GetBugsFromBoard: Bugs list not found on board {BoardId}.", boardId);
+                    return empty;
+                }
+                var (fieldIdToName, listOptionIdToTextByFieldId) = await GetBoardCustomFieldsWithOptionsAsync(boardId);
+                var cardsUrl = $"https://api.trello.com/1/lists/{bugsList.Id}/cards?filter=all&checklists=all&customFieldItems=true&key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
+                var response = await _httpClient.GetAsync(cardsUrl);
+                if (!response.IsSuccessStatusCode)
+                {
+                    _logger.LogWarning("GetBugsFromBoard: failed to get cards for Bugs list on board {BoardId}: {Status}.", boardId, response.StatusCode);
+                    return empty;
+                }
+                var cardsJson = await response.Content.ReadAsStringAsync();
+                var cardsData = JsonSerializer.Deserialize<JsonElement[]>(cardsJson);
+                var open = new List<OpenBugInfo>();
+                var done = new List<OpenBugInfo>();
+                foreach (var c in cardsData ?? Array.Empty<JsonElement>())
+                {
+                    var closed = (c.TryGetProperty("closed", out var closedP) || c.TryGetProperty("Closed", out closedP)) && closedP.ValueKind == JsonValueKind.True;
+                    var dueComplete = (c.TryGetProperty("dueComplete", out var dueCompleteP) || c.TryGetProperty("DueComplete", out dueCompleteP)) && dueCompleteP.ValueKind == JsonValueKind.True;
+                    var isDone = closed || dueComplete;
+                    var title = c.TryGetProperty("name", out var nameProp) ? nameProp.GetString() ?? "" : "";
+                    var fields = GetCustomFieldValuesFromCard(c, fieldIdToName, listOptionIdToTextByFieldId);
+                    var cardId = GetFieldValueIgnoreCase(fields, "CardId") ?? "";
+                    var priorityStr = GetFieldValueIgnoreCase(fields, "Priority");
+                    var status = GetFieldValueIgnoreCase(fields, "Status");
+                    var overdue = false;
+                    if (!isDone && c.TryGetProperty("due", out var dueProp))
+                    {
+                        var dueStr = dueProp.GetString();
+                        if (!string.IsNullOrEmpty(dueStr) && DateTime.TryParse(dueStr, null, System.Globalization.DateTimeStyles.RoundtripKind, out var dueDate))
+                            overdue = dueDate.ToUniversalTime() < DateTime.UtcNow;
+                    }
+                    var bug = new OpenBugInfo
+                    {
+                        CardId = cardId,
+                        Title = title ?? "",
+                        Priority = ParsePriorityToInt(priorityStr),
+                        Status = status ?? "",
+                        Overdue = overdue
+                    };
+                    if (isDone)
+                        done.Add(bug);
+                    else
+                        open.Add(bug);
+                }
+                return new BoardBugsResponse { Open = open, Done = done };
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "GetBugsFromBoard: error for board {BoardId}.", boardId);
+                return empty;
+            }
+        }
+
+        /// <inheritdoc />
+        public async Task<BugDetail?> GetBugDetailsByCardIdAsync(string boardId, string cardId)
+        {
+            if (string.IsNullOrWhiteSpace(boardId) || string.IsNullOrWhiteSpace(cardId))
+                return null;
+            try
+            {
+                var card = await GetCardByCardIdAsync(boardId, cardId);
+                if (card == null)
+                    return null;
+                var c = card.Value;
+                var (fieldIdToName, listOptionIdToTextByFieldId) = await GetBoardCustomFieldsWithOptionsAsync(boardId);
+                var title = c.TryGetProperty("name", out var nameProp) ? nameProp.GetString() ?? "" : "";
+                var description = c.TryGetProperty("desc", out var descProp) ? descProp.GetString() ?? "" : "";
+                var fields = GetCustomFieldValuesFromCard(c, fieldIdToName, listOptionIdToTextByFieldId);
+                var priorityStr = GetFieldValueIgnoreCase(fields, "Priority");
+                var status = GetFieldValueIgnoreCase(fields, "Status");
+                return new BugDetail
+                {
+                    CardId = cardId.Trim(),
+                    Title = title ?? "",
+                    Description = description ?? "",
+                    Priority = ParsePriorityToInt(priorityStr),
+                    Status = status ?? ""
+                };
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "GetBugDetailsByCardId: error for board {BoardId}, cardId {CardId}.", boardId, cardId);
+                return null;
+            }
+        }
+
+        private async Task AddCommentToCardAsync(string trelloCardId, string text)
+        {
+            try
+            {
+                var url = $"https://api.trello.com/1/cards/{trelloCardId}/actions/comments?text={Uri.EscapeDataString(text)}&key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
+                var response = await _httpClient.PostAsync(url, null);
+                if (!response.IsSuccessStatusCode)
+                    _logger.LogWarning("Failed to add comment to card {CardId}: {Status}", trelloCardId, response.StatusCode);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "AddCommentToCard: error for card {CardId}.", trelloCardId);
             }
         }
 

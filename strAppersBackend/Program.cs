@@ -7,6 +7,7 @@ using System.Linq;
 using Microsoft.Extensions.Logging;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.FileProviders;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -273,6 +274,17 @@ app.UseMiddleware<strAppersBackend.Middleware.GlobalExceptionHandlerMiddleware>(
 
 app.UseAuthorization();
 app.UseSession();
+
+// Serve email assets (e.g. logo.png) at /assets/* for fallback logo URL in emails
+var assetsPath = Path.Combine(app.Environment.ContentRootPath, "Assets");
+if (System.IO.Directory.Exists(assetsPath))
+{
+    app.UseStaticFiles(new StaticFileOptions
+    {
+        FileProvider = new PhysicalFileProvider(assetsPath),
+        RequestPath = "/assets"
+    });
+}
 
 app.MapControllers();
 

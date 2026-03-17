@@ -13,6 +13,8 @@ public interface ISmtpEmailService
     Task<bool> SendWelcomeEmailAsync(string recipientEmail, string firstName, string projectName, int projectLengthWeeks);
     Task<bool> SendBulkWelcomeEmailsAsync(List<(string Email, string FirstName)> recipients, string projectName, int projectLengthWeeks);
     Task<bool> SendMeetingEmailWithSenderAsync(string recipientEmail, string meetingTitle, DateTime startTime, DateTime endTime, string meetingLink, string senderEmail, string senderName, string? customMessage = null, string? organizationName = null);
+    /// <summary>Sends a plain email (subject + body) using the same SMTP credentials as meeting emails.</summary>
+    Task<bool> SendPlainEmailAsync(string recipientEmail, string subject, string body);
 }
 
 public class SmtpEmailService : ISmtpEmailService
@@ -416,6 +418,34 @@ END:VCALENDAR";
             _logger.LogDebug("SMTP exception full: {ExToString}", ex.ToString());
             if (ex.InnerException != null)
                 _logger.LogDebug("SMTP inner exception: {InnerMessage}", ex.InnerException.Message);
+            return false;
+        }
+    }
+
+    public async Task<bool> SendPlainEmailAsync(string recipientEmail, string subject, string body)
+    {
+        try
+        {
+            _logger.LogInformation("Sending plain email to {Email}, subject: {Subject}", recipientEmail, subject);
+            using var client = CreateSmtpClient();
+            var bodyHtml = body.Contains("<") && body.Contains(">")
+                ? body
+                : $"<html><body style='font-family: Arial, sans-serif;'><pre style='white-space: pre-wrap;'>{System.Net.WebUtility.HtmlEncode(body)}</pre></body></html>";
+            var message = new MailMessage
+            {
+                From = new MailAddress(_config.FromEmail, _config.FromName, System.Text.Encoding.UTF8),
+                Subject = subject,
+                IsBodyHtml = true,
+                Body = bodyHtml
+            };
+            message.To.Add(recipientEmail);
+            await client.SendMailAsync(message);
+            _logger.LogInformation("Plain email sent successfully to {Email}", recipientEmail);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to send plain email to {Email}: {Message}", recipientEmail, ex.Message);
             return false;
         }
     }

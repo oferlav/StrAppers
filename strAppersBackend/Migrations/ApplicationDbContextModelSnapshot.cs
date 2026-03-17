@@ -1457,6 +1457,11 @@ namespace strAppersBackend.Migrations
                         .HasColumnType("character varying(1000)")
                         .HasColumnName("NextMeetingUrl");
 
+                    b.Property<string>("NextMeetingTitle")
+                        .HasMaxLength(500)
+                        .HasColumnType("character varying(500)")
+                        .HasColumnName("NextMeetingTitle");
+
                     b.Property<int>("Observed")
                         .ValueGeneratedOnAdd()
                         .HasColumnType("integer")
@@ -1652,6 +1657,89 @@ namespace strAppersBackend.Migrations
                         .IsUnique();
 
                     b.ToTable("PrivateChats");
+                });
+
+            modelBuilder.Entity("strAppersBackend.Models.Support", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer")
+                        .HasColumnName("Id");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
+
+                    b.Property<string>("Description")
+                        .HasMaxLength(500)
+                        .HasColumnType("character varying(500)")
+                        .HasColumnName("Description");
+
+                    b.Property<string>("Email")
+                        .IsRequired()
+                        .HasMaxLength(255)
+                        .HasColumnType("character varying(255)")
+                        .HasColumnName("Email");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)")
+                        .HasColumnName("Name");
+
+                    b.Property<int>("Priority")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer")
+                        .HasDefaultValue(3)
+                        .HasColumnName("Priority");
+
+                    b.HasKey("Id");
+
+                    b.ToTable("Support");
+                });
+
+            modelBuilder.Entity("strAppersBackend.Models.Resource", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer")
+                        .HasColumnName("Id");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
+
+                    b.Property<string>("BoardId")
+                        .IsRequired()
+                        .HasMaxLength(50)
+                        .HasColumnType("character varying(50)")
+                        .HasColumnName("BoardId");
+
+                    b.Property<bool>("IsFigma")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("boolean")
+                        .HasDefaultValue(false)
+                        .HasColumnName("IsFigma");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)")
+                        .HasColumnName("Name");
+
+                    b.Property<int>("StudentId")
+                        .HasColumnType("integer")
+                        .HasColumnName("StudentId");
+
+                    b.Property<string>("Url")
+                        .IsRequired()
+                        .HasMaxLength(1000)
+                        .HasColumnType("character varying(1000)")
+                        .HasColumnName("Url");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("BoardId");
+
+                    b.HasIndex("StudentId");
+
+                    b.ToTable("Resources");
                 });
 
             modelBuilder.Entity("strAppersBackend.Models.ProjectCriteria", b =>
@@ -2206,6 +2294,11 @@ namespace strAppersBackend.Migrations
                     b.Property<bool>("IsAvailable")
                         .HasColumnType("boolean");
 
+                    b.Property<bool>("SuperUser")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("boolean")
+                        .HasDefaultValue(false);
+
                     b.Property<int?>("InstanceId")
                         .HasColumnType("integer");
 
@@ -2356,6 +2449,7 @@ namespace strAppersBackend.Migrations
                             RelocationWork = false,
                             StudentId = "TU001",
                             StudentWork = false,
+                            SuperUser = false,
                             TravelWork = false,
                             YearId = 3
                         },
@@ -2381,6 +2475,7 @@ namespace strAppersBackend.Migrations
                             RelocationWork = false,
                             StudentId = "TU002",
                             StudentWork = false,
+                            SuperUser = false,
                             TravelWork = false,
                             YearId = 4
                         },
@@ -2406,6 +2501,7 @@ namespace strAppersBackend.Migrations
                             RelocationWork = false,
                             StudentId = "TU003",
                             StudentWork = false,
+                            SuperUser = false,
                             TravelWork = false,
                             YearId = 5
                         },
@@ -2431,6 +2527,7 @@ namespace strAppersBackend.Migrations
                             RelocationWork = false,
                             StudentId = "TU004",
                             StudentWork = false,
+                            SuperUser = false,
                             TravelWork = false,
                             YearId = 2
                         },
@@ -2456,6 +2553,7 @@ namespace strAppersBackend.Migrations
                             RelocationWork = false,
                             StudentId = "TU005",
                             StudentWork = false,
+                            SuperUser = false,
                             TravelWork = false,
                             YearId = 1
                         });
@@ -2920,6 +3018,26 @@ namespace strAppersBackend.Migrations
                         .IsRequired();
 
                     b.Navigation("ProjectBoard");
+                });
+
+            modelBuilder.Entity("strAppersBackend.Models.Resource", b =>
+                {
+                    b.HasOne("strAppersBackend.Models.ProjectBoard", "ProjectBoard")
+                        .WithMany()
+                        .HasForeignKey("BoardId")
+                        .HasPrincipalKey("Id")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("strAppersBackend.Models.Student", "Student")
+                        .WithMany()
+                        .HasForeignKey("StudentId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("ProjectBoard");
+
+                    b.Navigation("Student");
                 });
 
             modelBuilder.Entity("strAppersBackend.Models.ProjectModule", b =>

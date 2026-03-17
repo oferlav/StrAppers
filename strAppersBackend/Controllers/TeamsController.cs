@@ -351,14 +351,15 @@ public class TeamsController : ControllerBase
                 _logger.LogWarning("Some SMTP email invitations failed to send");
             }
 
-            // Update the NextMeetingTime and NextMeetingUrl fields in the ProjectBoard
+            // Update the NextMeetingTime, NextMeetingUrl, and NextMeetingTitle fields in the ProjectBoard
             projectBoard.NextMeetingTime = startTime;
             projectBoard.NextMeetingUrl = result.JoinUrl;
+            projectBoard.NextMeetingTitle = request.Title;
             projectBoard.UpdatedAt = DateTime.UtcNow;
             
             await _context.SaveChangesAsync();
-            _logger.LogInformation("Updated NextMeetingTime and NextMeetingUrl for board {BoardId} to {MeetingTime} and {MeetingUrl}", 
-                request.BoardId, startTime, result.JoinUrl);
+            _logger.LogInformation("Updated NextMeetingTime, NextMeetingUrl, and NextMeetingTitle for board {BoardId} to {MeetingTime}, {MeetingUrl}, {Title}", 
+                request.BoardId, startTime, result.JoinUrl, request.Title);
 
             return Ok(new
             {
@@ -876,11 +877,12 @@ public class TeamsController : ControllerBase
             {
                 projectBoard.NextMeetingTime = startTime;
                 projectBoard.NextMeetingUrl = result.JoinUrl;
+                projectBoard.NextMeetingTitle = request.Title;
                 projectBoard.UpdatedAt = DateTime.UtcNow;
                 
                 await _context.SaveChangesAsync();
-                _logger.LogInformation("Updated NextMeetingTime and NextMeetingUrl for board {BoardId} to {MeetingTime} and {MeetingUrl}", 
-                    request.BoardId, startTime, result.JoinUrl);
+                _logger.LogInformation("Updated NextMeetingTime, NextMeetingUrl, and NextMeetingTitle for board {BoardId} to {MeetingTime}, {MeetingUrl}, {Title}", 
+                    request.BoardId, startTime, result.JoinUrl, request.Title);
             }
             else
             {
@@ -1207,16 +1209,17 @@ public class TeamsController : ControllerBase
                 }
             }
 
-            // Update the NextMeetingTime and NextMeetingUrl fields in the ProjectBoard (only if conditions met and config allows)
+            // Update the NextMeetingTime, NextMeetingUrl, and NextMeetingTitle fields in the ProjectBoard (only if conditions met and config allows)
             if (shouldUpdateProjectBoard && updateTeamMeetingsWhenSendInvite)
             {
                 projectBoard.NextMeetingTime = startTime;
                 projectBoard.NextMeetingUrl = result.JoinUrl;
+                projectBoard.NextMeetingTitle = request.Title;
                 projectBoard.UpdatedAt = DateTime.UtcNow;
                 
                 await _context.SaveChangesAsync();
-                _logger.LogInformation("Updated NextMeetingTime and NextMeetingUrl for board {BoardId} to {MeetingTime} and {MeetingUrl}", 
-                    request.BoardId, startTime, result.JoinUrl);
+                _logger.LogInformation("Updated NextMeetingTime, NextMeetingUrl, and NextMeetingTitle for board {BoardId} to {MeetingTime}, {MeetingUrl}, {Title}", 
+                    request.BoardId, startTime, result.JoinUrl, request.Title);
             }
             else if (!updateTeamMeetingsWhenSendInvite)
             {

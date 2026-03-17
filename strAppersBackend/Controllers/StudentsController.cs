@@ -680,7 +680,14 @@ public class StudentsController : ControllerBase
                 return NotFound($"Project with ID {projectId} not found.");
             }
 
-            // Step 1: Set student.ProjectId = null (deallocate)
+            // Protection: do not clear ProjectId when student is fully allocated (Status=3, has board) to a *different* project.
+            if (student.Status == 3 && !string.IsNullOrWhiteSpace(student.BoardId) && student.ProjectId.HasValue && student.ProjectId != projectId)
+            {
+                _logger.LogWarning("ALLOCATE blocked: Student {StudentId} is allocated to project {CurrentProjectId} with board; cannot deallocate from project {RequestedProjectId}.", studentId, student.ProjectId, projectId);
+                return BadRequest($"Student is allocated to another project (has board). Use deallocate from the current project first, or deallocate from project {projectId} only if that is their current project.");
+            }
+
+            // Step 1: Set student.ProjectId = null (deallocate from current project)
             student.ProjectId = null;
             
             // Step 2: Set student.IsAdmin = false
@@ -777,8 +784,17 @@ public class StudentsController : ControllerBase
                 return NotFound($"Project with ID {projectId} not found.");
             }
 
-            student.ProjectId = null;
-            student.IsAdmin = false; // Set IsAdmin to false when deallocating
+            // Only clear ProjectId when we're actually deallocating from their *current* project. If we're only removing this project from a priority slot, leave ProjectId unchanged so we don't wipe an active allocation.
+            if (student.ProjectId == projectId)
+            {
+                student.ProjectId = null;
+                student.IsAdmin = false;
+                _logger.LogInformation("DEALLOCATE: Student {StudentId} ProjectId set to NULL (was current project)", studentId);
+            }
+            else
+            {
+                _logger.LogInformation("DEALLOCATE: Student {StudentId} removing project {ProjectId} from priority list only (current ProjectId={CurrentProjectId} unchanged)", studentId, projectId, student.ProjectId);
+            }
             
             // Clear any ProjectPriority fields that contain this projectId
             if (student.ProjectPriority1 == projectId)
@@ -803,8 +819,6 @@ public class StudentsController : ControllerBase
             }
             
             student.UpdatedAt = DateTime.UtcNow;
-
-            _logger.LogInformation("DEALLOCATE: Student {StudentId} ProjectId set to NULL", studentId);
 
             // Get remaining students allocated to the project (AFTER deallocation - exclude the deallocated student)
             var remainingProjectStudentIds = await _context.Students
@@ -1128,6 +1142,7 @@ public class StudentsController : ControllerBase
                 Photo = student.Photo,
                 ProjectId = student.ProjectId,
                 IsAdmin = student.IsAdmin,
+                SuperUser = student.SuperUser,
                 BoardId = student.BoardId,
                 IsAvailable = student.IsAvailable,
                 ProgrammingLanguageId = student.ProgrammingLanguageId,

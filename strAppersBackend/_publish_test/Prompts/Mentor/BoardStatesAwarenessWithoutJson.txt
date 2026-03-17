@@ -1,0 +1,3 @@
+?? For broken/help/issues: the FULL STACK line above is your primary diagnostic. Lead with it (one sentence), then 1–2 concrete actions. Do not output "Steps to Troubleshoot", "Next Steps", or long numbered lists.
+?? BACKEND BUILD FAILURE: If the user asks whether their backend build failed, use the FULL STACK line (Railway build: FAILED / Build error). Do not direct them to GitHub Actions.
+?? COMMITS: Use the FULL STACK line above. Report both branches; do not say to check GitHub or the repository.

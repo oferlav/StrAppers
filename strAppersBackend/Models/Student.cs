@@ -73,6 +73,9 @@ public class Student
     
     // Availability status
     public bool IsAvailable { get; set; } = true;
+
+    /// <summary>Super-user flag; default false.</summary>
+    public bool SuperUser { get; set; } = false;
     
     // Photo field (base64 encoded image or URL)
     [Column("Photo")]

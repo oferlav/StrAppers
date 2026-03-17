@@ -247,4 +247,88 @@ namespace strAppersBackend.Models
         public string ListName { get; set; } = string.Empty;
         public List<SprintSnapshotCard> Cards { get; set; } = new List<SprintSnapshotCard>();
     }
+
+    /// <summary>Raw list info for Trello dashboard stats.</summary>
+    public class TrelloDashboardListInfo
+    {
+        public string Id { get; set; } = string.Empty;
+        public string Name { get; set; } = string.Empty;
+    }
+
+    /// <summary>Check item state for dashboard stats.</summary>
+    public class TrelloDashboardCheckItem
+    {
+        public string Id { get; set; } = string.Empty;
+        public string State { get; set; } = "incomplete";
+    }
+
+    /// <summary>Checklist with items for dashboard stats.</summary>
+    public class TrelloDashboardChecklist
+    {
+        public string Id { get; set; } = string.Empty;
+        public string Name { get; set; } = string.Empty;
+        public List<TrelloDashboardCheckItem> CheckItems { get; set; } = new List<TrelloDashboardCheckItem>();
+    }
+
+    /// <summary>Card with checklists for Trello dashboard stats (excludes User Stories list by filter).</summary>
+    public class TrelloDashboardCardInfo
+    {
+        public string Id { get; set; } = string.Empty;
+        public string IdList { get; set; } = string.Empty;
+        public bool Closed { get; set; }
+        /// <summary>True when the card is marked complete (checkmark) in Trello; card may still be open (not archived).</summary>
+        public bool DueComplete { get; set; }
+        public DateTime? Due { get; set; }
+        public List<string> IdMembers { get; set; } = new List<string>();
+        public List<string> LabelNames { get; set; } = new List<string>();
+        public List<TrelloDashboardChecklist> Checklists { get; set; } = new List<TrelloDashboardChecklist>();
+    }
+
+    /// <summary>Board member for matching students to Trello assignees.</summary>
+    public class TrelloDashboardMember
+    {
+        public string Id { get; set; } = string.Empty;
+        public string? Email { get; set; }
+        public string? FullName { get; set; }
+    }
+
+    /// <summary>Lists and cards (with checklists) for computing dashboard stats. Cards exclude User Stories list.</summary>
+    public class TrelloDashboardData
+    {
+        public List<TrelloDashboardListInfo> Lists { get; set; } = new List<TrelloDashboardListInfo>();
+        public List<TrelloDashboardCardInfo> Cards { get; set; } = new List<TrelloDashboardCardInfo>();
+        public List<TrelloDashboardMember> Members { get; set; } = new List<TrelloDashboardMember>();
+    }
+
+    /// <summary>Bug summary for get-all-open-bugs: single bug with CardId, Title, Priority, Status. Overdue is set only for Open bugs.</summary>
+    public class OpenBugInfo
+    {
+        /// <summary>CardId custom field value (e.g. B-6fe6f647) used to identify the bug card.</summary>
+        public string CardId { get; set; } = string.Empty;
+        public string Title { get; set; } = string.Empty;
+        /// <summary>Priority as integer (e.g. 1=Low, 2=Medium, 3=High, 4=Critical). 0 when missing or unparseable.</summary>
+        public int Priority { get; set; }
+        public string Status { get; set; } = string.Empty;
+        /// <summary>True when the bug is Open and the due date has passed. Always false for Done bugs.</summary>
+        public bool Overdue { get; set; }
+    }
+
+    /// <summary>Response for get-all-open-bugs: two sections, Open (not done) and Done.</summary>
+    public class BoardBugsResponse
+    {
+        public IReadOnlyList<OpenBugInfo> Open { get; set; } = Array.Empty<OpenBugInfo>();
+        public IReadOnlyList<OpenBugInfo> Done { get; set; } = Array.Empty<OpenBugInfo>();
+    }
+
+    /// <summary>Full bug details for get-bug by boardId and CardId.</summary>
+    public class BugDetail
+    {
+        /// <summary>CardId custom field value (e.g. B-6fe6f647) used to identify the bug card.</summary>
+        public string CardId { get; set; } = string.Empty;
+        public string Title { get; set; } = string.Empty;
+        public string Description { get; set; } = string.Empty;
+        /// <summary>Priority as integer (e.g. 1=Low, 2=Medium, 3=High, 4=Critical). 0 when missing or unparseable.</summary>
+        public int Priority { get; set; }
+        public string Status { get; set; } = string.Empty;
+    }
 }

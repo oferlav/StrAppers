@@ -46,6 +46,8 @@ public class ApplicationDbContext : DbContext
     public DbSet<StakeholderStatus> StakeholderStatuses { get; set; }
     public DbSet<Stakeholder> Stakeholders { get; set; }
     public DbSet<PrivateChat> PrivateChats { get; set; }
+    public DbSet<Support> Supports { get; set; }
+    public DbSet<Resource> Resources { get; set; }
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -167,6 +169,7 @@ public class ApplicationDbContext : DbContext
             entity.Property(e => e.StartPendingAt).HasColumnType("timestamp with time zone");
             entity.Property(e => e.ProgrammingLanguageId).HasColumnName("ProgrammingLanguageId");
             entity.Property(e => e.CreatedAt).HasDefaultValueSql("CURRENT_TIMESTAMP");
+            entity.Property(e => e.SuperUser).HasDefaultValue(false);
             
             entity.HasIndex(e => e.Email).IsUnique();
             entity.HasIndex(e => e.StudentId).IsUnique();
@@ -232,11 +235,11 @@ public class ApplicationDbContext : DbContext
 
             // Seed test data
             entity.HasData(
-                new Student { Id = 1, FirstName = "Alex", LastName = "Johnson", Email = "alex.johnson@techuniversity.edu", StudentId = "TU001", MajorId = 1, YearId = 3, LinkedInUrl = "https://linkedin.com/in/alexjohnson", IsAdmin = true, CreatedAt = DateTime.UtcNow.AddDays(-45) },
-                new Student { Id = 2, FirstName = "Sarah", LastName = "Williams", Email = "sarah.williams@techuniversity.edu", StudentId = "TU002", MajorId = 2, YearId = 4, LinkedInUrl = "https://linkedin.com/in/sarahwilliams", IsAdmin = false, CreatedAt = DateTime.UtcNow.AddDays(-40) },
-                new Student { Id = 3, FirstName = "Michael", LastName = "Brown", Email = "michael.brown@techuniversity.edu", StudentId = "TU003", MajorId = 3, YearId = 5, LinkedInUrl = "https://linkedin.com/in/michaelbrown", IsAdmin = true, CreatedAt = DateTime.UtcNow.AddDays(-35) },
-                new Student { Id = 4, FirstName = "Emily", LastName = "Davis", Email = "emily.davis@techuniversity.edu", StudentId = "TU004", MajorId = 4, YearId = 2, LinkedInUrl = "https://linkedin.com/in/emilydavis", CreatedAt = DateTime.UtcNow.AddDays(-30) },
-                new Student { Id = 5, FirstName = "David", LastName = "Miller", Email = "david.miller@techuniversity.edu", StudentId = "TU005", MajorId = 1, YearId = 1, LinkedInUrl = "https://linkedin.com/in/davidmiller", CreatedAt = DateTime.UtcNow.AddDays(-25) }
+                new Student { Id = 1, FirstName = "Alex", LastName = "Johnson", Email = "alex.johnson@techuniversity.edu", StudentId = "TU001", MajorId = 1, YearId = 3, LinkedInUrl = "https://linkedin.com/in/alexjohnson", IsAdmin = true, SuperUser = false, CreatedAt = DateTime.UtcNow.AddDays(-45) },
+                new Student { Id = 2, FirstName = "Sarah", LastName = "Williams", Email = "sarah.williams@techuniversity.edu", StudentId = "TU002", MajorId = 2, YearId = 4, LinkedInUrl = "https://linkedin.com/in/sarahwilliams", IsAdmin = false, SuperUser = false, CreatedAt = DateTime.UtcNow.AddDays(-40) },
+                new Student { Id = 3, FirstName = "Michael", LastName = "Brown", Email = "michael.brown@techuniversity.edu", StudentId = "TU003", MajorId = 3, YearId = 5, LinkedInUrl = "https://linkedin.com/in/michaelbrown", IsAdmin = true, SuperUser = false, CreatedAt = DateTime.UtcNow.AddDays(-35) },
+                new Student { Id = 4, FirstName = "Emily", LastName = "Davis", Email = "emily.davis@techuniversity.edu", StudentId = "TU004", MajorId = 4, YearId = 2, LinkedInUrl = "https://linkedin.com/in/emilydavis", SuperUser = false, CreatedAt = DateTime.UtcNow.AddDays(-30) },
+                new Student { Id = 5, FirstName = "David", LastName = "Miller", Email = "david.miller@techuniversity.edu", StudentId = "TU005", MajorId = 1, YearId = 1, LinkedInUrl = "https://linkedin.com/in/davidmiller", SuperUser = false, CreatedAt = DateTime.UtcNow.AddDays(-25) }
             );
         });
 
@@ -416,6 +419,7 @@ public class ApplicationDbContext : DbContext
             entity.Property(e => e.MovieUrl).HasColumnName("MovieUrl").HasMaxLength(500);
             entity.Property(e => e.NextMeetingTime).HasColumnName("NextMeetingTime").HasColumnType("timestamp with time zone");
             entity.Property(e => e.NextMeetingUrl).HasColumnName("NextMeetingUrl").HasMaxLength(1000);
+            entity.Property(e => e.NextMeetingTitle).HasColumnName("NextMeetingTitle").HasMaxLength(500);
             entity.Property(e => e.GithubBackendUrl).HasColumnName("GithubBackendUrl").HasMaxLength(1000);
             entity.Property(e => e.GithubFrontendUrl).HasColumnName("GithubFrontendUrl").HasMaxLength(1000);
             entity.Property(e => e.WebApiUrl).HasColumnName("WebApiUrl").HasMaxLength(1000);
@@ -602,6 +606,39 @@ public class ApplicationDbContext : DbContext
                 .OnDelete(DeleteBehavior.Cascade);
             entity.HasIndex(e => e.BoardId);
             entity.HasIndex(e => new { e.BoardId, e.Email1, e.Email2 }).IsUnique();
+        });
+
+        modelBuilder.Entity<Support>(entity =>
+        {
+            entity.HasKey(e => e.Id);
+            entity.Property(e => e.Id).ValueGeneratedOnAdd();
+            entity.ToTable("Support");
+            entity.Property(e => e.Name).HasMaxLength(200).IsRequired();
+            entity.Property(e => e.Email).HasMaxLength(255).IsRequired();
+            entity.Property(e => e.Description).HasMaxLength(500);
+            entity.Property(e => e.Priority).HasDefaultValue(3);
+        });
+
+        modelBuilder.Entity<Resource>(entity =>
+        {
+            entity.HasKey(e => e.Id);
+            entity.Property(e => e.Id).ValueGeneratedOnAdd();
+            entity.ToTable("Resources");
+            entity.Property(e => e.BoardId).HasMaxLength(50).IsRequired();
+            entity.Property(e => e.Name).HasMaxLength(100).IsRequired();
+            entity.Property(e => e.Url).HasMaxLength(1000).IsRequired();
+            entity.Property(e => e.IsFigma).HasDefaultValue(false);
+            entity.HasOne(e => e.ProjectBoard)
+                .WithMany()
+                .HasForeignKey(e => e.BoardId)
+                .HasPrincipalKey(pb => pb.Id)
+                .OnDelete(DeleteBehavior.Cascade);
+            entity.HasOne(e => e.Student)
+                .WithMany()
+                .HasForeignKey(e => e.StudentId)
+                .OnDelete(DeleteBehavior.Cascade);
+            entity.HasIndex(e => e.BoardId);
+            entity.HasIndex(e => e.StudentId);
         });
 
         // Configure MentorChatHistory entity (Id is identity; ensure value-generated on add to avoid duplicate key when sequence is out of sync)

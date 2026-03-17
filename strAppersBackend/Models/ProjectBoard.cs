@@ -108,6 +108,13 @@ namespace strAppersBackend.Models
         public string? NextMeetingUrl { get; set; }
 
         /// <summary>
+        /// Title of the next scheduled meeting for the project board
+        /// </summary>
+        [MaxLength(500)]
+        [Column("NextMeetingTitle")]
+        public string? NextMeetingTitle { get; set; }
+
+        /// <summary>
         /// GitHub backend repository URL for the project board
         /// </summary>
         [MaxLength(1000)]

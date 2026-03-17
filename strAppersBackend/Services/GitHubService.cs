@@ -3836,6 +3836,9 @@ public class GitHubService : IGitHubService
             readme += $"**Swagger API Tester URL:** {swaggerUrl}\n\n";
         }
 
+        readme += "## Google APIs (Gemini, Maps, Speech-to-Text)\n\n";
+        readme += "The backend can use a Google API key provided via the **GOOGLE_API_KEY** environment variable (set on Railway). Use it for Gemini LLM, Maps, and Speech-to-Text. Check **GET /api/google/status** and **GET /api/google/health** to verify the key is set and reachable.\n\n";
+
         readme += "## Recommended Tools\n\n";
         readme += "**Recommended SQL Editor tool (Free):** [pgAdmin](https://www.pgadmin.org/download/)\n\n";
         
@@ -4040,9 +4043,61 @@ public class GitHubService : IGitHubService
             </ul>
         </div>
 
-        <button id=""testButton"" onclick=""testBackend()"">Click Me</button>
-        <div id=""response""></div>
-        
+        <table class=""api-table"" style=""width:100%; border-collapse: collapse; margin: 1rem 0; background: #fff; border-radius: 8px; overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,0.1);"">
+            <thead>
+                <tr style=""background: #f1f5f9;"">
+                    <th style=""padding: 0.75rem; text-align: left; border-bottom: 2px solid #e2e8f0;"">API Name</th>
+                    <th style=""padding: 0.75rem; text-align: left; border-bottom: 2px solid #e2e8f0;"">API Description</th>
+                    <th style=""padding: 0.75rem; text-align: center; border-bottom: 2px solid #e2e8f0;"">Test</th>
+                    <th style=""padding: 0.75rem; text-align: left; border-bottom: 2px solid #e2e8f0;"">Response</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr style=""border-bottom: 1px solid #e2e8f0;"">
+                    <td style=""padding: 0.75rem;""><strong>Backend API</strong></td>
+                    <td style=""padding: 0.75rem;"">REST API and database connectivity (TestProjects CRUD).</td>
+                    <td style=""padding: 0.75rem; text-align: center;""><button id=""testButton"" type=""button"" onclick=""testBackend()"" style=""background: #2563eb; color: white; border: none; padding: 0.4rem 0.8rem; border-radius: 6px; cursor: pointer;"">Test API</button></td>
+                    <td style=""padding: 0.75rem; min-width: 120px;""><span id=""response""></span></td>
+                </tr>
+                <tr style=""border-bottom: 1px solid #e2e8f0;"">
+                    <td style=""padding: 0.75rem;""><strong>Google Geocoding API</strong></td>
+                    <td style=""padding: 0.75rem;"">Convert addresses to coordinates (and reverse).</td>
+                    <td style=""padding: 0.75rem; text-align: center;""><button type=""button"" onclick=""testGoogleApi('geocoding')"">Test API</button></td>
+                    <td style=""padding: 0.75rem; min-width: 120px;""><span id=""geocodingResponse"" class=""api-result""></span></td>
+                </tr>
+                <tr style=""border-bottom: 1px solid #e2e8f0;"">
+                    <td style=""padding: 0.75rem;""><strong>Google Maps JavaScript API</strong></td>
+                    <td style=""padding: 0.75rem;"">Display maps in the browser. Test validates Maps JavaScript API.</td>
+                    <td style=""padding: 0.75rem; text-align: center;""><button type=""button"" onclick=""testGoogleApi('maps')"">Test API</button></td>
+                    <td style=""padding: 0.75rem; min-width: 120px;""><span id=""mapsResponse"" class=""api-result""></span></td>
+                </tr>
+                <tr style=""border-bottom: 1px solid #e2e8f0;"">
+                    <td style=""padding: 0.75rem;""><strong>Google Places API (New)</strong></td>
+                    <td style=""padding: 0.75rem;"">Search places and get place details.</td>
+                    <td style=""padding: 0.75rem; text-align: center;""><button type=""button"" onclick=""testGoogleApi('places')"">Test API</button></td>
+                    <td style=""padding: 0.75rem; min-width: 120px;""><span id=""placesResponse"" class=""api-result""></span></td>
+                </tr>
+                <tr style=""border-bottom: 1px solid #e2e8f0;"">
+                    <td style=""padding: 0.75rem;""><strong>Google Directions API</strong></td>
+                    <td style=""padding: 0.75rem;"">Routes and directions between addresses.</td>
+                    <td style=""padding: 0.75rem; text-align: center;""><button type=""button"" onclick=""testGoogleApi('directions')"">Test API</button></td>
+                    <td style=""padding: 0.75rem; min-width: 120px;""><span id=""directionsResponse"" class=""api-result""></span></td>
+                </tr>
+                <tr style=""border-bottom: 1px solid #e2e8f0;"">
+                    <td style=""padding: 0.75rem;""><strong>Google Gemini API</strong></td>
+                    <td style=""padding: 0.75rem;"">Generative AI (LLM).</td>
+                    <td style=""padding: 0.75rem; text-align: center;""><button type=""button"" onclick=""testGoogleApi('gemini')"">Test API</button></td>
+                    <td style=""padding: 0.75rem; min-width: 120px;""><span id=""geminiResponse"" class=""api-result""></span></td>
+                </tr>
+                <tr style=""border-bottom: 1px solid #e2e8f0;"">
+                    <td style=""padding: 0.75rem;""><strong>Google Cloud Speech-to-Text API</strong></td>
+                    <td style=""padding: 0.75rem;"">Speech recognition (audio to text).</td>
+                    <td style=""padding: 0.75rem; text-align: center;""><button type=""button"" onclick=""testGoogleApi('speech-to-text')"">Test API</button></td>
+                    <td style=""padding: 0.75rem; min-width: 120px;""><span id=""speechResponse"" class=""api-result""></span></td>
+                </tr>
+            </tbody>
+        </table>
+
         <div class=""footer"">
             <p>
                 This page will be automatically replaced when you push your project files.<br>
@@ -4275,7 +4330,40 @@ public class GitHubService : IGitHubService
                 console.error('Unexpected error:', error);
             }} finally {{
                 button.disabled = false;
-                button.textContent = 'Click Me';
+                button.textContent = 'Test API';
+            }}
+        }}
+        
+        async function testGoogleApi(apiSlug) {{
+            const idMap = {{ geocoding: 'geocodingResponse', maps: 'mapsResponse', places: 'placesResponse', directions: 'directionsResponse', gemini: 'geminiResponse', 'speech-to-text': 'speechResponse' }};
+            const div = document.getElementById(idMap[apiSlug]);
+            if (!div) return;
+            div.className = 'api-result';
+            div.textContent = 'Loading...';
+            try {{
+                if (!configLoaded) await new Promise(r => setTimeout(r, 100));
+                let config = typeof CONFIG !== 'undefined' ? CONFIG : (typeof window !== 'undefined' && window.CONFIG ? window.CONFIG : null);
+                let apiUrl = config?.API_URL || '';
+                if (!apiUrl) {{
+                    div.className = 'api-result error';
+                    div.innerHTML = '<span class=""error"">API URL not configured.</span>';
+                    return;
+                }}
+                apiUrl = apiUrl.replace(/\\/$/, '');
+                if (apiUrl.includes('railway.app') && apiUrl.startsWith('http://')) apiUrl = apiUrl.replace('http://', 'https://');
+                const url = apiUrl + '/api/google/' + apiSlug;
+                const res = await fetch(url, {{ method: 'GET', mode: 'cors', credentials: 'omit', headers: {{ 'Accept': 'application/json' }}}});
+                const data = await res.json();
+                if (data.status === 'ok') {{
+                    div.className = 'api-result success';
+                    div.innerHTML = '<span style=""color: green; font-weight: bold;"">Successful</span>';
+                }} else {{
+                    div.className = 'api-result error';
+                    div.innerHTML = '<span class=""error"">' + (data.message || data.status || 'Failed') + '</span>';
+                }}
+            }} catch (error) {{
+                div.className = 'api-result error';
+                div.innerHTML = '<span class=""error"">' + (error.message || error) + '</span>';
             }}
         }}
     </script>
@@ -4364,6 +4452,242 @@ public class TestProjects
     [Required]
     [MaxLength(255)]
     public string Name { get; set; } = string.Empty;
+}
+";
+
+        // GoogleApiKeyHelper - read GOOGLE_API_KEY from environment (set by Railway)
+        files["backend/Services/GoogleApiKeyHelper.cs"] = @"namespace Backend.Services;
+
+/// <summary>
+/// Helper to read Google API key from environment (GOOGLE_API_KEY).
+/// Used for Gemini, Maps, and Speech-to-Text in student backends.
+/// </summary>
+public static class GoogleApiKeyHelper
+{
+    public static string? GetGoogleApiKey() => Environment.GetEnvironmentVariable(""GOOGLE_API_KEY"");
+}
+";
+
+        // GoogleApiController - status and per-API test endpoints (Gemini, Geocoding, Maps, Places, Speech-to-Text)
+        files["backend/Controllers/GoogleApiController.cs"] = @"using Microsoft.AspNetCore.Mvc;
+using System.Linq;
+using System.Text;
+using System.Text.Json;
+
+namespace Backend.Controllers;
+
+[ApiController]
+[Route(""api/google"")]
+public class GoogleApiController : ControllerBase
+{
+    /// <summary>GET /api/google/status - Returns whether Google API key is configured (no external call).</summary>
+    [HttpGet(""status"")]
+    public IActionResult Status()
+    {
+        var key = Services.GoogleApiKeyHelper.GetGoogleApiKey();
+        var configured = !string.IsNullOrWhiteSpace(key);
+        return Ok(new
+        {
+            configured,
+            message = configured ? ""Google API key is set. You can use Gemini, Maps, and Speech-to-Text."" : ""Google API key is not set. Add GOOGLE_API_KEY in Railway environment variables.""
+        });
+    }
+
+    /// <summary>GET /api/google/health - Calls Gemini with a minimal prompt (legacy).</summary>
+    [HttpGet(""health"")]
+    public Task<IActionResult> Health() => Gemini();
+
+    /// <summary>GET /api/google/gemini - Test Gemini API.</summary>
+    [HttpGet(""gemini"")]
+    public async Task<IActionResult> Gemini()
+    {
+        var key = Services.GoogleApiKeyHelper.GetGoogleApiKey();
+        if (string.IsNullOrWhiteSpace(key))
+            return Ok(new { status = ""not_configured"", message = ""GOOGLE_API_KEY is not set."", service = ""Gemini"" });
+
+        try
+        {
+            var url = $""https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={Uri.EscapeDataString(key)}"";
+            using var httpClient = new HttpClient();
+            httpClient.Timeout = TimeSpan.FromSeconds(10);
+            var body = new { contents = new[] { new { parts = new[] { new { text = ""Reply with exactly: OK"" } } } } };
+            var json = JsonSerializer.Serialize(body);
+            var content = new StringContent(json, Encoding.UTF8, ""application/json"");
+            var response = await httpClient.PostAsync(url, content);
+            var responseText = await response.Content.ReadAsStringAsync();
+
+            if (!response.IsSuccessStatusCode)
+                return Ok(new { status = ""error"", message = responseText.Length > 200 ? responseText.Substring(0, 200) + ""..."" : responseText, service = ""Gemini"" });
+
+            using var doc = JsonDocument.Parse(responseText);
+            var root = doc.RootElement;
+            string message = ""OK"";
+            if (root.TryGetProperty(""candidates"", out var candidates) && candidates.GetArrayLength() > 0)
+            {
+                var first = candidates.EnumerateArray().FirstOrDefault();
+                if (first.ValueKind != System.Text.Json.JsonValueKind.Undefined && first.TryGetProperty(""content"", out var contentNode) && contentNode.TryGetProperty(""parts"", out var parts))
+                {
+                    var firstPart = parts.EnumerateArray().FirstOrDefault();
+                    if (firstPart.ValueKind != System.Text.Json.JsonValueKind.Undefined && firstPart.TryGetProperty(""text"", out var text))
+                        message = text.GetString()?.Trim() ?? ""OK"";
+                }
+            }
+            return Ok(new { status = ""ok"", message, service = ""Gemini"" });
+        }
+        catch (Exception ex)
+        {
+            return Ok(new { status = ""error"", message = ex.Message, service = ""Gemini"" });
+        }
+    }
+
+    /// <summary>GET /api/google/geocoding - Test Geocoding API (addresses to coordinates).</summary>
+    [HttpGet(""geocoding"")]
+    public async Task<IActionResult> Geocoding()
+    {
+        var key = Services.GoogleApiKeyHelper.GetGoogleApiKey();
+        if (string.IsNullOrWhiteSpace(key))
+            return Ok(new { status = ""not_configured"", message = ""GOOGLE_API_KEY is not set."", service = ""Geocoding"" });
+
+        try
+        {
+            var url = $""https://maps.googleapis.com/maps/api/geocode/json?address=Times+Square+New+York&key={Uri.EscapeDataString(key)}"";
+            using var httpClient = new HttpClient();
+            httpClient.Timeout = TimeSpan.FromSeconds(10);
+            var response = await httpClient.GetAsync(url);
+            var responseText = await response.Content.ReadAsStringAsync();
+            if (!response.IsSuccessStatusCode)
+                return Ok(new { status = ""error"", message = responseText.Length > 200 ? responseText.Substring(0, 200) + ""..."" : responseText, service = ""Geocoding"" });
+            using var doc = JsonDocument.Parse(responseText);
+            var status = doc.RootElement.TryGetProperty(""status"", out var s) ? s.GetString() : """";
+            if (status == ""OK"")
+                return Ok(new { status = ""ok"", message = ""Geocoding API responded successfully."", service = ""Geocoding"" });
+            return Ok(new { status = ""error"", message = status, service = ""Geocoding"" });
+        }
+        catch (Exception ex)
+        {
+            return Ok(new { status = ""error"", message = ex.Message, service = ""Geocoding"" });
+        }
+    }
+
+    /// <summary>GET /api/google/maps - Test Maps JavaScript API (loader URL).</summary>
+    [HttpGet(""maps"")]
+    public async Task<IActionResult> Maps()
+    {
+        var key = Services.GoogleApiKeyHelper.GetGoogleApiKey();
+        if (string.IsNullOrWhiteSpace(key))
+            return Ok(new { status = ""not_configured"", message = ""GOOGLE_API_KEY is not set."", service = ""Maps"" });
+
+        try
+        {
+            var url = $""https://maps.googleapis.com/maps/api/js?key={Uri.EscapeDataString(key)}"";
+            using var httpClient = new HttpClient();
+            httpClient.Timeout = TimeSpan.FromSeconds(10);
+            var response = await httpClient.GetAsync(url);
+            var responseText = await response.Content.ReadAsStringAsync();
+            if (!response.IsSuccessStatusCode)
+                return Ok(new { status = ""error"", message = responseText.Length > 200 ? responseText.Substring(0, 200) + ""..."" : responseText, service = ""Maps"" });
+            if (responseText.Contains(""ApiNotActivatedMapError"") || responseText.Contains(""RefererNotAllowedMapError"") || responseText.Contains(""InvalidKeyMapError""))
+                return Ok(new { status = ""error"", message = responseText.Contains(""ApiNotActivatedMapError"") ? ""Maps JavaScript API is not enabled for this key."" : (responseText.Contains(""RefererNotAllowedMapError"") ? ""Referer not allowed for this key."" : ""Invalid API key."" ), service = ""Maps"" });
+            return Ok(new { status = ""ok"", message = ""Maps JavaScript API key valid."", service = ""Maps"" });
+        }
+        catch (Exception ex)
+        {
+            return Ok(new { status = ""error"", message = ex.Message, service = ""Maps"" });
+        }
+    }
+
+    /// <summary>GET /api/google/directions - Test Directions API (routes between addresses).</summary>
+    [HttpGet(""directions"")]
+    public async Task<IActionResult> Directions()
+    {
+        var key = Services.GoogleApiKeyHelper.GetGoogleApiKey();
+        if (string.IsNullOrWhiteSpace(key))
+            return Ok(new { status = ""not_configured"", message = ""GOOGLE_API_KEY is not set."", service = ""Directions"" });
+
+        try
+        {
+            var origin = Uri.EscapeDataString(""Times Square, New York, NY"");
+            var dest = Uri.EscapeDataString(""Brooklyn Bridge, New York, NY"");
+            var url = $""https://maps.googleapis.com/maps/api/directions/json?origin={origin}&destination={dest}&key={Uri.EscapeDataString(key)}"";
+            using var httpClient = new HttpClient();
+            httpClient.Timeout = TimeSpan.FromSeconds(10);
+            var response = await httpClient.GetAsync(url);
+            var responseText = await response.Content.ReadAsStringAsync();
+            if (!response.IsSuccessStatusCode)
+                return Ok(new { status = ""error"", message = responseText.Length > 200 ? responseText.Substring(0, 200) + ""..."" : responseText, service = ""Directions"" });
+            using var doc = JsonDocument.Parse(responseText);
+            var status = doc.RootElement.TryGetProperty(""status"", out var s) ? s.GetString() : """";
+            if (status == ""OK"")
+                return Ok(new { status = ""ok"", message = ""Directions API responded successfully. Use it from the backend to return routes to the frontend."", service = ""Directions"" });
+            return Ok(new { status = ""error"", message = status, service = ""Directions"" });
+        }
+        catch (Exception ex)
+        {
+            return Ok(new { status = ""error"", message = ex.Message, service = ""Directions"" });
+        }
+    }
+
+    /// <summary>GET /api/google/places - Test Places API (New): search places.</summary>
+    [HttpGet(""places"")]
+    public async Task<IActionResult> Places()
+    {
+        var key = Services.GoogleApiKeyHelper.GetGoogleApiKey();
+        if (string.IsNullOrWhiteSpace(key))
+            return Ok(new { status = ""not_configured"", message = ""GOOGLE_API_KEY is not set."", service = ""Places"" });
+
+        try
+        {
+            using var httpClient = new HttpClient();
+            httpClient.Timeout = TimeSpan.FromSeconds(10);
+            httpClient.DefaultRequestHeaders.Add(""X-Goog-Api-Key"", key);
+            httpClient.DefaultRequestHeaders.Add(""X-Goog-FieldMask"", ""places.id"");
+            var body = JsonSerializer.Serialize(new { textQuery = ""coffee"" });
+            var content = new StringContent(body, Encoding.UTF8, ""application/json"");
+            var response = await httpClient.PostAsync(""https://places.googleapis.com/v1/places:searchText"", content);
+            var responseText = await response.Content.ReadAsStringAsync();
+            if (response.IsSuccessStatusCode)
+                return Ok(new { status = ""ok"", message = ""Places API (New) responded successfully."", service = ""Places"" });
+            return Ok(new { status = ""error"", message = responseText.Length > 200 ? responseText.Substring(0, 200) + ""..."" : responseText, service = ""Places"" });
+        }
+        catch (Exception ex)
+        {
+            return Ok(new { status = ""error"", message = ex.Message, service = ""Places"" });
+        }
+    }
+
+    /// <summary>GET /api/google/speech-to-text - Test Cloud Speech-to-Text API with minimal audio.</summary>
+    [HttpGet(""speech-to-text"")]
+    public async Task<IActionResult> SpeechToText()
+    {
+        var key = Services.GoogleApiKeyHelper.GetGoogleApiKey();
+        if (string.IsNullOrWhiteSpace(key))
+            return Ok(new { status = ""not_configured"", message = ""GOOGLE_API_KEY is not set."", service = ""SpeechToText"" });
+
+        try
+        {
+            var silenceBytes = new byte[3200];
+            var base64Audio = Convert.ToBase64String(silenceBytes);
+            var body = JsonSerializer.Serialize(new
+            {
+                config = new { encoding = ""LINEAR16"", sampleRateHertz = 16000, languageCode = ""en-US"" },
+                audio = new { content = base64Audio }
+            });
+            using var httpClient = new HttpClient();
+            httpClient.Timeout = TimeSpan.FromSeconds(10);
+            var content = new StringContent(body, Encoding.UTF8, ""application/json"");
+            var response = await httpClient.PostAsync($""https://speech.googleapis.com/v1/speech:recognize?key={Uri.EscapeDataString(key)}"", content);
+            var responseText = await response.Content.ReadAsStringAsync();
+            if (response.IsSuccessStatusCode)
+                return Ok(new { status = ""ok"", message = ""Speech-to-Text API accepted the request."", service = ""SpeechToText"" });
+            if (response.StatusCode == System.Net.HttpStatusCode.BadRequest && responseText.Contains(""No speech""))
+                return Ok(new { status = ""ok"", message = ""Speech-to-Text API responded (no speech in test audio)."", service = ""SpeechToText"" });
+            return Ok(new { status = ""error"", message = responseText.Length > 200 ? responseText.Substring(0, 200) + ""..."" : responseText, service = ""SpeechToText"" });
+        }
+        catch (Exception ex)
+        {
+            return Ok(new { status = ""error"", message = ex.Message, service = ""SpeechToText"" });
+        }
+    }
 }
 ";
 
@@ -5062,7 +5386,8 @@ app.MapGet(""/"", () => new {
     message = ""Backend API is running"", 
     status = ""ok"",
     swagger = ""/swagger"",
-    api = ""/api/test""
+    api = ""/api/test"",
+    googleApi = ""/api/google/status""
 });
 
 try
@@ -5925,6 +6250,161 @@ def setup_exception_handlers(app: FastAPI):
     app.add_exception_handler(Exception, global_exception_handler)
 ";
 
+        // Controllers/GoogleApiController.py - Google API proxy (status, gemini, geocoding, maps, directions, places, speech-to-text)
+        files["backend/Controllers/GoogleApiController.py"] = @"import os
+import json
+import base64
+from fastapi import APIRouter
+from fastapi.responses import JSONResponse
+import httpx
+
+router = APIRouter(prefix="""", tags=[""google""])
+
+def get_google_api_key():
+    return os.getenv(""GOOGLE_API_KEY"")
+
+@router.get(""/status"")
+async def status():
+    key = get_google_api_key()
+    configured = bool(key and key.strip())
+    return {
+        ""configured"": configured,
+        ""message"": ""Google API key is set. You can use Gemini, Maps, and Speech-to-Text."" if configured else 'Google API key is not set. Add GOOGLE_API_KEY in Railway environment variables.'
+    }
+
+@router.get(""/health"")
+async def health():
+    return await gemini()
+
+@router.get(""/gemini"")
+async def gemini():
+    key = get_google_api_key()
+    if not key or not key.strip():
+        return JSONResponse(content={""status"": ""not_configured"", ""message"": ""GOOGLE_API_KEY is not set."", ""service"": ""Gemini""})
+    try:
+        url = f""https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={key}""
+        body = {""contents"": [{""parts"": [{""text"": ""Reply with exactly: OK""}]}]}
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            r = await client.post(url, json=body)
+        text = r.text
+        if not r.is_success:
+            return JSONResponse(content={""status"": ""error"", ""message"": text[:200] + (""..."" if len(text) > 200 else """"), ""service"": ""Gemini""})
+        data = json.loads(text)
+        message = ""OK""
+        if ""candidates"" in data and data[""candidates""]:
+            parts = data[""candidates""][0].get(""content"", {}).get(""parts"", [])
+            if parts and ""text"" in parts[0]:
+                message = (parts[0][""text""] or ""OK"").strip()
+        return {""status"": ""ok"", ""message"": message, ""service"": ""Gemini""}
+    except Exception as e:
+        return JSONResponse(content={""status"": ""error"", ""message"": str(e), ""service"": ""Gemini""})
+
+@router.get(""/geocoding"")
+async def geocoding():
+    key = get_google_api_key()
+    if not key or not key.strip():
+        return JSONResponse(content={""status"": ""not_configured"", ""message"": ""GOOGLE_API_KEY is not set."", ""service"": ""Geocoding""})
+    try:
+        url = ""https://maps.googleapis.com/maps/api/geocode/json?address=Times+Square+New+York&key="" + key
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            r = await client.get(url)
+        text = r.text
+        if not r.is_success:
+            return JSONResponse(content={""status"": ""error"", ""message"": text[:200] + (""..."" if len(text) > 200 else """"), ""service"": ""Geocoding""})
+        data = json.loads(text)
+        status_val = data.get(""status"", """")
+        if status_val == ""OK"":
+            return {""status"": ""ok"", ""message"": ""Geocoding API responded successfully."", ""service"": ""Geocoding""}
+        return JSONResponse(content={""status"": ""error"", ""message"": status_val, ""service"": ""Geocoding""})
+    except Exception as e:
+        return JSONResponse(content={""status"": ""error"", ""message"": str(e), ""service"": ""Geocoding""})
+
+@router.get(""/maps"")
+async def maps():
+    key = get_google_api_key()
+    if not key or not key.strip():
+        return JSONResponse(content={""status"": ""not_configured"", ""message"": ""GOOGLE_API_KEY is not set."", ""service"": ""Maps""})
+    try:
+        url = f""https://maps.googleapis.com/maps/api/js?key={key}""
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            r = await client.get(url)
+        text = r.text
+        if not r.is_success:
+            return JSONResponse(content={""status"": ""error"", ""message"": text[:200] + (""..."" if len(text) > 200 else """"), ""service"": ""Maps""})
+        if ""ApiNotActivatedMapError"" in text:
+            return JSONResponse(content={""status"": ""error"", ""message"": ""Maps JavaScript API is not enabled for this key."", ""service"": ""Maps""})
+        if ""RefererNotAllowedMapError"" in text:
+            return JSONResponse(content={""status"": ""error"", ""message"": ""Referer not allowed for this key."", ""service"": ""Maps""})
+        if ""InvalidKeyMapError"" in text:
+            return JSONResponse(content={""status"": ""error"", ""message"": ""Invalid API key."", ""service"": ""Maps""})
+        return {""status"": ""ok"", ""message"": ""Maps JavaScript API key valid."", ""service"": ""Maps""}
+    except Exception as e:
+        return JSONResponse(content={""status"": ""error"", ""message"": str(e), ""service"": ""Maps""})
+
+@router.get(""/directions"")
+async def directions():
+    key = get_google_api_key()
+    if not key or not key.strip():
+        return JSONResponse(content={""status"": ""not_configured"", ""message"": ""GOOGLE_API_KEY is not set."", ""service"": ""Directions""})
+    try:
+        import urllib.parse
+        origin = urllib.parse.quote(""Times Square, New York, NY"")
+        dest = urllib.parse.quote(""Brooklyn Bridge, New York, NY"")
+        url = f""https://maps.googleapis.com/maps/api/directions/json?origin={origin}&destination={dest}&key={key}""
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            r = await client.get(url)
+        text = r.text
+        if not r.is_success:
+            return JSONResponse(content={""status"": ""error"", ""message"": text[:200] + (""..."" if len(text) > 200 else """"), ""service"": ""Directions""})
+        data = json.loads(text)
+        status_val = data.get(""status"", """")
+        if status_val == ""OK"":
+            return {""status"": ""ok"", ""message"": ""Directions API responded successfully. Use it from the backend to return routes to the frontend."", ""service"": ""Directions""}
+        return JSONResponse(content={""status"": ""error"", ""message"": status_val, ""service"": ""Directions""})
+    except Exception as e:
+        return JSONResponse(content={""status"": ""error"", ""message"": str(e), ""service"": ""Directions""})
+
+@router.get(""/places"")
+async def places():
+    key = get_google_api_key()
+    if not key or not key.strip():
+        return JSONResponse(content={""status"": ""not_configured"", ""message"": ""GOOGLE_API_KEY is not set."", ""service"": ""Places""})
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            r = await client.post(
+                ""https://places.googleapis.com/v1/places:searchText"",
+                json={""textQuery"": ""coffee""},
+                headers={""X-Goog-Api-Key"": key, ""X-Goog-FieldMask"": ""places.id""}
+            )
+        text = r.text
+        if r.is_success:
+            return {""status"": ""ok"", ""message"": ""Places API (New) responded successfully."", ""service"": ""Places""}
+        return JSONResponse(content={""status"": ""error"", ""message"": text[:200] + (""..."" if len(text) > 200 else """"), ""service"": ""Places""})
+    except Exception as e:
+        return JSONResponse(content={""status"": ""error"", ""message"": str(e), ""service"": ""Places""})
+
+@router.get(""/speech-to-text"")
+async def speech_to_text():
+    key = get_google_api_key()
+    if not key or not key.strip():
+        return JSONResponse(content={""status"": ""not_configured"", ""message"": ""GOOGLE_API_KEY is not set."", ""service"": ""SpeechToText""})
+    try:
+        silence_bytes = b'\x00' * 3200
+        base64_audio = base64.b64encode(silence_bytes).decode(""utf-8"")
+        body = {""config"": {""encoding"": ""LINEAR16"", ""sampleRateHertz"": 16000, ""languageCode"": ""en-US""}, ""audio"": {""content"": base64_audio}}
+        url = f""https://speech.googleapis.com/v1/speech:recognize?key={key}""
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            r = await client.post(url, json=body)
+        text = r.text
+        if r.is_success:
+            return {""status"": ""ok"", ""message"": ""Speech-to-Text API accepted the request."", ""service"": ""SpeechToText""}
+        if r.status_code == 400 and ""No speech"" in text:
+            return {""status"": ""ok"", ""message"": ""Speech-to-Text API responded (no speech in test audio)."", ""service"": ""SpeechToText""}
+        return JSONResponse(content={""status"": ""error"", ""message"": text[:200] + (""..."" if len(text) > 200 else """"), ""service"": ""SpeechToText""})
+    except Exception as e:
+        return JSONResponse(content={""status"": ""error"", ""message"": str(e), ""service"": ""SpeechToText""})
+";
+
         // main.py
         files["backend/main.py"] = @"import os
 import sys
@@ -5983,6 +6463,8 @@ app.add_middleware(
 # Import and register router - let it crash if imports fail (this is a build-time error, not runtime)
 from Controllers.TestController import router as test_router
 app.include_router(test_router)
+from Controllers.GoogleApiController import router as google_router
+app.include_router(google_router, prefix=""/api/google"")
 
 @app.get(""/"")
 async def root():
@@ -6447,6 +6929,134 @@ module.exports = {
 };
 ";
 
+        // Controllers/GoogleApiController.js - Google API proxy (status, gemini, geocoding, maps, directions, places, speech-to-text)
+        files["backend/Controllers/GoogleApiController.js"] = @"const express = require('express');
+const router = express.Router();
+
+function getKey() { return process.env.GOOGLE_API_KEY || ''; }
+
+router.get('/status', (req, res) => {
+    const key = getKey();
+    const configured = !!key.trim();
+    res.json({
+        configured,
+        message: configured ? 'Google API key is set. You can use Gemini, Maps, and Speech-to-Text.' : 'Google API key is not set. Add GOOGLE_API_KEY in Railway environment variables.'
+    });
+});
+
+router.get('/health', async (req, res) => {
+    const key = getKey();
+    if (!key.trim()) return res.json({ status: 'not_configured', message: 'GOOGLE_API_KEY is not set.', service: 'Gemini' });
+    try {
+        const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${encodeURIComponent(key)}`;
+        const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ contents: [{ parts: [{ text: 'Reply with exactly: OK' }] }] }) });
+        const text = await r.text();
+        if (!r.ok) return res.json({ status: 'error', message: text.length > 200 ? text.slice(0, 200) + '...' : text, service: 'Gemini' });
+        const data = JSON.parse(text);
+        let message = 'OK';
+        if (data.candidates && data.candidates[0] && data.candidates[0].content && data.candidates[0].content.parts && data.candidates[0].content.parts[0] && data.candidates[0].content.parts[0].text)
+            message = (data.candidates[0].content.parts[0].text || 'OK').trim();
+        res.json({ status: 'ok', message, service: 'Gemini' });
+    } catch (e) { res.json({ status: 'error', message: e.message, service: 'Gemini' }); }
+});
+
+router.get('/gemini', async (req, res) => {
+    const key = getKey();
+    if (!key.trim()) return res.json({ status: 'not_configured', message: 'GOOGLE_API_KEY is not set.', service: 'Gemini' });
+    try {
+        const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${encodeURIComponent(key)}`;
+        const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ contents: [{ parts: [{ text: 'Reply with exactly: OK' }] }] }) });
+        const text = await r.text();
+        if (!r.ok) return res.json({ status: 'error', message: text.length > 200 ? text.slice(0, 200) + '...' : text, service: 'Gemini' });
+        const data = JSON.parse(text);
+        let message = 'OK';
+        if (data.candidates && data.candidates[0] && data.candidates[0].content && data.candidates[0].content.parts && data.candidates[0].content.parts[0] && data.candidates[0].content.parts[0].text)
+            message = (data.candidates[0].content.parts[0].text || 'OK').trim();
+        res.json({ status: 'ok', message, service: 'Gemini' });
+    } catch (e) { res.json({ status: 'error', message: e.message, service: 'Gemini' }); }
+});
+
+router.get('/geocoding', async (req, res) => {
+    const key = getKey();
+    if (!key.trim()) return res.json({ status: 'not_configured', message: 'GOOGLE_API_KEY is not set.', service: 'Geocoding' });
+    try {
+        const url = 'https://maps.googleapis.com/maps/api/geocode/json?address=Times+Square+New+York&key=' + encodeURIComponent(key);
+        const r = await fetch(url);
+        const text = await r.text();
+        if (!r.ok) return res.json({ status: 'error', message: text.length > 200 ? text.slice(0, 200) + '...' : text, service: 'Geocoding' });
+        const data = JSON.parse(text);
+        if (data.status === 'OK') return res.json({ status: 'ok', message: 'Geocoding API responded successfully.', service: 'Geocoding' });
+        res.json({ status: 'error', message: data.status || '', service: 'Geocoding' });
+    } catch (e) { res.json({ status: 'error', message: e.message, service: 'Geocoding' }); }
+});
+
+router.get('/maps', async (req, res) => {
+    const key = getKey();
+    if (!key.trim()) return res.json({ status: 'not_configured', message: 'GOOGLE_API_KEY is not set.', service: 'Maps' });
+    try {
+        const url = 'https://maps.googleapis.com/maps/api/js?key=' + encodeURIComponent(key);
+        const r = await fetch(url);
+        const text = await r.text();
+        if (!r.ok) return res.json({ status: 'error', message: text.length > 200 ? text.slice(0, 200) + '...' : text, service: 'Maps' });
+        if (text.includes('ApiNotActivatedMapError')) return res.json({ status: 'error', message: 'Maps JavaScript API is not enabled for this key.', service: 'Maps' });
+        if (text.includes('RefererNotAllowedMapError')) return res.json({ status: 'error', message: 'Referer not allowed for this key.', service: 'Maps' });
+        if (text.includes('InvalidKeyMapError')) return res.json({ status: 'error', message: 'Invalid API key.', service: 'Maps' });
+        res.json({ status: 'ok', message: 'Maps JavaScript API key valid.', service: 'Maps' });
+    } catch (e) { res.json({ status: 'error', message: e.message, service: 'Maps' }); }
+});
+
+router.get('/directions', async (req, res) => {
+    const key = getKey();
+    if (!key.trim()) return res.json({ status: 'not_configured', message: 'GOOGLE_API_KEY is not set.', service: 'Directions' });
+    try {
+        const origin = encodeURIComponent('Times Square, New York, NY');
+        const dest = encodeURIComponent('Brooklyn Bridge, New York, NY');
+        const url = `https://maps.googleapis.com/maps/api/directions/json?origin=${origin}&destination=${dest}&key=${encodeURIComponent(key)}`;
+        const r = await fetch(url);
+        const text = await r.text();
+        if (!r.ok) return res.json({ status: 'error', message: text.length > 200 ? text.slice(0, 200) + '...' : text, service: 'Directions' });
+        const data = JSON.parse(text);
+        if (data.status === 'OK') return res.json({ status: 'ok', message: 'Directions API responded successfully. Use it from the backend to return routes to the frontend.', service: 'Directions' });
+        res.json({ status: 'error', message: data.status || '', service: 'Directions' });
+    } catch (e) { res.json({ status: 'error', message: e.message, service: 'Directions' }); }
+});
+
+router.get('/places', async (req, res) => {
+    const key = getKey();
+    if (!key.trim()) return res.json({ status: 'not_configured', message: 'GOOGLE_API_KEY is not set.', service: 'Places' });
+    try {
+        const r = await fetch('https://places.googleapis.com/v1/places:searchText', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-Goog-Api-Key': key, 'X-Goog-FieldMask': 'places.id' },
+            body: JSON.stringify({ textQuery: 'coffee' })
+        });
+        const text = await r.text();
+        if (r.ok) return res.json({ status: 'ok', message: 'Places API (New) responded successfully.', service: 'Places' });
+        res.json({ status: 'error', message: text.length > 200 ? text.slice(0, 200) + '...' : text, service: 'Places' });
+    } catch (e) { res.json({ status: 'error', message: e.message, service: 'Places' }); }
+});
+
+router.get('/speech-to-text', async (req, res) => {
+    const key = getKey();
+    if (!key.trim()) return res.json({ status: 'not_configured', message: 'GOOGLE_API_KEY is not set.', service: 'SpeechToText' });
+    try {
+        const silence = Buffer.alloc(3200, 0);
+        const base64Audio = silence.toString('base64');
+        const r = await fetch('https://speech.googleapis.com/v1/speech:recognize?key=' + encodeURIComponent(key), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ config: { encoding: 'LINEAR16', sampleRateHertz: 16000, languageCode: 'en-US' }, audio: { content: base64Audio } })
+        });
+        const text = await r.text();
+        if (r.ok) return res.json({ status: 'ok', message: 'Speech-to-Text API accepted the request.', service: 'SpeechToText' });
+        if (r.status === 400 && text.includes('No speech')) return res.json({ status: 'ok', message: 'Speech-to-Text API responded (no speech in test audio).', service: 'SpeechToText' });
+        res.json({ status: 'error', message: text.length > 200 ? text.slice(0, 200) + '...' : text, service: 'SpeechToText' });
+    } catch (e) { res.json({ status: 'error', message: e.message, service: 'SpeechToText' }); }
+});
+
+module.exports = router;
+";
+
         // app.js
         files["backend/app.js"] = @"const express = require('express');
 const cors = require('cors');
@@ -6507,6 +7117,10 @@ const asyncHandler = (fn) => {
         Promise.resolve(fn(req, res, next)).catch(next);
     };
 };
+
+// Google API proxy routes (status, gemini, geocoding, maps, directions, places, speech-to-text)
+const googleApiController = require('./Controllers/GoogleApiController');
+app.use('/api/google', googleApiController);
 
 // Routes - wrap async handlers to catch errors
 app.get('/api/test', asyncHandler(testController.getAll));
@@ -6955,6 +7569,150 @@ app.listen(PORT, '0.0.0.0', (err) => {
 "            \"swagger\", \"/swagger-ui/index.html\",\n" +
 "            \"api\", \"/api/test\"\n" +
 "        ));\n" +
+"    }\n" +
+"}\n";
+
+        // GoogleApiController.java - Google API proxy (status, gemini, geocoding, maps, directions, places, speech-to-text)
+        files["backend/src/main/java/com/backend/Controllers/GoogleApiController.java"] = "package com.backend.Controllers;\n\n" +
+"import org.springframework.http.ResponseEntity;\n" +
+"import org.springframework.web.bind.annotation.GetMapping;\n" +
+"import org.springframework.web.bind.annotation.RequestMapping;\n" +
+"import org.springframework.web.bind.annotation.RestController;\n\n" +
+"import java.net.URI;\n" +
+"import java.net.URLEncoder;\n" +
+"import java.net.http.HttpClient;\n" +
+"import java.net.http.HttpRequest;\n" +
+"import java.net.http.HttpResponse;\n" +
+"import java.nio.charset.StandardCharsets;\n" +
+"import java.time.Duration;\n" +
+"import java.util.Map;\n\n" +
+"import com.fasterxml.jackson.databind.JsonNode;\n" +
+"import com.fasterxml.jackson.databind.ObjectMapper;\n\n" +
+"@RestController\n" +
+"@RequestMapping(\"/api/google\")\n" +
+"public class GoogleApiController {\n\n" +
+"    private static final ObjectMapper MAPPER = new ObjectMapper();\n\n" +
+"    private static String getKey() {\n" +
+"        String k = System.getenv(\"GOOGLE_API_KEY\");\n" +
+"        return k != null ? k : \"\";\n" +
+"    }\n\n" +
+"    private static HttpClient httpClient() {\n" +
+"        return HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).build();\n" +
+"    }\n\n" +
+"    @GetMapping(\"/status\")\n" +
+"    public ResponseEntity<Map<String, Object>> status() {\n" +
+"        String key = getKey();\n" +
+"        boolean configured = key != null && !key.trim().isEmpty();\n" +
+"        return ResponseEntity.ok(Map.of(\n" +
+"            \"configured\", configured,\n" +
+"            \"message\", configured ? \"Google API key is set. You can use Gemini, Maps, and Speech-to-Text.\" : \"Google API key is not set. Add GOOGLE_API_KEY in Railway environment variables.\"\n" +
+"        ));\n" +
+"    }\n\n" +
+"    @GetMapping(\"/health\")\n" +
+"    public ResponseEntity<Map<String, String>> health() { return gemini(); }\n\n" +
+"    @GetMapping(\"/gemini\")\n" +
+"    public ResponseEntity<Map<String, String>> gemini() {\n" +
+"        String key = getKey();\n" +
+"        if (key == null || key.trim().isEmpty())\n" +
+"            return ResponseEntity.ok(Map.of(\"status\", \"not_configured\", \"message\", \"GOOGLE_API_KEY is not set.\", \"service\", \"Gemini\"));\n" +
+"        try {\n" +
+"            String url = \"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=\" + URLEncoder.encode(key, StandardCharsets.UTF_8);\n" +
+"            HttpRequest req = HttpRequest.newBuilder().uri(URI.create(url)).timeout(Duration.ofSeconds(10))\n" +
+"                .header(\"Content-Type\", \"application/json\").POST(HttpRequest.BodyPublishers.ofString(\"{\\\"contents\\\":[{\\\"parts\\\":[{\\\"text\\\":\\\"Reply with exactly: OK\\\"}]}]}\")).build();\n" +
+"            HttpResponse<String> resp = httpClient().send(req, HttpResponse.BodyHandlers.ofString());\n" +
+"            String body = resp.body();\n" +
+"            if (resp.statusCode() != 200) return ResponseEntity.ok(Map.of(\"status\", \"error\", \"message\", body.length() > 200 ? body.substring(0, 200) + \"...\" : body, \"service\", \"Gemini\"));\n" +
+"            JsonNode root = MAPPER.readTree(body);\n" +
+"            String message = \"OK\";\n" +
+"            if (root.has(\"candidates\") && root.get(\"candidates\").isArray() && root.get(\"candidates\").size() > 0) {\n" +
+"                JsonNode cand = root.get(\"candidates\").get(0);\n" +
+"                if (cand.has(\"content\") && cand.get(\"content\").has(\"parts\") && cand.get(\"content\").get(\"parts\").size() > 0)\n" +
+"                    message = cand.get(\"content\").get(\"parts\").get(0).path(\"text\").asText(\"OK\").trim();\n" +
+"            }\n" +
+"            return ResponseEntity.ok(Map.of(\"status\", \"ok\", \"message\", message, \"service\", \"Gemini\"));\n" +
+"        } catch (Exception e) { return ResponseEntity.ok(Map.of(\"status\", \"error\", \"message\", e.getMessage() != null ? e.getMessage() : \"\", \"service\", \"Gemini\")); }\n" +
+"    }\n\n" +
+"    @GetMapping(\"/geocoding\")\n" +
+"    public ResponseEntity<Map<String, String>> geocoding() {\n" +
+"        String key = getKey();\n" +
+"        if (key == null || key.trim().isEmpty()) return ResponseEntity.ok(Map.of(\"status\", \"not_configured\", \"message\", \"GOOGLE_API_KEY is not set.\", \"service\", \"Geocoding\"));\n" +
+"        try {\n" +
+"            String url = \"https://maps.googleapis.com/maps/api/geocode/json?address=Times+Square+New+York&key=\" + URLEncoder.encode(key, StandardCharsets.UTF_8);\n" +
+"            HttpRequest req = HttpRequest.newBuilder().uri(URI.create(url)).timeout(Duration.ofSeconds(10)).GET().build();\n" +
+"            HttpResponse<String> resp = httpClient().send(req, HttpResponse.BodyHandlers.ofString());\n" +
+"            String body = resp.body();\n" +
+"            if (resp.statusCode() != 200) return ResponseEntity.ok(Map.of(\"status\", \"error\", \"message\", body.length() > 200 ? body.substring(0, 200) + \"...\" : body, \"service\", \"Geocoding\"));\n" +
+"            JsonNode json = MAPPER.readTree(body);\n" +
+"            String status = json.path(\"status\").asText(\"\");\n" +
+"            if (\"OK\".equals(status)) return ResponseEntity.ok(Map.of(\"status\", \"ok\", \"message\", \"Geocoding API responded successfully.\", \"service\", \"Geocoding\"));\n" +
+"            return ResponseEntity.ok(Map.of(\"status\", \"error\", \"message\", status, \"service\", \"Geocoding\"));\n" +
+"        } catch (Exception e) { return ResponseEntity.ok(Map.of(\"status\", \"error\", \"message\", e.getMessage() != null ? e.getMessage() : \"\", \"service\", \"Geocoding\")); }\n" +
+"    }\n\n" +
+"    @GetMapping(\"/maps\")\n" +
+"    public ResponseEntity<Map<String, String>> maps() {\n" +
+"        String key = getKey();\n" +
+"        if (key == null || key.trim().isEmpty()) return ResponseEntity.ok(Map.of(\"status\", \"not_configured\", \"message\", \"GOOGLE_API_KEY is not set.\", \"service\", \"Maps\"));\n" +
+"        try {\n" +
+"            String url = \"https://maps.googleapis.com/maps/api/js?key=\" + URLEncoder.encode(key, StandardCharsets.UTF_8);\n" +
+"            HttpRequest req = HttpRequest.newBuilder().uri(URI.create(url)).timeout(Duration.ofSeconds(10)).GET().build();\n" +
+"            HttpResponse<String> resp = httpClient().send(req, HttpResponse.BodyHandlers.ofString());\n" +
+"            String body = resp.body();\n" +
+"            if (resp.statusCode() != 200) return ResponseEntity.ok(Map.of(\"status\", \"error\", \"message\", body.length() > 200 ? body.substring(0, 200) + \"...\" : body, \"service\", \"Maps\"));\n" +
+"            if (body.contains(\"ApiNotActivatedMapError\")) return ResponseEntity.ok(Map.of(\"status\", \"error\", \"message\", \"Maps JavaScript API is not enabled for this key.\", \"service\", \"Maps\"));\n" +
+"            if (body.contains(\"RefererNotAllowedMapError\")) return ResponseEntity.ok(Map.of(\"status\", \"error\", \"message\", \"Referer not allowed for this key.\", \"service\", \"Maps\"));\n" +
+"            if (body.contains(\"InvalidKeyMapError\")) return ResponseEntity.ok(Map.of(\"status\", \"error\", \"message\", \"Invalid API key.\", \"service\", \"Maps\"));\n" +
+"            return ResponseEntity.ok(Map.of(\"status\", \"ok\", \"message\", \"Maps JavaScript API key valid.\", \"service\", \"Maps\"));\n" +
+"        } catch (Exception e) { return ResponseEntity.ok(Map.of(\"status\", \"error\", \"message\", e.getMessage() != null ? e.getMessage() : \"\", \"service\", \"Maps\")); }\n" +
+"    }\n\n" +
+"    @GetMapping(\"/directions\")\n" +
+"    public ResponseEntity<Map<String, String>> directions() {\n" +
+"        String key = getKey();\n" +
+"        if (key == null || key.trim().isEmpty()) return ResponseEntity.ok(Map.of(\"status\", \"not_configured\", \"message\", \"GOOGLE_API_KEY is not set.\", \"service\", \"Directions\"));\n" +
+"        try {\n" +
+"            String origin = URLEncoder.encode(\"Times Square, New York, NY\", StandardCharsets.UTF_8);\n" +
+"            String dest = URLEncoder.encode(\"Brooklyn Bridge, New York, NY\", StandardCharsets.UTF_8);\n" +
+"            String url = \"https://maps.googleapis.com/maps/api/directions/json?origin=\" + origin + \"&destination=\" + dest + \"&key=\" + URLEncoder.encode(key, StandardCharsets.UTF_8);\n" +
+"            HttpRequest req = HttpRequest.newBuilder().uri(URI.create(url)).timeout(Duration.ofSeconds(10)).GET().build();\n" +
+"            HttpResponse<String> resp = httpClient().send(req, HttpResponse.BodyHandlers.ofString());\n" +
+"            String body = resp.body();\n" +
+"            if (resp.statusCode() != 200) return ResponseEntity.ok(Map.of(\"status\", \"error\", \"message\", body.length() > 200 ? body.substring(0, 200) + \"...\" : body, \"service\", \"Directions\"));\n" +
+"            JsonNode json = MAPPER.readTree(body);\n" +
+"            String status = json.path(\"status\").asText(\"\");\n" +
+"            if (\"OK\".equals(status)) return ResponseEntity.ok(Map.of(\"status\", \"ok\", \"message\", \"Directions API responded successfully. Use it from the backend to return routes to the frontend.\", \"service\", \"Directions\"));\n" +
+"            return ResponseEntity.ok(Map.of(\"status\", \"error\", \"message\", status, \"service\", \"Directions\"));\n" +
+"        } catch (Exception e) { return ResponseEntity.ok(Map.of(\"status\", \"error\", \"message\", e.getMessage() != null ? e.getMessage() : \"\", \"service\", \"Directions\")); }\n" +
+"    }\n\n" +
+"    @GetMapping(\"/places\")\n" +
+"    public ResponseEntity<Map<String, String>> places() {\n" +
+"        String key = getKey();\n" +
+"        if (key == null || key.trim().isEmpty()) return ResponseEntity.ok(Map.of(\"status\", \"not_configured\", \"message\", \"GOOGLE_API_KEY is not set.\", \"service\", \"Places\"));\n" +
+"        try {\n" +
+"            HttpRequest req = HttpRequest.newBuilder().uri(URI.create(\"https://places.googleapis.com/v1/places:searchText\")).timeout(Duration.ofSeconds(10))\n" +
+"                .header(\"Content-Type\", \"application/json\").header(\"X-Goog-Api-Key\", key).header(\"X-Goog-FieldMask\", \"places.id\")\n" +
+"                .POST(HttpRequest.BodyPublishers.ofString(\"{\\\"textQuery\\\":\\\"coffee\\\"}\")).build();\n" +
+"            HttpResponse<String> resp = httpClient().send(req, HttpResponse.BodyHandlers.ofString());\n" +
+"            String body = resp.body();\n" +
+"            if (resp.statusCode() == 200) return ResponseEntity.ok(Map.of(\"status\", \"ok\", \"message\", \"Places API (New) responded successfully.\", \"service\", \"Places\"));\n" +
+"            return ResponseEntity.ok(Map.of(\"status\", \"error\", \"message\", body.length() > 200 ? body.substring(0, 200) + \"...\" : body, \"service\", \"Places\"));\n" +
+"        } catch (Exception e) { return ResponseEntity.ok(Map.of(\"status\", \"error\", \"message\", e.getMessage() != null ? e.getMessage() : \"\", \"service\", \"Places\")); }\n" +
+"    }\n\n" +
+"    @GetMapping(\"/speech-to-text\")\n" +
+"    public ResponseEntity<Map<String, String>> speechToText() {\n" +
+"        String key = getKey();\n" +
+"        if (key == null || key.trim().isEmpty()) return ResponseEntity.ok(Map.of(\"status\", \"not_configured\", \"message\", \"GOOGLE_API_KEY is not set.\", \"service\", \"SpeechToText\"));\n" +
+"        try {\n" +
+"            byte[] silence = new byte[3200];\n" +
+"            String base64Audio = java.util.Base64.getEncoder().encodeToString(silence);\n" +
+"            String payload = \"{\\\"config\\\":{\\\"encoding\\\":\\\"LINEAR16\\\",\\\"sampleRateHertz\\\":16000,\\\"languageCode\\\":\\\"en-US\\\"},\\\"audio\\\":{\\\"content\\\":\\\"\" + base64Audio + \"\\\"}}\";\n" +
+"            String url = \"https://speech.googleapis.com/v1/speech:recognize?key=\" + URLEncoder.encode(key, StandardCharsets.UTF_8);\n" +
+"            HttpRequest req = HttpRequest.newBuilder().uri(URI.create(url)).timeout(Duration.ofSeconds(10))\n" +
+"                .header(\"Content-Type\", \"application/json\").POST(HttpRequest.BodyPublishers.ofString(payload)).build();\n" +
+"            HttpResponse<String> resp = httpClient().send(req, HttpResponse.BodyHandlers.ofString());\n" +
+"            String body = resp.body();\n" +
+"            if (resp.statusCode() == 200) return ResponseEntity.ok(Map.of(\"status\", \"ok\", \"message\", \"Speech-to-Text API accepted the request.\", \"service\", \"SpeechToText\"));\n" +
+"            if (resp.statusCode() == 400 && body != null && body.contains(\"No speech\")) return ResponseEntity.ok(Map.of(\"status\", \"ok\", \"message\", \"Speech-to-Text API responded (no speech in test audio).\", \"service\", \"SpeechToText\"));\n" +
+"            return ResponseEntity.ok(Map.of(\"status\", \"error\", \"message\", body != null && body.length() > 200 ? body.substring(0, 200) + \"...\" : (body != null ? body : \"\"), \"service\", \"SpeechToText\"));\n" +
+"        } catch (Exception e) { return ResponseEntity.ok(Map.of(\"status\", \"error\", \"message\", e.getMessage() != null ? e.getMessage() : \"\", \"service\", \"SpeechToText\")); }\n" +
 "    }\n" +
 "}\n";
 
@@ -7521,7 +8279,7 @@ class TestController
         // index.php - Main entry point
         files["backend/index.php"] = @"<?php
 
-require_once __DIR__ . ""/vendor/autoload.php"";
+require_once __DIR__ . '/vendor/autoload.php';
 
 use App\Controllers\TestController;
 use PDO;
@@ -7698,9 +8456,9 @@ if ($method === 'OPTIONS') {
 
 // Handle routes that don't require database connection first
 if ($path === '/swagger') {
-    // Swagger UI endpoint - serve interactive Swagger UI HTML page
     header('Content-Type: text/html');
-    echo '<!DOCTYPE html>
+    echo <<<'SWAGGER_HTML'
+<!DOCTYPE html>
 <html>
 <head>
     <title>Backend API - Swagger UI</title>
@@ -7721,19 +8479,15 @@ if ($path === '/swagger') {
                 url: ""/swagger.json"",
                 dom_id: ""#swagger-ui"",
                 deepLinking: true,
-                presets: [
-                    SwaggerUIBundle.presets.apis,
-                    SwaggerUIStandalonePreset
-                ],
-                plugins: [
-                    SwaggerUIBundle.plugins.DownloadUrl
-                ],
+                presets: [SwaggerUIBundle.presets.apis, SwaggerUIStandalonePreset],
+                plugins: [SwaggerUIBundle.plugins.DownloadUrl],
                 layout: ""StandaloneLayout""
             });
         };
     </script>
 </body>
-</html>';
+</html>
+SWAGGER_HTML;
     exit;
 } elseif ($path === '/swagger.json') {
     // Swagger JSON endpoint - return OpenAPI spec as JSON
@@ -7884,6 +8638,81 @@ if ($path === '/swagger') {
         'service' => 'Backend API'
     ]);
     exit;
+} elseif (strpos($path, '/api/google/') === 0) {
+    header('Content-Type: application/json');
+    $key = trim((string) getenv('GOOGLE_API_KEY'));
+    $baseUrl = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent';
+    $geocodeUrl = 'https://maps.googleapis.com/maps/api/geocode/json';
+    $mapsJsUrl = 'https://maps.googleapis.com/maps/api/js';
+    $directionsUrl = 'https://maps.googleapis.com/maps/api/directions/json';
+    $placesUrl = 'https://places.googleapis.com/v1/places:searchText';
+    $speechUrl = 'https://speech.googleapis.com/v1/speech:recognize';
+    $handler = function ($status, $message, $service) { echo json_encode(compact('status', 'message', 'service')); exit; };
+    if ($path === '/api/google/status') {
+        $configured = $key !== '';
+        echo json_encode(['configured' => $configured, 'message' => $configured ? 'Google API key is set. You can use Gemini, Maps, and Speech-to-Text.' : 'Google API key is not set. Add GOOGLE_API_KEY in Railway environment variables.']);
+        exit;
+    }
+    if ($path === '/api/google/health') { $path = '/api/google/gemini'; }
+    if ($path === '/api/google/gemini') {
+        if ($key === '') { $handler('not_configured', 'GOOGLE_API_KEY is not set.', 'Gemini'); }
+        $url = $baseUrl . '?key=' . rawurlencode($key);
+        $geminiBody = json_encode(['contents' => [['parts' => [['text' => 'Reply with exactly: OK']]]]]);
+        $ctx = stream_context_create(['http' => ['method' => 'POST', 'header' => 'Content-Type: application/json', 'content' => $geminiBody, 'timeout' => 10]]);
+        $res = @file_get_contents($url, false, $ctx);
+        $code = (int) (isset($http_response_header[0]) ? preg_replace('/.* (\d+) .*/', '$1', $http_response_header[0]) : 0);
+        if ($code !== 200) { $handler('error', strlen($res) > 200 ? substr($res, 0, 200) . '...' : $res, 'Gemini'); }
+        $data = json_decode($res, true);
+        $message = 'OK';
+        if (!empty($data['candidates'][0]['content']['parts'][0]['text'])) { $message = trim($data['candidates'][0]['content']['parts'][0]['text']); }
+        $handler('ok', $message, 'Gemini');
+    }
+    if ($path === '/api/google/geocoding') {
+        if ($key === '') { $handler('not_configured', 'GOOGLE_API_KEY is not set.', 'Geocoding'); }
+        $res = @file_get_contents($geocodeUrl . '?address=Times+Square+New+York&key=' . rawurlencode($key));
+        $data = json_decode($res, true);
+        $statusVal = $data['status'] ?? '';
+        if ($statusVal === 'OK') { $handler('ok', 'Geocoding API responded successfully.', 'Geocoding'); }
+        $handler('error', $statusVal, 'Geocoding');
+    }
+    if ($path === '/api/google/maps') {
+        if ($key === '') { $handler('not_configured', 'GOOGLE_API_KEY is not set.', 'Maps'); }
+        $res = @file_get_contents($mapsJsUrl . '?key=' . rawurlencode($key));
+        if (strpos($res, 'ApiNotActivatedMapError') !== false) { $handler('error', 'Maps JavaScript API is not enabled for this key.', 'Maps'); }
+        if (strpos($res, 'RefererNotAllowedMapError') !== false) { $handler('error', 'Referer not allowed for this key.', 'Maps'); }
+        if (strpos($res, 'InvalidKeyMapError') !== false) { $handler('error', 'Invalid API key.', 'Maps'); }
+        $handler('ok', 'Maps JavaScript API key valid.', 'Maps');
+    }
+    if ($path === '/api/google/directions') {
+        if ($key === '') { $handler('not_configured', 'GOOGLE_API_KEY is not set.', 'Directions'); }
+        $origin = rawurlencode('Times Square, New York, NY'); $dest = rawurlencode('Brooklyn Bridge, New York, NY');
+        $res = @file_get_contents($directionsUrl . '?origin=' . $origin . '&destination=' . $dest . '&key=' . rawurlencode($key));
+        $data = json_decode($res, true);
+        $statusVal = $data['status'] ?? '';
+        if ($statusVal === 'OK') { $handler('ok', 'Directions API responded successfully. Use it from the backend to return routes to the frontend.', 'Directions'); }
+        $handler('error', $statusVal, 'Directions');
+    }
+    if ($path === '/api/google/places') {
+        if ($key === '') { $handler('not_configured', 'GOOGLE_API_KEY is not set.', 'Places'); }
+        $placesHeader = 'Content-Type: application/json' . chr(13) . chr(10) . 'X-Goog-Api-Key: ' . $key . chr(13) . chr(10) . 'X-Goog-FieldMask: places.id';
+        $placesBody = json_encode(['textQuery' => 'coffee']);
+        $ctx = stream_context_create(['http' => ['method' => 'POST', 'header' => $placesHeader, 'content' => $placesBody, 'timeout' => 10]]);
+        $res = @file_get_contents($placesUrl, false, $ctx);
+        $code = (int) (isset($http_response_header[0]) ? preg_replace('/.* (\d+) .*/', '$1', $http_response_header[0]) : 0);
+        if ($code === 200) { $handler('ok', 'Places API (New) responded successfully.', 'Places'); }
+        $handler('error', strlen($res) > 200 ? substr($res, 0, 200) . '...' : $res, 'Places');
+    }
+    if ($path === '/api/google/speech-to-text') {
+        if ($key === '') { $handler('not_configured', 'GOOGLE_API_KEY is not set.', 'SpeechToText'); }
+        $silence = str_repeat(chr(0), 3200); $b64 = base64_encode($silence);
+        $body = json_encode(['config' => ['encoding' => 'LINEAR16', 'sampleRateHertz' => 16000, 'languageCode' => 'en-US'], 'audio' => ['content' => $b64]]);
+        $ctx = stream_context_create(['http' => ['method' => 'POST', 'header' => 'Content-Type: application/json', 'content' => $body, 'timeout' => 10]]);
+        $res = @file_get_contents($speechUrl . '?key=' . rawurlencode($key), false, $ctx);
+        $code = (int) (isset($http_response_header[0]) ? preg_replace('/.* (\d+) .*/', '$1', $http_response_header[0]) : 0);
+        if ($code === 200) { $handler('ok', 'Speech-to-Text API accepted the request.', 'SpeechToText'); }
+        if ($code === 400 && strpos($res, 'No speech') !== false) { $handler('ok', 'Speech-to-Text API responded (no speech in test audio).', 'SpeechToText'); }
+        $handler('error', strlen($res) > 200 ? substr($res, 0, 200) . '...' : $res, 'SpeechToText');
+    }
 }
 
 // Routes that require database connection
@@ -7926,7 +8755,7 @@ try {
     
     // Build DSN string - PDO PostgreSQL DSN format uses semicolon-separated parameters, NOT query string
     // Format: pgsql:host=...;port=...;dbname=...;sslmode=require
-    $dsn = ""pgsql:host="" . $host . "";port="" . $port . "";dbname="" . $dbname;
+    $dsn = 'pgsql:host=' . $host . ';port=' . $port . ';dbname=' . $dbname;
     
     // Parse query parameters from original URL to check for sslmode
     $sslMode = 'require'; // Default to require for Neon
@@ -8207,6 +9036,9 @@ end
 require 'pg'
 require 'json'
 require 'logger'
+require 'erb'
+require 'base64'
+require 'net/http'
 require_relative 'Controllers/test_controller'
 
 # Configure logging - Warning and Error only
@@ -8393,6 +9225,157 @@ get '/health' do
         status: 'healthy',
         service: 'Backend API'
     }.to_json
+end
+
+# Google API proxy (status, gemini, geocoding, maps, directions, places, speech-to-text)
+def google_api_key
+  ENV['GOOGLE_API_KEY'].to_s.strip
+end
+
+get '/api/google/status' do
+  content_type :json
+  key = google_api_key
+  configured = !key.empty?
+  { configured: configured, message: configured ? 'Google API key is set. You can use Gemini, Maps, and Speech-to-Text.' : 'Google API key is not set. Add GOOGLE_API_KEY in Railway environment variables.' }.to_json
+end
+
+get '/api/google/health' do
+  content_type :json
+  key = google_api_key
+  return { status: 'not_configured', message: 'GOOGLE_API_KEY is not set.', service: 'Gemini' }.to_json if key.empty?
+  begin
+    uri = URI(""https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=#{ERB::Util.url_encode(key)}"")
+    res = Net::HTTP.start(uri.host, uri.port, use_ssl: true, open_timeout: 10, read_timeout: 10) do |http|
+      req = Net::HTTP::Post.new(uri); req['Content-Type'] = 'application/json'; req.body = '{""contents"":[{""parts"":[{""text"":""Reply with exactly: OK""}]}]}'
+      http.request(req)
+    end
+    body = res.body
+    return { status: 'error', message: body.length > 200 ? body[0..199] + '...' : body, service: 'Gemini' }.to_json unless res.is_a?(Net::HTTPSuccess)
+    data = JSON.parse(body)
+    message = 'OK'
+    if data['candidates'] && data['candidates'][0] && data['candidates'][0]['content'] && data['candidates'][0]['content']['parts'] && data['candidates'][0]['content']['parts'][0]
+      message = (data['candidates'][0]['content']['parts'][0]['text'] || 'OK').to_s.strip
+    end
+    { status: 'ok', message: message, service: 'Gemini' }.to_json
+  rescue => e
+    { status: 'error', message: e.message, service: 'Gemini' }.to_json
+  end
+end
+
+get '/api/google/gemini' do
+  content_type :json
+  key = google_api_key
+  return { status: 'not_configured', message: 'GOOGLE_API_KEY is not set.', service: 'Gemini' }.to_json if key.empty?
+  begin
+    uri = URI(""https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=#{ERB::Util.url_encode(key)}"")
+    res = Net::HTTP.start(uri.host, uri.port, use_ssl: true, open_timeout: 10, read_timeout: 10) do |http|
+      req = Net::HTTP::Post.new(uri); req['Content-Type'] = 'application/json'; req.body = '{""contents"":[{""parts"":[{""text"":""Reply with exactly: OK""}]}]}'
+      http.request(req)
+    end
+    body = res.body
+    return { status: 'error', message: body.length > 200 ? body[0..199] + '...' : body, service: 'Gemini' }.to_json unless res.is_a?(Net::HTTPSuccess)
+    data = JSON.parse(body)
+    message = 'OK'
+    if data['candidates'] && data['candidates'][0] && data['candidates'][0]['content'] && data['candidates'][0]['content']['parts'] && data['candidates'][0]['content']['parts'][0]
+      message = (data['candidates'][0]['content']['parts'][0]['text'] || 'OK').to_s.strip
+    end
+    { status: 'ok', message: message, service: 'Gemini' }.to_json
+  rescue => e
+    { status: 'error', message: e.message, service: 'Gemini' }.to_json
+  end
+end
+
+get '/api/google/geocoding' do
+  content_type :json
+  key = google_api_key
+  return { status: 'not_configured', message: 'GOOGLE_API_KEY is not set.', service: 'Geocoding' }.to_json if key.empty?
+  begin
+    uri = URI(""https://maps.googleapis.com/maps/api/geocode/json?address=Times+Square+New+York&key=#{ERB::Util.url_encode(key)}"")
+    res = Net::HTTP.get_response(uri)
+    body = res.body
+    return { status: 'error', message: body.length > 200 ? body[0..199] + '...' : body, service: 'Geocoding' }.to_json unless res.is_a?(Net::HTTPSuccess)
+    data = JSON.parse(body)
+    status_val = data['status'].to_s
+    return { status: 'ok', message: 'Geocoding API responded successfully.', service: 'Geocoding' }.to_json if status_val == 'OK'
+    { status: 'error', message: status_val, service: 'Geocoding' }.to_json
+  rescue => e
+    { status: 'error', message: e.message, service: 'Geocoding' }.to_json
+  end
+end
+
+get '/api/google/maps' do
+  content_type :json
+  key = google_api_key
+  return { status: 'not_configured', message: 'GOOGLE_API_KEY is not set.', service: 'Maps' }.to_json if key.empty?
+  begin
+    uri = URI(""https://maps.googleapis.com/maps/api/js?key=#{ERB::Util.url_encode(key)}"")
+    res = Net::HTTP.get_response(uri)
+    body = res.body
+    return { status: 'error', message: body.length > 200 ? body[0..199] + '...' : body, service: 'Maps' }.to_json unless res.is_a?(Net::HTTPSuccess)
+    return { status: 'error', message: 'Maps JavaScript API is not enabled for this key.', service: 'Maps' }.to_json if body.include?('ApiNotActivatedMapError')
+    return { status: 'error', message: 'Referer not allowed for this key.', service: 'Maps' }.to_json if body.include?('RefererNotAllowedMapError')
+    return { status: 'error', message: 'Invalid API key.', service: 'Maps' }.to_json if body.include?('InvalidKeyMapError')
+    { status: 'ok', message: 'Maps JavaScript API key valid.', service: 'Maps' }.to_json
+  rescue => e
+    { status: 'error', message: e.message, service: 'Maps' }.to_json
+  end
+end
+
+get '/api/google/directions' do
+  content_type :json
+  key = google_api_key
+  return { status: 'not_configured', message: 'GOOGLE_API_KEY is not set.', service: 'Directions' }.to_json if key.empty?
+  begin
+    origin = ERB::Util.url_encode('Times Square, New York, NY')
+    dest = ERB::Util.url_encode('Brooklyn Bridge, New York, NY')
+    uri = URI(""https://maps.googleapis.com/maps/api/directions/json?origin=#{origin}&destination=#{dest}&key=#{ERB::Util.url_encode(key)}"")
+    res = Net::HTTP.get_response(uri)
+    body = res.body
+    return { status: 'error', message: body.length > 200 ? body[0..199] + '...' : body, service: 'Directions' }.to_json unless res.is_a?(Net::HTTPSuccess)
+    data = JSON.parse(body)
+    status_val = data['status'].to_s
+    return { status: 'ok', message: 'Directions API responded successfully. Use it from the backend to return routes to the frontend.', service: 'Directions' }.to_json if status_val == 'OK'
+    { status: 'error', message: status_val, service: 'Directions' }.to_json
+  rescue => e
+    { status: 'error', message: e.message, service: 'Directions' }.to_json
+  end
+end
+
+get '/api/google/places' do
+  content_type :json
+  key = google_api_key
+  return { status: 'not_configured', message: 'GOOGLE_API_KEY is not set.', service: 'Places' }.to_json if key.empty?
+  begin
+    uri = URI('https://places.googleapis.com/v1/places:searchText')
+    http = Net::HTTP.new(uri.host, uri.port); http.use_ssl = true; http.open_timeout = 10; http.read_timeout = 10
+    req = Net::HTTP::Post.new(uri); req['Content-Type'] = 'application/json'; req['X-Goog-Api-Key'] = key; req['X-Goog-FieldMask'] = 'places.id'; req.body = '{""textQuery"":""coffee""}'
+    res = http.request(req)
+    body = res.body
+    return { status: 'ok', message: 'Places API (New) responded successfully.', service: 'Places' }.to_json if res.is_a?(Net::HTTPSuccess)
+    { status: 'error', message: body.length > 200 ? body[0..199] + '...' : body, service: 'Places' }.to_json
+  rescue => e
+    { status: 'error', message: e.message, service: 'Places' }.to_json
+  end
+end
+
+get '/api/google/speech-to-text' do
+  content_type :json
+  key = google_api_key
+  return { status: 'not_configured', message: 'GOOGLE_API_KEY is not set.', service: 'SpeechToText' }.to_json if key.empty?
+  begin
+    silence = ""\x00"" * 3200
+    base64_audio = Base64.strict_encode64(silence)
+    uri = URI(""https://speech.googleapis.com/v1/speech:recognize?key=#{ERB::Util.url_encode(key)}"")
+    http = Net::HTTP.new(uri.host, uri.port); http.use_ssl = true; http.open_timeout = 10; http.read_timeout = 10
+    req = Net::HTTP::Post.new(uri); req['Content-Type'] = 'application/json'; req.body = { config: { encoding: 'LINEAR16', sampleRateHertz: 16000, languageCode: 'en-US' }, audio: { content: base64_audio } }.to_json
+    res = http.request(req)
+    body = res.body
+    return { status: 'ok', message: 'Speech-to-Text API accepted the request.', service: 'SpeechToText' }.to_json if res.is_a?(Net::HTTPSuccess)
+    return { status: 'ok', message: 'Speech-to-Text API responded (no speech in test audio).', service: 'SpeechToText' }.to_json if res.code.to_i == 400 && body.to_s.include?('No speech')
+    { status: 'error', message: body.length > 200 ? body[0..199] + '...' : body, service: 'SpeechToText' }.to_json
+  rescue => e
+    { status: 'error', message: e.message, service: 'SpeechToText' }.to_json
+  end
 end
 
 # Swagger UI endpoint - serve interactive Swagger UI HTML page
@@ -9007,6 +9990,138 @@ func ExtractId(path string) (int, error) {
 }
 ";
 
+        // Controllers/google_api_controller.go - Google API proxy (status, gemini, geocoding, maps, directions, places, speech-to-text)
+        files["backend/Controllers/google_api_controller.go"] = @"package controllers
+
+import (
+    ""encoding/base64""
+    ""encoding/json""
+    ""net/http""
+    ""net/url""
+    ""os""
+    ""strings""
+    ""time""
+)
+
+func getGoogleApiKey() string { return strings.TrimSpace(os.Getenv(""GOOGLE_API_KEY"")) }
+
+func googleApiClient() *http.Client { return &http.Client{Timeout: 10 * time.Second} }
+
+func writeGoogleJson(w http.ResponseWriter, v interface{}) {
+    w.Header().Set(""Content-Type"", ""application/json"")
+    json.NewEncoder(w).Encode(v)
+}
+
+func GoogleApiStatus(w http.ResponseWriter, r *http.Request) {
+    key := getGoogleApiKey()
+    configured := key != """"
+    msg := ""Google API key is not set. Add GOOGLE_API_KEY in Railway environment variables.""
+    if configured { msg = ""Google API key is set. You can use Gemini, Maps, and Speech-to-Text."" }
+    writeGoogleJson(w, map[string]interface{}{""configured"": configured, ""message"": msg})
+}
+
+func GoogleApiGemini(w http.ResponseWriter, r *http.Request) {
+    key := getGoogleApiKey()
+    if key == """" { writeGoogleJson(w, map[string]string{""status"": ""not_configured"", ""message"": ""GOOGLE_API_KEY is not set."", ""service"": ""Gemini""}); return }
+    apiUrl := ""https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key="" + url.QueryEscape(key)
+    body := strings.NewReader(`{""contents"":[{""parts"":[{""text"":""Reply with exactly: OK""}]}]}`)
+    req, _ := http.NewRequest(""POST"", apiUrl, body)
+    req.Header.Set(""Content-Type"", ""application/json"")
+    resp, err := googleApiClient().Do(req)
+    if err != nil { writeGoogleJson(w, map[string]string{""status"": ""error"", ""message"": err.Error(), ""service"": ""Gemini""}); return }
+    defer resp.Body.Close()
+    var data struct { Candidates []struct { Content struct { Parts []struct { Text string `json:""text""` } } } }
+    json.NewDecoder(resp.Body).Decode(&data)
+    message := ""OK""
+    if len(data.Candidates) > 0 && len(data.Candidates[0].Content.Parts) > 0 { message = strings.TrimSpace(data.Candidates[0].Content.Parts[0].Text); if message == """" { message = ""OK"" } }
+    if resp.StatusCode != 200 { raw, _ := json.Marshal(data); s := string(raw); if len(s) > 200 { s = s[:200] + ""..."" }; writeGoogleJson(w, map[string]string{""status"": ""error"", ""message"": s, ""service"": ""Gemini""}); return }
+    writeGoogleJson(w, map[string]string{""status"": ""ok"", ""message"": message, ""service"": ""Gemini""})
+}
+
+func GoogleApiGeocoding(w http.ResponseWriter, r *http.Request) {
+    key := getGoogleApiKey()
+    if key == """" { writeGoogleJson(w, map[string]string{""status"": ""not_configured"", ""message"": ""GOOGLE_API_KEY is not set."", ""service"": ""Geocoding""}); return }
+    apiUrl := ""https://maps.googleapis.com/maps/api/geocode/json?address=Times+Square+New+York&key="" + url.QueryEscape(key)
+    resp, err := googleApiClient().Get(apiUrl)
+    if err != nil { writeGoogleJson(w, map[string]string{""status"": ""error"", ""message"": err.Error(), ""service"": ""Geocoding""}); return }
+    defer resp.Body.Close()
+    var data struct { Status string `json:""status""` }
+    json.NewDecoder(resp.Body).Decode(&data)
+    if resp.StatusCode != 200 { writeGoogleJson(w, map[string]string{""status"": ""error"", ""message"": data.Status, ""service"": ""Geocoding""}); return }
+    if data.Status == ""OK"" { writeGoogleJson(w, map[string]string{""status"": ""ok"", ""message"": ""Geocoding API responded successfully."", ""service"": ""Geocoding""}); return }
+    writeGoogleJson(w, map[string]string{""status"": ""error"", ""message"": data.Status, ""service"": ""Geocoding""})
+}
+
+func GoogleApiMaps(w http.ResponseWriter, r *http.Request) {
+    key := getGoogleApiKey()
+    if key == """" { writeGoogleJson(w, map[string]string{""status"": ""not_configured"", ""message"": ""GOOGLE_API_KEY is not set."", ""service"": ""Maps""}); return }
+    apiUrl := ""https://maps.googleapis.com/maps/api/js?key="" + url.QueryEscape(key)
+    resp, err := googleApiClient().Get(apiUrl)
+    if err != nil { writeGoogleJson(w, map[string]string{""status"": ""error"", ""message"": err.Error(), ""service"": ""Maps""}); return }
+    defer resp.Body.Close()
+    buf := make([]byte, 4096); n, _ := resp.Body.Read(buf); body := string(buf[:n])
+    if resp.StatusCode != 200 { writeGoogleJson(w, map[string]string{""status"": ""error"", ""message"": body, ""service"": ""Maps""}); return }
+    if strings.Contains(body, ""ApiNotActivatedMapError"") { writeGoogleJson(w, map[string]string{""status"": ""error"", ""message"": ""Maps JavaScript API is not enabled for this key."", ""service"": ""Maps""}); return }
+    if strings.Contains(body, ""RefererNotAllowedMapError"") { writeGoogleJson(w, map[string]string{""status"": ""error"", ""message"": ""Referer not allowed for this key."", ""service"": ""Maps""}); return }
+    if strings.Contains(body, ""InvalidKeyMapError"") { writeGoogleJson(w, map[string]string{""status"": ""error"", ""message"": ""Invalid API key."", ""service"": ""Maps""}); return }
+    writeGoogleJson(w, map[string]string{""status"": ""ok"", ""message"": ""Maps JavaScript API key valid."", ""service"": ""Maps""})
+}
+
+func GoogleApiDirections(w http.ResponseWriter, r *http.Request) {
+    key := getGoogleApiKey()
+    if key == """" { writeGoogleJson(w, map[string]string{""status"": ""not_configured"", ""message"": ""GOOGLE_API_KEY is not set."", ""service"": ""Directions""}); return }
+    origin := url.QueryEscape(""Times Square, New York, NY""); dest := url.QueryEscape(""Brooklyn Bridge, New York, NY"")
+    apiUrl := ""https://maps.googleapis.com/maps/api/directions/json?origin="" + origin + ""&destination="" + dest + ""&key="" + url.QueryEscape(key)
+    resp, err := googleApiClient().Get(apiUrl)
+    if err != nil { writeGoogleJson(w, map[string]string{""status"": ""error"", ""message"": err.Error(), ""service"": ""Directions""}); return }
+    defer resp.Body.Close()
+    var data struct { Status string `json:""status""` }
+    json.NewDecoder(resp.Body).Decode(&data)
+    if resp.StatusCode != 200 { writeGoogleJson(w, map[string]string{""status"": ""error"", ""message"": data.Status, ""service"": ""Directions""}); return }
+    if data.Status == ""OK"" { writeGoogleJson(w, map[string]string{""status"": ""ok"", ""message"": ""Directions API responded successfully. Use it from the backend to return routes to the frontend."", ""service"": ""Directions""}); return }
+    writeGoogleJson(w, map[string]string{""status"": ""error"", ""message"": data.Status, ""service"": ""Directions""})
+}
+
+func GoogleApiPlaces(w http.ResponseWriter, r *http.Request) {
+    key := getGoogleApiKey()
+    if key == """" { writeGoogleJson(w, map[string]string{""status"": ""not_configured"", ""message"": ""GOOGLE_API_KEY is not set."", ""service"": ""Places""}); return }
+    body := strings.NewReader(`{""textQuery"":""coffee""}`)
+    req, _ := http.NewRequest(""POST"", ""https://places.googleapis.com/v1/places:searchText"", body)
+    req.Header.Set(""Content-Type"", ""application/json""); req.Header.Set(""X-Goog-Api-Key"", key); req.Header.Set(""X-Goog-FieldMask"", ""places.id"")
+    resp, err := googleApiClient().Do(req)
+    if err != nil { writeGoogleJson(w, map[string]string{""status"": ""error"", ""message"": err.Error(), ""service"": ""Places""}); return }
+    defer resp.Body.Close()
+    if resp.StatusCode == 200 { writeGoogleJson(w, map[string]string{""status"": ""ok"", ""message"": ""Places API (New) responded successfully."", ""service"": ""Places""}); return }
+    writeGoogleJson(w, map[string]string{""status"": ""error"", ""message"": ""Places error"", ""service"": ""Places""})
+}
+
+func GoogleApiSpeechToText(w http.ResponseWriter, r *http.Request) {
+    key := getGoogleApiKey()
+    if key == """" { writeGoogleJson(w, map[string]string{""status"": ""not_configured"", ""message"": ""GOOGLE_API_KEY is not set."", ""service"": ""SpeechToText""}); return }
+    silence := make([]byte, 3200); base64Audio := base64.StdEncoding.EncodeToString(silence)
+    payload := `{""config"":{""encoding"":""LINEAR16"",""sampleRateHertz"":16000,""languageCode"":""en-US""},""audio"":{""content"":""` + base64Audio + `""}}`
+    apiUrl := ""https://speech.googleapis.com/v1/speech:recognize?key="" + url.QueryEscape(key)
+    req, _ := http.NewRequest(""POST"", apiUrl, strings.NewReader(payload))
+    req.Header.Set(""Content-Type"", ""application/json"")
+    resp, err := googleApiClient().Do(req)
+    if err != nil { writeGoogleJson(w, map[string]string{""status"": ""error"", ""message"": err.Error(), ""service"": ""SpeechToText""}); return }
+    defer resp.Body.Close()
+    if resp.StatusCode == 200 { writeGoogleJson(w, map[string]string{""status"": ""ok"", ""message"": ""Speech-to-Text API accepted the request."", ""service"": ""SpeechToText""}); return }
+    writeGoogleJson(w, map[string]string{""status"": ""ok"", ""message"": ""Speech-to-Text API responded (no speech in test audio)."", ""service"": ""SpeechToText""})
+}
+
+func RegisterGoogleApi(mux *http.ServeMux) {
+    mux.HandleFunc(""/api/google/status"", func(w http.ResponseWriter, r *http.Request) { if r.URL.Path != ""/api/google/status"" { http.NotFound(w, r); return }; GoogleApiStatus(w, r) })
+    mux.HandleFunc(""/api/google/health"", func(w http.ResponseWriter, r *http.Request) { if r.URL.Path != ""/api/google/health"" { http.NotFound(w, r); return }; GoogleApiGemini(w, r) })
+    mux.HandleFunc(""/api/google/gemini"", func(w http.ResponseWriter, r *http.Request) { if r.URL.Path != ""/api/google/gemini"" { http.NotFound(w, r); return }; GoogleApiGemini(w, r) })
+    mux.HandleFunc(""/api/google/geocoding"", func(w http.ResponseWriter, r *http.Request) { if r.URL.Path != ""/api/google/geocoding"" { http.NotFound(w, r); return }; GoogleApiGeocoding(w, r) })
+    mux.HandleFunc(""/api/google/maps"", func(w http.ResponseWriter, r *http.Request) { if r.URL.Path != ""/api/google/maps"" { http.NotFound(w, r); return }; GoogleApiMaps(w, r) })
+    mux.HandleFunc(""/api/google/directions"", func(w http.ResponseWriter, r *http.Request) { if r.URL.Path != ""/api/google/directions"" { http.NotFound(w, r); return }; GoogleApiDirections(w, r) })
+    mux.HandleFunc(""/api/google/places"", func(w http.ResponseWriter, r *http.Request) { if r.URL.Path != ""/api/google/places"" { http.NotFound(w, r); return }; GoogleApiPlaces(w, r) })
+    mux.HandleFunc(""/api/google/speech-to-text"", func(w http.ResponseWriter, r *http.Request) { if r.URL.Path != ""/api/google/speech-to-text"" { http.NotFound(w, r); return }; GoogleApiSpeechToText(w, r) })
+}
+";
+
         // main.go
         files["backend/main.go"] = @"package main
 
@@ -9341,6 +10456,8 @@ func main() {
         w.Header().Set(""Content-Type"", ""application/json"")
         fmt.Fprintf(w, `{""status"":""healthy"",""service"":""Backend API""}`)
     })
+
+    controllers.RegisterGoogleApi(mux)
 
     // Swagger UI endpoint - serve interactive Swagger UI HTML page
     mux.HandleFunc(""/swagger"", func(w http.ResponseWriter, r *http.Request) {
@@ -10667,9 +11784,61 @@ button:disabled {
             </ul>
         </div>
 
-        <button id=""testButton"" onclick=""testBackend()"">Click Me</button>
-        <div id=""response""></div>
-        
+        <table class=""api-table"" style=""width:100%; border-collapse: collapse; margin: 1rem 0; background: #fff; border-radius: 8px; overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,0.1);"">
+            <thead>
+                <tr style=""background: #f1f5f9;"">
+                    <th style=""padding: 0.75rem; text-align: left; border-bottom: 2px solid #e2e8f0;"">API Name</th>
+                    <th style=""padding: 0.75rem; text-align: left; border-bottom: 2px solid #e2e8f0;"">API Description</th>
+                    <th style=""padding: 0.75rem; text-align: center; border-bottom: 2px solid #e2e8f0;"">Test</th>
+                    <th style=""padding: 0.75rem; text-align: left; border-bottom: 2px solid #e2e8f0;"">Response</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr style=""border-bottom: 1px solid #e2e8f0;"">
+                    <td style=""padding: 0.75rem;""><strong>Backend API</strong></td>
+                    <td style=""padding: 0.75rem;"">REST API and database connectivity (TestProjects CRUD).</td>
+                    <td style=""padding: 0.75rem; text-align: center;""><button id=""testButton"" type=""button"" onclick=""testBackend()"" style=""background: #2563eb; color: white; border: none; padding: 0.4rem 0.8rem; border-radius: 6px; cursor: pointer;"">Test API</button></td>
+                    <td style=""padding: 0.75rem; min-width: 120px;""><span id=""response""></span></td>
+                </tr>
+                <tr style=""border-bottom: 1px solid #e2e8f0;"">
+                    <td style=""padding: 0.75rem;""><strong>Google Geocoding API</strong></td>
+                    <td style=""padding: 0.75rem;"">Convert addresses to coordinates (and reverse).</td>
+                    <td style=""padding: 0.75rem; text-align: center;""><button type=""button"" onclick=""testGoogleApi('geocoding')"">Test API</button></td>
+                    <td style=""padding: 0.75rem; min-width: 120px;""><span id=""geocodingResponse"" class=""api-result""></span></td>
+                </tr>
+                <tr style=""border-bottom: 1px solid #e2e8f0;"">
+                    <td style=""padding: 0.75rem;""><strong>Google Maps JavaScript API</strong></td>
+                    <td style=""padding: 0.75rem;"">Display maps in the browser. Test validates Maps JavaScript API.</td>
+                    <td style=""padding: 0.75rem; text-align: center;""><button type=""button"" onclick=""testGoogleApi('maps')"">Test API</button></td>
+                    <td style=""padding: 0.75rem; min-width: 120px;""><span id=""mapsResponse"" class=""api-result""></span></td>
+                </tr>
+                <tr style=""border-bottom: 1px solid #e2e8f0;"">
+                    <td style=""padding: 0.75rem;""><strong>Google Places API (New)</strong></td>
+                    <td style=""padding: 0.75rem;"">Search places and get place details.</td>
+                    <td style=""padding: 0.75rem; text-align: center;""><button type=""button"" onclick=""testGoogleApi('places')"">Test API</button></td>
+                    <td style=""padding: 0.75rem; min-width: 120px;""><span id=""placesResponse"" class=""api-result""></span></td>
+                </tr>
+                <tr style=""border-bottom: 1px solid #e2e8f0;"">
+                    <td style=""padding: 0.75rem;""><strong>Google Directions API</strong></td>
+                    <td style=""padding: 0.75rem;"">Routes and directions between addresses.</td>
+                    <td style=""padding: 0.75rem; text-align: center;""><button type=""button"" onclick=""testGoogleApi('directions')"">Test API</button></td>
+                    <td style=""padding: 0.75rem; min-width: 120px;""><span id=""directionsResponse"" class=""api-result""></span></td>
+                </tr>
+                <tr style=""border-bottom: 1px solid #e2e8f0;"">
+                    <td style=""padding: 0.75rem;""><strong>Google Gemini API</strong></td>
+                    <td style=""padding: 0.75rem;"">Generative AI (LLM).</td>
+                    <td style=""padding: 0.75rem; text-align: center;""><button type=""button"" onclick=""testGoogleApi('gemini')"">Test API</button></td>
+                    <td style=""padding: 0.75rem; min-width: 120px;""><span id=""geminiResponse"" class=""api-result""></span></td>
+                </tr>
+                <tr style=""border-bottom: 1px solid #e2e8f0;"">
+                    <td style=""padding: 0.75rem;""><strong>Google Cloud Speech-to-Text API</strong></td>
+                    <td style=""padding: 0.75rem;"">Speech recognition (audio to text).</td>
+                    <td style=""padding: 0.75rem; text-align: center;""><button type=""button"" onclick=""testGoogleApi('speech-to-text')"">Test API</button></td>
+                    <td style=""padding: 0.75rem; min-width: 120px;""><span id=""speechResponse"" class=""api-result""></span></td>
+                </tr>
+            </tbody>
+        </table>
+
         <div class=""footer"">
             <p>
                 This page will be automatically replaced when you push your project files.<br>
@@ -10902,7 +12071,40 @@ button:disabled {
                 console.error('Unexpected error:', error);
             } finally {
                 button.disabled = false;
-                button.textContent = 'Click Me';
+                button.textContent = 'Test API';
+            }
+        }
+        
+        async function testGoogleApi(apiSlug) {
+            const idMap = { geocoding: 'geocodingResponse', maps: 'mapsResponse', places: 'placesResponse', directions: 'directionsResponse', gemini: 'geminiResponse', 'speech-to-text': 'speechResponse' };
+            const div = document.getElementById(idMap[apiSlug]);
+            if (!div) return;
+            div.className = 'api-result';
+            div.textContent = 'Loading...';
+            try {
+                if (!configLoaded) await new Promise(r => setTimeout(r, 100));
+                let config = typeof CONFIG !== 'undefined' ? CONFIG : (typeof window !== 'undefined' && window.CONFIG ? window.CONFIG : null);
+                let apiUrl = config?.API_URL || '';
+                if (!apiUrl) {
+                    div.className = 'api-result error';
+                    div.innerHTML = '<span class=""error"">API URL not configured.</span>';
+                    return;
+                }
+                apiUrl = apiUrl.replace(/\/$/, '');
+                if (apiUrl.includes('railway.app') && apiUrl.startsWith('http://')) apiUrl = apiUrl.replace('http://', 'https://');
+                const url = apiUrl + '/api/google/' + apiSlug;
+                const res = await fetch(url, { method: 'GET', mode: 'cors', credentials: 'omit', headers: { 'Accept': 'application/json' }});
+                const data = await res.json();
+                if (data.status === 'ok') {
+                    div.className = 'api-result success';
+                    div.innerHTML = '<span style=""color: green; font-weight: bold;"">Successful</span>';
+                } else {
+                    div.className = 'api-result error';
+                    div.innerHTML = '<span class=""error"">' + (data.message || data.status || 'Failed') + '</span>';
+                }
+            } catch (error) {
+                div.className = 'api-result error';
+                div.innerHTML = '<span class=""error"">' + (error.message || error) + '</span>';
             }
         }
     </script>

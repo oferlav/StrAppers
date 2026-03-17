@@ -9,6 +9,7 @@ using Microsoft.Extensions.Options;
 using System.Text.RegularExpressions;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Text.Json.Serialization;
 using System.Net.Http;
 using System.Net;
 using Npgsql;
@@ -2046,10 +2047,47 @@ public class BoardsController : ControllerBase
                                         {
                                             _logger.LogInformation("✅ [RAILWAY] Successfully set DATABASE_URL environment variable on Railway service {ServiceId}", railwayServiceId);
                                             // Note: Verification query removed - the 200 response from variableUpsert confirms the variable was set
+
+                                            // Set GOOGLE_API_KEY on the same service (for Gemini, Maps, Speech-to-Text)
+                                            var googleApiKey = _configuration["GoogleApis:StudentBackendApiKey"]
+                                                ?? Environment.GetEnvironmentVariable("GOOGLE_API_KEY");
+                                            if (!string.IsNullOrWhiteSpace(googleApiKey))
+                                            {
+                                                var setGoogleEnvMutation = new
+                                                {
+                                                    query = @"
+                    mutation SetVariable($projectId: String!, $environmentId: String!, $serviceId: String!, $name: String!, $value: String!) {
+                        variableUpsert(input: { 
+                            projectId: $projectId
+                            environmentId: $environmentId
+                            serviceId: $serviceId
+                            name: $name
+                            value: $value
+                        })
+                    }",
+                                                    variables = new
+                                                    {
+                                                        projectId = projectId,
+                                                        environmentId = environmentId,
+                                                        serviceId = railwayServiceId,
+                                                        name = "GOOGLE_API_KEY",
+                                                        value = googleApiKey
+                                                    }
+                                                };
+                                                var googleEnvBody = System.Text.Json.JsonSerializer.Serialize(setGoogleEnvMutation);
+                                                var googleEnvContent = new StringContent(googleEnvBody, System.Text.Encoding.UTF8, "application/json");
+                                                var googleEnvResponse = await httpClient.PostAsync(railwayApiUrl, googleEnvContent);
+                                                if (googleEnvResponse.IsSuccessStatusCode)
+                                                    _logger.LogInformation("✅ [RAILWAY] Successfully set GOOGLE_API_KEY environment variable on Railway service {ServiceId}", railwayServiceId);
+                                                else
+                                                    _logger.LogWarning("⚠️ [RAILWAY] Failed to set GOOGLE_API_KEY: {StatusCode}", googleEnvResponse.StatusCode);
+                                            }
+                                            else
+                                                _logger.LogWarning("⚠️ [RAILWAY] GOOGLE_API_KEY not set on student backend: configure GoogleApis:StudentBackendApiKey or GOOGLE_API_KEY on this service.");
                                         }
                                         else
                                         {
-                                            _logger.LogWarning("⚠️ [RAILWAY] Failed to set DATABASE_URL environment variable: {StatusCode} - {Error}", 
+                                            _logger.LogWarning("⚠️ [RAILWAY] Failed to set DATABASE_URL environment variable: {StatusCode} - {Error}",
                                                 envResponse.StatusCode, envResponseContent);
                                             
                                             // Check for errors in GraphQL response
@@ -2844,11 +2882,12 @@ public class BoardsController : ControllerBase
             _logger.LogInformation("Creating ProjectBoard record for board: {BoardId}", trelloBoardId);
             _context.ProjectBoards.Add(projectBoard);
 
-            // Update students with BoardId
-            _logger.LogInformation("Updating students with BoardId");
+            // Update students with BoardId and ProjectId
+            _logger.LogInformation("Updating students with BoardId and ProjectId");
             foreach (var student in students)
             {
                 student.BoardId = trelloBoardId;
+                student.ProjectId = request.ProjectId;
                 student.Status = 3; // Set to pending/in-board status
                 student.UpdatedAt = DateTime.UtcNow;
             }
@@ -3362,6 +3401,7 @@ public class BoardsController : ControllerBase
                 MovieUrl = board.MovieUrl,
                 NextMeetingTime = board.NextMeetingTime,
                 NextMeetingUrl = board.NextMeetingUrl,
+                NextMeetingTitle = board.NextMeetingTitle,
                 GithubBackendUrl = board.GithubBackendUrl,
                 GithubFrontendUrl = board.GithubFrontendUrl,
                 WebApiUrl = board.WebApiUrl,
@@ -3379,6 +3419,163 @@ public class BoardsController : ControllerBase
                 Success = false,
                 Message = $"Error getting board information: {ex.Message}"
             });
+        }
+    }
+
+    /// <summary>
+    /// Create a bug card in the Trello Bugs list.
+    /// POST /api/Boards/use/create-bug
+    /// </summary>
+    [HttpPost("create-bug")]
+    public async Task<ActionResult<object>> CreateBug([FromBody] CreateBugRequest request)
+    {
+        if (request == null || string.IsNullOrWhiteSpace(request.BoardId))
+            return BadRequest(new { Success = false, Message = "BoardId is required." });
+        if (string.IsNullOrWhiteSpace(request.Creator))
+            return BadRequest(new { Success = false, Message = "Creator (student email) is required." });
+        if (string.IsNullOrWhiteSpace(request.Title))
+            return BadRequest(new { Success = false, Message = "Title is required." });
+
+        try
+        {
+            var projectBoard = await _context.ProjectBoards.FindAsync(request.BoardId.Trim());
+            if (projectBoard == null)
+                return NotFound(new { Success = false, Message = $"Board {request.BoardId} not found." });
+
+            var creatorEmail = request.Creator.Trim().ToLowerInvariant();
+            var student = await _context.Students
+                .FirstOrDefaultAsync(s => s.Email != null && s.Email.ToLower() == creatorEmail);
+            if (student == null)
+                return NotFound(new { Success = false, Message = $"Student with email '{request.Creator}' not found." });
+            var studentName = $"{student.FirstName} {student.LastName}".Trim();
+            if (string.IsNullOrEmpty(studentName)) studentName = student.Email ?? "Unknown";
+
+            var titleWithCreator = $"{request.Title.Trim()} - created by {studentName}";
+
+            var firstDayStr = _configuration["Trello:FirstDayOfWeek"] ?? "Sunday";
+            var localTimeStr = _configuration["Trello:LocalTime"] ?? "GMT+2";
+            var firstDay = strAppersBackend.Services.TrelloBoardScheduleHelper.ParseFirstDayOfWeek(firstDayStr);
+            var localOffset = strAppersBackend.Services.TrelloBoardScheduleHelper.ParseLocalTimeOffset(localTimeStr);
+            var dueDate = strAppersBackend.Services.TrelloBoardScheduleHelper.GetFirstDayOfNextWeekDateUtc(firstDay, localOffset);
+
+            var cardIdValue = "B-" + Guid.NewGuid().ToString("N")[..8];
+
+            var priority = request.Priority is >= 1 and <= 4 ? request.Priority : 1;
+            var (success, error, cardId, trelloCardId) = await _trelloService.CreateBugCardAsync(
+                request.BoardId.Trim(),
+                titleWithCreator,
+                request.Description ?? "",
+                priority,
+                cardIdValue,
+                dueDate);
+
+            if (!success)
+                return BadRequest(new { Success = false, Message = error ?? "Failed to create bug card." });
+
+            return Ok(new
+            {
+                Success = true,
+                Message = "Bug card created.",
+                CardId = cardId,
+                TrelloCardId = trelloCardId,
+                DueDate = dueDate
+            });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error creating bug card for board {BoardId}", request.BoardId);
+            return StatusCode(500, new { Success = false, Message = ex.Message });
+        }
+    }
+
+    /// <summary>
+    /// Modify a bug card by CardId: update Priority/Status custom fields, add comment; if Status is Done, mark card complete.
+    /// POST /api/Boards/use/modify-bug
+    /// </summary>
+    [HttpPost("modify-bug")]
+    public async Task<ActionResult<object>> ModifyBug([FromBody] ModifyBugRequest request)
+    {
+        if (request == null || string.IsNullOrWhiteSpace(request.BoardId))
+            return BadRequest(new { Success = false, Message = "BoardId is required." });
+        if (string.IsNullOrWhiteSpace(request.CardId))
+            return BadRequest(new { Success = false, Message = "CardId is required." });
+
+        try
+        {
+            var projectBoard = await _context.ProjectBoards.FindAsync(request.BoardId.Trim());
+            if (projectBoard == null)
+                return NotFound(new { Success = false, Message = $"Board {request.BoardId} not found." });
+
+            var (success, error) = await _trelloService.ModifyBugCardAsync(
+                request.BoardId.Trim(),
+                request.CardId.Trim(),
+                request.Priority,
+                string.IsNullOrWhiteSpace(request.Status) ? null : request.Status.Trim(),
+                string.IsNullOrWhiteSpace(request.Comments) ? null : request.Comments.Trim());
+
+            if (!success)
+                return BadRequest(new { Success = false, Message = error ?? "Failed to modify bug card." });
+
+            return Ok(new { Success = true, Message = "Bug card updated." });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error modifying bug card {CardId} on board {BoardId}", request.CardId, request.BoardId);
+            return StatusCode(500, new { Success = false, Message = ex.Message });
+        }
+    }
+
+    /// <summary>
+    /// Get all bugs from the Bugs list in two sections: Open (not done) and Done.
+    /// GET /api/Boards/use/get-all-open-bugs?boardId=...
+    /// Returns { open: [ { title, priority, status }, ... ], done: [ ... ] }.
+    /// </summary>
+    [HttpGet("get-all-open-bugs")]
+    public async Task<ActionResult<BoardBugsResponse>> GetAllOpenBugs([FromQuery] string boardId)
+    {
+        if (string.IsNullOrWhiteSpace(boardId))
+            return BadRequest(new { Message = "boardId is required." });
+        try
+        {
+            var projectBoard = await _context.ProjectBoards.FindAsync(boardId.Trim());
+            if (projectBoard == null)
+                return NotFound(new { Message = $"Board {boardId} not found." });
+            var result = await _trelloService.GetBugsFromBoardAsync(boardId.Trim());
+            return Ok(result);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error getting bugs for board {BoardId}", boardId);
+            return StatusCode(500, new { Message = ex.Message });
+        }
+    }
+
+    /// <summary>
+    /// Get one bug by CardId. Uses boardId and cardId as query params.
+    /// GET /api/Boards/use/get-bug?boardId=...&cardId=...
+    /// Returns { Title, Description, Priority, Status }.
+    /// </summary>
+    [HttpGet("get-bug")]
+    public async Task<ActionResult<BugDetail>> GetBug([FromQuery] string boardId, [FromQuery] string cardId)
+    {
+        if (string.IsNullOrWhiteSpace(boardId))
+            return BadRequest(new { Message = "boardId is required." });
+        if (string.IsNullOrWhiteSpace(cardId))
+            return BadRequest(new { Message = "cardId is required." });
+        try
+        {
+            var projectBoard = await _context.ProjectBoards.FindAsync(boardId.Trim());
+            if (projectBoard == null)
+                return NotFound(new { Message = $"Board {boardId} not found." });
+            var bug = await _trelloService.GetBugDetailsByCardIdAsync(boardId.Trim(), cardId.Trim());
+            if (bug == null)
+                return NotFound(new { Message = $"Bug with CardId '{cardId}' not found on board." });
+            return Ok(bug);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error getting bug {CardId} on board {BoardId}", cardId, boardId);
+            return StatusCode(500, new { Message = ex.Message });
         }
     }
 
@@ -3707,6 +3904,198 @@ public class BoardsController : ControllerBase
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error getting User Stories list for Board {BoardId}", boardId);
+            return StatusCode(500, new { Success = false, Message = ex.Message });
+        }
+    }
+
+    /// <summary>
+    /// Get the single User Story card whose ModuleId custom field equals the given moduleId. No student/role lookup.
+    /// GET /api/Boards/use/stats/get-user-stories-by-moduleid?boardId=...&amp;moduleId=42
+    /// </summary>
+    [HttpGet("stats/get-user-stories-by-moduleid")]
+    public async Task<ActionResult<object>> GetUserStoriesByModuleId([FromQuery] string boardId, [FromQuery] int moduleId)
+    {
+        if (string.IsNullOrWhiteSpace(boardId))
+            return BadRequest(new { Success = false, Message = "boardId is required." });
+
+        try
+        {
+            var result = await _trelloService.GetUserStoryCardByModuleIdAsync(boardId.Trim(), moduleId.ToString());
+            if (result == null)
+                return StatusCode(500, new { Success = false, Message = "Failed to get User Story by ModuleId." });
+            return Ok(result);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error getting User Story by ModuleId for Board {BoardId}, ModuleId {ModuleId}", boardId, moduleId);
+            return StatusCode(500, new { Success = false, Message = ex.Message });
+        }
+    }
+
+    /// <summary>
+    /// Get Trello dashboard stats for a board: card/task/bug counts and per-team-member task totals.
+    /// GET /api/Boards/use/trello-dashboard-stats?boardId=...
+    /// </summary>
+    [HttpGet("trello-dashboard-stats")]
+    public async Task<ActionResult<object>> GetTrelloDashboardStats([FromQuery] string boardId)
+    {
+        if (string.IsNullOrWhiteSpace(boardId))
+            return BadRequest(new { Success = false, Message = "boardId is required." });
+        boardId = boardId.Trim();
+
+        try
+        {
+            var projectBoard = await _context.ProjectBoards
+                .Include(pb => pb.Project)
+                .FirstOrDefaultAsync(pb => pb.Id == boardId);
+            if (projectBoard == null)
+                return NotFound(new { Success = false, Message = $"Board with ID {boardId} not found." });
+
+            var studentsOnBoard = await _context.Students
+                .Include(s => s.StudentRoles)
+                .ThenInclude(sr => sr.Role)
+                .Where(s => s.BoardId == boardId && s.IsAvailable)
+                .ToListAsync();
+
+            int totalCardsFromTemplate = 0;
+            var roleToTotalChecklistCount = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            if (!string.IsNullOrWhiteSpace(projectBoard.Project?.TrelloBoardJson))
+            {
+                try
+                {
+                    var template = JsonSerializer.Deserialize<TrelloProjectCreationRequest>(projectBoard.Project.TrelloBoardJson);
+                    if (template?.SprintPlan?.Cards != null)
+                    {
+                        var templateCardsExclUserStories = template.SprintPlan.Cards
+                            .Where(c => !string.Equals(c.ListName, "User Stories", StringComparison.OrdinalIgnoreCase))
+                            .ToList();
+                        totalCardsFromTemplate = templateCardsExclUserStories.Count;
+                        foreach (var card in templateCardsExclUserStories)
+                        {
+                            var role = string.IsNullOrWhiteSpace(card.RoleName) ? "Team Member" : card.RoleName;
+                            var count = card.ChecklistItems?.Count ?? 0;
+                            if (!roleToTotalChecklistCount.ContainsKey(role))
+                                roleToTotalChecklistCount[role] = 0;
+                            roleToTotalChecklistCount[role] += count;
+                        }
+                    }
+                }
+                catch (JsonException) { /* ignore malformed template */ }
+            }
+
+            var dashboardData = await _trelloService.GetBoardDashboardDataAsync(boardId);
+            if (dashboardData == null)
+                return StatusCode(500, new { Success = false, Message = "Failed to load Trello board data." });
+
+            var now = DateTime.UtcNow;
+            var bugsListId = dashboardData.Lists
+                .FirstOrDefault(l => string.Equals(l.Name, "Bugs", StringComparison.OrdinalIgnoreCase))?.Id ?? "";
+
+            // Card is completed if: marked closed (archived), OR marked complete (dueComplete), OR all check items are done
+            static bool IsCardCompleted(TrelloDashboardCardInfo c)
+            {
+                if (c.Closed || c.DueComplete) return true;
+                var totalItems = c.Checklists.Sum(cl => cl.CheckItems.Count);
+                if (totalItems == 0) return false;
+                var completedItems = c.Checklists.Sum(cl =>
+                    cl.CheckItems.Count(ci => string.Equals(ci.State, "complete", StringComparison.OrdinalIgnoreCase)));
+                return completedItems == totalItems;
+            }
+
+            int completedCards = dashboardData.Cards.Count(IsCardCompleted);
+            int activeTasks = dashboardData.Cards.Sum(c => c.Checklists.Sum(cl => cl.CheckItems.Count));
+            int completedTasks = dashboardData.Cards.Sum(c =>
+                c.Checklists.Sum(cl => cl.CheckItems.Count(ci => string.Equals(ci.State, "complete", StringComparison.OrdinalIgnoreCase))));
+            int overdueTasks = dashboardData.Cards
+                .Where(c => c.Due.HasValue && c.Due.Value < now && !IsCardCompleted(c))
+                .Sum(c => c.Checklists.Sum(cl => cl.CheckItems.Count));
+            int overdueCards = dashboardData.Cards.Count(c => c.Due.HasValue && c.Due.Value < now && !IsCardCompleted(c));
+            int totalBugs;
+            int completedBugs;
+            if (string.IsNullOrEmpty(bugsListId))
+            {
+                totalBugs = 0;
+                completedBugs = 0;
+            }
+            else
+            {
+                var bugsListCards = await _trelloService.GetListCardsWithChecklistsAsync(bugsListId);
+                totalBugs = bugsListCards.Count;
+                completedBugs = bugsListCards.Count(IsCardCompleted);
+            }
+
+            static int TotalTasksForRole(string roleName, IReadOnlyDictionary<string, int> roleToTotal)
+            {
+                if (string.IsNullOrWhiteSpace(roleName)) return 0;
+                if (string.Equals(roleName, "Fullstack Developer", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(roleName, "Full Stack Developer", StringComparison.OrdinalIgnoreCase))
+                {
+                    var front = roleToTotal.TryGetValue("Frontend Developer", out var f) ? f : 0;
+                    var back = roleToTotal.TryGetValue("Backend Developer", out var b) ? b : 0;
+                    return front + back;
+                }
+                return roleToTotal.TryGetValue(roleName, out var n) ? n : 0;
+            }
+
+            // Role labels that identify cards belonging to this member (Full Stack = Frontend + Backend)
+            static IEnumerable<string> GetRoleLabelsForMember(string roleName)
+            {
+                if (string.IsNullOrWhiteSpace(roleName)) yield break;
+                if (string.Equals(roleName, "Fullstack Developer", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(roleName, "Full Stack Developer", StringComparison.OrdinalIgnoreCase))
+                {
+                    yield return "Frontend Developer";
+                    yield return "Backend Developer";
+                    yield break;
+                }
+                yield return roleName;
+            }
+
+            var teamMembers = new List<object>();
+            foreach (var student in studentsOnBoard)
+            {
+                var roleName = student.StudentRoles?
+                    .Where(sr => sr.IsActive && sr.Role != null)
+                    .Select(sr => sr.Role!.Name)
+                    .FirstOrDefault() ?? "Team Member";
+                var totalTasks = TotalTasksForRole(roleName, roleToTotalChecklistCount);
+                var memberRoleLabels = new HashSet<string>(GetRoleLabelsForMember(roleName), StringComparer.OrdinalIgnoreCase);
+                int tasksCompleted = 0;
+                foreach (var card in dashboardData.Cards)
+                {
+                    var cardLabels = card.LabelNames ?? new List<string>();
+                    if (!cardLabels.Any(l => memberRoleLabels.Contains(l))) continue;
+                    tasksCompleted += card.Checklists.Sum(cl =>
+                        cl.CheckItems.Count(ci => string.Equals(ci.State, "complete", StringComparison.OrdinalIgnoreCase)));
+                }
+                teamMembers.Add(new
+                {
+                    StudentId = student.Id,
+                    Email = student.Email,
+                    FullName = (student.FirstName + " " + student.LastName).Trim(),
+                    RoleName = roleName,
+                    TotalTasks = totalTasks,
+                    TasksCompleted = tasksCompleted
+                });
+            }
+
+            return Ok(new
+            {
+                Success = true,
+                CompletedCards = completedCards,
+                TotalCards = totalCardsFromTemplate,
+                ActiveTasks = activeTasks,
+                CompletedTasks = completedTasks,
+                OverdueTasks = overdueTasks,
+                OverdueCards = overdueCards,
+                TotalBugs = totalBugs,
+                CompletedBugs = completedBugs,
+                TeamMembers = teamMembers
+            });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error getting Trello dashboard stats for Board {BoardId}", boardId);
             return StatusCode(500, new { Success = false, Message = ex.Message });
         }
     }
@@ -7616,6 +8005,29 @@ public class SetAdminResponse
     public string Message { get; set; } = string.Empty;
     public string BoardId { get; set; } = string.Empty;
     public int StudentId { get; set; }
+}
+
+/// <summary>Request for POST /api/Boards/use/create-bug. Priority: 1=Low, 2=Medium, 3=High, 4=Critical (stored as integer in Trello).</summary>
+public class CreateBugRequest
+{
+    public string BoardId { get; set; } = string.Empty;
+    /// <summary>Student email of the bug creator (used for "created by [Name]" in the card title).</summary>
+    public string Creator { get; set; } = string.Empty;
+    public string Title { get; set; } = string.Empty;
+    public string? Description { get; set; }
+    /// <summary>1=Low, 2=Medium, 3=High, 4=Critical. Stored as integer in Trello custom field.</summary>
+    public int Priority { get; set; } = 1;
+}
+
+/// <summary>Request for POST /api/Boards/use/modify-bug. Priority: 1=Low, 2=Medium, 3=High, 4=Critical.</summary>
+public class ModifyBugRequest
+{
+    public string BoardId { get; set; } = string.Empty;
+    public string CardId { get; set; } = string.Empty;
+    public string? Comments { get; set; }
+    /// <summary>1=Low, 2=Medium, 3=High, 4=Critical. Stored as integer in Trello.</summary>
+    public int? Priority { get; set; }
+    public string? Status { get; set; }
 }
 
 /// <summary>
