@@ -173,6 +173,7 @@ public class BoardsController : ControllerBase
             // Validate project exists
             _logger.LogInformation("Validating project {ProjectId}", request.ProjectId);
             var project = await _context.Projects
+                .Include(p => p.Organization)
                 .FirstOrDefaultAsync(p => p.Id == request.ProjectId);
 
             if (project == null)
@@ -2325,7 +2326,7 @@ public class BoardsController : ControllerBase
                             {
                                 // Hardcoded rich frontend (React + Vite)
                                 frontendReadyForDeploy = await _gitHubService.CreateRichFrontendOnlyCommitAsync(
-                                    frontendOwner, frontendRepoNameFromUrl, project.Title, githubToken, webApiUrl);
+                                    frontendOwner, frontendRepoNameFromUrl, project.Title, githubToken, webApiUrl, project.Organization?.Logo);
                                 if (frontendReadyForDeploy)
                                     _logger.LogInformation("✅ [FRONTEND] Rich frontend (React+Vite) commit created successfully");
                                 else
@@ -2349,7 +2350,7 @@ public class BoardsController : ControllerBase
                             {
                                 // Vanilla flow: Create frontend-only commit (files at root, no workflows)
                                 frontendReadyForDeploy = await _gitHubService.CreateFrontendOnlyCommitAsync(
-                                    frontendOwner, frontendRepoNameFromUrl, project.Title, githubToken, webApiUrl);
+                                    frontendOwner, frontendRepoNameFromUrl, project.Title, githubToken, webApiUrl, project.Organization?.Logo);
                                 if (frontendReadyForDeploy)
                                     _logger.LogInformation("✅ [FRONTEND] Frontend-only commit created successfully");
                                 else

@@ -1,5 +1,6 @@
 using Google.Apis.Gmail.v1.Data;
 using Humanizer;
+using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Http.HttpResults;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Hosting;
@@ -34,9 +35,9 @@ public interface IGitHubService
     /// <summary>Resends collaborator invite: cancels any pending invite for the user then re-adds them so GitHub sends a new email.</summary>
     Task<ResendInvitationResult> ResendCollaboratorInvitationAsync(string owner, string repo, string collaboratorUsername, string accessToken);
     Task<bool> CreateInitialCommitAsync(string owner, string repositoryName, string projectTitle, string accessToken, string? databaseConnectionString = null, string? webApiUrl = null, string? swaggerUrl = null, string? programmingLanguage = null);
-    Task<bool> CreateFrontendOnlyCommitAsync(string owner, string repositoryName, string projectTitle, string accessToken, string? webApiUrl = null);
+    Task<bool> CreateFrontendOnlyCommitAsync(string owner, string repositoryName, string projectTitle, string accessToken, string? webApiUrl = null, string? organizationLogoUrl = null);
     /// <summary>Creates initial commit with hardcoded rich frontend (React + Vite). Use when GitHub:UseHardcodedFrontendTemplate is true.</summary>
-    Task<bool> CreateRichFrontendOnlyCommitAsync(string owner, string repositoryName, string projectTitle, string accessToken, string? webApiUrl = null);
+    Task<bool> CreateRichFrontendOnlyCommitAsync(string owner, string repositoryName, string projectTitle, string accessToken, string? webApiUrl = null, string? organizationLogoUrl = null);
     Task<bool> CreateBackendOnlyCommitAsync(string owner, string repositoryName, string projectTitle, string accessToken, string programmingLanguage, string? databaseConnectionString = null, string? webApiUrl = null, string? swaggerUrl = null);
     Task<bool> CreateInitialReadmeAsync(string owner, string repositoryName, string projectTitle, string accessToken, bool isFrontend = false, string? webApiUrl = null, string? databaseConnectionString = null, string? swaggerUrl = null);
     /// <summary>Updates backend README.md with full Web API and Swagger URLs (e.g. after Railway domain is created).</summary>
@@ -86,14 +87,16 @@ public class GitHubService : IGitHubService
     private readonly HttpClient _httpClient;
     private readonly ILogger<GitHubService> _logger;
     private readonly IConfiguration _configuration;
+    private readonly IWebHostEnvironment _env;
     private const string GitHubApiBaseUrl = "https://api.github.com";
     private const string GitHubTokenUrl = "https://github.com/login/oauth/access_token";
 
-    public GitHubService(HttpClient httpClient, ILogger<GitHubService> logger, IConfiguration configuration)
+    public GitHubService(HttpClient httpClient, ILogger<GitHubService> logger, IConfiguration configuration, IWebHostEnvironment env)
     {
         _httpClient = httpClient;
         _logger = logger;
         _configuration = configuration;
+        _env = env;
         
         // GitHub API requires a User-Agent header
         _httpClient.DefaultRequestHeaders.Add("User-Agent", "StrAppers-API");
@@ -853,8 +856,8 @@ public class GitHubService : IGitHubService
             // Generate the GitHub Pages URL
             var pagesUrl = GetGitHubPagesUrl(repositoryName);
 
-            // Generate the index.html content with project title
-            var indexHtmlContent = GenerateDefaultIndexHtml(projectTitle, pagesUrl);
+            // Generate the index.html content with project title (no org logo in this code path)
+            var indexHtmlContent = GenerateDefaultIndexHtml(projectTitle, pagesUrl, null);
 
             // Get the default branch (usually 'main')
             var branchInfo = await GetDefaultBranchAsync(owner, repositoryName, accessToken);
@@ -1100,7 +1103,7 @@ public class GitHubService : IGitHubService
     /// <summary>
     /// Creates initial commit with frontend files only (at root level, no workflows)
     /// </summary>
-    public async Task<bool> CreateFrontendOnlyCommitAsync(string owner, string repositoryName, string projectTitle, string accessToken, string? webApiUrl = null)
+    public async Task<bool> CreateFrontendOnlyCommitAsync(string owner, string repositoryName, string projectTitle, string accessToken, string? webApiUrl = null, string? organizationLogoUrl = null)
     {
         try
         {
@@ -1110,8 +1113,8 @@ public class GitHubService : IGitHubService
             // Frontend repos use boardId directly (no prefix), so use repo name as-is
             var pagesUrl = GetGitHubPagesUrl(owner, repositoryName);
 
-            // Generate the index.html content with project title
-            var indexHtmlContent = GenerateDefaultIndexHtml(projectTitle, pagesUrl);
+            // Generate the index.html content with project title and optional org logo
+            var indexHtmlContent = GenerateDefaultIndexHtml(projectTitle, pagesUrl, organizationLogoUrl);
 
             // Get the default branch (usually 'main')
             var branchInfo = await GetDefaultBranchAsync(owner, repositoryName, accessToken);
@@ -1232,13 +1235,13 @@ public class GitHubService : IGitHubService
     /// <summary>
     /// Creates initial commit with hardcoded rich frontend (React + Vite). Used when GitHub:UseHardcodedFrontendTemplate is true.
     /// </summary>
-    public async Task<bool> CreateRichFrontendOnlyCommitAsync(string owner, string repositoryName, string projectTitle, string accessToken, string? webApiUrl = null)
+    public async Task<bool> CreateRichFrontendOnlyCommitAsync(string owner, string repositoryName, string projectTitle, string accessToken, string? webApiUrl = null, string? organizationLogoUrl = null)
     {
         try
         {
             _logger.LogInformation("[FRONTEND] Creating rich frontend (React+Vite) commit for repository {Owner}/{Repository}", owner, repositoryName);
             var pagesUrl = GetGitHubPagesUrl(owner, repositoryName);
-            var fileContents = GenerateRichFrontendFiles(projectTitle, pagesUrl, webApiUrl, repositoryName);
+            var fileContents = GenerateRichFrontendFiles(projectTitle, pagesUrl, webApiUrl, repositoryName, organizationLogoUrl);
             var branchInfo = await GetDefaultBranchAsync(owner, repositoryName, accessToken);
             if (branchInfo == null)
             {
@@ -3848,261 +3851,168 @@ public class GitHubService : IGitHubService
         return readme;
     }
 
-    private string GenerateDefaultIndexHtml(string projectTitle, string pagesUrl)
+    private string GetMadeWithSkillInHtml()
     {
+        try
+        {
+            var path = Path.Combine(_env.ContentRootPath, "Assets", "made-with-skill-in.png");
+            if (System.IO.File.Exists(path))
+            {
+                var bytes = System.IO.File.ReadAllBytes(path);
+                var b64 = Convert.ToBase64String(bytes);
+                return $"<img src=\"data:image/png;base64,{b64}\" alt=\"Made with Skill-in\" class=\"made-with-skill-in\" />";
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Could not load Made with Skill-in image from Assets");
+        }
+        return "<p>This page will be automatically replaced when you push your project files.</p><br><strong>Happy coding! 🎉</strong>";
+    }
+
+    private string GenerateDefaultIndexHtml(string projectTitle, string pagesUrl, string? organizationLogoUrl)
+    {
+        var logoHtml = !string.IsNullOrWhiteSpace(organizationLogoUrl)
+            ? $"<img src=\"{organizationLogoUrl.Replace("\"", "&quot;")}\" alt=\"Organization\" class=\"project-logo-img\" />"
+            : "<span class=\"project-logo-placeholder\">◆</span>";
+        var madeWithHtml = GetMadeWithSkillInHtml();
         return $@"<!DOCTYPE html>
 <html lang=""en"">
 <head>
     <meta charset=""UTF-8"">
     <meta name=""viewport"" content=""width=device-width, initial-scale=1.0"">
     <title>{projectTitle} - Project Page</title>
+    <link rel=""preconnect"" href=""https://fonts.googleapis.com"">
+    <link rel=""preconnect"" href=""https://fonts.gstatic.com"" crossorigin>
+    <link href=""https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;700&family=Noto+Sans:wght@400;500;700&display=swap"" rel=""stylesheet"">
     <style>
-        * {{
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }}
-        
+        * {{ margin: 0; padding: 0; box-sizing: border-box; }}
         body {{
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            font-family: 'Noto Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+            background: #EDEEF3;
             min-height: 100vh;
             display: flex;
+            flex-direction: column;
             align-items: center;
-            justify-content: center;
-            padding: 20px;
+            padding: 24px;
+            color: #292C33;
         }}
-        
-        .container {{
-            max-width: 800px;
-            background: white;
-            border-radius: 20px;
-            padding: 60px 40px;
-            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
-            text-align: center;
-            animation: fadeIn 0.8s ease-in;
+        .page {{ display: flex; flex-direction: column; align-items: center; gap: 32px; max-width: 1152px; width: 100%; }}
+        .board-header {{ display: flex; flex-direction: column; align-items: center; gap: 24px; width: 100%; }}
+        .project-logo {{
+            display: flex; justify-content: center; align-items: center;
+            width: 80px; height: 60px; background: transparent;
+            color: #292C33; font-size: 24px; overflow: hidden;
         }}
-        
-        @keyframes fadeIn {{
-            from {{ opacity: 0; transform: translateY(20px); }}
-            to {{ opacity: 1; transform: translateY(0); }}
+        .project-logo img {{ width: 100%; height: 100%; object-fit: contain; }}
+        .project-logo-placeholder {{ color: #292C33; }}
+        .board-header h1 {{
+            font-family: 'Fira Code', monospace; font-weight: 400; font-size: 32px; line-height: 36px;
+            text-align: center; color: #292C33;
         }}
-        
-        .icon {{
-            width: 80px;
-            height: 80px;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            border-radius: 50%;
-            margin: 0 auto 30px;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            font-size: 40px;
+        .welcome {{ font-family: 'Noto Sans', sans-serif; font-weight: 700; font-size: 16px; line-height: 22px; text-align: center; color: #292C33; }}
+        .description {{ font-family: 'Noto Sans', sans-serif; font-size: 16px; line-height: 22px; text-align: center; color: #292C33; max-width: 666px; }}
+        .panel-label {{ font-family: 'Fira Code', monospace; font-weight: 700; font-size: 20px; line-height: 24px; color: #292C33; text-align: center; width: 100%; margin-bottom: 2px; display: block; }}
+        .panel {{
+            width: 100%; max-width: 1152px; background: #fff; border-radius: 8px; padding: 24px;
+            box-shadow: 0 2px 15px rgba(0,0,0,0.1); border: 1px solid #DADEE6;
         }}
-        
-        h1 {{
-            color: #2d3748;
-            font-size: 2.5rem;
-            margin-bottom: 20px;
-            font-weight: 700;
+        .frontend-panel-text {{ color: #6b7280; font-size: 16px; line-height: 22px; margin-bottom: 16px; text-align: center; }}
+        .frontend-buttons {{ display: flex; flex-wrap: wrap; gap: 12px; }}
+        .backend-intro {{ font-family: 'Noto Sans', sans-serif; font-size: 16px; line-height: 22px; color: #6b7280; margin-bottom: 16px; text-align: center; }}
+        .api-table {{ width: 100%; border-collapse: collapse; background: #fff; border-radius: 8px; overflow: hidden; }}
+        .api-table th {{ padding: 0.75rem; text-align: left; border-bottom: 2px solid #e2e8f0; background: #f1f5f9; font-family: 'Noto Sans', sans-serif; font-size: 16px; color: #292C33; }}
+        .api-table td {{ padding: 0.75rem; border-bottom: 1px solid #e2e8f0; font-family: 'Noto Sans', sans-serif; font-size: 16px; color: #000; }}
+        #response {{ margin: 0; padding: 0; min-height: 0; display: inline; }}
+        .btn-test-api {{
+            display: inline-flex; align-items: center; justify-content: center;
+            padding: 6px 16px; min-height: 34px; background: #3D76FF; color: #FFFFFF;
+            font-family: 'Noto Sans', sans-serif; font-weight: 400; font-size: 16px; line-height: 22px;
+            border: none; border-radius: 20px; cursor: pointer;
         }}
-        
-        .subtitle {{
-            color: #667eea;
-            font-size: 1.2rem;
-            margin-bottom: 30px;
-            font-weight: 600;
-        }}
-        
-        p {{
-            color: #4a5568;
-            line-height: 1.8;
-            margin-bottom: 20px;
-            font-size: 1.1rem;
-        }}
-        
-        .highlight {{
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
-            background-clip: text;
-            font-weight: 600;
-        }}
-        
-        .info-box {{
-            background: #f7fafc;
-            border-left: 4px solid #667eea;
-            padding: 20px;
-            margin: 30px 0;
-            text-align: left;
-            border-radius: 8px;
-        }}
-        
-        .info-box h3 {{
-            color: #2d3748;
-            margin-bottom: 15px;
-            font-size: 1.2rem;
-        }}
-        
-        .info-box ul {{
-            list-style: none;
-            padding-left: 0;
-        }}
-        
-        .info-box li {{
-            color: #4a5568;
-            margin-bottom: 10px;
-            padding-left: 30px;
-            position: relative;
-        }}
-        
-        .info-box li:before {{
-            content: ""✓"";
-            position: absolute;
-            left: 0;
-            color: #667eea;
-            font-weight: bold;
-            font-size: 1.2rem;
-        }}
-        
-        .footer {{
-            margin-top: 40px;
-            padding-top: 30px;
-            border-top: 2px solid #e2e8f0;
-            color: #718096;
-            font-size: 0.9rem;
-        }}
-        
-        .url-box {{
-            display: inline-block;
-            background: #edf2f7;
-            padding: 12px 20px;
-            border-radius: 8px;
-            font-family: 'Courier New', monospace;
-            color: #667eea;
-            margin: 10px 0;
-            font-weight: 600;
-            word-break: break-all;
-        }}
-        
-        @media (max-width: 600px) {{
-            .container {{
-                padding: 40px 20px;
-            }}
-            
-            h1 {{
-                font-size: 2rem;
-            }}
-            
-            .subtitle {{
-                font-size: 1rem;
-            }}
-        }}
+        .btn-test-api:disabled {{ background: #CED3DE; color: #000000; cursor: not-allowed; }}
+        .api-result.success {{ color: #08957E; font-weight: 700; font-size: 16px; line-height: 22px; background: none; border: none; }}
+        #response.api-result.success {{ background: none; border: none; }}
+        .footer {{ margin-top: 24px; padding-top: 20px; border-top: 1px solid #DADEE6; color: #292C33; font-size: 14px; text-align: left; }}
+        .made-with-skill-in {{ display: block; margin: 0; max-height: 20px; height: auto; }}
+        @media (max-width: 600px) {{ .board-header h1 {{ font-size: 24px; }} }}
     </style>
 </head>
 <body>
-    <div class=""container"">
-        <div class=""icon"">🚀</div>
-        
-        <h1>{projectTitle}</h1>
-        <p class=""subtitle"">Your Project Landing Page</p>
-        
-        <p>
-            Welcome to your project's <span class=""highlight"">default landing page</span>! 
-            This is the beginning of something amazing.
-        </p>
-        
-        <p>
-            This page is hosted on <span class=""highlight"">GitHub Pages</span> and is ready to showcase 
-            your project to the world. As you develop your prototype, this page will evolve into 
-            your final product presentation.
-        </p>
-        
-        <div class=""info-box"">
-            <h3>📚 About This Repository</h3>
-            <ul>
-                <li>Use this repository to collaborate with your team</li>
-                <li>Commit your code and track changes using Git</li>
-                <li>Deploy your final prototype automatically with GitHub Pages</li>
-                <li>Share your progress with stakeholders</li>
-            </ul>
-        </div>
-        
-        <p>
-            Your project is accessible at:<br>
-            <span class=""url-box"">{pagesUrl}</span>
-        </p>
-        
-        <div class=""info-box"">
-            <h3>🎯 Next Steps</h3>
-            <ul>
-                <li>Clone this repository to your local machine</li>
-                <li>Start building your prototype</li>
-                <li>Push your changes to see them live instantly</li>
-                <li>Replace this page with your amazing end product!</li>
-            </ul>
+    <div class=""page"">
+        <header class=""board-header"">
+            <div class=""project-logo"">{logoHtml}</div>
+            <h1>{projectTitle}</h1>
+            <p class=""welcome"">Welcome to your project's default landing page!</p>
+            <p class=""description"">This page is hosted on GitHub Pages and is ready to showcase your project to the world. As you develop your prototype, this page will evolve into your final product presentation.</p>
+        </header>
+
+        <h2 class=""panel-label"">Frontend</h2>
+        <div class=""panel"">
+            <p class=""frontend-panel-text"">As you progress through the project, add buttons to this panel. Each button should link to one of the project's modules.<br><br>Later in the project, you'll be asked to replace this default landing page with the final product's landing page<br><br>(don't worry 😊 we'll guide you when it's time.)</p>
+            <div class=""frontend-buttons""></div>
         </div>
 
-        <table class=""api-table"" style=""width:100%; border-collapse: collapse; margin: 1rem 0; background: #fff; border-radius: 8px; overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,0.1);"">
+        <h2 class=""panel-label"">Backend</h2>
+        <div class=""panel"">
+            <p class=""backend-intro"">The following APIs are pre-configured, free to use, and already included in your default repository,<br><br>so you can start using them right away.</p>
+            <table class=""api-table"">
             <thead>
-                <tr style=""background: #f1f5f9;"">
-                    <th style=""padding: 0.75rem; text-align: left; border-bottom: 2px solid #e2e8f0;"">API Name</th>
-                    <th style=""padding: 0.75rem; text-align: left; border-bottom: 2px solid #e2e8f0;"">API Description</th>
-                    <th style=""padding: 0.75rem; text-align: center; border-bottom: 2px solid #e2e8f0;"">Test</th>
-                    <th style=""padding: 0.75rem; text-align: left; border-bottom: 2px solid #e2e8f0;"">Response</th>
+                <tr>
+                    <th>API Name</th>
+                    <th>API Description</th>
+                    <th style=""text-align: center;"">Test</th>
+                    <th>Response</th>
                 </tr>
             </thead>
             <tbody>
-                <tr style=""border-bottom: 1px solid #e2e8f0;"">
-                    <td style=""padding: 0.75rem;""><strong>Backend API</strong></td>
-                    <td style=""padding: 0.75rem;"">REST API and database connectivity (TestProjects CRUD).</td>
-                    <td style=""padding: 0.75rem; text-align: center;""><button id=""testButton"" type=""button"" onclick=""testBackend()"" style=""background: #2563eb; color: white; border: none; padding: 0.4rem 0.8rem; border-radius: 6px; cursor: pointer;"">Test API</button></td>
-                    <td style=""padding: 0.75rem; min-width: 120px;""><span id=""response""></span></td>
+                <tr>
+                    <td><strong>Database Connectivity</strong></td>
+                    <td>REST API and database connectivity (TestProjects CRUD).</td>
+                    <td style=""text-align: center;""><button id=""testButton"" type=""button"" onclick=""testBackend()"" class=""btn-test-api"">Test API</button></td>
+                    <td style=""min-width: 120px;""><span id=""response""></span></td>
                 </tr>
-                <tr style=""border-bottom: 1px solid #e2e8f0;"">
-                    <td style=""padding: 0.75rem;""><strong>Google Geocoding API</strong></td>
-                    <td style=""padding: 0.75rem;"">Convert addresses to coordinates (and reverse).</td>
-                    <td style=""padding: 0.75rem; text-align: center;""><button type=""button"" onclick=""testGoogleApi('geocoding')"">Test API</button></td>
-                    <td style=""padding: 0.75rem; min-width: 120px;""><span id=""geocodingResponse"" class=""api-result""></span></td>
+                <tr>
+                    <td><strong>Google Geocoding API</strong></td>
+                    <td>Convert addresses to coordinates (and reverse).</td>
+                    <td style=""text-align: center;""><button type=""button"" onclick=""testGoogleApi('geocoding')"" class=""btn-test-api"">Test API</button></td>
+                    <td style=""min-width: 120px;""><span id=""geocodingResponse"" class=""api-result""></span></td>
                 </tr>
-                <tr style=""border-bottom: 1px solid #e2e8f0;"">
-                    <td style=""padding: 0.75rem;""><strong>Google Maps JavaScript API</strong></td>
-                    <td style=""padding: 0.75rem;"">Display maps in the browser. Test validates Maps JavaScript API.</td>
-                    <td style=""padding: 0.75rem; text-align: center;""><button type=""button"" onclick=""testGoogleApi('maps')"">Test API</button></td>
-                    <td style=""padding: 0.75rem; min-width: 120px;""><span id=""mapsResponse"" class=""api-result""></span></td>
+                <tr>
+                    <td><strong>Google Maps JavaScript API</strong></td>
+                    <td>Display maps in the browser. Test validates Maps JavaScript API.</td>
+                    <td style=""text-align: center;""><button type=""button"" onclick=""testGoogleApi('maps')"" class=""btn-test-api"">Test API</button></td>
+                    <td style=""min-width: 120px;""><span id=""mapsResponse"" class=""api-result""></span></td>
                 </tr>
-                <tr style=""border-bottom: 1px solid #e2e8f0;"">
-                    <td style=""padding: 0.75rem;""><strong>Google Places API (New)</strong></td>
-                    <td style=""padding: 0.75rem;"">Search places and get place details.</td>
-                    <td style=""padding: 0.75rem; text-align: center;""><button type=""button"" onclick=""testGoogleApi('places')"">Test API</button></td>
-                    <td style=""padding: 0.75rem; min-width: 120px;""><span id=""placesResponse"" class=""api-result""></span></td>
+                <tr>
+                    <td><strong>Google Places API (New)</strong></td>
+                    <td>Search places and get place details.</td>
+                    <td style=""text-align: center;""><button type=""button"" onclick=""testGoogleApi('places')"" class=""btn-test-api"">Test API</button></td>
+                    <td style=""min-width: 120px;""><span id=""placesResponse"" class=""api-result""></span></td>
                 </tr>
-                <tr style=""border-bottom: 1px solid #e2e8f0;"">
-                    <td style=""padding: 0.75rem;""><strong>Google Directions API</strong></td>
-                    <td style=""padding: 0.75rem;"">Routes and directions between addresses.</td>
-                    <td style=""padding: 0.75rem; text-align: center;""><button type=""button"" onclick=""testGoogleApi('directions')"">Test API</button></td>
-                    <td style=""padding: 0.75rem; min-width: 120px;""><span id=""directionsResponse"" class=""api-result""></span></td>
+                <tr>
+                    <td><strong>Google Directions API</strong></td>
+                    <td>Routes and directions between addresses.</td>
+                    <td style=""text-align: center;""><button type=""button"" onclick=""testGoogleApi('directions')"" class=""btn-test-api"">Test API</button></td>
+                    <td style=""min-width: 120px;""><span id=""directionsResponse"" class=""api-result""></span></td>
                 </tr>
-                <tr style=""border-bottom: 1px solid #e2e8f0;"">
-                    <td style=""padding: 0.75rem;""><strong>Google Gemini API</strong></td>
-                    <td style=""padding: 0.75rem;"">Generative AI (LLM).</td>
-                    <td style=""padding: 0.75rem; text-align: center;""><button type=""button"" onclick=""testGoogleApi('gemini')"">Test API</button></td>
-                    <td style=""padding: 0.75rem; min-width: 120px;""><span id=""geminiResponse"" class=""api-result""></span></td>
+                <tr>
+                    <td><strong>Google Gemini API</strong></td>
+                    <td>Generative AI (LLM).</td>
+                    <td style=""text-align: center;""><button type=""button"" onclick=""testGoogleApi('gemini')"" class=""btn-test-api"">Test API</button></td>
+                    <td style=""min-width: 120px;""><span id=""geminiResponse"" class=""api-result""></span></td>
                 </tr>
-                <tr style=""border-bottom: 1px solid #e2e8f0;"">
-                    <td style=""padding: 0.75rem;""><strong>Google Cloud Speech-to-Text API</strong></td>
-                    <td style=""padding: 0.75rem;"">Speech recognition (audio to text).</td>
-                    <td style=""padding: 0.75rem; text-align: center;""><button type=""button"" onclick=""testGoogleApi('speech-to-text')"">Test API</button></td>
-                    <td style=""padding: 0.75rem; min-width: 120px;""><span id=""speechResponse"" class=""api-result""></span></td>
+                <tr>
+                    <td><strong>Google Cloud Speech-to-Text API</strong></td>
+                    <td>Speech recognition (audio to text).</td>
+                    <td style=""text-align: center;""><button type=""button"" onclick=""testGoogleApi('speech-to-text')"" class=""btn-test-api"">Test API</button></td>
+                    <td style=""min-width: 120px;""><span id=""speechResponse"" class=""api-result""></span></td>
                 </tr>
             </tbody>
-        </table>
-
+            </table>
+        </div>
         <div class=""footer"">
-            <p>
-                This page will be automatically replaced when you push your project files.<br>
-                <strong>Happy coding! 🎉</strong>
-            </p>
+            {madeWithHtml}
         </div>
     </div>
     <script>
@@ -4298,9 +4208,8 @@ public class GitHubService : IGitHubService
                 console.log('Response status:', response.status, response.statusText);
                 
                 if (response.ok) {{
-                    const data = await response.json();
-                    responseDiv.className = 'success';
-                    responseDiv.innerHTML = '<strong>✅ Success!</strong><br>Backend API is working. Received ' + data.length + ' test projects.';
+                    responseDiv.className = 'api-result success';
+                    responseDiv.innerHTML = '<span style=""color: #08957E; font-weight: 700;"">Successful</span>';
                 }} else {{
                     // HTTP error response
                     let errorText = '';
@@ -4356,7 +4265,7 @@ public class GitHubService : IGitHubService
                 const data = await res.json();
                 if (data.status === 'ok') {{
                     div.className = 'api-result success';
-                    div.innerHTML = '<span style=""color: green; font-weight: bold;"">Successful</span>';
+                    div.innerHTML = '<span style=""color: #08957E; font-weight: 700;"">Successful</span>';
                 }} else {{
                     div.className = 'api-result error';
                     div.innerHTML = '<span class=""error"">' + (data.message || data.status || 'Failed') + '</span>';
@@ -11002,7 +10911,7 @@ jobs:
     /// <summary>
     /// Generates file contents for hardcoded rich frontend (React + Vite). Config uses GenerateConfigJs.
     /// </summary>
-    private Dictionary<string, string> GenerateRichFrontendFiles(string projectTitle, string pagesUrl, string? webApiUrl, string repositoryName)
+    private Dictionary<string, string> GenerateRichFrontendFiles(string projectTitle, string pagesUrl, string? webApiUrl, string repositoryName, string? organizationLogoUrl = null)
     {
         var mentorApiBaseUrl = _configuration["ApiBaseUrl"];
         _logger.LogInformation("[FRONTEND] Binding API_URL for config.js: {ApiUrl} (empty={Empty})", 
@@ -11081,9 +10990,14 @@ export default defineConfig({{
 node_modules
 ";
 
+        var projectLogoHtml = !string.IsNullOrWhiteSpace(organizationLogoUrl)
+            ? $"<img src=\"{organizationLogoUrl.Replace("\"", "&quot;")}\" alt=\"Organization\" class=\"project-logo-img\" />"
+            : "<span class=\"project-logo-placeholder\">◆</span>";
         files["index.html"] = GetRichFrontendIndexHtmlTemplate()
             .Replace("{{PROJECT_TITLE}}", projectTitle)
-            .Replace("{{PAGES_URL}}", pagesUrl);
+            .Replace("{{PAGES_URL}}", pagesUrl)
+            .Replace("{{PROJECT_LOGO_HTML}}", projectLogoHtml)
+            .Replace("{{MADE_WITH_SKILLIN}}", GetMadeWithSkillInHtml());
         files["public/foundations.css"] = GenerateFoundationsCss();
         files["public/style.css"] = GenerateStyleCss();
 
@@ -11508,17 +11422,17 @@ button:disabled {
 }
 
 #response {
-    margin-top: 20px;
-    padding: 15px;
-    border-radius: 5px;
-    display: none;
+    margin: 0;
+    padding: 0;
+    display: inline;
 }
 
 #response.success {
-    background-color: #d4edda;
-    border: 1px solid #c3e6cb;
-    color: #155724;
     display: block;
+    color: #08957E;
+    font-weight: 700;
+    background: none;
+    border: none;
 }
 
 #response.error {
@@ -11596,254 +11510,199 @@ button:disabled {
     <meta charset=""UTF-8"">
     <meta name=""viewport"" content=""width=device-width, initial-scale=1.0"">
     <title>{{PROJECT_TITLE}} - Project Page</title>
+    <link rel=""preconnect"" href=""https://fonts.googleapis.com"">
+    <link rel=""preconnect"" href=""https://fonts.gstatic.com"" crossorigin>
+    <link href=""https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;700&family=Noto+Sans:wght@400;500;700&display=swap"" rel=""stylesheet"">
     <link rel=""stylesheet"" href=""foundations.css"">
     <style>
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }
-        
+        * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
-            display: flex;
-            align-items: center;
-            justify-content: center;
+            font-family: 'Noto Sans', var(--font-family-sans), sans-serif;
+            background: #EDEEF3;
             min-height: 100vh;
-            padding: var(--space-5);
-            font-family: var(--font-family-sans);
-            background: var(--gradient-primary);
-        }
-        
-        .container {
-            max-width: var(--container-narrow);
-            padding: var(--space-15) var(--space-10);
-            border-radius: var(--radius-lg);
-            background: var(--color-surface);
-            box-shadow: var(--shadow-lg);
-            text-align: center;
-            animation: fadeIn 0.8s ease-in;
-        }
-        
-        @keyframes fadeIn {
-            from { opacity: 0; transform: translateY(var(--space-5)); }
-            to { opacity: 1; transform: translateY(0); }
-        }
-        
-        .icon {
             display: flex;
+            flex-direction: column;
             align-items: center;
+            padding: 24px;
+            color: #292C33;
+        }
+        .page {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 32px;
+            max-width: 1152px;
+            width: 100%;
+        }
+        .board-header {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 24px;
+            width: 100%;
+        }
+        .project-logo {
+            display: flex;
             justify-content: center;
-            width: var(--space-20);
-            height: var(--space-20);
-            margin: 0 auto var(--space-8);
-            border-radius: var(--radius-full);
-            background: var(--gradient-primary);
-            font-size: var(--text-5xl);
+            align-items: center;
+            width: 80px;
+            height: 60px;
+            background: transparent;
+            color: #292C33;
+            font-size: 24px;
+            overflow: hidden;
         }
-        
-        h1 {
-            margin-bottom: var(--space-5);
-            color: var(--color-neutral-700);
-            font-size: var(--text-4xl);
-            font-weight: var(--font-bold);
+        .project-logo img { width: 100%; height: 100%; object-fit: contain; }
+        .project-logo-placeholder { color: #292C33; }
+        .board-header h1 {
+            font-family: 'Fira Code', monospace;
+            font-weight: 400;
+            font-size: 32px;
+            line-height: 36px;
+            text-align: center;
+            color: #292C33;
         }
-        
-        .subtitle {
-            color: var(--color-primary);
-            font-size: var(--text-xl);
-            margin-bottom: var(--space-8);
-            font-weight: var(--font-semibold);
+        .welcome {
+            font-family: 'Noto Sans', sans-serif;
+            font-weight: 700;
+            font-size: 16px;
+            line-height: 22px;
+            text-align: center;
+            color: #292C33;
         }
-        
-        p {
-            color: var(--color-text-muted);
-            line-height: var(--leading-relaxed);
-            margin-bottom: var(--space-5);
-            font-size: var(--text-lg);
+        .description {
+            font-family: 'Noto Sans', sans-serif;
+            font-size: 16px;
+            line-height: 22px;
+            text-align: center;
+            color: #292C33;
+            max-width: 666px;
         }
-        
-        .highlight {
-            background: var(--gradient-primary);
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
-            background-clip: text;
-            font-weight: var(--font-semibold);
+        .panel-label {
+            font-family: 'Fira Code', monospace;
+            font-weight: 700;
+            font-size: 20px;
+            line-height: 24px;
+            color: #292C33;
+            text-align: center;
+            width: 100%;
+            margin-bottom: 2px;
+            display: block;
         }
-        
-        .info-box {
-            margin: var(--space-8) 0;
-            padding: var(--space-5);
-            border-left: var(--border-width-accent) solid var(--color-primary);
-            border-radius: var(--radius-md);
-            background: var(--color-surface-muted);
+        .panel {
+            width: 100%;
+            max-width: 1152px;
+            background: #fff;
+            border-radius: 8px;
+            padding: 24px;
+            box-shadow: 0 2px 15px rgba(0,0,0,0.1);
+            border: 1px solid #DADEE6;
+        }
+        .frontend-panel-text { color: #6b7280; font-size: 16px; line-height: 22px; margin-bottom: 16px; text-align: center; }
+        .frontend-buttons { display: flex; flex-wrap: wrap; gap: 12px; }
+        .backend-intro { font-family: 'Noto Sans', sans-serif; font-size: 16px; line-height: 22px; color: #6b7280; margin-bottom: 16px; text-align: center; }
+        .api-table { width: 100%; border-collapse: collapse; background: #fff; border-radius: 8px; overflow: hidden; }
+        .api-table th { padding: 0.75rem; text-align: left; border-bottom: 2px solid #e2e8f0; background: #f1f5f9; font-family: 'Noto Sans', sans-serif; font-size: 16px; color: #292C33; }
+        .api-table td { padding: 0.75rem; border-bottom: 1px solid #e2e8f0; font-family: 'Noto Sans', sans-serif; font-size: 16px; color: #000; }
+        #response { margin: 0; padding: 0; min-height: 0; display: inline; }
+        .btn-test-api {
+            display: inline-flex; align-items: center; justify-content: center;
+            padding: 6px 16px; min-height: 34px; background: #3D76FF; color: #FFFFFF;
+            font-family: 'Noto Sans', sans-serif; font-weight: 400; font-size: 16px; line-height: 22px;
+            border: none; border-radius: 20px; cursor: pointer;
+        }
+        .btn-test-api:disabled { background: #CED3DE; color: #000000; cursor: not-allowed; }
+        .api-result.success { color: #08957E; font-weight: 700; font-size: 16px; line-height: 22px; background: none; border: none; }
+        #response.api-result.success { background: none; border: none; }
+        .footer {
+            margin-top: 24px;
+            padding-top: 20px;
+            border-top: 1px solid #DADEE6;
+            color: #292C33;
+            font-size: 14px;
             text-align: left;
         }
-        
-        .info-box h3 {
-            margin-bottom: var(--space-4);
-            color: var(--color-neutral-700);
-            font-size: var(--text-xl);
-        }
-        
-        .info-box ul {
-            padding-left: var(--space-0);
-            list-style: none;
-        }
-        
-        .info-box li {
-            position: relative;
-            margin-bottom: var(--space-2);
-            padding-left: var(--space-8);
-            color: var(--color-text-muted);
-        }
-        
-        .info-box li:before {
-            content: ""✓"";
-            position: absolute;
-            left: 0;
-            color: var(--color-primary);
-            font-size: var(--text-xl);
-            font-weight: var(--font-bold);
-        }
-        
-        .footer {
-            margin-top: var(--space-10);
-            padding-top: var(--space-8);
-            border-top: var(--border-width-medium) solid var(--color-border);
-            color: var(--color-text-subtle);
-            font-size: var(--text-sm);
-        }
-        
-        .url-box {
-            display: inline-block;
-            margin: var(--space-2) 0;
-            padding: var(--space-3) var(--space-5);
-            border-radius: var(--radius-md);
-            background: var(--color-neutral-100);
-            font-family: var(--font-family-mono);
-            font-weight: var(--font-semibold);
-            color: var(--color-primary);
-            word-break: break-all;
-        }
-        
+        .made-with-skill-in { display: block; margin: 0; max-height: 20px; height: auto; }
         @media (max-width: 600px) {
-            .container {
-                padding: var(--space-10) var(--space-5);
-            }
-            
-            h1 {
-                font-size: var(--text-3xl);
-            }
-            
-            .subtitle {
-                font-size: var(--text-base);
-            }
+            .board-header h1 { font-size: 24px; }
         }
     </style>
 </head>
 <body>
-    <div class=""container"">
-        <div class=""icon"">🚀</div>
-        
-        <h1>{{PROJECT_TITLE}}</h1>
-        <p class=""subtitle"">Your Project Landing Page</p>
-        
-        <p>
-            Welcome to your project's <span class=""highlight"">default landing page</span>! 
-            This is the beginning of something amazing.
-        </p>
-        
-        <p>
-            This page is hosted on <span class=""highlight"">GitHub Pages</span> and is ready to showcase 
-            your project to the world. As you develop your prototype, this page will evolve into 
-            your final product presentation.
-        </p>
-        
-        <div class=""info-box"">
-            <h3>📚 About This Repository</h3>
-            <ul>
-                <li>Use this repository to collaborate with your team</li>
-                <li>Commit your code and track changes using Git</li>
-                <li>Deploy your final prototype automatically with GitHub Pages</li>
-                <li>Share your progress with stakeholders</li>
-            </ul>
-        </div>
-        
-        <p>
-            Your project is accessible at:<br>
-            <span class=""url-box"">{{PAGES_URL}}</span>
-        </p>
-        
-        <div class=""info-box"">
-            <h3>🎯 Next Steps</h3>
-            <ul>
-                <li>Clone this repository to your local machine</li>
-                <li>Start building your prototype</li>
-                <li>Push your changes to see them live instantly</li>
-                <li>Replace this page with your amazing end product!</li>
-            </ul>
+    <div class=""page"">
+        <header class=""board-header"">
+            <div class=""project-logo"">{{PROJECT_LOGO_HTML}}</div>
+            <h1>{{PROJECT_TITLE}}</h1>
+            <p class=""welcome"">Welcome to your project's default landing page!</p>
+            <p class=""description"">This page is hosted on GitHub Pages and is ready to showcase your project to the world. As you develop your prototype, this page will evolve into your final product presentation.</p>
+        </header>
+
+        <h2 class=""panel-label"">Frontend</h2>
+        <div class=""panel"">
+            <p class=""frontend-panel-text"">As you progress through the project, add buttons to this panel. Each button should link to one of the project's modules.<br><br>Later in the project, you'll be asked to replace this default landing page with the final product's landing page<br><br>(don't worry 😊 we'll guide you when it's time.)</p>
+            <div class=""frontend-buttons""></div>
         </div>
 
-        <table class=""api-table"" style=""width:100%; border-collapse: collapse; margin: 1rem 0; background: #fff; border-radius: 8px; overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,0.1);"">
+        <h2 class=""panel-label"">Backend</h2>
+        <div class=""panel"">
+            <p class=""backend-intro"">The following APIs are pre-configured, free to use, and already included in your default repository,<br><br>so you can start using them right away.</p>
+            <table class=""api-table"">
             <thead>
-                <tr style=""background: #f1f5f9;"">
-                    <th style=""padding: 0.75rem; text-align: left; border-bottom: 2px solid #e2e8f0;"">API Name</th>
-                    <th style=""padding: 0.75rem; text-align: left; border-bottom: 2px solid #e2e8f0;"">API Description</th>
-                    <th style=""padding: 0.75rem; text-align: center; border-bottom: 2px solid #e2e8f0;"">Test</th>
-                    <th style=""padding: 0.75rem; text-align: left; border-bottom: 2px solid #e2e8f0;"">Response</th>
+                <tr>
+                    <th>API Name</th>
+                    <th>API Description</th>
+                    <th style=""text-align: center;"">Test</th>
+                    <th>Response</th>
                 </tr>
             </thead>
             <tbody>
-                <tr style=""border-bottom: 1px solid #e2e8f0;"">
-                    <td style=""padding: 0.75rem;""><strong>Backend API</strong></td>
-                    <td style=""padding: 0.75rem;"">REST API and database connectivity (TestProjects CRUD).</td>
-                    <td style=""padding: 0.75rem; text-align: center;""><button id=""testButton"" type=""button"" onclick=""testBackend()"" style=""background: #2563eb; color: white; border: none; padding: 0.4rem 0.8rem; border-radius: 6px; cursor: pointer;"">Test API</button></td>
-                    <td style=""padding: 0.75rem; min-width: 120px;""><span id=""response""></span></td>
+                <tr>
+                    <td><strong>Database Connectivity</strong></td>
+                    <td>REST API and database connectivity (TestProjects CRUD).</td>
+                    <td style=""text-align: center;""><button id=""testButton"" type=""button"" onclick=""testBackend()"" class=""btn-test-api"">Test API</button></td>
+                    <td style=""min-width: 120px;""><span id=""response""></span></td>
                 </tr>
-                <tr style=""border-bottom: 1px solid #e2e8f0;"">
-                    <td style=""padding: 0.75rem;""><strong>Google Geocoding API</strong></td>
-                    <td style=""padding: 0.75rem;"">Convert addresses to coordinates (and reverse).</td>
-                    <td style=""padding: 0.75rem; text-align: center;""><button type=""button"" onclick=""testGoogleApi('geocoding')"">Test API</button></td>
-                    <td style=""padding: 0.75rem; min-width: 120px;""><span id=""geocodingResponse"" class=""api-result""></span></td>
+                <tr>
+                    <td><strong>Google Geocoding API</strong></td>
+                    <td>Convert addresses to coordinates (and reverse).</td>
+                    <td style=""text-align: center;""><button type=""button"" onclick=""testGoogleApi('geocoding')"" class=""btn-test-api"">Test API</button></td>
+                    <td style=""min-width: 120px;""><span id=""geocodingResponse"" class=""api-result""></span></td>
                 </tr>
-                <tr style=""border-bottom: 1px solid #e2e8f0;"">
-                    <td style=""padding: 0.75rem;""><strong>Google Maps JavaScript API</strong></td>
-                    <td style=""padding: 0.75rem;"">Display maps in the browser. Test validates Maps JavaScript API.</td>
-                    <td style=""padding: 0.75rem; text-align: center;""><button type=""button"" onclick=""testGoogleApi('maps')"">Test API</button></td>
-                    <td style=""padding: 0.75rem; min-width: 120px;""><span id=""mapsResponse"" class=""api-result""></span></td>
+                <tr>
+                    <td><strong>Google Maps JavaScript API</strong></td>
+                    <td>Display maps in the browser. Test validates Maps JavaScript API.</td>
+                    <td style=""text-align: center;""><button type=""button"" onclick=""testGoogleApi('maps')"" class=""btn-test-api"">Test API</button></td>
+                    <td style=""min-width: 120px;""><span id=""mapsResponse"" class=""api-result""></span></td>
                 </tr>
-                <tr style=""border-bottom: 1px solid #e2e8f0;"">
-                    <td style=""padding: 0.75rem;""><strong>Google Places API (New)</strong></td>
-                    <td style=""padding: 0.75rem;"">Search places and get place details.</td>
-                    <td style=""padding: 0.75rem; text-align: center;""><button type=""button"" onclick=""testGoogleApi('places')"">Test API</button></td>
-                    <td style=""padding: 0.75rem; min-width: 120px;""><span id=""placesResponse"" class=""api-result""></span></td>
+                <tr>
+                    <td><strong>Google Places API (New)</strong></td>
+                    <td>Search places and get place details.</td>
+                    <td style=""text-align: center;""><button type=""button"" onclick=""testGoogleApi('places')"" class=""btn-test-api"">Test API</button></td>
+                    <td style=""min-width: 120px;""><span id=""placesResponse"" class=""api-result""></span></td>
                 </tr>
-                <tr style=""border-bottom: 1px solid #e2e8f0;"">
-                    <td style=""padding: 0.75rem;""><strong>Google Directions API</strong></td>
-                    <td style=""padding: 0.75rem;"">Routes and directions between addresses.</td>
-                    <td style=""padding: 0.75rem; text-align: center;""><button type=""button"" onclick=""testGoogleApi('directions')"">Test API</button></td>
-                    <td style=""padding: 0.75rem; min-width: 120px;""><span id=""directionsResponse"" class=""api-result""></span></td>
+                <tr>
+                    <td><strong>Google Directions API</strong></td>
+                    <td>Routes and directions between addresses.</td>
+                    <td style=""text-align: center;""><button type=""button"" onclick=""testGoogleApi('directions')"" class=""btn-test-api"">Test API</button></td>
+                    <td style=""min-width: 120px;""><span id=""directionsResponse"" class=""api-result""></span></td>
                 </tr>
-                <tr style=""border-bottom: 1px solid #e2e8f0;"">
-                    <td style=""padding: 0.75rem;""><strong>Google Gemini API</strong></td>
-                    <td style=""padding: 0.75rem;"">Generative AI (LLM).</td>
-                    <td style=""padding: 0.75rem; text-align: center;""><button type=""button"" onclick=""testGoogleApi('gemini')"">Test API</button></td>
-                    <td style=""padding: 0.75rem; min-width: 120px;""><span id=""geminiResponse"" class=""api-result""></span></td>
+                <tr>
+                    <td><strong>Google Gemini API</strong></td>
+                    <td>Generative AI (LLM).</td>
+                    <td style=""text-align: center;""><button type=""button"" onclick=""testGoogleApi('gemini')"" class=""btn-test-api"">Test API</button></td>
+                    <td style=""min-width: 120px;""><span id=""geminiResponse"" class=""api-result""></span></td>
                 </tr>
-                <tr style=""border-bottom: 1px solid #e2e8f0;"">
-                    <td style=""padding: 0.75rem;""><strong>Google Cloud Speech-to-Text API</strong></td>
-                    <td style=""padding: 0.75rem;"">Speech recognition (audio to text).</td>
-                    <td style=""padding: 0.75rem; text-align: center;""><button type=""button"" onclick=""testGoogleApi('speech-to-text')"">Test API</button></td>
-                    <td style=""padding: 0.75rem; min-width: 120px;""><span id=""speechResponse"" class=""api-result""></span></td>
+                <tr>
+                    <td><strong>Google Cloud Speech-to-Text API</strong></td>
+                    <td>Speech recognition (audio to text).</td>
+                    <td style=""text-align: center;""><button type=""button"" onclick=""testGoogleApi('speech-to-text')"" class=""btn-test-api"">Test API</button></td>
+                    <td style=""min-width: 120px;""><span id=""speechResponse"" class=""api-result""></span></td>
                 </tr>
             </tbody>
-        </table>
-
+            </table>
+        </div>
         <div class=""footer"">
-            <p>
-                This page will be automatically replaced when you push your project files.<br>
-                <strong>Happy coding! 🎉</strong>
-            </p>
+            {{MADE_WITH_SKILLIN}}
         </div>
     </div>
     <script>
@@ -12039,9 +11898,8 @@ button:disabled {
                 console.log('Response status:', response.status, response.statusText);
                 
                 if (response.ok) {
-                    const data = await response.json();
-                    responseDiv.className = 'success';
-                    responseDiv.innerHTML = '<strong>✅ Success!</strong><br>Backend API is working. Received ' + data.length + ' test projects.';
+                    responseDiv.className = 'api-result success';
+                    responseDiv.innerHTML = '<span style=""color: #08957E; font-weight: 700;"">Successful</span>';
                 } else {
                     // HTTP error response
                     let errorText = '';
@@ -12097,7 +11955,7 @@ button:disabled {
                 const data = await res.json();
                 if (data.status === 'ok') {
                     div.className = 'api-result success';
-                    div.innerHTML = '<span style=""color: green; font-weight: bold;"">Successful</span>';
+                    div.innerHTML = '<span style=""color: #08957E; font-weight: 700;"">Successful</span>';
                 } else {
                     div.className = 'api-result error';
                     div.innerHTML = '<span class=""error"">' + (data.message || data.status || 'Failed') + '</span>';

@@ -74,6 +74,9 @@ public class Student
     // Availability status
     public bool IsAvailable { get; set; } = true;
 
+    /// <summary>When true (default), student is exposed to employers (e.g. in candidate lists).</summary>
+    public bool EmployerExposure { get; set; } = true;
+
     /// <summary>Super-user flag; default false.</summary>
     public bool SuperUser { get; set; } = false;
     
@@ -171,6 +174,9 @@ public class CreateStudentRequest
     public bool? StudentWork { get; set; }
     public bool? MultilingualWork { get; set; }
     
+    /// <summary>When true, student is exposed to employers. Default true if not provided.</summary>
+    public bool? EmployerExposure { get; set; }
+    
     // CV field (base64 encoded PDF/document)
     public string? CV { get; set; }
 }
@@ -216,6 +222,9 @@ public class UpdateStudentRequest
     public bool? RelocationWork { get; set; }
     public bool? StudentWork { get; set; }
     public bool? MultilingualWork { get; set; }
+    
+    /// <summary>When true, student is exposed to employers. Optional on update.</summary>
+    public bool? EmployerExposure { get; set; }
     
     // CV field (base64 encoded PDF/document)
     public string? CV { get; set; }

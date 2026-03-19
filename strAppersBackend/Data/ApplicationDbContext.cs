@@ -916,6 +916,7 @@ public class ApplicationDbContext : DbContext
             entity.Property(e => e.RelocationWork).HasDefaultValue(false);
             entity.Property(e => e.StudentWork).HasDefaultValue(false);
             entity.Property(e => e.MultilingualWork).HasDefaultValue(false);
+            entity.Property(e => e.EmployerExposure).HasDefaultValue(true);
             
             entity.HasOne(e => e.SubscriptionType)
                   .WithMany(s => s.Students)

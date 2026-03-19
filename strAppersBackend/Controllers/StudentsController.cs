@@ -539,6 +539,7 @@ public class StudentsController : ControllerBase
                 RelocationWork = request.RelocationWork ?? false,
                 StudentWork = request.StudentWork ?? false,
                 MultilingualWork = request.MultilingualWork ?? false,
+                EmployerExposure = request.EmployerExposure ?? true,
                 CV = request.CV // Base64 encoded CV file
             };
 
@@ -580,6 +581,7 @@ public class StudentsController : ControllerBase
                 GithubUser = student.GithubUser,
                 IsAdmin = student.IsAdmin,
                 IsAvailable = student.IsAvailable,
+                EmployerExposure = student.EmployerExposure,
                 CreatedAt = student.CreatedAt
             });
         }
@@ -1065,6 +1067,9 @@ public class StudentsController : ControllerBase
             if (request.MultilingualWork.HasValue)
                 student.MultilingualWork = request.MultilingualWork.Value;
 
+            if (request.EmployerExposure.HasValue)
+                student.EmployerExposure = request.EmployerExposure.Value;
+
             // Update CV if provided
             if (request.CV != null)
                 student.CV = request.CV;
@@ -1145,6 +1150,7 @@ public class StudentsController : ControllerBase
                 SuperUser = student.SuperUser,
                 BoardId = student.BoardId,
                 IsAvailable = student.IsAvailable,
+                EmployerExposure = student.EmployerExposure,
                 ProgrammingLanguageId = student.ProgrammingLanguageId,
                 ProgrammingLanguageName = student.ProgrammingLanguage?.Name,
                 RoleId = roleInfo?.RoleId,

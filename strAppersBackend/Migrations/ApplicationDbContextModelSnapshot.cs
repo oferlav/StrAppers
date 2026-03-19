@@ -2294,6 +2294,11 @@ namespace strAppersBackend.Migrations
                     b.Property<bool>("IsAvailable")
                         .HasColumnType("boolean");
 
+                    b.Property<bool>("EmployerExposure")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("boolean")
+                        .HasDefaultValue(true);
+
                     b.Property<bool>("SuperUser")
                         .ValueGeneratedOnAdd()
                         .HasColumnType("boolean")
