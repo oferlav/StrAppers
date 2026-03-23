@@ -1156,7 +1156,18 @@ public class StudentsController : ControllerBase
                 RoleId = roleInfo?.RoleId,
                 RoleName = roleInfo?.Role?.Name,
                 CreatedAt = student.CreatedAt,
-                UpdatedAt = student.UpdatedAt
+                UpdatedAt = student.UpdatedAt,
+                MinutesToWork = student.MinutesToWork,
+                HybridWork = student.HybridWork,
+                HomeWork = student.HomeWork,
+                FullTimeWork = student.FullTimeWork,
+                PartTimeWork = student.PartTimeWork,
+                FreelanceWork = student.FreelanceWork,
+                TravelWork = student.TravelWork,
+                NightShiftWork = student.NightShiftWork,
+                RelocationWork = student.RelocationWork,
+                StudentWork = student.StudentWork,
+                MultilingualWork = student.MultilingualWork
             });
         }
         catch (Exception ex)
@@ -1673,7 +1684,9 @@ public class StudentsController : ControllerBase
                     FirstName = student.FirstName,
                     LastName = student.LastName,
                     Email = student.Email,
-                    Status = student.Status
+                    Status = student.Status,
+                    BoardId = student.BoardId,
+                    ProjectId = student.ProjectId
                 }
             });
         }

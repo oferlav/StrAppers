@@ -6,6 +6,7 @@ using strAppersBackend.Models;
 using strAppersBackend.Services;
 using System.Drawing;
 using System.Drawing.Imaging;
+using System.IO.Compression;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -2000,4 +2001,19 @@ public class ModuleDescriptionInfo
     public string Title { get; set; } = string.Empty;
     public string Description { get; set; } = string.Empty;
     public int ModuleType { get; set; }
+}
+
+public class DownloadProjectDesignRequest
+{
+    public int ProjectId { get; set; }
+    public string? BoundContent { get; set; }
+    public string? ProjectTitle { get; set; }
+}
+
+public class DownloadProjectDesignResponse
+{
+    public bool Success { get; set; }
+    public string? Message { get; set; }
+    /// <summary>Base64-encoded ZIP (legacy frontend reads response.data.data).</summary>
+    public string? Data { get; set; }
 }

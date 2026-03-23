@@ -3841,12 +3841,26 @@ public class BoardsController : ControllerBase
                 ["projectId"] = projectBoard.ProjectId,
                 ["projectName"] = projectBoard.Project?.Title ?? "",
                 ["boardUrl"] = projectBoard.BoardUrl ?? "",
+                ["publishUrl"] = projectBoard.PublishUrl ?? "",
                 ["observed"] = projectBoard.Observed,
                 ["githubBackendUrl"] = projectBoard.GithubBackendUrl ?? "",
                 ["githubFrontendUrl"] = projectBoard.GithubFrontendUrl ?? "",
                 ["webApiUrl"] = projectBoard.WebApiUrl ?? "",
                 ["stats"] = statsNodeCamel
             };
+
+            // BoardRoom / MeetingStrip: ProjectBoard next meeting (Base44 getBoardStats used to merge these)
+            if (projectBoard.NextMeetingTime.HasValue)
+            {
+                responseNode["nextMeetingTime"] = JsonValue.Create(
+                    projectBoard.NextMeetingTime.Value.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss.fffZ"));
+            }
+
+            if (!string.IsNullOrWhiteSpace(projectBoard.NextMeetingUrl))
+                responseNode["nextMeetingUrl"] = JsonValue.Create(projectBoard.NextMeetingUrl);
+
+            if (!string.IsNullOrWhiteSpace(projectBoard.NextMeetingTitle))
+                responseNode["nextMeetingTitle"] = JsonValue.Create(projectBoard.NextMeetingTitle);
 
             return Content(JsonSerializer.Serialize(responseNode, camelOptions), "application/json");
         }
@@ -5478,13 +5492,12 @@ The actual prompt generation would require access to project details and student
                 })
                 .ToListAsync();
 
+            // Empty list is normal (e.g. project created, no Trello board yet). Use 200 + [] so clients
+            // don't treat "no boards" as an error in DevTools or strict HTTP handling.
             if (projectBoards == null || !projectBoards.Any())
             {
-                _logger.LogInformation("No project boards found for ProjectId {ProjectId}", projectId);
-                return NotFound(new { 
-                    Success = false, 
-                    Message = $"No project boards found for project ID {projectId}" 
-                });
+                _logger.LogInformation("No project boards found for ProjectId {ProjectId} — returning empty list", projectId);
+                return Ok(new List<ProjectBoardInfoResponse>());
             }
 
             _logger.LogInformation("Successfully retrieved {Count} project board(s) for ProjectId {ProjectId}", projectBoards.Count, projectId);
