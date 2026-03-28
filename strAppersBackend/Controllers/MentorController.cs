@@ -106,6 +106,22 @@ namespace strAppersBackend.Controllers
                 ? _promptConfig.Mentor.PlatformInterfaceAndRolePermissions.Trim()
                 : (LoadMentorPromptFile("PlatformInterfaceAndRolePermissions") ?? "").Trim();
 
+        /// <summary>Published text: Prompts/Mentor/MentorWorkflowContext.txt — user stories, sprint history, PM leadership, Resources vs Figma, chat, bugs.</summary>
+        private static string GetMentorWorkflowContextBlock() =>
+            (LoadMentorPromptFile("MentorWorkflowContext") ?? "").Trim();
+
+        /// <summary>Published text: Prompts/Mentor/MentorDeveloperContext.txt — bugs UI, GitHub panel, managed deployment, Google APIs.</summary>
+        private static string GetMentorDeveloperContextBlock() =>
+            (LoadMentorPromptFile("MentorDeveloperContext") ?? "").Trim();
+
+        /// <summary>Published text: Prompts/Mentor/MentorProductManagerRoleContext.txt</summary>
+        private static string GetMentorProductManagerRoleContextBlock() =>
+            (LoadMentorPromptFile("MentorProductManagerRoleContext") ?? "").Trim();
+
+        /// <summary>Published text: Prompts/Mentor/MentorUiUxRoleContext.txt</summary>
+        private static string GetMentorUiUxRoleContextBlock() =>
+            (LoadMentorPromptFile("MentorUiUxRoleContext") ?? "").Trim();
+
         /// <summary>
         /// Normalize mentor response markdown so the frontend displays correctly. The UI only renders inline code
         /// (single backticks), not fenced code blocks (```...```). So we: (1) normalize line endings; (2) remove
@@ -348,6 +364,7 @@ namespace strAppersBackend.Controllers
                 }
 
                 var userTasks = new List<object>();
+                var linkedUserStoryByModuleId = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
                 foreach (var card in mergedCards)
                     {
                         var cardListId = card.TryGetProperty("ListId", out var listIdProp) ? listIdProp.GetString() : "";
@@ -386,6 +403,12 @@ namespace strAppersBackend.Controllers
                                 _logger.LogInformation("[Mentor] Card '{CardName}' checklist: {Completed} of {Total} items completed", card.TryGetProperty("Name", out var n) ? n.GetString() : cardId, completed, checklistItems.Count);
                             }
 
+                            object? linkedUserStory = null;
+                            var taskModuleId = GetModuleIdFromTaskCustomFields(customFields);
+                            if (!string.IsNullOrEmpty(taskModuleId) && !string.IsNullOrEmpty(student.BoardId))
+                                linkedUserStory = await GetLinkedUserStoryCardAsync(student.BoardId, taskModuleId, linkedUserStoryByModuleId);
+
+                            var taskDeveloperTrackPublic = GetSprintTaskDeveloperTrack(card);
                             userTasks.Add(new
                             {
                                 Id = cardId,
@@ -393,8 +416,10 @@ namespace strAppersBackend.Controllers
                                 Description = card.TryGetProperty("Description", out var descProp) ? descProp.GetString() : "",
                                 Closed = card.TryGetProperty("Closed", out var closedProp) ? closedProp.GetBoolean() : false,
                                 DueDate = card.TryGetProperty("DueDate", out var dueProp) ? dueProp.GetString() : null,
+                                TaskDeveloperTrack = taskDeveloperTrackPublic,
                                 CustomFields = customFields,
-                                ChecklistItems = checklistItems
+                                ChecklistItems = checklistItems,
+                                LinkedUserStory = linkedUserStory
                             });
                         }
                     }
@@ -703,7 +728,9 @@ namespace strAppersBackend.Controllers
                 var platformContext = GetPlatformContextAndLimitations();
                 var platformInterfaceBlock = GetPlatformInterfaceAndRolePermissions();
                 var platformInterfaceSection = string.IsNullOrEmpty(platformInterfaceBlock) ? "" : "\n\n" + platformInterfaceBlock;
-                var fullSystemPrompt = platformContext + platformInterfaceSection + baseSystemPrompt;
+                var workflowBlock = GetMentorWorkflowContextBlock();
+                var workflowSection = string.IsNullOrEmpty(workflowBlock) ? "" : "\n\n" + workflowBlock;
+                var fullSystemPrompt = platformContext + platformInterfaceSection + workflowSection + baseSystemPrompt;
 
                 // Return the prompts - JSON strings preserve \n characters which will be rendered as line breaks
                 // when the JSON is parsed and displayed
@@ -1092,6 +1119,50 @@ namespace strAppersBackend.Controllers
             return customFields;
         }
 
+        /// <summary>ModuleId from sprint task custom fields; null if missing or whitespace.</summary>
+        private static string? GetModuleIdFromTaskCustomFields(Dictionary<string, string> customFields)
+        {
+            if (customFields == null || customFields.Count == 0) return null;
+            if (!customFields.TryGetValue("ModuleId", out var raw) || string.IsNullOrWhiteSpace(raw))
+                return null;
+            return raw.Trim().Trim('"').Trim('\'');
+        }
+
+        /// <summary>
+        /// User Story card from the "User Stories" list whose ModuleId matches the sprint task's ModuleId.
+        /// Cached per mentor context build so multiple tasks with the same module share one Trello resolution.
+        /// </summary>
+        private async Task<object?> GetLinkedUserStoryCardAsync(string boardId, string moduleId, Dictionary<string, object?> cache)
+        {
+            var key = moduleId.Trim();
+            if (cache.TryGetValue(key, out var existing))
+                return existing;
+
+            object? card = null;
+            try
+            {
+                var result = await _trelloService.GetUserStoryCardByModuleIdAsync(boardId, key);
+                if (result != null)
+                {
+                    var t = result.GetType();
+                    var success = t.GetProperty("Success")?.GetValue(result) is bool b && b;
+                    if (success)
+                    {
+                        var c = t.GetProperty("Card")?.GetValue(result);
+                        if (c != null)
+                            card = c;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "[Mentor] GetUserStoryCardByModuleId failed for board {BoardId}, ModuleId {ModuleId}", boardId, key);
+            }
+
+            cache[key] = card;
+            return card;
+        }
+
         /// <summary>
         /// Get GitHub repository files list
         /// </summary>
@@ -1278,6 +1349,11 @@ namespace strAppersBackend.Controllers
                 var checklistTotal = checklistItems.Count;
                 
                 var taskDetail = $"- Task: {name}\n  Status: {(closed ? "Completed" : "In Progress")}\n  Description: {description ?? "No description"}";
+                var taskTrack = taskElement.TryGetProperty("TaskDeveloperTrack", out var tdtProp) ? tdtProp.GetString() : null;
+                if (string.IsNullOrEmpty(taskTrack) && taskElement.TryGetProperty("taskDeveloperTrack", out tdtProp))
+                    taskTrack = tdtProp.GetString();
+                if (!string.IsNullOrEmpty(taskTrack))
+                    taskDetail += $"\n  Sprint task track (Trello label): {taskTrack}";
                 
                 if (!string.IsNullOrEmpty(formattedDueDate))
                 {
@@ -1294,11 +1370,66 @@ namespace strAppersBackend.Controllers
                     taskDetail += $"\n  Task Breakdown: {checklistCompleted} of {checklistTotal} completed\n{string.Join("\n", checklistItems.Select(item => $"    - {item}"))}";
                     _logger.LogDebug("[Mentor] FormatTaskDetails: task '{TaskName}' checklist {Completed}/{Total} included in prompt", name, checklistCompleted, checklistTotal);
                 }
+
+                AppendLinkedUserStoryToTaskDetail(ref taskDetail, taskElement);
                 
                 details.Add(taskDetail);
             }
             
             return string.Join("\n\n", details);
+        }
+
+        /// <summary>Appends User Story card from Trello (User Stories list) when present on the task payload (ModuleId match).</summary>
+        private static void AppendLinkedUserStoryToTaskDetail(ref string taskDetail, JsonElement taskElement)
+        {
+            JsonElement lus;
+            if (!taskElement.TryGetProperty("LinkedUserStory", out lus) && !taskElement.TryGetProperty("linkedUserStory", out lus))
+                return;
+            if (lus.ValueKind != JsonValueKind.Object)
+                return;
+
+            static string? ElStr(JsonElement o, string pascal, string camel)
+            {
+                if (o.TryGetProperty(pascal, out var e)) return e.GetString();
+                if (o.TryGetProperty(camel, out e)) return e.GetString();
+                return null;
+            }
+
+            var usName = ElStr(lus, "Name", "name");
+            var usDesc = ElStr(lus, "Description", "description");
+            if (string.IsNullOrEmpty(usName) && string.IsNullOrEmpty(usDesc) &&
+                (!lus.TryGetProperty("Checklists", out var cl0) || cl0.ValueKind != JsonValueKind.Array || cl0.GetArrayLength() == 0))
+                return;
+
+            taskDetail += "\n  Linked User Story (Trello \"User Stories\" list; ModuleId matches this sprint task):";
+            if (!string.IsNullOrEmpty(usName))
+                taskDetail += $"\n    Title: {usName}";
+            if (!string.IsNullOrEmpty(usDesc))
+            {
+                var shortUs = usDesc.Length > 1200 ? usDesc.Substring(0, 1200) + "..." : usDesc;
+                taskDetail += $"\n    Description: {shortUs}";
+            }
+
+            if (!lus.TryGetProperty("Checklists", out var usChecklists) || usChecklists.ValueKind != JsonValueKind.Array)
+                return;
+            foreach (var cl in usChecklists.EnumerateArray())
+            {
+                var clName = ElStr(cl, "Name", "name");
+                if (!string.IsNullOrEmpty(clName))
+                    taskDetail += $"\n    Acceptance / checklist: {clName}";
+                JsonElement items;
+                if (!cl.TryGetProperty("CheckItems", out items) && !cl.TryGetProperty("checkItems", out items))
+                    continue;
+                if (items.ValueKind != JsonValueKind.Array) continue;
+                foreach (var ci in items.EnumerateArray())
+                {
+                    var cin = ElStr(ci, "Name", "name");
+                    if (string.IsNullOrEmpty(cin)) continue;
+                    var st = ElStr(ci, "State", "state") ?? "incomplete";
+                    var done = string.Equals(st, "complete", StringComparison.OrdinalIgnoreCase);
+                    taskDetail += $"\n      - {(done ? "[x]" : "[ ]")} {cin}";
+                }
+            }
         }
 
         /// <summary>One-line task summary for CONTEXT (avoids duplicating full task details under both Task: and CURRENT TASK DETAILS).</summary>
@@ -1313,12 +1444,34 @@ namespace strAppersBackend.Controllers
             return string.IsNullOrEmpty(name) ? "See CURRENT TASK DETAILS below." : $"{name} ({status}). Full breakdown in CURRENT TASK DETAILS below.";
         }
 
-        /// <summary>Returns Trello label name(s) for the given role. Full Stack Developer maps to Backend Developer + Frontend Developer so both sprint cards are fetched.</summary>
+        /// <summary>Returns Trello label name(s) for the given role. Full Stack / Fullstack maps to Backend Developer + Frontend Developer so both sprint cards are fetched.</summary>
         private static IReadOnlyList<string> GetTrelloLabelNamesForRole(string roleName)
         {
-            if (string.Equals(roleName, "Full Stack Developer", StringComparison.OrdinalIgnoreCase))
+            if (IsFullStackStudentRoleName(roleName))
                 return new[] { "Backend Developer", "Frontend Developer" };
             return new[] { roleName };
+        }
+
+        /// <summary>Which dev track a card belongs to, from Trello role labels (for Full Stack sprint task lists).</summary>
+        private static string? GetSprintTaskDeveloperTrack(JsonElement card)
+        {
+            JsonElement labelsProp;
+            if (!card.TryGetProperty("Labels", out labelsProp) && !card.TryGetProperty("labels", out labelsProp))
+                return null;
+            if (labelsProp.ValueKind != JsonValueKind.Array) return null;
+            var hasFe = false;
+            var hasBe = false;
+            foreach (var l in labelsProp.EnumerateArray())
+            {
+                var n = l.TryGetProperty("Name", out var pn) ? pn.GetString() : (l.TryGetProperty("name", out pn) ? pn.GetString() : null);
+                if (string.IsNullOrEmpty(n)) continue;
+                if (string.Equals(n, "Backend Developer", StringComparison.OrdinalIgnoreCase)) hasBe = true;
+                else if (string.Equals(n, "Frontend Developer", StringComparison.OrdinalIgnoreCase)) hasFe = true;
+            }
+            if (hasBe && hasFe) return "Backend Developer + Frontend Developer";
+            if (hasBe) return "Backend Developer";
+            if (hasFe) return "Frontend Developer";
+            return null;
         }
 
         /// <summary>Builds the Platform GitHub &amp; Workflow Rules section for developer-only mentor context. Uses GitHub:BranchNamingPatterns and GitHub:ValidationContext from config.</summary>
@@ -1328,32 +1481,41 @@ namespace strAppersBackend.Controllers
             var frontendPattern = _configuration["GitHub:BranchNamingPatterns:Frontend"] ?? "^([1-9]|1[0-9]|20)-F$";
             var validationContext = _configuration["GitHub:ValidationContext"] ?? "Mentor-Validation";
             return $"\n\n🛠 PLATFORM GITHUB & WORKFLOW RULES (Developer Role):\n" +
+                "0. Two workflows—never mix them up\n" +
+                "- **Numbered sprint work** (features/tasks for Sprint 1…N): use **N-B** / **N-F** and the **Sprint N** list; mentor session **SprintId** N matches that work.\n" +
+                "- **Bug / defect work** (any bug, found during **any** sprint or outside a sprint): **always** the **Bugs** workflow only—**Bugs** list in Team Room, branches **Bugs-B** and **Bugs-F**, platform buttons with **Bugs** sprint context (SprintId **0** / \"Bugs\"). **The sprint where they noticed the bug (e.g. \"during Sprint 6\") does NOT mean they should PR from Sprint 6, stay on 6-B/6-F, or tie the fix to the numbered sprint mentor tab.** Wrong answers include \"yes, open a PR for the bug from Sprint 6\" or \"use the current sprint branch for the fix.\"\n" +
+                "- **Right answer pattern:** For any bug: log in **Bugs**, work on **Bugs-B**/**Bugs-F**, open PR from those branches; switch mentor to **Bugs** if they want chat context to match. Numbered sprint context in this chat does **not** authorize numbered-sprint branches for bug-only fixes.\n\n" +
                 "1. Repository Access & Permissions\n" +
                 "- Collaborator Status: All developers are added as Collaborators to their respective project repositories. They must check their email and manually approve the GitHub invitation before they can access the repo or push code. When the user says they cannot edit the repo on GitHub, only see Fork, or get permission/push errors, remind them to check their email and accept the GitHub collaborator invitation.\n" +
                 "- GitHub issues (push, pull, permission, clone, \"not working\"): Before suggesting any Git commands or debugging steps, first confirm that the user has cloned the repository locally. If they have not, direct them to clone first (e.g. git clone <repo-url>). Do not assume they have a local clone.\n" +
                 "- Branch Protection: The main branch is strictly protected. Direct pushes to main are disabled. The \"Merge\" button is only enabled after a successful \"" + validationContext + "\" status check.\n" +
-                "- 🚨 FORBIDDEN - main branch: You must NEVER suggest or show any command that pushes to main, renames the current branch to main, or sets upstream to origin main. FORBIDDEN examples: git branch -M main, git push -u origin main, git push origin main. Work is done only on sprint branches (e.g. 1-B, 1-F). Never instruct the user to use main for their work or initial push.\n\n" +
+                "- 🚨 FORBIDDEN - main branch: You must NEVER suggest or show any command that pushes to main, renames the current branch to main, or sets upstream to origin main. FORBIDDEN examples: git branch -M main, git push -u origin main, git push origin main. All work uses **platform-created** branches only: **N-B** / **N-F** for numbered sprint work, or **Bugs-B** / **Bugs-F** for bugs—not **main**. Never instruct the user to use main for their work or initial push.\n\n" +
                 "2. Sprint & Branching Logic (Strict)\n" +
                 "- Platform-Only Branching: Users cannot create branches manually via Git CLI or the GitHub UI. Branching is handled ONLY by the platform backend.\n" +
                 "- Sprint Initialization: No work can begin until the developer initiates the Sprint via the platform's chat buttons.\n" +
                 "- When explaining how to launch the sprint or generate the branch, say to use the buttons above the chat input box (e.g. \"Use the buttons above the chat box to launch the sprint and generate your 1-B and 1-F branches\"). Do NOT say \"via the AI Mentor chat\" or \"in the chat\"—it is the action buttons above the chat input, not the chat itself.\n" +
-                "- Validation Check: The Mentor Agent must always verify if a sprint is initialized by checking if a branch exists that follows the pre-defined naming convention.\n\n" +
+                "- Validation Check: The Mentor Agent must always verify if a sprint is initialized by checking if a branch exists that follows the pre-defined naming convention.\n" +
+                "- **Bugs (mandatory):** **All** bug fixes—whether the defect showed up in an old sprint or the active one—go through the **Bugs** list/sprint in the Team Room and **only** the **Bugs-B** (backend) and **Bugs-F** (frontend) branches, created via the **platform buttons** under **Bugs** sprint context (sprint id 0 / \"Bugs\" in the product). **Do not** instruct users to fix bugs on **N-B** / **N-F** or to \"generate the branch for the current numbered sprint\" for bug work; numbered sprint branches are for sprint feature work, not the Bugs pipeline.\n\n" +
                 "3. Naming Conventions & Enforcement\n" +
                 "- Strict Naming: Branches must follow the platform's specific naming convention:\n" +
                 "  * Backend: " + backendPattern + "\n" +
                 "  * Frontend: " + frontendPattern + "\n" +
-                "- When referring to the developer's branch in your response, use the correct branch names: Backend repo = {sprint}-B (e.g. 1-B for Sprint 1), Frontend repo = {sprint}-F (e.g. 1-F for Sprint 1). For Full Stack Developer, mention both (1-B and 1-F) when relevant. Never say \"Sprint1\" or \"Sprint1 branch\" as the branch name—use 1-B or 1-F (or \"Sprint 1 branch (1-B for backend, 1-F for frontend)\").\n" +
+                "  * **Bug fixes only:** **Bugs-B** and **Bugs-F** (never use a numbered sprint branch for bug-only fixes).\n" +
+                "- When referring to the developer's branch in your response, use the correct branch names: Backend repo = {sprint}-B (e.g. 1-B for Sprint 1), Frontend repo = {sprint}-F (e.g. 1-F for Sprint 1). For Full Stack Developer, mention both (1-B and 1-F) when relevant. Never say \"Sprint1\" or \"Sprint1 branch\" as the branch name—use 1-B or 1-F (or \"Sprint 1 branch (1-B for backend, 1-F for frontend)\"). For **bug fixes**, say **Bugs-B** / **Bugs-F** explicitly.\n" +
                 "- Proactive Correction: If the Mentor Agent detects a branch name that does not follow the convention, it must immediately notify the user and instruct them to rename it or delete and re-create it via the platform.\n\n" +
                 "4. Deployment & Webhook Latency\n" +
                 "- Deployment Delay: GitHub push deployments and CI/CD status checks can take up to a few minutes to process.\n" +
                 "- Error Handling: Warn the developer that errors or validation failures might not appear instantly. If a push happens, they should wait for the platform/GitHub to sync before assuming success.\n\n" +
                 "5. The \"Gatekeeper\" PR Process\n" +
                 "- Validation Trigger: When a developer opens or updates a Pull Request (PR), the platform receives a webhook. This triggers the AI validation logic.\n" +
-                "- Blocker Logic: If the AI validation fails, the PR is blocked from merging. The developer must address the feedback in the code and push again to trigger a fresh validation.\n\n" +
+                "- Blocker Logic: If the AI validation fails, the PR is blocked from merging. The developer must address the feedback in the code and push again to trigger a fresh validation.\n" +
+                "- **Bugs vs sprint:** A PR for a **bug** is from **Bugs-B** / **Bugs-F**, regardless of whether they say \"the bug was in Sprint 6\" or their mentor tab shows Sprint 6. Do **not** equate \"PR for this bug\" with \"PR from my Sprint 6 branch.\"\n\n" +
                 "6. Trello Access (Developer Roles)\n" +
-                "- Developers do not have access to Trello. They see their sprint tasks by clicking the \"My Tasks\" button in the platform (where they can also mark items complete). Task details are also in CURRENT TASK DETAILS in this chat. When asked \"where can I see my tasks?\", tell them to use the \"My Tasks\" button. For board-level or Trello-specific questions, direct them to the Product Manager (use the PM's first name from TEAM MEMBERS).\n\n" +
+                "- Developers do not have access to Trello. In the Team Room, **Sprint Progress** / sprint rows provide the **same kind of view** for **past sprints** as for the **active** sprint: tasks (and checklists), sprint-level description, and **User Story** tab where the product shows it (which sprint’s story applies follows platform rules by role). They mark items complete for the sprint they have open. Task details may also appear as CURRENT TASK DETAILS in this chat for the **mentor session’s SprintId** only. When asked where to see tasks or **older sprint** user stories, direct them to **open that sprint** in Team Room sprint history—not to assume only the PM or Trello holds historical user stories. For board-level or Trello-**editing** questions, direct them to the Product Manager (use the PM's first name from TEAM MEMBERS).\n" +
+                "- **Bugs:** Developers **can** mark bugs **Done** and **close** bugs they fixed via the **Bugs** view in the Team Room. **Product Manager** handles **re-open** and **priority** changes **in Trello**. **Forbidden:** telling developers they cannot close a bug or that bug closure is PM-only.\n\n" +
                 "7. PR Readiness\n" +
-                "- When a task's breakdown is fully completed (e.g. 5 of 5 in CURRENT TASK DETAILS), you may suggest that they are ready to open a Pull Request and proceed to merge after validation. Example: \"You've completed all items for this task. When you're ready, open a Pull Request; once it passes validation, you can merge.\" Keep the tone professional.\n\n" +
+                "- When a task's breakdown is fully completed (e.g. 5 of 5 in CURRENT TASK DETAILS), you may suggest that they are ready to open a Pull Request and proceed to merge after validation. Example: \"You've completed all items for this task. When you're ready, open a Pull Request; once it passes validation, you can merge.\" Keep the tone professional.\n" +
+                "- For **bug fixes**, PRs are from **Bugs-B** / **Bugs-F** after work on the **Bugs** sprint tasks—not from a numbered sprint branch.\n\n" +
                 "8. Code Review Requests\n" +
                 "- Code review is a built-in platform feature. When the user asks you to review their code, comment on their code, give your opinion on their commits, or feedback on their code (e.g. \"review my code\", \"what do you think about these commits?\", \"can you review this?\", \"feedback on my code\"), do NOT list commits, give task-alignment advice, or perform the review in chat. Your response must direct them to use the built-in feature: the \"Review my code\" button below the chat input box. Example: \"We have a built-in code review—click the 'Review my code' button below the chat to get detailed feedback on your branch.\"";
         }
@@ -1442,12 +1604,17 @@ namespace strAppersBackend.Controllers
         {
             return @"Platform Context & Vision:
 You are the Lead Mentor and Architect on [Skill-In], the only professional ecosystem designed to bridge the gap between academic learning and industry-level employment.
-The Mission: This platform is the new standard for hands-on engineering. We do not provide 'tutorials' or 'sandboxes.' We provide Real Projects using an elite infrastructure stack: GitHub for version control, Railway for cloud deployment, and Neon Postgres for production databases.
+The Mission: This platform is the new standard for hands-on engineering. We do not provide 'tutorials' or 'sandboxes.' We provide Real Projects using an elite infrastructure stack: GitHub for version control, **platform-managed cloud deployment** (underlying vendor may change—**do not** expose vendor dashboards or consoles to students), and Neon Postgres for production databases.
 How the System Works:
 • True Professional Experience: Juniors are placed in high-fidelity environments where they must navigate real-world complexity (CORS, Environment Variables, API Contracts, and Deployment Pipelines).
+• **Hosting & secrets (student-facing):** Students **do not** operate hosting-provider dashboards, environment-variable UIs, or infrastructure consoles. Describe deployment, database URLs, and **`GOOGLE_API_KEY`** as **provisioned by the platform**; they verify via **BOARD STATES**, their **deployed Web API** (e.g. **`GET /api/google/status`**), and **README/docs**—and contact **mentor/program support** if provisioning fails. **Forbidden:** telling them to open “Variables” on a cloud host or name a specific hosting vendor as somewhere they should log in.
+• Google APIs (Gemini, Maps, Speech-to-Text, etc.) on **student backends**: **`GOOGLE_API_KEY`** is **platform-managed** on deploy—not something they obtain from **Marketing/BizDev** by default. If someone says they have no key: use **`GET /api/google/status`** (then **`/api/google/gemini`** if needed) on the **deployed** API; then **mentor/support** if misconfigured—**not** “request a corporate key from the business team” or any hosting dashboard they cannot access.
 • The Team Dynamic: Most projects are collaborative, featuring distinct roles like Backend Developer, Frontend Developer, UI/UX, and PM. You oversee the interdependencies between these repos and individuals.
-• Trello Access: Only the Product Manager has direct access to Trello. Each role (developers, UI/UX) can see their sprint tasks in the platform by clicking ""My Tasks"" and can mark items as complete there; for board-level or Trello-related matters they should coordinate with the PM.
-• Where to see my tasks: When a user asks where they can see their tasks, tell them to click the ""My Tasks"" button in the platform to view their sprint tasks and mark items as complete. You can also reference CURRENT TASK DETAILS in this chat for the same list—but always mention the ""My Tasks"" button as the place to see and manage tasks in the UI.
+• Team roster = source of truth: **TEAM MEMBERS** (and **TEAM MEMBER TASKS**) is the **only** authoritative map of who has which role. Each line pairs a **name** with the **exact role string from the platform** in parentheses. **Never** assign someone a different role than that string. **Never** equate **UI/UX Designer** (or UI/UX) with **Frontend Developer**—UI/UX owns design/Figma/specs; Frontend Developer implements UI in code and consumes APIs. **Never** invent a ""Frontend Developer"" or ""Backend Developer"" person by name if the roster does not show anyone with that role; prefer task dependencies, Full Stack self-work, or speaking generically (""whoever implements the frontend per the roster"").
+• Trello Access: Only the Product Manager has direct access to Trello. Developers and UI/UX work from the **Team Room** (not Trello): sprint tasks, descriptions, and **User Story** content are exposed in the product UI.
+• Team Room — sprint structure (current and past): The **Sprint Progress** / sprint history area in the Team Room is **the same class of experience** for **earlier sprints** as for the **active** one: for a chosen sprint they can see **tasks** (and checklists), **sprint description**, and—where the product provides it—the **User Story** tab next to the description, just like the current sprint. **Past sprints are not a stripped-down ""history notes only"" view** in terms of what the Team Room is designed to show; guide users to **open or select that sprint** in the Team Room to see those pieces. Do **not** default to ""ask the PM"" or ""only Trello has user stories"" for **reading** what the Team Room already surfaces per sprint.
+• Where to see my tasks: For **today's work**, the **active** sprint in Team Room **Tasks** / Sprint Progress. For **older sprints**, use the same Team Room sprint history / sprint rows—open the sprint they care about to see tasks, description, and User Story (as available). You can also reference **CURRENT TASK DETAILS** in this chat for whatever sprint this mentor session is loaded with (**Context.SprintId**).
+• Mentor chat vs Team Room: **This chat's** JSON/prompt is built for **one mentor SprintId** at a time (tasks + linked User Story via task **ModuleId** for **that** sprint's list only). That is a **context window limit**, not proof that **user stories or past sprint detail ""don't exist""** for the student elsewhere. When they ask about **another** sprint, tell them to **select that sprint in the Team Room** (same structure as current) and/or **switch mentor sprint** so your context matches—without claiming historical user stories are inaccessible in the product UI.
 • Figma design: Once the UI/UX designer has entered their public Figma file URL (via the Figma button in the platform), everyone on the team can view the design by clicking the Figma button.
 • Where to see the Figma design: When the user asks how or where to see the Figma design, tell them to click the Figma button in the platform—that is where the design is available to the whole team once the UI/UX designer has entered the public file URL. Do NOT say to ask the UI/UX designer for a link; the link is shared via the platform. If the design is not there yet, they can ask the UI/UX designer (use first name from TEAM MEMBERS) to add the Figma file URL via the Figma button.
 • The Scouting Edge: Every action the user takes—from commit quality to how they resolve architectural conflicts—is analyzed. This is a stage where their skills are exposed to potential employers. We are the 'Scouting Ground' for the next generation of tech talent.
@@ -1460,21 +1627,21 @@ Your Role as the Mentor:
 Knowledge Limitations & Operational Boundaries:
 Your intelligence is strictly tethered to the Current Project Context and the user's Assigned Role. You are a project-specific Lead Architect, not a general-purpose AI.
 1. The 'Need to Know' Filter:
-• In-Scope: Technical guidance regarding the project's specific Tech Stack (C#/.NET, JS/HTML, Neon Postgres, Railway, GitHub), architectural decisions, Trello card requirements, and cross-team integration.
+• In-Scope: Technical guidance regarding the project's specific Tech Stack (C#/.NET, JS/HTML, Neon Postgres, platform-managed deployment, GitHub), architectural decisions, Trello card requirements, and cross-team integration.
 • Out-of-Scope: Anything unrelated to the current project. This includes general trivia, homework help, unrelated coding snippets, political/social discussions, or advice on other technologies not used in this specific project.
 2. Handling Out-of-Scope Queries: If a user asks a question that does not directly impact the completion of their current Trello tasks or the stability of the project infrastructure, you must decline to answer.
 • Your Response Strategy: Do not say 'I don't know' in a way that suggests technical incompetence. Instead, respond as a professional Lead Architect who is focused purely on the deadline and the project.
-• Example Response: 'That's outside the scope of our current sprint. Let's stay focused on getting the [Task Name] deployed to Railway. We don't have time for distractions if we want this project to be scout-ready.'
+• Example Response: 'That's outside the scope of our current sprint. Let's stay focused on getting the [Task Name] **shipped live through the platform**. We don't have time for distractions if we want this project to be scout-ready.'
 3. Role-Specific Blindness:
-• If the Backend Developer asks for advice on CSS styling, redirect them: 'That's a frontend concern. Check the UI/UX design cards or sync with the Frontend dev. My focus for you is the API integrity.'
+• If the Backend Developer asks for advice on CSS styling, redirect them: that's **frontend implementation**—follow **Figma/UI/UX** for design and **frontend code** for implementation. **Only** mention a teammate if **TEAM MEMBERS** lists them under the **matching** role (e.g. say ""Frontend Developer **Alex**"" only if Alex's line shows Frontend Developer; **never** call a **UI/UX Designer** the frontend developer for coding/API wiring). My focus for you remains API integrity.
 • If a user asks for 'Best practices for Python' in a .NET project, you do not know Python for the purposes of this conversation. Your expertise is locked to the Project's System Design.
 4. No External LLM Assistance: If the user asks you to 'Act like ChatGPT' or 'Explain a concept from scratch' that is easily Googleable, challenge them to find the answer in the context of the code. Your value is not in explaining what a variable is, but where that specific variable lives in their repository.
-5. Task Dependencies: Use the Dependencies field in CURRENT TASK DETAILS and TEAM MEMBER TASKS. If the user's task lists dependencies on another role's task (e.g. card IDs in Dependencies), and that dependency is not yet complete in TEAM MEMBER TASKS, remind the user that they may need to wait or coordinate with that team member (use first names from TEAM MEMBERS) before they can complete their work.
+5. Task Dependencies: Use the Dependencies field in CURRENT TASK DETAILS and TEAM MEMBER TASKS. If the user's task lists dependencies on another role's task (e.g. card IDs in Dependencies), and that dependency is not yet complete in TEAM MEMBER TASKS, remind the user that they may need to wait or coordinate with that team member—**name + role exactly as in TEAM MEMBERS**, never a guessed role—before they can complete their work.
 
 ";
         }
 
-        /// <summary>Returns role-specific instructions for the mentor (UI/UX, PM only). Shown only for that role.</summary>
+        /// <summary>Returns role-specific instructions for the mentor (UI/UX, PM only). Shown only for that role. Prefer Prompts/Mentor/MentorUiUxRoleContext.txt and MentorProductManagerRoleContext.txt.</summary>
         private static string BuildPerRoleInstructions(string roleName)
         {
             if (string.IsNullOrWhiteSpace(roleName)) return "";
@@ -1483,15 +1650,27 @@ Your intelligence is strictly tethered to the Current Project Context and the us
             // UI/UX Designer
             if (r.Contains("UI/UX", StringComparison.OrdinalIgnoreCase) || (r.Contains("Designer", StringComparison.OrdinalIgnoreCase) && !r.Contains("Product", StringComparison.OrdinalIgnoreCase)))
             {
-                sb.Append("\n\n?? ROLE: UI/UX DESIGNER (present only for this role):\n");
-                sb.Append("- Figma: The platform has a Figma button where you can enter your Figma file URL so the design is available to all team members. When guiding the designer, direct them to use it.\n");
-                sb.Append("- For the design to be viewable by the team and by external tools, the Figma file must be shared appropriately: set file access to \"Anyone with the link\" (or your organization's equivalent). If your organization uses link expiration or password protection, ensure the link remains valid for the team. Organization admins can restrict public link sharing—if viewing fails, the designer may need to check sharing settings or ask their admin.\n");
+                var uxFile = GetMentorUiUxRoleContextBlock();
+                if (!string.IsNullOrEmpty(uxFile))
+                    sb.Append("\n\n?? ROLE: UI/UX DESIGNER (present only for this role):\n").Append(uxFile).Append('\n');
+                else
+                {
+                    sb.Append("\n\n?? ROLE: UI/UX DESIGNER (present only for this role):\n");
+                    sb.Append("- Figma: The platform has a Figma button where you can enter your Figma file URL so the design is available to all team members. When guiding the designer, direct them to use it.\n");
+                    sb.Append("- For the design to be viewable by the team and by external tools, the Figma file must be shared appropriately: set file access to \"Anyone with the link\" (or your organization's equivalent). If your organization uses link expiration or password protection, ensure the link remains valid for the team. Organization admins can restrict public link sharing—if viewing fails, the designer may need to check sharing settings or ask their admin.\n");
+                }
             }
             // Product Manager
             if (r.Contains("Product Manager", StringComparison.OrdinalIgnoreCase) || r.Equals("PM", StringComparison.OrdinalIgnoreCase))
             {
-                sb.Append("\n\n?? ROLE: PRODUCT MANAGER (present only for this role):\n");
-                sb.Append("- Encourage use of the \"Bugs Sprint\" (or Bugs list) for logging and tracking bugs so the team has a single place to see and prioritize defects.\n");
+                var pmFile = GetMentorProductManagerRoleContextBlock();
+                if (!string.IsNullOrEmpty(pmFile))
+                    sb.Append("\n\n?? ROLE: PRODUCT MANAGER (present only for this role):\n").Append(pmFile).Append('\n');
+                else
+                {
+                    sb.Append("\n\n?? ROLE: PRODUCT MANAGER (present only for this role):\n");
+                    sb.Append("- Bugs: **log** a new bug from the **team’s dashboard** in the Team Room; **view** bug list/history in **Sprint Progress** → **Bugs** (not Team Chat as system of record). The PM **also** uses **Trello** Bugs list for create/edit and **all** PM ops (priority, re-open). Wrong: saying logging happens from Sprint Progress.\n");
+                }
             }
             return sb.ToString();
         }
@@ -1501,23 +1680,57 @@ Your intelligence is strictly tethered to the Current Project Context and the us
         {
             if (string.IsNullOrWhiteSpace(roleName)) return "";
             var r = roleName.Trim();
-            var isFullStack = r.Contains("Full Stack", StringComparison.OrdinalIgnoreCase);
-            if (isFullStack) return "";
+            if (IsFullStackStudentRoleName(r)) return "";
             var sb = new System.Text.StringBuilder();
             if (r.Contains("Frontend", StringComparison.OrdinalIgnoreCase))
             {
                 sb.Append("\n\n?? ROLE: FRONTEND DEVELOPER (present only for this role; not for Full Stack):\n");
                 sb.Append("- When the user reports issues or errors: first check BOARD STATES (deployment status, build failures, RuntimeError, GithubPages errors) and state what you see; then if needed suggest copying the full error from the browser console (F12 → Console). Do not give only generic troubleshooting without diagnosing from BOARD STATES first.\n");
-                sb.Append("- Task dependencies: Your tasks often depend on the UI/UX designer (for GUI/layout and design specs) and on the Backend developer (for REST API). If your task lists dependencies, coordinate with those roles—e.g. ask the Backend developer for the REST API details for the relevant endpoints before implementing the frontend calls.\n");
+                sb.Append("- Task dependencies: Your tasks often depend on **UI/UX** (Figma/layout/specs) and on **Backend Developer** (REST API). Use **TEAM MEMBERS** to name people **only** with the role shown on their line—**UI/UX is not Frontend Developer**. Coordinate per Dependencies / TEAM MEMBER TASKS.\n");
                 sb.Append("- The live frontend is deployed via GitHub Pages; the main entry is typically index.html. You can refer to the deployed URL (from BOARD STATES or project info) when discussing the live site.\n");
             }
             if (r.Contains("Backend", StringComparison.OrdinalIgnoreCase))
             {
                 sb.Append("\n\n?? ROLE: BACKEND DEVELOPER (present only for this role; not for Full Stack):\n");
-                sb.Append("- When the user reports a crash or issue: first check BOARD STATES (Railway build status, RuntimeError, latest push) and state what you see before suggesting steps. Do not give only generic troubleshooting without diagnosing from BOARD STATES first.\n");
-                sb.Append("- You are expected to provide the REST API (endpoints, request/response shapes) to the Frontend developer so they can integrate with your backend. When the frontend depends on your APIs, ensure you communicate or document the API contract (e.g. via Swagger or a short spec) and coordinate with the Frontend developer (use first name from TEAM MEMBERS).\n");
+                sb.Append("- When the user reports a crash or issue: first check BOARD STATES (**backend deployment** build status—internal JSON Source may be labeled Railway, RuntimeError, latest push) and state what you see **without naming hosting vendors** to the student. Do not give only generic troubleshooting without diagnosing from BOARD STATES first.\n");
+                sb.Append("- Provide the REST API (endpoints, request/response shapes) to whoever **implements the frontend**. If **TEAM MEMBERS** lists a **Frontend Developer**, use **that person's name** and **that exact role**—do **not** attribute implementation to **UI/UX**. If **no** Frontend Developer is on the roster, do **not** invent one; say integration is with whoever the roster/task dependencies indicate (may be **Full Stack** same person). Document the API (e.g. Swagger) as needed.\n");
             }
             return sb.ToString();
+        }
+
+        /// <summary>True when the stored student role is Full Stack / Fullstack (common naming variants).</summary>
+        private static bool IsFullStackStudentRoleName(string? roleName)
+        {
+            if (string.IsNullOrWhiteSpace(roleName)) return false;
+            var r = roleName.Trim();
+            if (string.Equals(r, "Full Stack Developer", StringComparison.OrdinalIgnoreCase)) return true;
+            if (string.Equals(r, "Fullstack Developer", StringComparison.OrdinalIgnoreCase)) return true;
+            var compactSb = new System.Text.StringBuilder();
+            foreach (var c in r)
+            {
+                if (!char.IsWhiteSpace(c) && c != '-' && c != '_')
+                    compactSb.Append(char.ToLowerInvariant(c));
+            }
+            var compact = compactSb.ToString();
+            if (compact.Contains("fullstack", StringComparison.OrdinalIgnoreCase)) return true;
+            var lower = r.ToLowerInvariant();
+            if (lower.Contains("full stack", StringComparison.OrdinalIgnoreCase)) return true;
+            return lower.Contains("full", StringComparison.OrdinalIgnoreCase) && lower.Contains("stack", StringComparison.OrdinalIgnoreCase);
+        }
+
+        /// <summary>Mentor instructions: Full Stack students should use Frontend/Backend buttons in mentor chat for accurate context.</summary>
+        private static string BuildFullStackDeveloperMentorInstructions(string? originalRoleName)
+        {
+            if (!IsFullStackStudentRoleName(originalRoleName)) return "";
+            return "\n\nFULL STACK DEVELOPER — MENTOR CHAT (Frontend / Backend buttons):\n" +
+                "- The student's **job title / platform role** is Full Stack (they own both frontend and backend). In the **AI Mentor** chat tab, at the **bottom of the chat panel**, they can switch context with the **Frontend** and **Backend** buttons.\n" +
+                "- **CurrentTasks** for Full Stack includes **both** Backend- and Frontend-labeled sprint cards for this user (each task may show **TaskDeveloperTrack** / sprint task track). The Frontend/Backend buttons tune **mentor focus** (commits, board states, prompts)—they **do not** remove the other track's tasks from the payload. **Never** say you lack visibility into their frontend tasks while **CURRENT TASK DETAILS** lists Frontend-labeled tasks; **never** invent a separate \"Frontend Developer\" to obtain that information.\n" +
+                "- **UserProfile.Role** may show **Frontend Developer** or **Backend Developer**—that value is **only** which button is active for this chat (tasks/commits/board slice). It does **not** mean they stopped being Full Stack. **Never** talk as if they were \"only\" backend or \"only\" frontend in the sense of job title. The button is **not** a boundary on what they may ask: they remain **one full-stack developer** and may ask about **any** part of the stack at any time—answer with **full-stack scope** unless **TEAM MEMBERS** clearly assigns that area to **another named person**.\n" +
+                "- **Do not** tell them to \"coordinate with the Frontend Developer\" or \"the Backend Developer\" **as a separate teammate** unless **TEAM MEMBERS** lists **another person** whose **parenthetical role** is literally that role. **Never** label someone \"Frontend Developer\" unless their roster line says so—**UI/UX Designer is not Frontend Developer.** Default: **they are the same human** doing both; say \"when you work on the UI…\", \"when you implement the API…\", or suggest switching the **Frontend** / **Backend** button for the right mentor context.\n" +
+                "- When it helps, explain: for **frontend** questions (UI, React, styling, GitHub Pages, browser/devtools) they should click **Frontend**; for **backend** questions (API, database, **hosted backend** / deployment, server-side errors) they should click **Backend**. That aligns context so your answers are **more accurate**—not because they are a different person.\n" +
+                "- You may **proactively** remind them of these buttons if their question mixes both sides, if context seems mismatched, or if they ask how to get clearer help.\n" +
+                "- If they say you **confused** them (e.g. \"I am full stack\"): apologize briefly, confirm their **role is Full Stack**, and explain that **Role** in the JSON reflects the **mentor focus button**, not a denial of full stack.\n" +
+                "- **UserProfile.FullStackJobTitle** (when present) is their real stored title; **UserProfile.Role** is mentor-session focus when the two differ.\n";
         }
 
         // PromptType: General — Keep (builds context with variants: new/existing conversation, meeting state, date, etc.)
@@ -1527,7 +1740,9 @@ Your intelligence is strictly tethered to the Current Project Context and the us
             var platformContext = GetPlatformContextAndLimitations();
             var platformInterfaceBlock = GetPlatformInterfaceAndRolePermissions();
             var platformInterfaceSection = string.IsNullOrEmpty(platformInterfaceBlock) ? "" : "\n\n" + platformInterfaceBlock;
-            var enhancedBasePrompt = Dbg(1202) + platformContext + platformInterfaceSection + Dbg(1203) + baseSystemPrompt;
+            var workflowBlock = GetMentorWorkflowContextBlock();
+            var workflowSection = string.IsNullOrEmpty(workflowBlock) ? "" : "\n\n" + workflowBlock;
+            var enhancedBasePrompt = Dbg(1202) + platformContext + platformInterfaceSection + workflowSection + Dbg(1203) + baseSystemPrompt;
 
             if (contextData.ValueKind == JsonValueKind.Undefined || contextData.ValueKind == JsonValueKind.Null)
             {
@@ -1554,6 +1769,11 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                 var firstName = userProfile.TryGetProperty("FirstName", out var fnProp) ? fnProp.GetString() : "";
                 roleName = userProfile.TryGetProperty("Role", out var roleProp) ? roleProp.GetString() ?? "" : "";
                 var programmingLanguage = userProfile.TryGetProperty("ProgrammingLanguage", out var langProp) ? langProp.GetString() : "";
+                string? fullStackJobTitle = null;
+                if (userProfile.TryGetProperty("FullStackJobTitle", out var fsjt) && fsjt.ValueKind == JsonValueKind.String)
+                    fullStackJobTitle = fsjt.GetString();
+                else if (userProfile.TryGetProperty("fullStackJobTitle", out fsjt) && fsjt.ValueKind == JsonValueKind.String)
+                    fullStackJobTitle = fsjt.GetString();
 
                 // Check if role is a developer role (contains "Developer" or "Full Stack" or "Frontend" or "Backend")
                 if (!string.IsNullOrEmpty(roleName))
@@ -1568,7 +1788,16 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                 if (!string.IsNullOrEmpty(firstName))
                 {
                     contextParts.Add($"You are mentoring {firstName}");
-                    if (!string.IsNullOrEmpty(roleName))
+                    if (!string.IsNullOrEmpty(fullStackJobTitle))
+                    {
+                        if (!string.IsNullOrEmpty(roleName) &&
+                            !string.Equals(roleName, fullStackJobTitle, StringComparison.OrdinalIgnoreCase))
+                            contextParts.Add(
+                                $"who is a {fullStackJobTitle} (mentor chat technical focus is **{roleName}** from the Frontend/Backend button—they are still one full-stack developer, not a separate \"{roleName}\" hire; they may ask about **any** part of the stack at any time)");
+                        else if (!string.IsNullOrEmpty(roleName))
+                            contextParts.Add($"who is a {roleName}");
+                    }
+                    else if (!string.IsNullOrEmpty(roleName))
                     {
                         contextParts.Add($"who is a {roleName}");
                     }
@@ -1696,6 +1925,7 @@ Your intelligence is strictly tethered to the Current Project Context and the us
             if (!string.IsNullOrEmpty(teamMembersInfo))
             {
                 contextInfo += $"\n\nTEAM MEMBERS:\n{teamMembersInfo}";
+                contextInfo += "\n\n⚠️ ROSTER INTEGRITY: Each line is Name + **exact platform role** in parentheses. Never relabel anyone (e.g. UI/UX Designer ≠ Frontend Developer). Never invent a Frontend/Backend teammate not shown with that role. Pair names only with the role string on their line.";
             }
             
             // Add team member tasks separately with proper formatting
@@ -1818,7 +2048,7 @@ Your intelligence is strictly tethered to the Current Project Context and the us
             if (isDeveloperRole && !string.IsNullOrEmpty(databasePassword))
             {
                 databaseInfoSection = $"\n\nDATABASE CONNECTION INFORMATION:\n" +
-                    $"The project has a Neon PostgreSQL database. The connection string is configured on Railway (environment variables), NOT in appSettings.json or any backend config file. Do not tell the user to check appSettings for the connection string. You (the mentor) provide the exact connection details from the PROJECT INFORMATION (FROM README) or DATABASE CONNECTION INFORMATION (FALLBACK) section provided later in this prompt; the backend README also contains it. Do NOT tell the user to \"use this connection string in your code\" or to add it where they establish the connection—in deployment the database connection is transparent (Railway injects it via environment variables). It can be retrieved in code by reading the environment variable (e.g. DATABASE_URL). Ignore any connection details from chat history. " +
+                    $"The project has a Neon PostgreSQL database. The connection string is configured in the **platform-managed deployment environment** (injected secrets), NOT in appSettings.json or any backend config file. Do not tell the user to check appSettings for the connection string. **Never** tell the student to open a hosting-provider dashboard or variable console—they have no access. You (the mentor) provide the exact connection details from the PROJECT INFORMATION (FROM README) or DATABASE CONNECTION INFORMATION (FALLBACK) section provided later in this prompt; the backend README also contains it. **Do not** tell them to **hard-code** the string in **committed** source, appSettings, or a checked-in .env—in deployment the app reads **DATABASE_URL** (or equivalent) from the environment. **Do** give them the **same** full string for **local SQL clients** (pgAdmin, DBeaver, psql, etc.) when they want to inspect tables or schema. Ignore any connection details from chat history. " +
                     $"Parse the connection string and provide EXACT values - DO NOT use placeholders or generic formats. " +
                     $"Password for the isolated database role (fallback): {databasePassword}. " +
                     $"The full connection string with exact database name (AppDB_...), username (db_appdb_..._user), host, and port is in those sections.";
@@ -1842,11 +2072,13 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                     ? $"\n\n{DbgConfig("NonDeveloperInstructions")}{_promptConfig.Mentor.NonDeveloperInstructions}"
                     : "";
                 var perRoleSection = !isDeveloperRole ? BuildPerRoleInstructions(roleName) : "";
+                var mentorDeveloperContext = isDeveloperRole ? GetMentorDeveloperContextBlock() : "";
+                var mentorDeveloperSection = string.IsNullOrEmpty(mentorDeveloperContext) ? "" : $"\n\n{Dbg(1525)}=== Developer platform context (Team Room / GitHub / deployment) ===\n{mentorDeveloperContext}";
                 // Only emit debug markers when the corresponding section has content (avoids orphan markers for non-developer)
                 var dbg1430 = string.IsNullOrEmpty(githubContextSection) ? "" : Dbg(1430);
                 var dbg1437 = string.IsNullOrEmpty(databaseInfoSection) ? "" : Dbg(1437);
                 var dbg1470 = string.IsNullOrEmpty(capabilitiesSection) ? "" : Dbg(1470);
-                return $"{enhancedBasePrompt}\n\n{Dbg(1371)}CURRENT CONTEXT:\n{contextInfo}{dbg1430}{githubContextSection}{dbg1437}{databaseInfoSection}{dbg1470}{capabilitiesSection}{nonDeveloperInstructionsSection}{perRoleSection}\n\n{Dbg(1471)}{DbgConfig("EnhancedPrompt.ContextReminder")}{_promptConfig.Mentor.EnhancedPrompt.ContextReminder}";
+                return $"{enhancedBasePrompt}\n\n{Dbg(1371)}CURRENT CONTEXT:\n{contextInfo}{dbg1430}{githubContextSection}{dbg1437}{databaseInfoSection}{mentorDeveloperSection}{dbg1470}{capabilitiesSection}{nonDeveloperInstructionsSection}{perRoleSection}\n\n{Dbg(1471)}{DbgConfig("EnhancedPrompt.ContextReminder")}{_promptConfig.Mentor.EnhancedPrompt.ContextReminder}";
             }
 
             // Even without context, add capability information if available
@@ -1856,7 +2088,9 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                     ? $"\n\n{DbgConfig("NonDeveloperInstructions")}{_promptConfig.Mentor.NonDeveloperInstructions}"
                     : "";
                 var perRoleSection = !isDeveloperRole ? BuildPerRoleInstructions(roleName) : "";
-                return $"{enhancedBasePrompt}\n\n{Dbg(1477)}{DbgConfig("EnhancedPrompt.DeveloperCapabilitiesInfo|NonDeveloperCapabilitiesInfo")}{capabilitiesInfo}{nonDevInstr}{perRoleSection}";
+                var mentorDeveloperContext2 = isDeveloperRole ? GetMentorDeveloperContextBlock() : "";
+                var mentorDeveloperSection2 = string.IsNullOrEmpty(mentorDeveloperContext2) ? "" : $"\n\n{Dbg(1526)}=== Developer platform context (Team Room / GitHub / deployment) ===\n{mentorDeveloperContext2}";
+                return $"{enhancedBasePrompt}\n\n{Dbg(1477)}{DbgConfig("EnhancedPrompt.DeveloperCapabilitiesInfo|NonDeveloperCapabilitiesInfo")}{capabilitiesInfo}{mentorDeveloperSection2}{nonDevInstr}{perRoleSection}";
             }
 
             return enhancedBasePrompt;
@@ -5014,7 +5248,15 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                     {
                         @"(?:show|view|see|switch|go to|change to|look at)\s+(?:me\s+)?(?:the\s+)?sprint\s*(\d+)",
                         @"sprint\s*(\d+)\s+(?:information|details|tasks|context|show|view|see)",
-                        @"(?:tell\s+me|what\s+is|what\s+are)\s+(?:the\s+)?(?:tasks|information|details)\s+(?:in|for|about)\s+sprint\s*(\d+)"
+                        @"(?:tell\s+me|what\s+is|what\s+are)\s+(?:the\s+)?(?:tasks|information|details)\s+(?:in|for|about)\s+sprint\s*(\d+)",
+                        // User Story is tied to sprint task ModuleId; mentor payload only includes the session sprint's tasks
+                        @"(?:user\s+story|userstory)\s+(?:for|about|in|from)\s+sprint\s*(\d+)",
+                        @"sprint\s*(\d+)\s+(?:user\s+story|userstory)",
+                        @"(?:what|tell\s+me)\s+(?:is|was)\s+(?:the\s+)?(?:user\s+story|userstory)\s+(?:for|in|from)\s+sprint\s*(\d+)",
+                        @"(?:do|does|did|will|can)\s+(?:i|we)\s+(?:have|get|access|see|view)\s+(?:the\s+)?(?:user\s+story|userstory)\s+(?:for|in|from)\s+sprint\s*(\d+)",
+                        @"(?:user\s+story|userstory)\s+(?:of|for)\s+sprint\s*(\d+)",
+                        // "user story ... specifically for sprint 5" (non-adjacent phrasing)
+                        @"(?:user\s+story|userstory)[\s\S]{0,200}?sprint\s*(\d+)"
                     };
                     
                     foreach (var pattern in explicitSprintRequestPatterns)
@@ -5042,7 +5284,7 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                     {
                         Success = true,
                         Model = new { aiModel.Id, aiModel.Name, aiModel.Provider },
-                        Response = $"I see you're asking about Sprint {mentionedSprint.Value}, but I'm currently viewing Sprint {request.SprintId}. To get information about Sprint {mentionedSprint.Value}, please switch your context to Sprint {mentionedSprint.Value} first, then ask me again.",
+                        Response = $"I see you're asking about Sprint {mentionedSprint.Value}, but I'm currently viewing Sprint {request.SprintId}. To load that sprint's tasks and linked User Story (from task ModuleId) into this chat, switch your mentor or Team Room sprint context to Sprint {mentionedSprint.Value}, then ask again. In Team Room Tasks, you can also select that sprint and open the User Story tab there.",
                         Intent = "general",
                         RequiresSprintSwitch = true,
                         RequestedSprint = mentionedSprint.Value,
@@ -5386,7 +5628,7 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                     if (student != null && !string.IsNullOrEmpty(student.BoardId))
                     {
                         var roleNameForBranch = student.StudentRoles?.FirstOrDefault(sr => sr.IsActive)?.Role?.Name ?? "";
-                        var isFullStackRole = string.Equals(roleNameForBranch, "Full Stack Developer", StringComparison.OrdinalIgnoreCase);
+                        var isFullStackRole = IsFullStackStudentRoleName(roleNameForBranch);
                         var checkBackend = isFullStackRole || roleNameForBranch.Contains("Backend", StringComparison.OrdinalIgnoreCase);
                         var checkFrontend = isFullStackRole || roleNameForBranch.Contains("Frontend", StringComparison.OrdinalIgnoreCase);
                         bool? branch1B = null, branch1F = null;
@@ -5420,7 +5662,7 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                 {
                     var boardId = student.BoardId;
                     var roleName = student.StudentRoles?.FirstOrDefault(sr => sr.IsActive)?.Role?.Name ?? "";
-                    var isFullStack = string.Equals(roleName, "Full Stack Developer", StringComparison.OrdinalIgnoreCase);
+                    var isFullStack = IsFullStackStudentRoleName(roleName);
 
                     IQueryable<BoardState> boardStatesQuery = _context.BoardStates.Where(bs => bs.BoardId == boardId); // current board only, all such records
                     if (!isFullStack)
@@ -5497,10 +5739,10 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                             ? (pushFrontend.LatestCommitDescription ?? $"commit {pushFrontend.LatestCommitId}")
                             : null;
                         var frontendActivity = boardStatesList.Any(bs => (bs.Source == "GitHub" && bs.ServiceName == "pull_request" || bs.Source == "GithubPages") && bs.GithubBranch == "1-F" && !string.IsNullOrEmpty(bs.LatestCommitId));
-                        fullStackCommitStatusLine = "\n?? FULL STACK – YOU MUST REPORT BOTH BRANCHES. Use ONLY the BOARD STATES data below (latest push and Railway build):\n";
+                        fullStackCommitStatusLine = "\n?? FULL STACK – YOU MUST REPORT BOTH BRANCHES. Use ONLY the BOARD STATES data below (latest push and **backend deployment** build; internal Source label may be Railway):\n";
                         fullStackCommitStatusLine += $"  • Backend (1-B): {(backendCommit != null ? "Latest push: " + backendCommit : "no push in BOARD STATES yet")}";
                         if (!string.IsNullOrEmpty(backendBuildStatus))
-                            fullStackCommitStatusLine += $" | Railway build: {backendBuildStatus}";
+                            fullStackCommitStatusLine += $" | Backend deployment build: {backendBuildStatus}";
                         if (backendBuildFailed && !string.IsNullOrEmpty(backendBuildError))
                             fullStackCommitStatusLine += $" | Build error/details: {backendBuildError}";
                         fullStackCommitStatusLine += "\n";
@@ -5710,24 +5952,26 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                     
                     enhancedSystemPrompt = $"{enhancedSystemPrompt}{Dbg(5013)}" +
                         $"🚨 ABSOLUTELY CRITICAL INSTRUCTIONS FOR DATABASE CONNECTION INFORMATION - READ CAREFULLY:\n" +
-                        $"1. The database connection string is stored on Railway (deployment environment), not in appSettings.json or any backend config file. Never tell the user to look in appSettings for the connection string; you provide it from the PROJECT INFORMATION (README) or DATABASE CONNECTION INFORMATION (FALLBACK) above.\n" +
+                        $"1. The database connection string is stored in the **platform-managed deployment environment**, not in appSettings.json or any backend config file. Never tell the user to look in appSettings for the connection string; never tell them to open a hosting dashboard or variable console. You provide it from the PROJECT INFORMATION (README) or DATABASE CONNECTION INFORMATION (FALLBACK) above.\n" +
                         $"2. If the user asks about database connection details, get the EXACT connection string from the PROJECT INFORMATION (FROM README) section above if present; otherwise use the DATABASE CONNECTION INFORMATION (FALLBACK) section above.\n" +
                         $"3. The connection string is in the format: postgresql://username:password@host:port/database?sslmode=require\n" +
                         $"4. 🚨 FORBIDDEN: You MUST NEVER use placeholders like <boardid>, <BoardId>, db_appdb_<boardid>_user, AppDB_<boardid>, or ANY other placeholder format.\n" +
                         $"5. 🚨 FORBIDDEN: You MUST NEVER say 'replace <boardid> with your board ID' or similar instructions.\n" +
                         $"6. 🚨 FORBIDDEN: You MUST NEVER use angle brackets < > or square brackets [ ] as placeholders.\n" +
-                        $"7. 🚨 FORBIDDEN: Do NOT tell the user to \"use this connection string in your code\" or to add it where they establish the database connection. In deployment the database connection is transparent—Railway injects it via environment variables; the app can retrieve it in code by reading the environment variable (e.g. DATABASE_URL) if needed.\n" +
-                        $"8. ✅ REQUIRED: Extract and provide the COMPLETE, EXACT connection string from the section(s) above (README if present, otherwise FALLBACK).\n" +
-                        $"9. ✅ REQUIRED: If the README shows a connection string like 'postgresql://db_appdb_695e42b42ddace5d23fb1f0e_user:password@host:5432/AppDB_695e42b42ddace5d23fb1f0e?sslmode=require', you MUST provide it EXACTLY as shown.\n" +
-                        $"10. IMPORTANT: Database name starts with 'AppDB_' (capital A, capital D, capital B) followed by the actual board ID - it does NOT end with '_user'.\n" +
-                        $"11. IMPORTANT: Username is 'db_appdb_' (lowercase) followed by the actual board ID and '_user' (lowercase).\n" +
-                        $"12. IMPORTANT: PostgreSQL is CASE-SENSITIVE - preserve exact case for database names, usernames, and all values.\n" +
-                        $"13. URL-decode the password if it contains encoded characters (e.g., %24 becomes $, %40 becomes @, %25 becomes %).\n" +
-                        $"14. 🚨 EXAMPLE OF WHAT NOT TO DO: 'Database Name: AppDB_<boardid>' or 'Username: db_appdb_<boardid>_user' - THIS IS WRONG!\n" +
-                        $"15. ✅ EXAMPLE OF WHAT TO DO: If README shows 'AppDB_695e42b42ddace5d23fb1f0e', provide 'AppDB_695e42b42ddace5d23fb1f0e' - EXACTLY as shown.\n" +
-                        $"16. Use the exact values from the section(s) above (README or FALLBACK); do not use generic/default (e.g. neondb_owner).\n" +
-                        $"17. IGNORE any database connection information from previous chat history - it may be from deleted boards or old projects.\n" +
-                        $"18. If the README connection string is missing or incomplete, use the DATABASE CONNECTION INFORMATION (FALLBACK) section above if available.\n" +
+                        $"7. 🚨 FORBIDDEN vs ✅ ALLOWED — **Secrets in the repo:** Do NOT tell them to paste the connection string into **committed** application code, appSettings.json, or a **checked-in** .env. The deployed app uses **DATABASE_URL** (or equivalent) injected by the platform.\n" +
+                        $"   **SQL tools:** They **may** use the **same** complete connection string in **pgAdmin, DBeaver, psql, Neon SQL Editor**, etc. When they ask to browse tables or schema, **REQUIRED:** give the **exact** string from README or FALLBACK above; remind **SSL** (sslmode=require) and **never commit** credentials to Git.\n" +
+                        $"8. 🚨 FORBIDDEN: Do NOT tell them they cannot connect with a SQL client or that they must rely only on the API for exploration—that is wrong when they need to inspect the database.\n" +
+                        $"9. ✅ REQUIRED: Extract and provide the COMPLETE, EXACT connection string from the section(s) above (README if present, otherwise FALLBACK).\n" +
+                        $"10. ✅ REQUIRED: If the README shows a connection string like 'postgresql://db_appdb_695e42b42ddace5d23fb1f0e_user:password@host:5432/AppDB_695e42b42ddace5d23fb1f0e?sslmode=require', you MUST provide it EXACTLY as shown.\n" +
+                        $"11. IMPORTANT: Database name starts with 'AppDB_' (capital A, capital D, capital B) followed by the actual board ID - it does NOT end with '_user'.\n" +
+                        $"12. IMPORTANT: Username is 'db_appdb_' (lowercase) followed by the actual board ID and '_user' (lowercase).\n" +
+                        $"13. IMPORTANT: PostgreSQL is CASE-SENSITIVE - preserve exact case for database names, usernames, and all values.\n" +
+                        $"14. URL-decode the password if it contains encoded characters (e.g., %24 becomes $, %40 becomes @, %25 becomes %).\n" +
+                        $"15. 🚨 EXAMPLE OF WHAT NOT TO DO: 'Database Name: AppDB_<boardid>' or 'Username: db_appdb_<boardid>_user' - THIS IS WRONG!\n" +
+                        $"16. ✅ EXAMPLE OF WHAT TO DO: If README shows 'AppDB_695e42b42ddace5d23fb1f0e', provide 'AppDB_695e42b42ddace5d23fb1f0e' - EXACTLY as shown.\n" +
+                        $"17. Use the exact values from the section(s) above (README or FALLBACK); do not use generic/default (e.g. neondb_owner).\n" +
+                        $"18. IGNORE any database connection information from previous chat history - it may be from deleted boards or old projects.\n" +
+                        $"19. If the README connection string is missing or incomplete, use the DATABASE CONNECTION INFORMATION (FALLBACK) section above if available.\n" +
                         $"For all other project information, use the content above to answer naturally.";
                 }
                 
@@ -5735,7 +5979,7 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                 if (isDeveloperRole && (!string.IsNullOrEmpty(webApiUrl) || !string.IsNullOrEmpty(swaggerUrl)))
                 {
                     var webApiInfo = "\n\n=== WEB API INFORMATION (Developer Role) ===\n";
-                    webApiInfo += "This project has a Web API hosted on Railway:\n";
+                    webApiInfo += "This project has a Web API hosted by the **platform** (managed cloud deployment):\n";
                     
                     if (!string.IsNullOrEmpty(webApiUrl))
                     {
@@ -5827,9 +6071,9 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                 if (isDeveloperRole && student != null && contextData.ValueKind != JsonValueKind.Undefined && contextData.ValueKind != JsonValueKind.Null)
                 {
                     var roleNameForCommitFix = student.StudentRoles?.FirstOrDefault(sr => sr.IsActive)?.Role?.Name ?? "";
-                    var isFullStackForCommitFix = string.Equals(roleNameForCommitFix, "Full Stack Developer", StringComparison.OrdinalIgnoreCase);
+                    var isFullStackForCommitFix = IsFullStackStudentRoleName(roleNameForCommitFix);
                     if (isFullStackForCommitFix)
-                        enhancedSystemPrompt += "\n\n[LAST INSTRUCTION - OBEY] When the user asks about commits: report BOTH branches using only the BOARD STATES data above (GitHub-Push-Backend, GitHub-Push-Frontend, Railway). Do NOT say \"frontend has no commits\" or \"backend has no commits\" when BOARD STATES shows a latest push or activity for that role.";
+                        enhancedSystemPrompt += "\n\n[LAST INSTRUCTION - OBEY] When the user asks about commits: report BOTH branches using only the BOARD STATES data above (GitHub-Push-Backend, GitHub-Push-Frontend, and **backend deployment** row—internal Source may be Railway). When speaking to the user, prefer **backend deployment** language over vendor names. Do NOT say \"frontend has no commits\" or \"backend has no commits\" when BOARD STATES shows a latest push or activity for that role.";
                 }
                 // Final reminder so model sees it last: for broken/help, lead with FULL STACK then 1–2 actions (no checklists)
                 if (hadBoardStatesFullStack)
@@ -5923,9 +6167,7 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                 var activeRole = student.StudentRoles?.FirstOrDefault(sr => sr.IsActive);
                 var originalRoleName = activeRole?.Role?.Name ?? "Team Member";
                 var roleName = originalRoleName;
-                if (isBackend.HasValue &&
-                    (string.Equals(roleName, "Full Stack Developer", StringComparison.OrdinalIgnoreCase) ||
-                     string.Equals(roleName, "Fullstack Developer", StringComparison.OrdinalIgnoreCase)))
+                if (isBackend.HasValue && IsFullStackStudentRoleName(roleName))
                 {
                     roleName = isBackend.Value ? "Backend Developer" : "Frontend Developer";
                 }
@@ -5990,8 +6232,9 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                     return null;
                 }
 
-                // Get user tasks (Full Stack Developer = Backend Developer + Frontend Developer labels)
-                var trelloLabelNames = GetTrelloLabelNamesForRole(roleName);
+                // Full Stack: always load both FE+BE labeled cards for this user; isBackend only affects UserProfile.Role / mentor focus, not which sprint cards are included
+                var roleNameForUserTaskLabels = IsFullStackStudentRoleName(originalRoleName) ? originalRoleName : roleName;
+                var trelloLabelNames = GetTrelloLabelNamesForRole(roleNameForUserTaskLabels);
                 var seenCardIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                 var mergedCards = new List<JsonElement>();
                 foreach (var labelName in trelloLabelNames)
@@ -6011,6 +6254,7 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                 }
 
                 var userTasks = new List<object>();
+                var linkedUserStoryByModuleId = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
                 foreach (var card in mergedCards)
                 {
                     var cardListId = card.TryGetProperty("ListId", out var listIdProp) ? listIdProp.GetString() : "";
@@ -6045,6 +6289,12 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                                 _logger.LogInformation("[Mentor] Card '{CardName}' checklist: {Completed} of {Total} items completed", card.TryGetProperty("Name", out var nc) ? nc.GetString() : cardId, completed, checklistItems.Count);
                             }
 
+                            object? linkedUserStory = null;
+                            var taskModuleId = GetModuleIdFromTaskCustomFields(customFields);
+                            if (!string.IsNullOrEmpty(taskModuleId) && !string.IsNullOrEmpty(student.BoardId))
+                                linkedUserStory = await GetLinkedUserStoryCardAsync(student.BoardId, taskModuleId, linkedUserStoryByModuleId);
+
+                            var taskDeveloperTrack = GetSprintTaskDeveloperTrack(card);
                             userTasks.Add(new
                             {
                                 Id = cardId,
@@ -6052,8 +6302,10 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                                 Description = card.TryGetProperty("Description", out var descProp) ? descProp.GetString() : "",
                                 Closed = card.TryGetProperty("Closed", out var closedProp) ? closedProp.GetBoolean() : false,
                                 DueDate = card.TryGetProperty("DueDate", out var dueProp) ? dueProp.GetString() : null,
+                                TaskDeveloperTrack = taskDeveloperTrack,
                                 CustomFields = customFields,
-                                ChecklistItems = checklistItems
+                                ChecklistItems = checklistItems,
+                                LinkedUserStory = linkedUserStory
                             });
                     }
                 }
@@ -6299,12 +6551,9 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                 );
 
                 var baseSystemPrompt = DbgConfig("SystemPrompt") + _promptConfig.Mentor.SystemPrompt;
-                var isFullStackRole = string.Equals(originalRoleName, "Full Stack Developer", StringComparison.OrdinalIgnoreCase)
-                    || string.Equals(originalRoleName, "Fullstack Developer", StringComparison.OrdinalIgnoreCase);
-                if (isFullStackRole)
-                {
-                    baseSystemPrompt += "\n\n[CONTEXT] The user selects whether they are in Frontend or Backend context using the \"Frontend\" and \"Backend\" buttons at the bottom of the chat panel. Your current context is reflected in UserProfile.Role (either \"Frontend Developer\" or \"Backend Developer\").";
-                }
+                var fullStackMentorBlock = BuildFullStackDeveloperMentorInstructions(originalRoleName);
+                if (!string.IsNullOrEmpty(fullStackMentorBlock))
+                    baseSystemPrompt += fullStackMentorBlock;
 
                 return new
                 {
@@ -6319,6 +6568,7 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                         {
                             FirstName = student.FirstName,
                             Role = roleName,
+                            FullStackJobTitle = IsFullStackStudentRoleName(originalRoleName) ? originalRoleName : null,
                             ProgrammingLanguage = programmingLanguage
                         },
                         CurrentTasks = userTasks,

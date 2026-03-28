@@ -342,11 +342,42 @@ public class Worker : BackgroundService
         }
     }
 
+    private static double PendingWaitHours(StudentCandidate c, DateTime nowUtc)
+    {
+        var start = c.StartPendingAt ?? nowUtc;
+        return (nowUtc - start).TotalHours;
+    }
+
+    private static bool NonDeveloperRequirementsSatisfied(IReadOnlyCollection<StudentCandidate> group, KickoffConfig cfg)
+    {
+        if (cfg.RequireAdmin && group.Count(x => x.IsAdmin) != 1) return false;
+        if (cfg.RequireUIUXDesigner && group.Count(x => x.RoleType == 3) != 1) return false;
+        if (cfg.RequireProductManager && group.Count(x => x.RoleType == 4) != 1) return false;
+        return true;
+    }
+
+    private static void RemoveFrontendBackendFromByRole(Dictionary<int, StudentCandidate> byRole, ILogger logger)
+    {
+        var frontendBackendRoleIds = byRole.Values
+            .Where(x => x.RoleType == 2 &&
+                ((x.RoleName ?? string.Empty).Contains("Frontend", StringComparison.OrdinalIgnoreCase) ||
+                 (x.RoleName ?? string.Empty).Contains("Backend", StringComparison.OrdinalIgnoreCase)))
+            .Select(x => x.RoleId!.Value)
+            .ToList();
+
+        foreach (var roleId in frontendBackendRoleIds)
+        {
+            var removed = byRole[roleId];
+            byRole.Remove(roleId);
+            logger.LogInformation("[SELECT] Removed from group: StudentId={StudentId}, RoleId={RoleId}, RoleName={RoleName} (split devs vs fullstack)",
+                removed.Id, roleId, removed.RoleName);
+        }
+    }
+
     private static List<StudentCandidate>? SelectGroup(List<StudentCandidate> candidates, KickoffConfig cfg, ILogger logger)
     {
-        // Greedy: unique roles, exactly one admin, at least MinimumStudents
+        // Greedy: one student per RoleId; order is priority rank then StartPendingAt (first wins — no IsAdmin tie-break).
         var byRole = new Dictionary<int, StudentCandidate>();
-        StudentCandidate? admin = null;
         logger.LogInformation("[SELECT] Evaluating {Count} candidates", candidates.Count);
         
         // DEBUG: Log all candidates with full details
@@ -356,12 +387,6 @@ public class Worker : BackgroundService
             var c = candidates[i];
             logger.LogInformation("[SELECT]   Candidate {Index}: StudentId={StudentId}, RoleId={RoleId}, RoleType={RoleType}, RoleName={RoleName}, IsAdmin={IsAdmin}, PriorityRank={PriorityRank}, StartPendingAt={StartPendingAt}",
                 i + 1, c.Id, c.RoleId?.ToString() ?? "NULL", c.RoleType?.ToString() ?? "NULL", c.RoleName ?? "NULL", c.IsAdmin, c.PriorityRank, c.StartPendingAt?.ToString() ?? "NULL");
-        }
-        
-        var adminIds = candidates.Where(x => x.IsAdmin && x.RoleId != null).Select(x => x.Id).ToList();
-        if (adminIds.Any())
-        {
-            logger.LogInformation("[SELECT] Admin-flagged candidates: [{Ids}]", string.Join(',', adminIds));
         }
         
         // DEBUG: Check for UI/UX in all candidates
@@ -386,30 +411,15 @@ public class Worker : BackgroundService
             var roleKey = c.RoleId.Value;
             if (!byRole.ContainsKey(roleKey))
             {
-                // First time we see this role, take candidate
                 byRole[roleKey] = c;
                 logger.LogInformation("[SELECT] Added to byRole: StudentId={StudentId}, RoleId={RoleId}, RoleType={RoleType}, RoleName={RoleName}, IsAdmin={IsAdmin}",
                     c.Id, roleKey, c.RoleType?.ToString() ?? "NULL", c.RoleName ?? "NULL", c.IsAdmin);
             }
             else
             {
-                // Role already taken. If current candidate is admin and existing is not, prefer admin
                 var existing = byRole[roleKey];
-                if (c.IsAdmin && !existing.IsAdmin)
-                {
-                    logger.LogInformation("[SELECT] Replacing in byRole (preferring admin): Old StudentId={OldId}, New StudentId={NewId}, RoleId={RoleId}",
-                        existing.Id, c.Id, roleKey);
-                    byRole[roleKey] = c;
-                }
-                else
-                {
-                    logger.LogInformation("[SELECT] Skipping candidate StudentId={StudentId}: RoleId={RoleId} already taken by StudentId={ExistingId}",
-                        c.Id, roleKey, existing.Id);
-                }
-            }
-            if (c.IsAdmin)
-            {
-                if (admin == null) admin = c; // track one admin reference; exact count computed below
+                logger.LogInformation("[SELECT] Skipping candidate StudentId={StudentId}: RoleId={RoleId} already taken by StudentId={ExistingId}",
+                    c.Id, roleKey, existing.Id);
             }
             
             // Check if we can stop early, but only if all required roles are satisfied
@@ -608,34 +618,6 @@ public class Worker : BackgroundService
                 group = byRole.Values.ToList();
             }
         }
-        var adminCount = group.Count(x => x.IsAdmin);
-        if (cfg.RequireAdmin && adminCount != 1)
-        {
-            // Try to enforce exactly one admin by replacing a same-role non-admin with an admin from candidates
-            var anyAdmin = candidates.FirstOrDefault(x => x.IsAdmin && x.RoleId != null);
-            if (anyAdmin != null)
-            {
-                var key = anyAdmin.RoleId!.Value;
-                if (byRole.ContainsKey(key))
-                {
-                    // Replace existing (even if already admin we will recompute)
-                    byRole[key] = anyAdmin;
-                }
-                else
-                {
-                    // If role not in group, add and possibly evict a non-admin duplicate role to keep size
-                    byRole[key] = anyAdmin;
-                }
-                group = byRole.Values.ToList();
-                adminCount = group.Count(x => x.IsAdmin);
-            }
-
-            if (adminCount != 1)
-            {
-                logger.LogInformation("[SELECT] Rejected: admin count {AdminCount} (require exactly 1)", adminCount);
-                return null;
-            }
-        }
 
         // Enforce required roles - exactly 1 for UI/UX and Product Manager
         if (cfg.RequireUIUXDesigner)
@@ -681,70 +663,87 @@ public class Worker : BackgroundService
                 return null;
             }
         }
+
+        if (cfg.RequireAdmin && group.Count(x => x.IsAdmin) != 1)
+        {
+            logger.LogInformation("[SELECT] Rejected: admin count is {Count} (RequireAdmin=true, need exactly 1)", group.Count(x => x.IsAdmin));
+            return null;
+        }
+
         if (cfg.RequireDeveloperRule)
         {
-            // Rule: 
-            // - If exactly one Fullstack (RoleType=1) exists, there must be NO Frontend and NO Backend developers
-            // - If NO Fullstack exists, there must be BOTH Frontend (RoleType=2, name contains "Frontend") 
-            //   AND Backend (RoleType=2, name contains "Backend")
             var fullstackCount = group.Count(x => x.RoleType == 1);
             var hasFrontend = group.Any(x => x.RoleType == 2 && (x.RoleName ?? string.Empty).Contains("Frontend", StringComparison.OrdinalIgnoreCase));
             var hasBackend = group.Any(x => x.RoleType == 2 && (x.RoleName ?? string.Empty).Contains("Backend", StringComparison.OrdinalIgnoreCase));
 
-            // If Fullstack exists, automatically remove Frontend and Backend developers
-            if (fullstackCount == 1 && (hasFrontend || hasBackend))
+            if (fullstackCount == 1 && hasFrontend && hasBackend)
             {
-                logger.LogInformation("[SELECT] Fullstack developer found - removing Frontend and Backend developers from group");
-                
-                // Remove Frontend and Backend developers from byRole dictionary
-                var frontendBackendRoleIds = byRole.Values
-                    .Where(x => x.RoleType == 2 && 
-                        ((x.RoleName ?? string.Empty).Contains("Frontend", StringComparison.OrdinalIgnoreCase) ||
-                         (x.RoleName ?? string.Empty).Contains("Backend", StringComparison.OrdinalIgnoreCase)))
-                    .Select(x => x.RoleId!.Value)
-                    .ToList();
-                
-                foreach (var roleId in frontendBackendRoleIds)
+                var fsMember = byRole.Values.First(x => x.RoleType == 1);
+                var feMember = byRole.Values.First(x => x.RoleType == 2 && (x.RoleName ?? string.Empty).Contains("Frontend", StringComparison.OrdinalIgnoreCase));
+                var beMember = byRole.Values.First(x => x.RoleType == 2 && (x.RoleName ?? string.Empty).Contains("Backend", StringComparison.OrdinalIgnoreCase));
+
+                if (NonDeveloperRequirementsSatisfied(group, cfg))
                 {
-                    var removed = byRole[roleId];
-                    byRole.Remove(roleId);
-                    logger.LogInformation("[SELECT] Removed from group: StudentId={StudentId}, RoleId={RoleId}, RoleName={RoleName} (redundant with Fullstack)",
-                        removed.Id, roleId, removed.RoleName);
+                    var now = DateTime.UtcNow;
+                    var wFs = PendingWaitHours(fsMember, now);
+                    var wFe = PendingWaitHours(feMember, now);
+                    var wBe = PendingWaitHours(beMember, now);
+                    var preferSplitDevs = wFe > wFs || wBe > wFs;
+                    if (preferSplitDevs)
+                    {
+                        logger.LogInformation("[SELECT] Developer triple: FE/BE waited longer (wFs={WFs}, wFe={WFe}, wBe={WBe}) — keeping Frontend+Backend, removing Fullstack", wFs, wFe, wBe);
+                        byRole.Remove(fsMember.RoleId!.Value);
+                    }
+                    else
+                    {
+                        logger.LogInformation("[SELECT] Developer triple: Fullstack longest or tied wait (wFs={WFs}, wFe={WFe}, wBe={WBe}) — keeping Fullstack, removing FE/BE", wFs, wFe, wBe);
+                        RemoveFrontendBackendFromByRole(byRole, logger);
+                    }
                 }
-                
-                // Update group after removal
+                else
+                {
+                    logger.LogInformation("[SELECT] Developer triple but non-developer requirements not all satisfied — default: remove FE/BE, keep Fullstack");
+                    RemoveFrontendBackendFromByRole(byRole, logger);
+                }
+
                 group = byRole.Values.ToList();
-                
-                // Re-check counts after removal
                 fullstackCount = group.Count(x => x.RoleType == 1);
                 hasFrontend = group.Any(x => x.RoleType == 2 && (x.RoleName ?? string.Empty).Contains("Frontend", StringComparison.OrdinalIgnoreCase));
                 hasBackend = group.Any(x => x.RoleType == 2 && (x.RoleName ?? string.Empty).Contains("Backend", StringComparison.OrdinalIgnoreCase));
-                
-                logger.LogInformation("[SELECT] After removal: fullstackCount={Fullstack}, hasFrontend={FE}, hasBackend={BE}, groupCount={Count}",
-                    fullstackCount, hasFrontend, hasBackend, group.Count);
-                
-                // Re-check minimum students after removal
+
+                if (group.Count < cfg.MinimumStudents)
+                {
+                    logger.LogInformation("[SELECT] Rejected: not enough students after developer triple resolution (have {Have}, need {Need})", group.Count, cfg.MinimumStudents);
+                    return null;
+                }
+            }
+            else if (fullstackCount == 1 && (hasFrontend || hasBackend))
+            {
+                logger.LogInformation("[SELECT] Fullstack with partial FE/BE — removing split devs in favor of Fullstack");
+                RemoveFrontendBackendFromByRole(byRole, logger);
+                group = byRole.Values.ToList();
+                fullstackCount = group.Count(x => x.RoleType == 1);
+                hasFrontend = group.Any(x => x.RoleType == 2 && (x.RoleName ?? string.Empty).Contains("Frontend", StringComparison.OrdinalIgnoreCase));
+                hasBackend = group.Any(x => x.RoleType == 2 && (x.RoleName ?? string.Empty).Contains("Backend", StringComparison.OrdinalIgnoreCase));
+
                 if (group.Count < cfg.MinimumStudents)
                 {
                     logger.LogInformation("[SELECT] Rejected: not enough unique-role students after developer rule cleanup (have {Have}, need {Need})", group.Count, cfg.MinimumStudents);
                     return null;
                 }
             }
-            
-            // Now validate the developer rule
+
             bool satisfies;
             if (fullstackCount == 1)
             {
-                // If we have exactly one Fullstack, we should NOT have Frontend or Backend
                 satisfies = !hasFrontend && !hasBackend;
                 if (!satisfies)
                 {
-                    logger.LogInformation("[SELECT] Rejected: developer rule violated - Fullstack exists but also has Frontend={FE} or Backend={BE} (Fullstack should be alone)", hasFrontend, hasBackend);
+                    logger.LogInformation("[SELECT] Rejected: developer rule violated - Fullstack exists but also has Frontend={FE} or Backend={BE}", hasFrontend, hasBackend);
                 }
             }
             else if (fullstackCount == 0)
             {
-                // If we have NO Fullstack, we must have BOTH Frontend AND Backend
                 satisfies = hasFrontend && hasBackend;
                 if (!satisfies)
                 {
@@ -753,7 +752,6 @@ public class Worker : BackgroundService
             }
             else
             {
-                // More than one Fullstack is invalid
                 satisfies = false;
                 logger.LogInformation("[SELECT] Rejected: developer rule violated - Multiple Fullstack developers ({Count})", fullstackCount);
             }
@@ -765,30 +763,10 @@ public class Worker : BackgroundService
             }
         }
 
-        // Ensure exactly one admin if required
-        if (cfg.RequireAdmin)
+        if (cfg.RequireAdmin && group.Count(x => x.IsAdmin) != 1)
         {
-            // If none admin in selected roles but there is one in candidates, swap first to admin
-            if (adminCount == 0)
-            {
-                var anyAdmin = candidates.FirstOrDefault(x => x.IsAdmin && x.RoleId != null);
-                if (anyAdmin != null)
-                {
-                    if (!byRole.ContainsKey(anyAdmin.RoleId!.Value))
-                    {
-                        // replace first entry
-                        var firstKey = byRole.Keys.First();
-                        byRole[firstKey] = anyAdmin;
-                        group = byRole.Values.ToList();
-                    }
-                }
-            }
-            // Recheck
-            if (group.Count(x => x.IsAdmin) != 1)
-            {
-                logger.LogInformation("[SELECT] Rejected after admin swap attempt: admin count still != 1");
-                return null;
-            }
+            logger.LogInformation("[SELECT] Rejected: admin count after developer rule is {Count} (need exactly 1)", group.Count(x => x.IsAdmin));
+            return null;
         }
 
         logger.LogInformation("[SELECT] Accepted group: ids=[{Ids}] roles=[{Roles}]", string.Join(',', group.Select(g => g.Id)), string.Join(',', group.Select(g => $"{g.RoleName}:{g.RoleType}")));

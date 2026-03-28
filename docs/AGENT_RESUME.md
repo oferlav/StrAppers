@@ -6,7 +6,7 @@ Copy **one** of these:
 
 **Short**
 
-> Read `docs/AGENT_RESUME.md` (checkpoint **2026-03-22**), `docs/BASE44_FINAL_DETACH_CHECKLIST.md`, and `docs/BASE44_MIGRATION_PLAN.md`, then continue from **Next (lead order)** in `AGENT_RESUME` (or execute the final-detach checklist if I ask for cutover).
+> Read `docs/AGENT_RESUME.md` (checkpoint **2026-03-24** — migration **complete**), `docs/BASE44_FINAL_DETACH_CHECKLIST.md`, and `docs/BASE44_MIGRATION_PLAN.md` for reference; continue from **Current status** (or optional final-detach cleanup if I ask).
 
 **If you remember the last task**
 
@@ -14,7 +14,7 @@ Copy **one** of these:
 
 **Fast handoff (recommended now)**
 
-> Read `docs/AGENT_RESUME.md`, `docs/BASE44_MIGRATION_PLAN.md`, `docs/BASE44_FINAL_DETACH_CHECKLIST.md`, and `docs/STRAPPERS_BACKEND_CLIENT.md`. Continue from the **Checkpoint** and **Next step** below.
+> Read `docs/AGENT_RESUME.md`, `docs/BASE44_MIGRATION_PLAN.md`, `docs/BASE44_FINAL_DETACH_CHECKLIST.md`, and `docs/STRAPPERS_BACKEND_CLIENT.md`. **Migration is complete** — see **Checkpoint — 2026-03-24**; use checklist only for optional SDK/static cleanup.
 
 ---
 
@@ -26,6 +26,7 @@ Copy **one** of these:
 | Backend | `strAppersBackend` in **StrAppers** repo. |
 | Policy | **Happy with current frontend.** **Do not** add backend routes just to fill audit gaps. Mark calls **obsolete** only when **100% sure** no matching route exists. |
 | Cursor vs disk | IDE may show fewer files than Explorer; audits used **disk** scans. **Also:** Cursor’s **file search / glob** for `strAppersFrontend/src` has returned only a **subset** of `.jsx` files while PowerShell on the same machine sees **159** — use **`docs/FRONTEND_SRC_FILE_INDEX.md`** (regenerate: `.\scripts\GenerateFrontendSrcIndex.ps1`) as the **source of truth** for “what exists on disk.” |
+| Curated frontend paths | **`docs/FRONTEND_PATH_INDEX.md`** — append-only list of pages/components the user (or agent) has pointed at; agents should extend it “as you go.” Rule: `.cursor/rules/strappers-frontend-layout.mdc`. |
 
 ---
 
@@ -40,29 +41,33 @@ Copy **one** of these:
 - **`strAppersFrontend/.env.example`** — env template; `.gitignore` has `!.env.example`.
 - **`docs/BASE44_FINAL_DETACH_CHECKLIST.md`** — **single checklist** for the last mile when removing Base44 (SDK, fallbacks, CDN URLs, CRM direct invokes, verification greps). Updated 2026-03-21.
 
-## Not done yet (unless you finished it later)
+## Migration status — **complete** (2026-03-24)
 
-- Replacing **`base44.functions.invoke`** with **`strAppersBackendJson`** screen-by-screen.
-- Azure deploy (plan §5).
-- Auth migration off base44.
+- **Base44 → StrAppers (dual-path) work** and **cutover-related tasks** are treated as **done** for this project (frontend uses `VITE_STRAPPERS_BACKEND_URL` + StrAppers APIs; remaining Base44 references are fallbacks or optional cleanup per checklist).
+- **Azure:** API deployed; **Google OAuth** — `GoogleAuth:*` configured in **Azure App Service Configuration** (overrides JSON); redirect URI aligned with Google Cloud Console.
+- **Optional later:** `docs/BASE44_FINAL_DETACH_CHECKLIST.md` — remove SDK fallbacks, static CDN URLs, etc., only if you want a “hard” detach with no Base44 code paths.
 
 ---
 
-## Suggested next step (when continuing implementation)
+## Suggested next step (post-migration)
 
-1. Pick **one** screen or hook.  
-2. Map invokes → paths via **`base44/functions/<name>/entry.ts`** + audit (skip obsolete URLs).  
-3. Wire **`strAppersBackendJson`**; confirm **CORS** on the API.  
+Only if you open a new task: pick a concrete bug/feature, or run **optional** final-detach items from **`docs/BASE44_FINAL_DETACH_CHECKLIST.md`**. Update this file when direction changes.
 
-Update this file’s **Next step** line when you change direction.
+### Checkpoint — 2026-03-24 (**current** — migration complete)
 
-### Checkpoint — 2026-03-21 (break — **current**)
+**Status:** Migration **complete** per user. StrAppers backend on Azure; Google sign-in works with app settings for **`GoogleAuth`** (redirect URI, client id/secret, etc.). Use **`docs/BASE44_FINAL_DETACH_CHECKLIST.md`** only for **optional** cleanup (remove Base44 SDK / fallbacks / CDN references), not as a blocking migration step.
 
-**User decision:** Final Base44 detach is planned **ASAP**; **hold new development on Base44** (Deno / Base44-only) until cutover. Until then, continue migrating **other modules/pages** using the **dual-path** pattern — Board Room is **StrAppers-first** when `VITE_STRAPPERS_BACKEND_URL` is set; remaining Base44 ties are tracked in **`docs/BASE44_FINAL_DETACH_CHECKLIST.md`** (SDK removal, invoke fallbacks, static assets, `CRMDashboardModal` → `crmStrAppers`, etc.).
+**Historical:** Prior checkpoints (2026-03-21, 2026-03-22) described dual-path rollout and detach planning; that phase is **closed**.
 
-**Board Room (recap):** Team Performance uses **`fetchDashboardStats`** + **`useDashboardStats`** (~60s poll). No merged board/detailed-task overlay in board stats (reverted per user). **`base44Client` intercepts** still route many invokes to StrAppers when env is set.
+---
 
-**Next session:** Pick the next **page/module** from the order below (or user’s priority). Do **not** block on final detach checklist until user starts cutover.
+### Checkpoint — 2026-03-21 (archived — pre-complete)
+
+**User decision:** Final Base44 detach was planned **ASAP**; dual-path pattern until cutover. Superseded by **2026-03-24** (migration complete).
+
+**Board Room (recap):** Team Performance uses **`fetchDashboardStats`** + **`useDashboardStats`** (~60s poll). **`base44Client` intercepts** still route many invokes to StrAppers when env is set.
+
+**Next session:** Superseded — see **2026-03-24**.
 
 ---
 
@@ -104,11 +109,11 @@ Update this file’s **Next step** line when you change direction.
 
 **Done (2026-03-19g):** **Student registration / edit profile, org registration / edit, ProjectsOrg** — **`studentRegistrationStrAppers.js`** (majors, years, roles, langs, create/update student, GitHub login URL), **`organizationStrAppers.js`** (terms, create, update org), **`projectsOrgStrAppers.js`** (projects by org, boards by project, member count, suspend/activate). Pages wired off **`@/functions/*`** for those flows when **`VITE_STRAPPERS_BACKEND_URL`** is set. **`boardEntityStrAppers.getStudentByEmail`** now normalizes API casing via **`normalizeStudentRecord`**. **Landing** footer `mailto:` uses **`VITE_SUPPORT_EMAIL`** or **`support@strappers.app`** (not skill-in.com). **`getProjectsByOrgId`** accepts **`orgId`** or **`organizationId`**.
 
-**Next (lead order) — superseded by checkpoint 2026-03-22:** see **Checkpoint — 2026-03-22** table above. Historical items: landing smoke-test, auth noise, Checkout entities fallback, employer upload, final checklist.
+**Next (lead order) — superseded:** **Checkpoint — 2026-03-24** marks migration **complete**; items below are historical.
 
-**Detach readiness:** Dual-path coverage is wider; **final detach** still requires checklist items (remove SDK fallbacks, static CDN URLs, auth replacement, etc.) — say when when you want that pass.
+**Detach readiness (optional):** **`docs/BASE44_FINAL_DETACH_CHECKLIST.md`** — SDK removal, CDN URLs, etc. — only if you want a hard Base44 detach.
 
-**Still optional:** `npm run build` / `ChangePassword.jsx`; Azure; auth off Base44.
+**Still optional (non-blocking):** `npm run build` / `ChangePassword.jsx` issues; any leftover Base44 fallbacks.
 
 ---
 
@@ -134,7 +139,9 @@ Update this file’s **Next step** line when you change direction.
 
 **Follow-ups:** `npm run build` may still fail on unrelated `ChangePassword.jsx` import; Azure + auth migration later per plan.
 
-### Progress snapshot (excludes Azure deploy + auth migration)
+### Progress snapshot (historical — pre-2026-03-24)
+
+**Superseded:** Migration declared **complete** in **Checkpoint — 2026-03-24**. Table kept for archive.
 
 Rough **frontend base44 → StrAppers (dual-path / cutover) progress:**
 
@@ -155,13 +162,13 @@ Rough **frontend base44 → StrAppers (dual-path / cutover) progress:**
 
 Paste this into a **new chat** (edit the bracketed part if your priority changed):
 
-> Read **`docs/AGENT_RESUME.md`** (start at **Checkpoint — 2026-03-22**), **`docs/STRAPPERS_BACKEND_CLIENT.md`**, **`docs/BASE44_FINAL_DETACH_CHECKLIST.md`**, and **`docs/BASE44_MIGRATION_PLAN.md`** (intro + policy §0.0.2).  
-> **Context:** Dual-path migration: when **`VITE_STRAPPERS_BACKEND_URL`** is set, prefer StrAppers HTTP; else Base44 invoke. **Org project wizard** (ProjectsOrg, CreateProjectModal, ProjectWizardModal) is migrated including **`bindModules`** and **`downloadProjectDesign`**; backend needs **`POST /api/SystemDesign/use/download-project-design`** deployed if ZIP download should work on dev/prod. **`Boards/use/boards`** returns **200 + []** when project exists but has no boards (redeploy if still 404).  
-> **Continue from:** **Next (lead order)** in checkpoint **2026-03-22** — **[pick: remaining invoke grep / employer integrations upload / final detach checklist / user-specific screen]**.  
-> Policy: avoid **new** backend routes **only** to fill audit gaps (`docs/BASE44_BACKEND_ENDPOINT_AUDIT.md`); map real routes from `docs/BASE44_AUDIT_API_PATHS_FROM_DISK.txt` / `BASE44_FRONTEND_INVOKE_INDEX.md`. Full file index: `docs/FRONTEND_SRC_FILE_INDEX.md` if glob is incomplete in IDE.
+> Read **`docs/AGENT_RESUME.md`** (start at **Checkpoint — 2026-03-24** — migration **complete**), **`docs/STRAPPERS_BACKEND_CLIENT.md`**, **`docs/BASE44_FINAL_DETACH_CHECKLIST.md`** (optional hard-detach), and **`docs/BASE44_MIGRATION_PLAN.md`** (reference).  
+> **Context:** Base44 → StrAppers migration is **done**; API on Azure; Google OAuth via **`GoogleAuth`** in Azure App Service settings. Dual-path / Base44 fallbacks may still exist until optional checklist cleanup.  
+> **Continue from:** New user task (bug/feature), or **optional** final-detach items in **`docs/BASE44_FINAL_DETACH_CHECKLIST.md`**.  
+> Policy (unchanged): avoid **new** backend routes **only** to fill audit gaps (`docs/BASE44_BACKEND_ENDPOINT_AUDIT.md`); map real routes from `docs/BASE44_AUDIT_API_PATHS_FROM_DISK.txt` / `BASE44_FRONTEND_INVOKE_INDEX.md`. Full file index: `docs/FRONTEND_SRC_FILE_INDEX.md` if glob is incomplete in IDE.
 
 ---
 
 ## Optional: git as checkpoint
 
-After a good stopping point: `git add` / `git commit` with a message like `docs: base44 migration checkpoint` so the next session can use `git log -1` / diff to see state.
+After a good stopping point: `git add` / `git commit` with a message like `docs: migration complete checkpoint` so the next session can use `git log -1` / diff to see state.

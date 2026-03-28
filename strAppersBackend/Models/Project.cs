@@ -10,6 +10,14 @@ public class Project
     [Required]
     [MaxLength(200)]
     public string Title { get; set; } = string.Empty;
+
+    /// <summary>Short mission statement for the project (max 250 characters).</summary>
+    [MaxLength(250)]
+    public string? Mission { get; set; }
+
+    /// <summary>Single-line pitch or tagline (max 250 characters).</summary>
+    [MaxLength(250)]
+    public string? OneLiner { get; set; }
     
     [MaxLength(1000)]
     public string? Description { get; set; }
@@ -109,6 +117,12 @@ public class CreateProjectRequest
     
     [MaxLength(1000)]
     public string? ShortBrief { get; set; }
+
+    [MaxLength(250)]
+    public string? Mission { get; set; }
+
+    [MaxLength(250)]
+    public string? OneLiner { get; set; }
     
     [MaxLength(50)]
     public string Priority { get; set; } = "Medium";
@@ -136,6 +150,12 @@ public class CreateProjectSimpleRequest
     
     [MaxLength(1000)]
     public string? ShortBrief { get; set; }
+
+    [MaxLength(250)]
+    public string? Mission { get; set; }
+
+    [MaxLength(250)]
+    public string? OneLiner { get; set; }
     
     [MaxLength(500)]
     public string? CriteriaIds { get; set; }
@@ -154,6 +174,12 @@ public class UpdateProjectRequest
     
     [MaxLength(1000)]
     public string? ShortBrief { get; set; }
+
+    [MaxLength(250)]
+    public string? Mission { get; set; }
+
+    [MaxLength(250)]
+    public string? OneLiner { get; set; }
     
     [MaxLength(50)]
     public string? Priority { get; set; }

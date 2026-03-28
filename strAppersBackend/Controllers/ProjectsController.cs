@@ -49,6 +49,8 @@ public class ProjectsController : ControllerBase
                 {
                     Id = p.Id,
                     Title = p.Title,
+                    Mission = p.Mission,
+                    OneLiner = p.OneLiner,
                     Description = p.Description,
                     ExtendedDescription = p.ExtendedDescription,
                     ShortBrief = p.ShortBrief,
@@ -85,6 +87,8 @@ public class ProjectsController : ControllerBase
                 {
                     Id = p.Id,
                     Title = p.Title,
+                    Mission = p.Mission,
+                    OneLiner = p.OneLiner,
                     Description = p.Description,
                     ExtendedDescription = p.ExtendedDescription,
                     ShortBrief = p.ShortBrief,
@@ -148,6 +152,8 @@ public class ProjectsController : ControllerBase
                 {
                     Id = p.Id,
                     Title = p.Title,
+                    Mission = p.Mission,
+                    OneLiner = p.OneLiner,
                     Description = p.Description,
                     ExtendedDescription = p.ExtendedDescription,
                     ShortBrief = p.ShortBrief,
@@ -216,6 +222,8 @@ public class ProjectsController : ControllerBase
             var project = new Project
             {
                 Title = request.Title,
+                Mission = request.Mission,
+                OneLiner = request.OneLiner,
                 Description = request.Description,
                 ExtendedDescription = request.ExtendedDescription,
                 ShortBrief = request.ShortBrief,
@@ -236,6 +244,8 @@ public class ProjectsController : ControllerBase
                 {
                     Id = p.Id,
                     Title = p.Title,
+                    Mission = p.Mission,
+                    OneLiner = p.OneLiner,
                     Description = p.Description,
                     ExtendedDescription = p.ExtendedDescription,
                     ShortBrief = p.ShortBrief,
@@ -426,6 +436,8 @@ public class ProjectsController : ControllerBase
             var project = new Project
             {
                 Title = request.Title,
+                Mission = request.Mission,
+                OneLiner = request.OneLiner,
                 Description = request.Description,
                 ExtendedDescription = request.ExtendedDescription,
                 ShortBrief = request.ShortBrief,
@@ -446,6 +458,8 @@ public class ProjectsController : ControllerBase
                 {
                     Id = p.Id,
                     Title = p.Title,
+                    Mission = p.Mission,
+                    OneLiner = p.OneLiner,
                     Description = p.Description,
                     ExtendedDescription = p.ExtendedDescription,
                     ShortBrief = p.ShortBrief,
@@ -523,7 +537,9 @@ public class ProjectsController : ControllerBase
                 {
                     Id = p.Id,
                     Title = p.Title,
-                    Description = p.ShortBrief,
+                    Mission = p.Mission,
+                    OneLiner = p.OneLiner,
+                    Description = p.Description,
                     ExtendedDescription = p.ExtendedDescription,
                     ShortBrief = p.ShortBrief,
                     Priority = p.Priority,
@@ -580,12 +596,19 @@ public class ProjectsController : ControllerBase
     /// Get all students who have this project in their priority fields (ProjectPriority1-4) and Status < 2
     /// </summary>
     /// <param name="id">The project ID</param>
+    /// <param name="candidateRoleId">When MultiRolesPerProject is false, students with this active role are excluded, developer/full-stack pairing rules apply (see <see cref="ShouldExcludePeerByDeveloperRule"/>), then the list is de-duplicated to one student per role.</param>
+    /// <param name="currentStudentId">Optional logged-in student id that should always be returned when present in this project's candidate list (used to keep the applicant visible after Apply).</param>
     [HttpGet("use/get-students/{id}")]
-    public async Task<ActionResult<IEnumerable<object>>> GetStudentsForProject(int id)
+    public async Task<ActionResult<IEnumerable<object>>> GetStudentsForProject(
+        int id,
+        [FromQuery(Name = "CandidateRoleId")] int? candidateRoleId = null,
+        [FromQuery(Name = "CurrentStudentId")] int? currentStudentId = null)
     {
         try
         {
-            _logger.LogInformation("Getting students for project {ProjectId} with Status < 2", id);
+            _logger.LogInformation(
+                "Getting students for project {ProjectId} with Status < 2 (MultiRolesPerProject={MultiRoles}, CandidateRoleId={CandidateRoleId}, CurrentStudentId={CurrentStudentId})",
+                id, _kickoffConfig.MultiRolesPerProject, candidateRoleId, currentStudentId);
 
             // Validate project exists
             var projectExists = await _context.Projects.AnyAsync(p => p.Id == id);
@@ -638,6 +661,47 @@ public class ProjectsController : ControllerBase
                 })
                 .ToListAsync();
 
+            if (!_kickoffConfig.MultiRolesPerProject)
+            {
+                string? candidateRoleName = null;
+                if (candidateRoleId.HasValue)
+                {
+                    candidateRoleName = await _context.Roles
+                        .Where(r => r.Id == candidateRoleId.Value)
+                        .Select(r => r.Name)
+                        .FirstOrDefaultAsync();
+                    if (string.IsNullOrWhiteSpace(candidateRoleName))
+                    {
+                        _logger.LogWarning(
+                            "get-students project {ProjectId}: CandidateRoleId {CandidateRoleId} has no matching Role row; " +
+                            "developer/full-stack pairing is skipped (same-role exclusion still applies). Client should pass a valid role id.",
+                            id, candidateRoleId.Value);
+                    }
+                }
+                else
+                {
+                    _logger.LogWarning(
+                        "get-students project {ProjectId}: CandidateRoleId query param missing while MultiRolesPerProject=false; " +
+                        "same-role exclusion and developer/full-stack pairing are skipped (per-role dedupe still runs). " +
+                        "Student UI should pass the logged-in active role id.",
+                        id);
+                }
+
+                var filtered = students
+                    .Where(s => !candidateRoleId.HasValue || s.RoleId != candidateRoleId.Value || (currentStudentId.HasValue && s.Id == currentStudentId.Value))
+                    .Where(s => (currentStudentId.HasValue && s.Id == currentStudentId.Value) || !ShouldExcludePeerByDeveloperRule(candidateRoleName, s.RoleName))
+                    .ToList();
+
+                students = filtered
+                    .GroupBy(s => s.RoleId)
+                    .Select(g => g
+                        .OrderByDescending(s => currentStudentId.HasValue && s.Id == currentStudentId.Value)
+                        .ThenBy(s => s.UpdatedAt ?? DateTime.MaxValue)
+                        .ThenBy(s => s.Id)
+                        .First())
+                    .ToList();
+            }
+
             _logger.LogInformation("Found {Count} students for project {ProjectId} with Status < 2", students.Count, id);
             return Ok(students);
         }
@@ -677,6 +741,8 @@ public class ProjectsController : ControllerBase
                 {
                     Id = p.Id,
                     Title = p.Title,
+                    Mission = p.Mission,
+                    OneLiner = p.OneLiner,
                     Description = p.Description,
                     ExtendedDescription = p.ExtendedDescription,
                     ShortBrief = p.ShortBrief,
@@ -820,6 +886,8 @@ public class ProjectsController : ControllerBase
                 {
                     Id = p.Id,
                     Title = p.Title,
+                    Mission = p.Mission,
+                    OneLiner = p.OneLiner,
                     Description = p.Description,
                     ExtendedDescription = p.ExtendedDescription,
                     ShortBrief = p.ShortBrief,
@@ -933,6 +1001,12 @@ public class ProjectsController : ControllerBase
 
             if (request.ShortBrief != null)
                 project.ShortBrief = request.ShortBrief;
+
+            if (request.Mission != null)
+                project.Mission = request.Mission;
+
+            if (request.OneLiner != null)
+                project.OneLiner = request.OneLiner;
 
             if (!string.IsNullOrEmpty(request.Priority))
                 project.Priority = request.Priority;
@@ -1227,6 +1301,46 @@ public class ProjectsController : ControllerBase
             _logger.LogError(ex, "Error retrieving hot projects for student {StudentId}", studentId);
             return StatusCode(500, "An error occurred while retrieving hot projects");
         }
+    }
+
+    /// <summary>
+    /// When filtering peers for a candidate role: full-stack labels exclude every role whose name contains &quot;Developer&quot;;
+    /// any developer-role label excludes full-stack-style labels (Full Stack / Fullstack / FullStack + Developer).
+    /// </summary>
+    private static bool ShouldExcludePeerByDeveloperRule(string? candidateRoleName, string? peerRoleName)
+    {
+        if (string.IsNullOrWhiteSpace(candidateRoleName))
+            return false;
+
+        bool candidateIsFullStack = RoleNameIsFullStackDeveloperLabel(candidateRoleName);
+        bool candidateIsDeveloper = RoleNameContainsDeveloperWord(candidateRoleName);
+
+        if (candidateIsFullStack && RoleNameContainsDeveloperWord(peerRoleName))
+            return true;
+
+        if (candidateIsDeveloper && RoleNameIsFullStackDeveloperLabel(peerRoleName))
+            return true;
+
+        return false;
+    }
+
+    private static bool RoleNameContainsDeveloperWord(string? roleName)
+    {
+        return !string.IsNullOrEmpty(roleName)
+               && roleName.Contains("developer", StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>Matches &quot;Full Stack Developer&quot;, &quot;Fullstack Developer&quot;, &quot;FullStack Developer&quot;, and similar (case/spacing insensitive).</summary>
+    private static bool RoleNameIsFullStackDeveloperLabel(string? roleName)
+    {
+        if (string.IsNullOrWhiteSpace(roleName) || !RoleNameContainsDeveloperWord(roleName))
+            return false;
+
+        if (roleName.Contains("full stack", StringComparison.OrdinalIgnoreCase))
+            return true;
+
+        var compact = string.Concat(roleName.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
+        return compact.Contains("fullstack", StringComparison.OrdinalIgnoreCase);
     }
 
 }

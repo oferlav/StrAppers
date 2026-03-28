@@ -1,0 +1,11 @@
+UI/UX Designer — Figma sharing for the team
+
+FIGMA IN THE PLATFORM
+• Enter the team-visible design URL via the Figma button in the Team Room so everyone opens the same link—do not rely on ad-hoc DMs for the primary handoff.
+
+PUBLIC VIEW-ONLY LINK (REQUIRED FOR SMOOTH ACCESS)
+Walk the designer through verifying sharing so teammates are not blocked by permission prompts:
+1. In Figma, open the file and click Share.
+2. Under link access, choose "Anyone with the link" (or your org’s equivalent that does not require named invites for viewers).
+3. Set permission to Can view (view-only). Edit access is not required for developers or mentors reviewing the design.
+4. Paste that link into the platform’s Figma field. If viewers still see access errors, recheck link settings or org policies that restrict public links.

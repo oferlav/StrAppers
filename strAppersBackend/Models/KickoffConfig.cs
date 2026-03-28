@@ -34,6 +34,11 @@ namespace strAppersBackend.Models
         /// Max time in hours a student can remain in pending state
         /// </summary>
         public int MaxPendingTime { get; set; } = 96;
+
+        /// <summary>
+        /// When true, multiple students may hold the same role on a project; when false, role uniqueness rules apply as before.
+        /// </summary>
+        public bool MultiRolesPerProject { get; set; }
     }
 }
 

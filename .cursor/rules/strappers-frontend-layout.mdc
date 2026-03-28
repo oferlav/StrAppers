@@ -1,0 +1,28 @@
+---
+description: Where the StrAppers React app and student API wrappers live (always include in searches).
+alwaysApply: true
+---
+
+# StrAppers frontend — canonical paths
+
+The **student-facing React app** lives under **`strAppersFrontend/src/`** (not the repo root).
+
+| Area | Path |
+|------|------|
+| Pages (e.g. student projects UI) | `strAppersFrontend/src/pages/` — includes `ProjectsStudentV2.jsx`, `CategoryProjects.jsx` |
+| HTTP wrappers to .NET backend | `strAppersFrontend/src/api/*StrAppers.js` |
+| Shared components | `strAppersFrontend/src/components/` |
+| Legacy/Base44 function sources (Deno) | `strAppersFrontend/base44/functions/` |
+
+When the user mentions **ProjectsStudentV2**, **get-students**, **invokeGetProjectStudents**, or **student project browsing**, search **`strAppersFrontend/src`** first. Do not assume `strAppersFrontend` only contains a landing page.
+
+Indexer note: `strAppersFrontend/node_modules` and build folders are excluded via root **`.cursorignore`** so tools can enumerate `src` reliably.
+
+## “As you go” path indexing
+
+If the user **states a concrete path** to a page, component, API module, or folder (e.g. “X is in `…/src/pages/…`”), **in the same change**:
+
+1. **Append** a row to **`docs/FRONTEND_PATH_INDEX.md`** (Path + one-line Context). Avoid duplicates for the same path; update Context if the old note is wrong.
+2. Optionally extend the table in this rule’s **canonical paths** section only when it’s a **new top-level area** (e.g. a new major directory).
+
+Future agents should **read `docs/FRONTEND_PATH_INDEX.md`** when working on frontend tasks so known locations accumulate without re-discovery.

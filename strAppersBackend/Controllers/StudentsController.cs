@@ -1,7 +1,7 @@
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
-using Microsoft.Extensions.Options;
 using strAppersBackend.Data;
+using strAppersBackend.Helpers;
 using strAppersBackend.Models;
 using strAppersBackend.Services;
 using System.ComponentModel;
@@ -18,16 +18,14 @@ public class StudentsController : ControllerBase
     private readonly IGitHubService _githubService;
     private readonly IKickoffService _kickoffService;
     private readonly IPasswordHasherService _passwordHasher;
-    private readonly KickoffConfig _kickoffConfig;
 
-    public StudentsController(ApplicationDbContext context, ILogger<StudentsController> logger, IGitHubService githubService, IKickoffService kickoffService, IPasswordHasherService passwordHasher, IOptions<KickoffConfig> kickoffConfig)
+    public StudentsController(ApplicationDbContext context, ILogger<StudentsController> logger, IGitHubService githubService, IKickoffService kickoffService, IPasswordHasherService passwordHasher)
     {
         _context = context;
         _logger = logger;
         _githubService = githubService;
         _kickoffService = kickoffService;
         _passwordHasher = passwordHasher;
-        _kickoffConfig = kickoffConfig.Value;
     }
 
     /// <summary>
@@ -239,8 +237,12 @@ public class StudentsController : ControllerBase
             student.ProjectPriority2 = ToNullable(projectId2);
             student.ProjectPriority3 = ToNullable(projectId3);
             student.ProjectPriority4 = ToNullable(projectId4);
+            var previousStatus = student.Status;
             student.Status = 1; // Pending
-            student.StartPendingAt = DateTime.UtcNow;
+            if (previousStatus is null or 0)
+            {
+                student.StartPendingAt = DateTime.UtcNow;
+            }
             student.UpdatedAt = DateTime.UtcNow;
 
             await _context.SaveChangesAsync();
@@ -509,6 +511,7 @@ public class StudentsController : ControllerBase
 
             // Create new student
             _logger.LogInformation("Creating new student with email {Email}", request.Email);
+            var photo = StudentPhotoHelper.CompressStudentPhotoIfNeeded(request.Photo, _logger);
             var student = new Student
             {
                 FirstName = request.FirstName,
@@ -519,7 +522,7 @@ public class StudentsController : ControllerBase
                 YearId = request.YearId,
                 LinkedInUrl = request.LinkedInUrl,
                 GithubUser = request.GithubUser ?? string.Empty, // GitHub username (optional)
-                Photo = request.Photo, // Base64 encoded image or URL
+                Photo = photo, // Base64 encoded image or URL (compressed if larger than 2 MB)
                 ProgrammingLanguageId = programmingLanguageId, // Programming language preference (null allowed)
                 ProjectId = null, // Default to null
                 IsAdmin = false, // Default to false
@@ -720,6 +723,12 @@ public class StudentsController : ControllerBase
             {
                 _logger.LogWarning("ALLOCATE: Student {StudentId} already has all 4 priorities set. Cannot add project {ProjectId} to priority list.", studentId, projectId);
                 return BadRequest("Student already has all 4 project priorities set. Cannot add more projects to priority list.");
+            }
+
+            if (student.Status is null or 0)
+            {
+                student.Status = 1;
+                student.StartPendingAt = DateTime.UtcNow;
             }
             
             student.UpdatedAt = DateTime.UtcNow;
@@ -945,9 +954,9 @@ public class StudentsController : ControllerBase
             if (!string.IsNullOrEmpty(request.LinkedInUrl))
                 student.LinkedInUrl = request.LinkedInUrl;
 
-            // Update photo if provided (can be base64 or URL)
+            // Update photo if provided (can be base64 or URL; compressed if larger than 2 MB)
             if (request.Photo != null)
-                student.Photo = request.Photo;
+                student.Photo = StudentPhotoHelper.CompressStudentPhotoIfNeeded(request.Photo, _logger);
 
             // Validate and update GitHub username if provided (non-developer roles may not have GitHub)
             if (request.GithubUser != null && !string.IsNullOrWhiteSpace(request.GithubUser))
@@ -1698,13 +1707,10 @@ public class StudentsController : ControllerBase
     }
 
     /// <summary>
-    /// Check if allocating a student to a project would break KickoffConfig RequireDeveloperRule
-    /// Only checks for role conflicts (e.g., Fullstack + Frontend/Backend, multiple Fullstacks)
-    /// Does NOT block if roles are missing (e.g., missing Frontend when Backend exists)
+    /// Lightweight check before a student applies to a project (priority allocation).
+    /// Does not enforce developer roster mix (fullstack vs FE/BE): multiple developer types may apply to the same project;
+    /// composition is validated when the team can kick off / get a board (see <see cref="IKickoffService.ShouldKickoffBeTrue"/>).
     /// </summary>
-    /// <param name="projectId">The project ID to check allocation for</param>
-    /// <param name="studentId">The student ID to check if can be allocated</param>
-    /// <returns>Object with isAllocatable (bool) and message (string) explaining why allocation is not allowed if false</returns>
     [HttpGet("use/is-allocatable/{projectId}/{studentId}")]
     public async Task<ActionResult<object>> IsStudentAllocatable(int projectId, int studentId)
     {
@@ -1712,7 +1718,6 @@ public class StudentsController : ControllerBase
         {
             _logger.LogInformation("Checking if student {StudentId} can be allocated to project {ProjectId}", studentId, projectId);
 
-            // Get the student to be allocated
             var studentToAllocate = await _context.Students
                 .Include(s => s.StudentRoles)
                     .ThenInclude(sr => sr.Role)
@@ -1724,13 +1729,12 @@ public class StudentsController : ControllerBase
                 return NotFound($"Student with ID {studentId} not found");
             }
 
-            // Get student's active role types
             var studentRoleTypes = studentToAllocate.StudentRoles
                 .Where(sr => sr.IsActive)
                 .Select(sr => new { Type = sr.Role?.Type ?? 0, Name = sr.Role?.Name ?? "" })
                 .ToList();
 
-            _logger.LogInformation("Student {StudentId} roles: [{Roles}]", 
+            _logger.LogInformation("Student {StudentId} roles: [{Roles}]",
                 studentId, string.Join(", ", studentRoleTypes.Select(r => $"Type={r.Type}, Name='{r.Name}'")));
 
             if (!studentRoleTypes.Any())
@@ -1743,138 +1747,13 @@ public class StudentsController : ControllerBase
                 });
             }
 
-            // Get all students with Status < 2 that have this projectId in any ProjectPriority field
-            // This matches the logic used in /api/Projects/use/get-students/{id}
-            var studentsAlreadyAllocated = await _context.Students
-                .Include(s => s.StudentRoles)
-                    .ThenInclude(sr => sr.Role)
-                .Where(s => s.Id != studentId &&
-                           s.Status.HasValue && 
-                           s.Status < 2 && // Status < 2 (same as get-students endpoint)
-                           (s.ProjectPriority1 == projectId ||
-                            s.ProjectPriority2 == projectId ||
-                            s.ProjectPriority3 == projectId ||
-                            s.ProjectPriority4 == projectId))
-                .ToListAsync();
-
-            _logger.LogInformation("Found {Count} students with Status < 2 already allocated or pending allocation to project {ProjectId} (excluding student {StudentId})", 
-                studentsAlreadyAllocated.Count, projectId, studentId);
-            
-            // Log details for debugging
-            foreach (var student in studentsAlreadyAllocated)
-            {
-                var activeRoles = student.StudentRoles.Where(sr => sr.IsActive).ToList();
-                var roleInfo = string.Join(", ", activeRoles.Select(r => $"Type={r.Role?.Type}, Name={r.Role?.Name}"));
-                _logger.LogInformation("  - Student ID: {StudentId}, Status: {Status}, ProjectPriority1: {P1}, ProjectPriority2: {P2}, ProjectPriority3: {P3}, ProjectPriority4: {P4}, Roles: [{Roles}]", 
-                    student.Id, student.Status, student.ProjectPriority1, student.ProjectPriority2, student.ProjectPriority3, student.ProjectPriority4, roleInfo);
-            }
-
-            // Only check RequireDeveloperRule if enabled
-            if (!_kickoffConfig.RequireDeveloperRule)
-            {
-                _logger.LogInformation("✅ RequireDeveloperRule is disabled - allocation allowed");
-                return Ok(new
-                {
-                    isAllocatable = true,
-                    message = "Allocation is allowed - RequireDeveloperRule is disabled"
-                });
-            }
-
-            // Get role types from already allocated students
-            var allocatedRoleTypes = studentsAlreadyAllocated
-                .SelectMany(s => s.StudentRoles.Where(sr => sr.IsActive))
-                .Select(sr => new { Type = sr.Role?.Type ?? 0, Name = sr.Role?.Name ?? "" })
-                .ToList();
-
-            _logger.LogInformation("Allocated students' roles: [{Roles}]", 
-                string.Join(", ", allocatedRoleTypes.Select(r => $"Type={r.Type}, Name='{r.Name}'")));
-
-            // Count Fullstack developers (Type=1) - check for "Full Stack Developer" or "Fullstack"
-            var allocatedFullstackCount = allocatedRoleTypes.Count(r => r.Type == 1);
-            var studentHasFullstack = studentRoleTypes.Any(r => r.Type == 1);
-
-            // Check for Frontend/Backend developers (Type=2 with name containing Frontend/Backend)
-            var allocatedHasFrontend = allocatedRoleTypes.Any(r => r.Type == 2 && 
-                (r.Name.Contains("Frontend", StringComparison.OrdinalIgnoreCase) || 
-                 r.Name.Contains("Front-end", StringComparison.OrdinalIgnoreCase)));
-            var allocatedHasBackend = allocatedRoleTypes.Any(r => r.Type == 2 && 
-                (r.Name.Contains("Backend", StringComparison.OrdinalIgnoreCase) || 
-                 r.Name.Contains("Back-end", StringComparison.OrdinalIgnoreCase)));
-
-            var studentHasFrontend = studentRoleTypes.Any(r => r.Type == 2 && 
-                (r.Name.Contains("Frontend", StringComparison.OrdinalIgnoreCase) || 
-                 r.Name.Contains("Front-end", StringComparison.OrdinalIgnoreCase)));
-            var studentHasBackend = studentRoleTypes.Any(r => r.Type == 2 && 
-                (r.Name.Contains("Backend", StringComparison.OrdinalIgnoreCase) || 
-                 r.Name.Contains("Back-end", StringComparison.OrdinalIgnoreCase)));
-
-            // Calculate counts after allocation
-            var newFullstackCount = allocatedFullstackCount + (studentHasFullstack ? 1 : 0);
-            var newHasFrontend = allocatedHasFrontend || studentHasFrontend;
-            var newHasBackend = allocatedHasBackend || studentHasBackend;
-
-            _logger.LogInformation("Developer rule check: Allocated Fullstack={AllocatedFS}, Student Fullstack={StudentFS}, New Fullstack={NewFS}", 
-                allocatedFullstackCount, studentHasFullstack, newFullstackCount);
-            _logger.LogInformation("Developer rule check: Allocated Frontend={AllocatedFE}, Backend={AllocatedBE}", allocatedHasFrontend, allocatedHasBackend);
-            _logger.LogInformation("Developer rule check: Student Frontend={StudentFE}, Backend={StudentBE}", studentHasFrontend, studentHasBackend);
-            _logger.LogInformation("Developer rule check: After allocation Frontend={NewFE}, Backend={NewBE}", newHasFrontend, newHasBackend);
-            _logger.LogInformation("Developer rule check: Violation check - newFullstackCount==1: {Check1}, newHasFrontend: {Check2}, newHasBackend: {Check3}, ShouldBlock: {ShouldBlock}", 
-                newFullstackCount == 1, newHasFrontend, newHasBackend, newFullstackCount == 1 && (newHasFrontend || newHasBackend));
-
-            // Check for violations (only block conflicts, not missing roles)
-            
-            // Violation 1: Multiple Fullstack developers (>1)
-            if (newFullstackCount > 1)
-            {
-                var message = $"Allocation would violate RequireDeveloperRule: Multiple Fullstack developers would be allocated ({newFullstackCount} found, maximum 1 allowed, Type=1)";
-                _logger.LogInformation("❌ Allocation would break developer rule: Multiple Fullstack developers ({Count})", newFullstackCount);
-                return Ok(new
-                {
-                    isAllocatable = false,
-                    message = message
-                });
-            }
-
-            // Violation 2: Fullstack + Frontend/Backend conflict
-            // If exactly one Fullstack exists (or will exist), there must be NO Frontend and NO Backend
-            // Check both: if Fullstack already exists AND student has Frontend/Backend, OR if student is Fullstack AND Frontend/Backend already exists
-            bool hasFullstackConflict = false;
-            List<string> conflictRoles = new List<string>();
-            
-            if (newFullstackCount == 1)
-            {
-                if (newHasFrontend)
-                {
-                    hasFullstackConflict = true;
-                    conflictRoles.Add("Frontend");
-                }
-                if (newHasBackend)
-                {
-                    hasFullstackConflict = true;
-                    conflictRoles.Add("Backend");
-                }
-            }
-            
-            if (hasFullstackConflict)
-            {
-                var message = $"Allocation would violate RequireDeveloperRule: Fullstack developer (Type=1) cannot coexist with {string.Join(" and ", conflictRoles)} developer(s). If a Fullstack developer exists, Frontend and Backend developers are not allowed.";
-                _logger.LogInformation("❌ Allocation would break developer rule: Fullstack + {Conflicts} | allocatedFullstackCount={AllocatedFS}, studentHasFullstack={StudentFS}, newFullstackCount={NewFS}, newHasFrontend={NewFE}, newHasBackend={NewBE}", 
-                    string.Join("/", conflictRoles), allocatedFullstackCount, studentHasFullstack, newFullstackCount, newHasFrontend, newHasBackend);
-                return Ok(new
-                {
-                    isAllocatable = false,
-                    message = message
-                });
-            }
-
-            // Note: We do NOT block if Frontend is missing but Backend exists (or vice versa)
-            // Missing roles are allowed - we only block conflicts
-
-            _logger.LogInformation("✅ Allocation is allowed: Student {StudentId} can be allocated to project {ProjectId} - no developer rule conflicts", studentId, projectId);
+            _logger.LogInformation(
+                "✅ Student {StudentId} may apply to project {ProjectId}; developer mix is not gated here (kickoff/board formation enforces roster rules)",
+                studentId, projectId);
             return Ok(new
             {
                 isAllocatable = true,
-                message = "Allocation is allowed and does not violate RequireDeveloperRule"
+                message = "Allocation is allowed. Developer composition is validated when the team can kick off / receive a board, not at application time."
             });
         }
         catch (Exception ex)

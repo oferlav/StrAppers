@@ -360,9 +360,9 @@ public class TrelloController : ControllerBase
         /// Get all cards and lists for a specific board filtered by label name
         /// </summary>
         /// <param name="boardId">Trello board ID</param>
-        /// <param name="labelName">Label name to filter cards by</param>
+        /// <param name="labelName">Label name to filter cards by (catch-all so names like Marketing/BizDev work when %2F is decoded to /)</param>
         /// <returns>Lists and cards filtered by the specified label</returns>
-        [HttpGet("use/board/{boardId}/label/{labelName}")]
+        [HttpGet("use/board/{boardId}/label/{*labelName}")]
         public async Task<ActionResult<object>> GetCardsAndListsByLabel(string boardId, string labelName)
         {
             try

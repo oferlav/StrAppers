@@ -3,7 +3,9 @@
 
 param(
     [string]$ResourceGroup = "Strappers_gr",
-    [string]$AppServiceName = "skill-in-backend"
+    [string]$AppServiceName = "skill-in-backend",
+    # Set by publish-to-both.ps1 after it already ran clean/build (and IIS publish). Skips redundant dotnet clean/build; still runs dotnet publish to a temp folder, zip, and deploy.
+    [switch]$SkipCleanBuild
 )
 
 Write-Host "[START] Publishing to Azure (Production)..." -ForegroundColor Green
@@ -70,43 +72,67 @@ if ($LASTEXITCODE -ne 0 -or -not $appServiceCheck) {
 }
 
 try {
-    Write-Host "Step 1: Cleaning project..." -ForegroundColor Yellow
-    dotnet clean -c Release
-    if ($LASTEXITCODE -ne 0) {
-        throw "Clean failed!"
+    if ($SkipCleanBuild) {
+        Write-Host "Skipping dotnet clean and build (SkipCleanBuild: caller already built, e.g. publish-to-both.ps1)." -ForegroundColor DarkCyan
+        Write-Host ""
+    } else {
+        Write-Host "Step 1: Cleaning project..." -ForegroundColor Yellow
+        dotnet clean -c Release
+        if ($LASTEXITCODE -ne 0) {
+            throw "Clean failed!"
+        }
+
+        Write-Host ""
+        Write-Host "Step 2: Building project..." -ForegroundColor Yellow
+        dotnet build -c Release
+        if ($LASTEXITCODE -ne 0) {
+            throw "Build failed!"
+        }
+
+        Write-Host ""
     }
 
-    Write-Host ""
-    Write-Host "Step 2: Building project..." -ForegroundColor Yellow
-    dotnet build -c Release
-    if ($LASTEXITCODE -ne 0) {
-        throw "Build failed!"
-    }
-
-    Write-Host ""
-    Write-Host "Step 3: Publishing to local folder..." -ForegroundColor Yellow
-    $publishPath = Join-Path $projectPath "publish-prod"
-    
-    # Remove old publish folder
+    Write-Host "Step 3: Publishing to a temp folder (avoids DLL locks on publish-prod)..." -ForegroundColor Yellow
+    # Publish outside the repo tree so nothing (IDE, Explorer, AV) holds handles on a fixed path.
+    $stagingId = [guid]::NewGuid().ToString('N')
+    $publishPath = Join-Path $env:TEMP "strappers-azure-publish-$stagingId"
     if (Test-Path $publishPath) {
-        Remove-Item -Path $publishPath -Recurse -Force
+        Remove-Item -Path $publishPath -Recurse -Force -ErrorAction SilentlyContinue
     }
-    
+
     dotnet publish -c Release -o $publishPath
     if ($LASTEXITCODE -ne 0) {
         throw "Publish failed!"
     }
 
+    # Brief pause so real-time AV can finish scanning new DLLs before we read them for the archive.
+    Start-Sleep -Seconds 2
+
     Write-Host ""
     Write-Host "Step 4: Creating deployment zip..." -ForegroundColor Yellow
     $zipPath = Join-Path $projectPath "publish-prod.zip"
-    
+
     # Remove old zip if exists
     if (Test-Path $zipPath) {
         Remove-Item -Path $zipPath -Force
     }
-    
-    Compress-Archive -Path "$publishPath\*" -DestinationPath $zipPath -Force
+
+    # Prefer tar.exe (ships with Windows 10+); Compress-Archive often fails with "file in use" on DLLs.
+    $tar = Get-Command tar.exe -ErrorAction SilentlyContinue
+    if ($tar) {
+        Push-Location $publishPath
+        try {
+            & tar.exe -a -c -f $zipPath .
+            if ($LASTEXITCODE -ne 0) {
+                throw "tar zip failed with exit code $LASTEXITCODE"
+            }
+        } finally {
+            Pop-Location
+        }
+    } else {
+        Compress-Archive -Path "$publishPath\*" -DestinationPath $zipPath -Force
+    }
+
     if (-not (Test-Path $zipPath)) {
         throw "Failed to create zip file!"
     }
@@ -149,6 +175,9 @@ try {
     # Cleanup
     Write-Host "Cleaning up temporary files..." -ForegroundColor Yellow
     Remove-Item -Path $zipPath -Force -ErrorAction SilentlyContinue
+    if ($publishPath -and (Test-Path $publishPath)) {
+        Remove-Item -Path $publishPath -Recurse -Force -ErrorAction SilentlyContinue
+    }
 }
 catch {
     Write-Host ""

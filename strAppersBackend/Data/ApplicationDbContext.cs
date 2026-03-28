@@ -248,6 +248,8 @@ public class ApplicationDbContext : DbContext
         {
             entity.HasKey(e => e.Id);
             entity.Property(e => e.Title).IsRequired().HasMaxLength(200);
+            entity.Property(e => e.Mission).HasMaxLength(250);
+            entity.Property(e => e.OneLiner).HasMaxLength(250);
             entity.Property(e => e.Description).HasMaxLength(1000);
             entity.Property(e => e.ExtendedDescription).HasColumnType("TEXT");
             entity.Property(e => e.SystemDesign).HasColumnType("TEXT");

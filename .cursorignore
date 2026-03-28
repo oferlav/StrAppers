@@ -1,0 +1,16 @@
+﻿# Cursor index: skip heavy trees so src stays fast to search.
+# strAppersFrontend/src is NOT ignored.
+
+strAppersFrontend/node_modules/
+strAppersFrontend/dist/
+strAppersFrontend/build/
+strAppersFrontend/.vite/
+strAppersFrontend/coverage/
+
+strAppersBackend/bin/
+strAppersBackend/obj/
+strAppersBackend/publish-prod/
+strAppersBackend/publish-azure/
+
+**/node_modules/
+**/.pnpm-store/

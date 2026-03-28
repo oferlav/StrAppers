@@ -282,10 +282,10 @@ namespace strAppersBackend.Controllers
         }
 
         /// <summary>
-        /// Get an employer by contact email
+        /// Get an employer by contact email (safe DTO: no password hash, no full navigation graphs).
         /// </summary>
         [HttpGet("use/{email}")]
-        public async Task<ActionResult<Employer>> GetEmployerByEmail(string email)
+        public async Task<ActionResult<EmployerByEmailResponse>> GetEmployerByEmail(string email)
         {
             try
             {
@@ -297,10 +297,33 @@ namespace strAppersBackend.Controllers
                     return BadRequest(new { Success = false, Message = "Email parameter is required" });
                 }
 
-                // Find employer by contact email (case-insensitive)
+                // Project to a small shape so JSON serialization never walks Subscription.Employers / etc.
                 var employer = await _context.Employers
-                    .Include(e => e.SubscriptionType)
-                    .FirstOrDefaultAsync(e => e.ContactEmail.ToLower() == email.ToLower());
+                    .AsNoTracking()
+                    .Where(e => e.ContactEmail.ToLower() == email.ToLower())
+                    .Select(e => new EmployerByEmailResponse
+                    {
+                        Id = e.Id,
+                        Name = e.Name,
+                        Logo = e.Logo,
+                        Website = e.Website,
+                        ContactEmail = e.ContactEmail,
+                        Phone = e.Phone,
+                        Address = e.Address,
+                        Description = e.Description,
+                        SubscriptionTypeId = e.SubscriptionTypeId,
+                        CreatedAt = e.CreatedAt,
+                        UpdatedAt = e.UpdatedAt,
+                        SubscriptionType = new EmployerSubscriptionSnippet
+                        {
+                            Id = e.SubscriptionType.Id,
+                            Description = e.SubscriptionType.Description,
+                            Price = e.SubscriptionType.Price,
+                            CreatedAt = e.SubscriptionType.CreatedAt,
+                            UpdatedAt = e.SubscriptionType.UpdatedAt
+                        }
+                    })
+                    .FirstOrDefaultAsync();
 
                 if (employer == null)
                 {
@@ -308,7 +331,7 @@ namespace strAppersBackend.Controllers
                     return NotFound(new { Success = false, Message = $"Employer with contact email '{email}' not found" });
                 }
 
-                _logger.LogInformation("Employer found: ID={EmployerId}, Name={Name}, Email={Email}", 
+                _logger.LogInformation("Employer found: ID={EmployerId}, Name={Name}, Email={Email}",
                     employer.Id, employer.Name, employer.ContactEmail);
 
                 return Ok(employer);
@@ -1184,6 +1207,32 @@ public class EditEmployerRequest
 
     [Required]
     public int SubscriptionTypeId { get; set; }
+}
+
+/// <summary>JSON shape for GET /api/Employers/use/{email} — mirrors Employer without secrets or heavy navs.</summary>
+public class EmployerByEmailResponse
+{
+    public int Id { get; set; }
+    public string Name { get; set; } = string.Empty;
+    public string? Logo { get; set; }
+    public string? Website { get; set; }
+    public string ContactEmail { get; set; } = string.Empty;
+    public string? Phone { get; set; }
+    public string? Address { get; set; }
+    public string? Description { get; set; }
+    public int SubscriptionTypeId { get; set; }
+    public DateTime CreatedAt { get; set; }
+    public DateTime? UpdatedAt { get; set; }
+    public EmployerSubscriptionSnippet SubscriptionType { get; set; } = null!;
+}
+
+public class EmployerSubscriptionSnippet
+{
+    public int Id { get; set; }
+    public string Description { get; set; } = string.Empty;
+    public decimal Price { get; set; }
+    public DateTime CreatedAt { get; set; }
+    public DateTime? UpdatedAt { get; set; }
 }
 
 // Request DTO for employer login

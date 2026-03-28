@@ -11,6 +11,13 @@ using Microsoft.Extensions.FileProviders;
 
 var builder = WebApplication.CreateBuilder(args);
 
+// Azure App Service: wire ILogger to filesystem diagnostics (portal Log stream, LogFiles\Application).
+// WEBSITE_INSTANCE_ID is set on App Service workers; skip locally.
+if (!string.IsNullOrEmpty(Environment.GetEnvironmentVariable("WEBSITE_INSTANCE_ID")))
+{
+    builder.Logging.AddAzureWebAppDiagnostics();
+}
+
 // Add services to the container.
 
 // Add CORS service
@@ -29,11 +36,16 @@ builder.Services.AddCors(options =>
                               // Allow GitHub Pages (*.github.io) - for generated frontend projects
                               if (uri.Host.EndsWith(".github.io", StringComparison.OrdinalIgnoreCase))
                                   return true;
+
+                              // Azure Static Web Apps (e.g. *.4.azurestaticapps.net)
+                              if (uri.Host.EndsWith(".azurestaticapps.net", StringComparison.OrdinalIgnoreCase))
+                                  return true;
                               
                               // Allow specific frontend domains
                               var allowedOrigins = new[]
                               {
                                   "preview--skill-in-ce9dcf39.base44.app",
+                                  "skill-in.com",
                                   "localhost",
                                   "127.0.0.1",
                                   "20.126.90.3"
@@ -180,6 +192,12 @@ builder.Services.AddSession(options =>
 
 // Add HttpContextAccessor for logging filters
 builder.Services.AddHttpContextAccessor();
+
+// Google OAuth (login) — token + userinfo HTTP calls
+builder.Services.AddHttpClient("GoogleOAuth", client =>
+{
+    client.Timeout = TimeSpan.FromSeconds(45);
+});
 
 // Configure Trello settings
 builder.Services.Configure<TrelloConfig>(builder.Configuration.GetSection("Trello"));

@@ -1194,6 +1194,14 @@ namespace strAppersBackend.Migrations
                         .HasMaxLength(200)
                         .HasColumnType("character varying(200)");
 
+                    b.Property<string>("Mission")
+                        .HasMaxLength(250)
+                        .HasColumnType("character varying(250)");
+
+                    b.Property<string>("OneLiner")
+                        .HasMaxLength(250)
+                        .HasColumnType("character varying(250)");
+
                     b.Property<int>("TotalChunks")
                         .HasColumnType("integer")
                         .HasColumnName("total_chunks");
@@ -2997,8 +3005,6 @@ namespace strAppersBackend.Migrations
                     b.Navigation("Admin");
 
                     b.Navigation("Project");
-
-                    b.Navigation("SprintMerges");
 
                     b.Navigation("Status");
                 });
