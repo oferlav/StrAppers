@@ -14,6 +14,10 @@
 | `strAppersFrontend/src/lib/cookieConsentStorage.js` | Landing cookie consent: `localStorage` key `skillin_cookie_consent_v1`, `openCookieSettings()`, `hasAnalyticsConsent()` / `hasMarketingConsent()` for gating tags |
 | `strAppersFrontend/src/pages/LandingNew.jsx` | Marketing landing; footer: logo, Privacy Policy / Terms of Use / Cookie settings (`createPageUrl`), social + mail |
 | `strAppersFrontend/src/components/landing/CookieConsentBar.jsx` | Landing cookie banner + settings modal + FAB; footer uses `openCookieSettings()` from `LandingNew.jsx` |
+| `strAppersFrontend/src/pages/ManagementDashboardMock.jsx` | Staff management dashboard **UI mockup** (classes/boards, stats, URLs, resources, assistance flags); static data only, route `/ManagementDashboardMock` |
+| `strAppersFrontend/src/api/figmaStrAppers.js` | Figma OAuth: `getFigmaOAuthStart`, `storeFigmaOAuthTokens`, `beginBoardFigmaOAuth`, `getFigmaConnection` → `/api/Figma/use/oauth`, `store-tokens`, `connection` |
+| `strAppersFrontend/src/components/boards/FigmaLinksModal.jsx` | Figma links list + “Connect Figma account” (API) for designers when StrAppers backend is configured |
+| `strAppersFrontend/src/pages/BoardRoom.jsx` | Figma OAuth **redirect target** (`Figma:RedirectUrls[0]`, e.g. `https://skill-in.com/BoardRoom`): exchanges `code`, then `location.replace` to saved return URL |
 
 ### Preview ProjectsStudentV2 locally (before deploy)
 

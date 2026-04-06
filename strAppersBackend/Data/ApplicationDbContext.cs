@@ -235,11 +235,11 @@ public class ApplicationDbContext : DbContext
 
             // Seed test data
             entity.HasData(
-                new Student { Id = 1, FirstName = "Alex", LastName = "Johnson", Email = "alex.johnson@techuniversity.edu", StudentId = "TU001", MajorId = 1, YearId = 3, LinkedInUrl = "https://linkedin.com/in/alexjohnson", IsAdmin = true, SuperUser = false, CreatedAt = DateTime.UtcNow.AddDays(-45) },
-                new Student { Id = 2, FirstName = "Sarah", LastName = "Williams", Email = "sarah.williams@techuniversity.edu", StudentId = "TU002", MajorId = 2, YearId = 4, LinkedInUrl = "https://linkedin.com/in/sarahwilliams", IsAdmin = false, SuperUser = false, CreatedAt = DateTime.UtcNow.AddDays(-40) },
-                new Student { Id = 3, FirstName = "Michael", LastName = "Brown", Email = "michael.brown@techuniversity.edu", StudentId = "TU003", MajorId = 3, YearId = 5, LinkedInUrl = "https://linkedin.com/in/michaelbrown", IsAdmin = true, SuperUser = false, CreatedAt = DateTime.UtcNow.AddDays(-35) },
-                new Student { Id = 4, FirstName = "Emily", LastName = "Davis", Email = "emily.davis@techuniversity.edu", StudentId = "TU004", MajorId = 4, YearId = 2, LinkedInUrl = "https://linkedin.com/in/emilydavis", SuperUser = false, CreatedAt = DateTime.UtcNow.AddDays(-30) },
-                new Student { Id = 5, FirstName = "David", LastName = "Miller", Email = "david.miller@techuniversity.edu", StudentId = "TU005", MajorId = 1, YearId = 1, LinkedInUrl = "https://linkedin.com/in/davidmiller", SuperUser = false, CreatedAt = DateTime.UtcNow.AddDays(-25) }
+                new Student { Id = 1, FirstName = "Alex", LastName = "Johnson", Email = "alex.johnson@techuniversity.edu", StudentId = "TU001", MajorId = 1, YearId = 3, LinkedInUrl = "https://linkedin.com/in/alexjohnson", IsAdmin = true, SuperUser = false, B2c = true, AssistMe = false, CreatedAt = DateTime.UtcNow.AddDays(-45) },
+                new Student { Id = 2, FirstName = "Sarah", LastName = "Williams", Email = "sarah.williams@techuniversity.edu", StudentId = "TU002", MajorId = 2, YearId = 4, LinkedInUrl = "https://linkedin.com/in/sarahwilliams", IsAdmin = false, SuperUser = false, B2c = true, AssistMe = false, CreatedAt = DateTime.UtcNow.AddDays(-40) },
+                new Student { Id = 3, FirstName = "Michael", LastName = "Brown", Email = "michael.brown@techuniversity.edu", StudentId = "TU003", MajorId = 3, YearId = 5, LinkedInUrl = "https://linkedin.com/in/michaelbrown", IsAdmin = true, SuperUser = false, B2c = true, AssistMe = false, CreatedAt = DateTime.UtcNow.AddDays(-35) },
+                new Student { Id = 4, FirstName = "Emily", LastName = "Davis", Email = "emily.davis@techuniversity.edu", StudentId = "TU004", MajorId = 4, YearId = 2, LinkedInUrl = "https://linkedin.com/in/emilydavis", SuperUser = false, B2c = true, AssistMe = false, CreatedAt = DateTime.UtcNow.AddDays(-30) },
+                new Student { Id = 5, FirstName = "David", LastName = "Miller", Email = "david.miller@techuniversity.edu", StudentId = "TU005", MajorId = 1, YearId = 1, LinkedInUrl = "https://linkedin.com/in/davidmiller", SuperUser = false, B2c = true, AssistMe = false, CreatedAt = DateTime.UtcNow.AddDays(-25) }
             );
         });
 
@@ -919,6 +919,8 @@ public class ApplicationDbContext : DbContext
             entity.Property(e => e.StudentWork).HasDefaultValue(false);
             entity.Property(e => e.MultilingualWork).HasDefaultValue(false);
             entity.Property(e => e.EmployerExposure).HasDefaultValue(true);
+            entity.Property(e => e.B2c).HasDefaultValue(true);
+            entity.Property(e => e.AssistMe).HasDefaultValue(false);
             
             entity.HasOne(e => e.SubscriptionType)
                   .WithMany(s => s.Students)

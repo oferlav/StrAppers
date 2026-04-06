@@ -1,4 +1,5 @@
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.WebUtilities;
 using Microsoft.EntityFrameworkCore;
 using strAppersBackend.Data;
 using strAppersBackend.Models;
@@ -6,6 +7,7 @@ using System.Text.Json;
 using System.Text;
 using System.Text.Json.Serialization;
 using System.Net.Http.Headers;
+using Microsoft.Extensions.Primitives;
 
 namespace strAppersBackend.Controllers
 {
@@ -310,6 +312,46 @@ namespace strAppersBackend.Controllers
         }
 
         /// <summary>
+        /// Whether the board has a stored Figma OAuth token (no secrets returned).
+        /// </summary>
+        [HttpGet("use/connection")]
+        public async Task<ActionResult<object>> GetConnection([FromQuery] string boardId)
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace(boardId))
+                {
+                    return BadRequest("boardId is required.");
+                }
+
+                var figma = await _context.Figma.FirstOrDefaultAsync(f => f.BoardId == boardId);
+                if (figma == null)
+                {
+                    return Ok(new
+                    {
+                        success = true,
+                        boardId,
+                        hasOAuthToken = false,
+                        hasFigmaFileUrl = false
+                    });
+                }
+
+                return Ok(new
+                {
+                    success = true,
+                    boardId,
+                    hasOAuthToken = !string.IsNullOrEmpty(figma.FigmaAccessToken),
+                    hasFigmaFileUrl = !string.IsNullOrEmpty(figma.FigmaFileUrl)
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error reading Figma connection for board {BoardId}", boardId);
+                return StatusCode(500, "An error occurred while reading Figma connection status.");
+            }
+        }
+
+        /// <summary>
         /// Generate OAuth URL for Figma authentication
         /// </summary>
         [HttpGet("use/oauth")]
@@ -328,7 +370,7 @@ namespace strAppersBackend.Controllers
                 // Generate unique state for security
                 var state = Guid.NewGuid().ToString();
                 
-                // Use the first redirect URL (or you could make this configurable)
+                // Must match a redirect URI registered on the Figma OAuth app (first entry in config).
                 var redirectUri = redirectUrls[0];
                 
                 var oauthUrl = $"https://www.figma.com/oauth?client_id={clientId}&redirect_uri={Uri.EscapeDataString(redirectUri)}&scope=file_content:read,current_user:read,projects:read,team_library_content:read,file_metadata:read,file_versions:read,library_assets:read,library_content:read&state={state}&response_type=code";
@@ -794,6 +836,104 @@ namespace strAppersBackend.Controllers
             {
                 _logger.LogError(ex, "Error downloading metadata for board {BoardId}", request.BoardId);
                 return StatusCode(500, "An error occurred while downloading metadata");
+            }
+        }
+
+        /// <summary>
+        /// Rasterize a Figma node to PNG and return base64. Requires a stored OAuth token for the board.
+        /// Omit <see cref="ExportPngRequest.FileUrl"/> to use <see cref="Figma.FigmaFileUrl"/> from the database (must include <c>node-id</c> or pass <see cref="ExportPngRequest.NodeId"/>).
+        /// </summary>
+        [HttpPost("use/export-png")]
+        public async Task<ActionResult<object>> ExportPngAsBase64([FromBody] ExportPngRequest request)
+        {
+            try
+            {
+                if (request == null || string.IsNullOrWhiteSpace(request.BoardId))
+                {
+                    return BadRequest("BoardId is required.");
+                }
+
+                var figma = await _context.Figma.FirstOrDefaultAsync(f => f.BoardId == request.BoardId);
+                if (figma == null)
+                {
+                    return NotFound($"Figma integration not found for board {request.BoardId}");
+                }
+
+                if (string.IsNullOrEmpty(figma.FigmaAccessToken))
+                {
+                    return BadRequest("No Figma access token for this board. Complete Figma OAuth first.");
+                }
+
+                var effectiveUrl = !string.IsNullOrWhiteSpace(request.FileUrl)
+                    ? request.FileUrl.Trim()
+                    : (figma.FigmaFileUrl ?? string.Empty).Trim();
+
+                if (string.IsNullOrEmpty(effectiveUrl))
+                {
+                    return BadRequest("FileUrl is missing and no FigmaFileUrl is stored for this board. Pass FileUrl or save a file URL on the Figma integration.");
+                }
+
+                await RefreshTokenIfNeeded(figma);
+
+                var fileKey = ExtractFileKeyFromUrl(effectiveUrl);
+                if (string.IsNullOrEmpty(fileKey) && !string.IsNullOrEmpty(figma.FigmaFileKey))
+                {
+                    fileKey = figma.FigmaFileKey;
+                }
+
+                if (string.IsNullOrEmpty(fileKey))
+                {
+                    return BadRequest("Could not determine file key from URL or database.");
+                }
+
+                var nodeRaw = !string.IsNullOrWhiteSpace(request.NodeId)
+                    ? request.NodeId.Trim()
+                    : TryExtractNodeIdFromFigmaUrl(effectiveUrl);
+
+                if (string.IsNullOrEmpty(nodeRaw))
+                {
+                    return BadRequest("NodeId is required, or FileUrl must include a node-id query parameter (e.g. …?node-id=1-2).");
+                }
+
+                var nodeId = NormalizeFigmaNodeId(nodeRaw);
+                var scale = request.Scale is > 0 and <= 4 ? request.Scale.Value : 1d;
+
+                var (apiErr, imageUrl) = await RequestFigmaPngExportUrl(figma.FigmaAccessToken!, fileKey, nodeId, scale);
+                if (!string.IsNullOrEmpty(apiErr))
+                {
+                    return BadRequest(new { success = false, message = apiErr });
+                }
+
+                if (string.IsNullOrEmpty(imageUrl))
+                {
+                    return BadRequest(new { success = false, message = "Figma did not return an image URL for this node. Check node id and file access." });
+                }
+
+                _httpClient.DefaultRequestHeaders.Clear();
+                using var pngResponse = await _httpClient.GetAsync(imageUrl);
+                var pngBytes = await pngResponse.Content.ReadAsByteArrayAsync();
+
+                if (!pngResponse.IsSuccessStatusCode)
+                {
+                    _logger.LogWarning("Figma PNG download failed: {Status}", pngResponse.StatusCode);
+                    return BadRequest(new { success = false, message = "Failed to download rendered PNG from Figma." });
+                }
+
+                var pngBase64 = Convert.ToBase64String(pngBytes);
+
+                return Ok(new
+                {
+                    success = true,
+                    fileKey,
+                    nodeId,
+                    scale,
+                    pngBase64
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error exporting Figma PNG for board {BoardId}", request?.BoardId);
+                return StatusCode(500, "An error occurred while exporting the Figma PNG.");
             }
         }
 
@@ -1307,6 +1447,105 @@ namespace strAppersBackend.Controllers
             }
         }
 
+        private static string NormalizeFigmaNodeId(string raw)
+        {
+            raw = raw.Trim();
+            if (string.IsNullOrEmpty(raw))
+            {
+                return raw;
+            }
+
+            if (raw.Contains(':', StringComparison.Ordinal))
+            {
+                return raw;
+            }
+
+            var parts = raw.Split('-', 2, StringSplitOptions.None);
+            if (parts.Length == 2 && parts[0].All(char.IsDigit) && parts[1].All(char.IsDigit))
+            {
+                return $"{parts[0]}:{parts[1]}";
+            }
+
+            return raw.Replace('-', ':');
+        }
+
+        private static string? TryExtractNodeIdFromFigmaUrl(string url)
+        {
+            if (!Uri.TryCreate(url, UriKind.Absolute, out var uri))
+            {
+                return null;
+            }
+
+            var q = QueryHelpers.ParseQuery(uri.Query);
+            if (q.TryGetValue("node-id", out var v) && !StringValues.IsNullOrEmpty(v))
+            {
+                return NormalizeFigmaNodeId(v.ToString());
+            }
+
+            if (q.TryGetValue("node_id", out var v2) && !StringValues.IsNullOrEmpty(v2))
+            {
+                return NormalizeFigmaNodeId(v2.ToString());
+            }
+
+            return null;
+        }
+
+        private async Task<(string? Error, string? ImageUrl)> RequestFigmaPngExportUrl(string accessToken, string fileKey, string nodeId, double scale)
+        {
+            try
+            {
+                var scaleStr = scale.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                var requestUri =
+                    $"https://api.figma.com/v1/images/{Uri.EscapeDataString(fileKey)}" +
+                    $"?ids={Uri.EscapeDataString(nodeId)}&format=png&scale={Uri.EscapeDataString(scaleStr)}";
+
+                _httpClient.DefaultRequestHeaders.Clear();
+                _httpClient.DefaultRequestHeaders.Add("X-Figma-Token", accessToken);
+                _httpClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
+
+                var response = await _httpClient.GetAsync(requestUri);
+                var content = await response.Content.ReadAsStringAsync();
+
+                if (!response.IsSuccessStatusCode)
+                {
+                    _logger.LogWarning("Figma images API failed: {Status} {Body}", response.StatusCode, content);
+                    return ($"Figma images API error: {(int)response.StatusCode}", null);
+                }
+
+                var parsed = JsonSerializer.Deserialize<FigmaImagesApiResponse>(content, new JsonSerializerOptions
+                {
+                    PropertyNameCaseInsensitive = true
+                });
+
+                if (parsed == null)
+                {
+                    return ("Invalid response from Figma images API.", null);
+                }
+
+                if (!string.IsNullOrEmpty(parsed.Err))
+                {
+                    return (parsed.Err, null);
+                }
+
+                if (parsed.Images == null || parsed.Images.Count == 0)
+                {
+                    return ("Figma returned no images.", null);
+                }
+
+                if (!parsed.Images.TryGetValue(nodeId, out var url) || string.IsNullOrEmpty(url))
+                {
+                    url = parsed.Images.Values.FirstOrDefault(u => !string.IsNullOrEmpty(u));
+                }
+
+                return (null, url);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error calling Figma images API for file {FileKey}", fileKey);
+                return (ex.Message, null);
+            }
+        }
+
         /// <summary>
         /// Get Figma file metadata
         /// </summary>
@@ -1367,6 +1606,26 @@ namespace strAppersBackend.Controllers
         public string AuthCode { get; set; } = string.Empty;
         public string FileUrl { get; set; } = string.Empty;
         public string? RedirectUri { get; set; }
+    }
+
+    public class ExportPngRequest
+    {
+        public string BoardId { get; set; } = string.Empty;
+        /// <summary>Optional; when omitted, uses <see cref="Figma.FigmaFileUrl"/> for this board.</summary>
+        public string? FileUrl { get; set; }
+        /// <summary>Figma node id (e.g. <c>1:23</c> or <c>1-23</c>). Optional if the effective URL contains <c>node-id</c>.</summary>
+        public string? NodeId { get; set; }
+        /// <summary>Export scale; Figma allows positive values (often 1–4). Default 1.</summary>
+        public double? Scale { get; set; }
+    }
+
+    public class FigmaImagesApiResponse
+    {
+        [JsonPropertyName("err")]
+        public string? Err { get; set; }
+
+        [JsonPropertyName("images")]
+        public Dictionary<string, string?>? Images { get; set; }
     }
 
     public class FigmaTokenResponse

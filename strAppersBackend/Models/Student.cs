@@ -79,6 +79,13 @@ public class Student
 
     /// <summary>Super-user flag; default false.</summary>
     public bool SuperUser { get; set; } = false;
+
+    /// <summary>B2C track flag; maps to database column b2c. Default true.</summary>
+    [Column("b2c")]
+    public bool B2c { get; set; } = true;
+
+    /// <summary>When true, student has opted into assist-me flows. Default false.</summary>
+    public bool AssistMe { get; set; } = false;
     
     // Photo field (base64 encoded image or URL)
     [Column("Photo")]

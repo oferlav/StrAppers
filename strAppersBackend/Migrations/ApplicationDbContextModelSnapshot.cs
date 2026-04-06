@@ -2253,6 +2253,17 @@ namespace strAppersBackend.Migrations
                         .HasMaxLength(50)
                         .HasColumnType("character varying(50)");
 
+                    b.Property<bool>("AssistMe")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("boolean")
+                        .HasDefaultValue(false);
+
+                    b.Property<bool>("B2c")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("boolean")
+                        .HasColumnName("b2c")
+                        .HasDefaultValue(true);
+
                     b.Property<string>("CV")
                         .HasColumnType("text");
 
@@ -2443,6 +2454,8 @@ namespace strAppersBackend.Migrations
                         new
                         {
                             Id = 1,
+                            AssistMe = false,
+                            B2c = true,
                             CreatedAt = new DateTime(2025, 12, 8, 19, 15, 42, 923, DateTimeKind.Utc).AddTicks(9300),
                             Email = "alex.johnson@techuniversity.edu",
                             FirstName = "Alex",
@@ -2469,6 +2482,8 @@ namespace strAppersBackend.Migrations
                         new
                         {
                             Id = 2,
+                            AssistMe = false,
+                            B2c = true,
                             CreatedAt = new DateTime(2025, 12, 13, 19, 15, 42, 923, DateTimeKind.Utc).AddTicks(9315),
                             Email = "sarah.williams@techuniversity.edu",
                             FirstName = "Sarah",
@@ -2495,6 +2510,8 @@ namespace strAppersBackend.Migrations
                         new
                         {
                             Id = 3,
+                            AssistMe = false,
+                            B2c = true,
                             CreatedAt = new DateTime(2025, 12, 18, 19, 15, 42, 923, DateTimeKind.Utc).AddTicks(9318),
                             Email = "michael.brown@techuniversity.edu",
                             FirstName = "Michael",
@@ -2521,6 +2538,8 @@ namespace strAppersBackend.Migrations
                         new
                         {
                             Id = 4,
+                            AssistMe = false,
+                            B2c = true,
                             CreatedAt = new DateTime(2025, 12, 23, 19, 15, 42, 923, DateTimeKind.Utc).AddTicks(9321),
                             Email = "emily.davis@techuniversity.edu",
                             FirstName = "Emily",
@@ -2547,6 +2566,8 @@ namespace strAppersBackend.Migrations
                         new
                         {
                             Id = 5,
+                            AssistMe = false,
+                            B2c = true,
                             CreatedAt = new DateTime(2025, 12, 28, 19, 15, 42, 923, DateTimeKind.Utc).AddTicks(9324),
                             Email = "david.miller@techuniversity.edu",
                             FirstName = "David",
