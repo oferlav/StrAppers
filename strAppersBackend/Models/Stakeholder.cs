@@ -32,4 +32,8 @@ public class Stakeholder
     /// <summary>When the stakeholder row was created (UTC). Used to scope CRM review to the sprint window.</summary>
     [Column("CreatedAt")]
     public DateTime? CreatedAt { get; set; }
+
+    /// <summary>When the stakeholder row was last updated (UTC). CRM review also includes rows touched in the sprint window.</summary>
+    [Column("UpdatedAt")]
+    public DateTime? UpdatedAt { get; set; }
 }

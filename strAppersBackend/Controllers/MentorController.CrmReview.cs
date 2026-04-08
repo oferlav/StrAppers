@@ -10,7 +10,7 @@ namespace strAppersBackend.Controllers;
 public partial class MentorController
 {
     /// <summary>
-    /// Reviews stakeholder (CRM) rows created in the sprint’s date window, with the same mentor context as resource-review
+    /// Reviews stakeholder (CRM) rows created or last updated in the sprint’s date window, with the same mentor context as resource-review
     /// (module, user story, workspace tasks, customer chat). Requires sprint dates from board SprintPlan or board StartDate fallback.
     /// </summary>
     [HttpPost("use/crm-review")]
@@ -29,7 +29,8 @@ public partial class MentorController
         const string bugsMessage = "CRM review applies to numbered sprints only, not Bugs.";
         const string noWindowMessage =
             "Could not resolve this sprint’s dates from the board plan. Ensure Sprint lists in the board plan have Start/End dates, or set the board start date.";
-        const string noStakeholdersMessage = "No stakeholders with a CreatedAt time in this sprint’s window for this board. Add CRM entries during the sprint, or confirm CreatedAt is set on new rows.";
+        const string noStakeholdersMessage =
+            "No new stakeholder data has been added to this sprint.";
 
         if (request.SprintNumber == 0)
         {
@@ -164,11 +165,14 @@ public partial class MentorController
                 .Include(s => s.Category)
                 .Include(s => s.Status)
                 .Where(s => s.BoardId != null && s.BoardId == boardId
-                            && s.CreatedAt != null
-                            && s.CreatedAt >= windowStartUtc
-                            && s.CreatedAt <= windowEndInclusiveUtc)
-                .OrderBy(s => s.CreatedAt)
-                .ThenBy(s => s.Name)
+                            && (
+                                (s.CreatedAt != null
+                                 && s.CreatedAt >= windowStartUtc
+                                 && s.CreatedAt <= windowEndInclusiveUtc)
+                                || (s.UpdatedAt != null
+                                    && s.UpdatedAt >= windowStartUtc
+                                    && s.UpdatedAt <= windowEndInclusiveUtc)))
+                .OrderBy(s => s.Name)
                 .Select(s => new
                 {
                     s.Id,
@@ -178,6 +182,7 @@ public partial class MentorController
                     s.V1AlignmentScore,
                     s.Delta,
                     s.CreatedAt,
+                    s.UpdatedAt,
                 })
                 .ToListAsync(cancellationToken);
 
@@ -200,8 +205,10 @@ public partial class MentorController
             var crmSb = new StringBuilder();
             foreach (var row in stakeholderRows)
             {
+                var added = row.CreatedAt.HasValue ? row.CreatedAt.Value.ToString("O") : "(unknown)";
+                var lastEdit = row.UpdatedAt.HasValue ? row.UpdatedAt.Value.ToString("O") : "(unknown)";
                 crmSb.AppendLine(
-                    $"- **{row.Name}** | Category: {row.CategoryName} | Status: {row.StatusName} | V1Alignment: {row.V1AlignmentScore} | CreatedAt (UTC): {row.CreatedAt:O}");
+                    $"- **{row.Name}** | Category: {row.CategoryName} | Status: {row.StatusName} | V1Alignment: {row.V1AlignmentScore} | Added (UTC): {added} | Last updated (UTC): {lastEdit}");
                 if (!string.IsNullOrWhiteSpace(row.Delta))
                 {
                     crmSb.AppendLine("  Notes/Delta:");
@@ -234,7 +241,7 @@ public partial class MentorController
             userMessage.AppendLine("=== [INTERNAL] Customer/product backstory (reasoning only) ===");
             userMessage.AppendLine(customerPastStory);
             userMessage.AppendLine();
-            userMessage.AppendLine("=== STAKEHOLDERS FOR THIS SPRINT (CreatedAt within sprint window, with category & status names) ===");
+            userMessage.AppendLine("=== STAKEHOLDERS FOR THIS SPRINT (created or last updated within sprint window; category & status names) ===");
             userMessage.AppendLine(crmSb.ToString().Trim());
             userMessage.AppendLine();
             userMessage.AppendLine("Provide your CRM / stakeholders review now.");

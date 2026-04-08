@@ -587,6 +587,7 @@ public class ApplicationDbContext : DbContext
                 .HasPrincipalKey(pb => pb.Id)
                 .OnDelete(DeleteBehavior.SetNull);
             entity.Property(e => e.CreatedAt).HasColumnName("CreatedAt").HasColumnType("timestamp with time zone");
+            entity.Property(e => e.UpdatedAt).HasColumnName("UpdatedAt").HasColumnType("timestamp with time zone");
             entity.HasIndex(e => e.CategoryId);
             entity.HasIndex(e => e.StatusId);
             entity.HasIndex(e => e.BoardId);

@@ -52,6 +52,7 @@ public class CRMController : ControllerBase
             Delta = request.Delta?.Trim(),
             BoardId = string.IsNullOrWhiteSpace(request.BoardId) ? null : request.BoardId.Trim(),
             CreatedAt = DateTime.UtcNow,
+            UpdatedAt = DateTime.UtcNow,
         };
         _context.Stakeholders.Add(stakeholder);
         await _context.SaveChangesAsync();
@@ -111,6 +112,7 @@ public class CRMController : ControllerBase
             }
         }
 
+        stakeholder.UpdatedAt = DateTime.UtcNow;
         await _context.SaveChangesAsync();
         _logger.LogInformation("CRM: updated stakeholder Id={Id}", stakeholder.Id);
         return Ok(new { Success = true, Message = "Stakeholder updated.", Stakeholder = stakeholder });
@@ -166,7 +168,8 @@ public class CRMController : ControllerBase
                 s.V1AlignmentScore,
                 s.Delta,
                 s.BoardId,
-                s.CreatedAt
+                s.CreatedAt,
+                s.UpdatedAt
             })
             .ToListAsync();
 
