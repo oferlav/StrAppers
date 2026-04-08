@@ -28,4 +28,8 @@ public class Stakeholder
     public string? BoardId { get; set; }
     [ForeignKey(nameof(BoardId))]
     public ProjectBoard? ProjectBoard { get; set; }
+
+    /// <summary>When the stakeholder row was created (UTC). Used to scope CRM review to the sprint window.</summary>
+    [Column("CreatedAt")]
+    public DateTime? CreatedAt { get; set; }
 }

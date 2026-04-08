@@ -50,7 +50,8 @@ public class CRMController : ControllerBase
             StatusId = request.StatusId,
             V1AlignmentScore = request.V1AlignmentScore,
             Delta = request.Delta?.Trim(),
-            BoardId = string.IsNullOrWhiteSpace(request.BoardId) ? null : request.BoardId.Trim()
+            BoardId = string.IsNullOrWhiteSpace(request.BoardId) ? null : request.BoardId.Trim(),
+            CreatedAt = DateTime.UtcNow,
         };
         _context.Stakeholders.Add(stakeholder);
         await _context.SaveChangesAsync();
@@ -164,7 +165,8 @@ public class CRMController : ControllerBase
                 StatusName = s.Status != null ? s.Status.Name : null,
                 s.V1AlignmentScore,
                 s.Delta,
-                s.BoardId
+                s.BoardId,
+                s.CreatedAt
             })
             .ToListAsync();
 
