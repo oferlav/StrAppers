@@ -3,6 +3,7 @@ using Microsoft.AspNetCore.WebUtilities;
 using Microsoft.EntityFrameworkCore;
 using strAppersBackend.Data;
 using strAppersBackend.Models;
+using System.Net;
 using System.Text.Json;
 using System.Text;
 using System.Text.Json.Serialization;
@@ -26,6 +27,193 @@ namespace strAppersBackend.Controllers
             _logger = logger;
             _configuration = configuration;
             _httpClient = httpClient;
+        }
+
+        /// <summary>Diagnostics only: never log raw secrets.</summary>
+        private static string DescribeSecret(string? value)
+        {
+            if (value == null) return "null";
+            if (value.Length == 0) return "empty";
+            return $"present,len={value.Length}";
+        }
+
+        private static string SanitizeFileNameSegment(string segment)
+        {
+            var s = segment.Replace(':', '-').Replace(',', '_');
+            return string.Join("_", s.Split(Path.GetInvalidFileNameChars(), StringSplitOptions.RemoveEmptyEntries));
+        }
+
+        private void LogFigmaIntegrationSnapshot(string phase, Figma figma)
+        {
+            _logger.LogInformation(
+                "Figma row snapshot {Phase}: BoardId={BoardId} FigmaId={FigmaId} " +
+                "AccessToken={Access} RefreshToken={Refresh} TokenExpiryUtc={Expiry} FigmaUserId={UserId} " +
+                "HasFigmaFileUrl={HasUrl} FigmaFileKey={FileKey} UpdatedAtUtc={UpdatedAt}",
+                phase,
+                figma.BoardId,
+                figma.Id,
+                DescribeSecret(figma.FigmaAccessToken),
+                DescribeSecret(figma.FigmaRefreshToken),
+                figma.FigmaTokenExpiry,
+                figma.FigmaUserId ?? "(null)",
+                !string.IsNullOrEmpty(figma.FigmaFileUrl),
+                figma.FigmaFileKey ?? "(null)",
+                figma.UpdatedAt);
+        }
+
+        /// <summary>Result of Figma GET /v1/images/… (export URL only; PNG bytes fetched separately).</summary>
+        private sealed record FigmaPngUrlResult(
+            string? ImageUrl,
+            string? ErrorMessage,
+            int? ClientStatusCode,
+            int? RetryAfterSeconds,
+            string? ErrorCode,
+            int? FigmaRetryAfterRawSeconds = null);
+
+        private static int? TryGetRetryAfterSeconds(HttpResponseMessage response)
+        {
+            if (response.Headers.RetryAfter?.Delta is { TotalSeconds: > 0 } d)
+            {
+                return (int)Math.Ceiling(d.TotalSeconds);
+            }
+
+            if (response.Headers.TryGetValues("Retry-After", out var values))
+            {
+                var raw = values.FirstOrDefault();
+                if (raw != null &&
+                    int.TryParse(raw, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var sec) &&
+                    sec >= 0)
+                {
+                    return sec;
+                }
+            }
+
+            return null;
+        }
+
+        /// <summary>Response + content headers for diagnostics (e.g. <c>Retry-After</c> on 429). Figma error responses should not include secrets.</summary>
+        private static string FormatFigmaResponseHeadersForLog(HttpResponseMessage response)
+        {
+            var sb = new StringBuilder(256);
+            void Append(string key, IEnumerable<string> values)
+            {
+                if (sb.Length > 0)
+                    sb.Append("; ");
+                sb.Append(key).Append('=').Append(string.Join(",", values));
+            }
+
+            foreach (var h in response.Headers)
+                Append(h.Key, h.Value);
+            foreach (var h in response.Content.Headers)
+                Append(h.Key, h.Value);
+
+            return sb.Length == 0 ? "(no headers)" : sb.ToString();
+        }
+
+        /// <summary>Forwarded to clients when Figma returns 429 so the UI can show plan tier, rate-limit type, and Retry-After.</summary>
+        private sealed record FigmaFilesApiFailureExtras(int? RetryAfterSeconds, string? RateLimitType, string? PlanTier);
+
+        private static string? GetFigmaHeaderFirstValue(HttpResponseMessage response, string headerName)
+        {
+            if (response.Headers.TryGetValues(headerName, out var v1))
+                return v1.FirstOrDefault();
+            if (response.Content.Headers.TryGetValues(headerName, out var v2))
+                return v2.FirstOrDefault();
+            foreach (var h in response.Headers)
+            {
+                if (string.Equals(h.Key, headerName, StringComparison.OrdinalIgnoreCase))
+                    return h.Value.FirstOrDefault();
+            }
+
+            foreach (var h in response.Content.Headers)
+            {
+                if (string.Equals(h.Key, headerName, StringComparison.OrdinalIgnoreCase))
+                    return h.Value.FirstOrDefault();
+            }
+
+            return null;
+        }
+
+        private static FigmaFilesApiFailureExtras? BuildFigmaFilesApiFailureExtras(HttpResponseMessage response, int httpStatus)
+        {
+            if (httpStatus != 429)
+                return null;
+            var retry = TryGetRetryAfterSeconds(response);
+            var rateType = GetFigmaHeaderFirstValue(response, "X-Figma-Rate-Limit-Type");
+            var planTier = GetFigmaHeaderFirstValue(response, "X-Figma-Plan-Tier");
+            return new FigmaFilesApiFailureExtras(retry, rateType, planTier);
+        }
+
+        /// <summary>
+        /// Figma sends a <c>Retry-After</c> value in seconds (RFC 7231). It can be very large when an API quota resets in
+        /// days (e.g. some monthly/low tiers). Cap what we mirror on our HTTP response so clients get a usable backoff hint.
+        /// </summary>
+        private int? ToClientRetryAfterSeconds(int? figmaRetrySeconds)
+        {
+            const int maxClientHintSeconds = 3600;
+            if (figmaRetrySeconds is null or <= 0)
+            {
+                return null;
+            }
+
+            if (figmaRetrySeconds <= maxClientHintSeconds)
+            {
+                return figmaRetrySeconds;
+            }
+
+            _logger.LogWarning(
+                "Figma Retry-After is {RawSeconds}s (~{Days:F2} days). Large values usually mean time until quota/meter reset, not a bug. Capping API Retry-After / JSON hint to {Cap}s; see https://developers.figma.com/docs/rest-api/rate-limits/",
+                figmaRetrySeconds.Value,
+                figmaRetrySeconds.Value / 86400.0,
+                maxClientHintSeconds);
+            return maxClientHintSeconds;
+        }
+
+        private static int MapFigmaImagesHttpStatusToClient(HttpStatusCode status)
+        {
+            var code = (int)status;
+            if (code >= 500)
+            {
+                return 502;
+            }
+
+            return status switch
+            {
+                HttpStatusCode.Unauthorized => 401,
+                HttpStatusCode.Forbidden => 403,
+                HttpStatusCode.NotFound => 404,
+                HttpStatusCode.TooManyRequests => 429,
+                HttpStatusCode.BadRequest => 400,
+                _ => 400
+            };
+        }
+
+        /// <summary>Stable machine-readable code for clients (e.g. reconnect banner).</summary>
+        private static string? ClientStatusToErrorCode(int clientStatus) =>
+            clientStatus switch
+            {
+                401 => "figma_reconnect_required",
+                403 => "figma_access_denied",
+                404 => "figma_not_found",
+                429 => "figma_rate_limited",
+                502 => "figma_upstream_error",
+                504 => "figma_timeout",
+                500 => "figma_internal",
+                400 => "figma_bad_request",
+                _ => "figma_error"
+            };
+
+        private static int Compute429BackoffMs(int? retryAfterSeconds, int baseDelayMs, int attemptZeroBased)
+        {
+            var fromHeaderMs = retryAfterSeconds.HasValue
+                ? Math.Clamp(retryAfterSeconds.Value * 1000, 0, 120_000)
+                : 0;
+            var capMs = 30_000;
+            var exponential = Math.Min(baseDelayMs * (1 << attemptZeroBased), capMs);
+            var delay = Math.Max(fromHeaderMs, exponential);
+            delay = Math.Min(delay, 120_000);
+            delay += Random.Shared.Next(0, 250);
+            return delay;
         }
 
         /// <summary>
@@ -352,10 +540,11 @@ namespace strAppersBackend.Controllers
         }
 
         /// <summary>
-        /// Generate OAuth URL for Figma authentication
+        /// Generate OAuth URL for Figma authentication.
+        /// Optional <paramref name="redirectUri"/> must exactly match an entry in <c>Figma:RedirectUrls</c> and in the Figma app (e.g. BoardRoom vs StudentRegistration).
         /// </summary>
         [HttpGet("use/oauth")]
-        public ActionResult<object> GetOAuthUrl()
+        public ActionResult<object> GetOAuthUrl([FromQuery] string? redirectUri = null)
         {
             try
             {
@@ -367,23 +556,27 @@ namespace strAppersBackend.Controllers
                     return BadRequest("Figma configuration is missing");
                 }
 
+                var redirectUriToUse = PickRedirectUri(redirectUri, redirectUrls);
+                if (redirectUriToUse == null)
+                {
+                    return BadRequest("redirectUri is not listed in Figma:RedirectUrls.");
+                }
+
                 // Generate unique state for security
                 var state = Guid.NewGuid().ToString();
                 
-                // Must match a redirect URI registered on the Figma OAuth app (first entry in config).
-                var redirectUri = redirectUrls[0];
-                
-                var oauthUrl = $"https://www.figma.com/oauth?client_id={clientId}&redirect_uri={Uri.EscapeDataString(redirectUri)}&scope=file_content:read,current_user:read,projects:read,team_library_content:read,file_metadata:read,file_versions:read,library_assets:read,library_content:read&state={state}&response_type=code";
+                // Omit projects:read — not available for public OAuth apps; team/project listing APIs require a private app.
+                var oauthUrl = $"https://www.figma.com/oauth?client_id={clientId}&redirect_uri={Uri.EscapeDataString(redirectUriToUse)}&scope=file_content:read,current_user:read,team_library_content:read,file_metadata:read,file_versions:read,library_assets:read,library_content:read&state={state}&response_type=code";
 
                 _logger.LogInformation("Generated OAuth URL for Figma authentication");
-                _logger.LogInformation("Requested scopes: file_content:read,current_user:read,projects:read,team_library_content:read,file_metadata:read,file_versions:read,library_assets:read,library_content:read (file_variables:read and library_analytics:read removed - Enterprise only)");
+                _logger.LogInformation("Requested scopes: file_content:read,current_user:read,team_library_content:read,file_metadata:read,file_versions:read,library_assets:read,library_content:read (projects:read omitted for public OAuth apps; file_variables:read and library_analytics:read are Enterprise-only)");
 
                 return Ok(new
                 {
                     success = true,
                     oauthUrl = oauthUrl,
                     state = state,
-                    redirectUri = redirectUri
+                    redirectUri = redirectUriToUse
                 });
             }
             catch (Exception ex)
@@ -393,15 +586,37 @@ namespace strAppersBackend.Controllers
             }
         }
 
+        /// <summary>Returns null if <paramref name="requested"/> is set but not allowed.</summary>
+        private static string? PickRedirectUri(string? requested, string[] allowed)
+        {
+            if (string.IsNullOrWhiteSpace(requested))
+            {
+                return allowed[0];
+            }
+
+            foreach (var a in allowed)
+            {
+                if (string.Equals(a.Trim(), requested.Trim(), StringComparison.Ordinal))
+                {
+                    return a;
+                }
+            }
+
+            return null;
+        }
+
         /// <summary>
-        /// Exchange authorization code for tokens and store them
+        /// Exchange authorization code for tokens and store them against a board or (during registration) a pending email.
         /// </summary>
         [HttpPost("use/store-tokens")]
         public async Task<ActionResult<object>> StoreTokens([FromBody] StoreTokensRequest request)
         {
             try
             {
-                _logger.LogInformation("Storing Figma tokens for board {BoardId}", request.BoardId);
+                if (request == null || string.IsNullOrWhiteSpace(request.AuthCode))
+                {
+                    return BadRequest("AuthCode is required.");
+                }
 
                 var clientId = _configuration["Figma:ClientId"];
                 var clientSecret = _configuration["Figma:ClientSecret"];
@@ -412,21 +627,22 @@ namespace strAppersBackend.Controllers
                     return BadRequest("Figma configuration is missing");
                 }
 
-                var redirectUri = redirectUrls[0];
+                var redirectUriForExchange = PickRedirectUri(request.RedirectUri, redirectUrls);
+                if (redirectUriForExchange == null)
+                {
+                    return BadRequest("redirectUri is not listed in Figma:RedirectUrls.");
+                }
 
-                // Exchange authorization code for tokens
                 var formData = new List<KeyValuePair<string, string>>
                 {
                     new KeyValuePair<string, string>("client_id", clientId),
                     new KeyValuePair<string, string>("client_secret", clientSecret),
-                    new KeyValuePair<string, string>("redirect_uri", redirectUri),
+                    new KeyValuePair<string, string>("redirect_uri", redirectUriForExchange),
                     new KeyValuePair<string, string>("code", request.AuthCode),
                     new KeyValuePair<string, string>("grant_type", "authorization_code")
                 };
 
-                var content = new FormUrlEncodedContent(formData);
-
-                var response = await _httpClient.PostAsync("https://api.figma.com/v1/oauth/token", content);
+                var response = await _httpClient.PostAsync("https://api.figma.com/v1/oauth/token", new FormUrlEncodedContent(formData));
                 var responseContent = await response.Content.ReadAsStringAsync();
 
                 _logger.LogInformation("Figma OAuth response: {StatusCode} - {Content}", response.StatusCode, responseContent);
@@ -442,42 +658,79 @@ namespace strAppersBackend.Controllers
                     PropertyNameCaseInsensitive = true
                 });
 
-                _logger.LogInformation("Parsed token response - AccessToken: {AccessToken}, RefreshToken: {RefreshToken}, ExpiresIn: {ExpiresIn}", 
-                    tokenResponse?.AccessToken, tokenResponse?.RefreshToken, tokenResponse?.ExpiresIn);
-                
-                // Log the raw response for debugging
-                _logger.LogInformation("Raw Figma OAuth response content: {RawContent}", responseContent);
-
                 if (tokenResponse?.AccessToken == null)
                 {
                     _logger.LogError("Invalid token response from Figma: {Response}", responseContent);
                     return BadRequest("Invalid token response from Figma");
                 }
 
-                // Check if Figma integration already exists for this board
+                var hasBoard = !string.IsNullOrWhiteSpace(request.BoardId);
+                var hasEmail = !string.IsNullOrWhiteSpace(request.Email);
+
+                if (hasBoard && hasEmail)
+                {
+                    return BadRequest("Provide BoardId or Email, not both.");
+                }
+
+                if (!hasBoard && !hasEmail)
+                {
+                    return BadRequest("BoardId or Email is required.");
+                }
+
+                if (hasEmail)
+                {
+                    var emailNorm = NormalizeRegistrationEmail(request.Email!);
+                    _logger.LogInformation("Storing Figma tokens for registration email (pending board) {Email}", emailNorm);
+
+                    var pending = await _context.FigmaOAuthPending.FirstOrDefaultAsync(p => p.Email == emailNorm);
+                    if (pending != null)
+                    {
+                        pending.FigmaAccessToken = tokenResponse.AccessToken;
+                        pending.FigmaRefreshToken = tokenResponse.RefreshToken;
+                        pending.FigmaTokenExpiry = DateTime.UtcNow.AddSeconds(tokenResponse.ExpiresIn);
+                        pending.UpdatedAt = DateTime.UtcNow;
+                    }
+                    else
+                    {
+                        _context.FigmaOAuthPending.Add(new FigmaOAuthPending
+                        {
+                            Email = emailNorm,
+                            FigmaAccessToken = tokenResponse.AccessToken,
+                            FigmaRefreshToken = tokenResponse.RefreshToken,
+                            FigmaTokenExpiry = DateTime.UtcNow.AddSeconds(tokenResponse.ExpiresIn),
+                            CreatedAt = DateTime.UtcNow,
+                            UpdatedAt = DateTime.UtcNow
+                        });
+                    }
+
+                    await _context.SaveChangesAsync();
+                    return Ok(new
+                    {
+                        success = true,
+                        message = "Tokens stored for your account. They will apply when you are assigned a project board."
+                    });
+                }
+
+                _logger.LogInformation("Storing Figma tokens for board {BoardId}", request.BoardId);
+
                 var existingFigma = await _context.Figma
                     .FirstOrDefaultAsync(f => f.BoardId == request.BoardId);
 
                 if (existingFigma != null)
                 {
-                    // Update existing record
                     _logger.LogInformation("Updating existing Figma record for board {BoardId}", request.BoardId);
                     existingFigma.FigmaAccessToken = tokenResponse.AccessToken;
                     existingFigma.FigmaRefreshToken = tokenResponse.RefreshToken;
                     existingFigma.FigmaTokenExpiry = DateTime.UtcNow.AddSeconds(tokenResponse.ExpiresIn);
                     existingFigma.FigmaLastSync = DateTime.UtcNow;
                     existingFigma.UpdatedAt = DateTime.UtcNow;
-                    
-                    _logger.LogInformation("Updated Figma record - AccessToken: {AccessToken}, RefreshToken: {RefreshToken}", 
-                        existingFigma.FigmaAccessToken, existingFigma.FigmaRefreshToken);
                 }
                 else
                 {
-                    // Create new record
                     _logger.LogInformation("Creating new Figma record for board {BoardId}", request.BoardId);
                     var figma = new Figma
                     {
-                        BoardId = request.BoardId,
+                        BoardId = request.BoardId!,
                         FigmaAccessToken = tokenResponse.AccessToken,
                         FigmaRefreshToken = tokenResponse.RefreshToken,
                         FigmaTokenExpiry = DateTime.UtcNow.AddSeconds(tokenResponse.ExpiresIn),
@@ -486,15 +739,10 @@ namespace strAppersBackend.Controllers
                         UpdatedAt = DateTime.UtcNow
                     };
 
-                    _logger.LogInformation("New Figma record - AccessToken: {AccessToken}, RefreshToken: {RefreshToken}", 
-                        figma.FigmaAccessToken, figma.FigmaRefreshToken);
-
                     _context.Figma.Add(figma);
                 }
 
                 await _context.SaveChangesAsync();
-                _logger.LogInformation("Successfully saved Figma tokens to database for board {BoardId}", request.BoardId);
-
                 _logger.LogInformation("Successfully stored Figma tokens for board {BoardId}", request.BoardId);
 
                 return Ok(new
@@ -505,10 +753,75 @@ namespace strAppersBackend.Controllers
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Error storing Figma tokens for board {BoardId}", request.BoardId);
+                _logger.LogError(ex, "Error storing Figma tokens");
                 return StatusCode(500, "An error occurred while storing tokens");
             }
         }
+
+        /// <summary>
+        /// Moves tokens from <see cref="FigmaOAuthPending"/> to <see cref="Figma"/> when the student gets a board.
+        /// </summary>
+        [HttpPost("use/apply-pending")]
+        public async Task<ActionResult<object>> ApplyPendingFigmaTokens([FromBody] ApplyPendingFigmaRequest request)
+        {
+            try
+            {
+                if (request == null || string.IsNullOrWhiteSpace(request.Email) || string.IsNullOrWhiteSpace(request.BoardId))
+                {
+                    return BadRequest("Email and BoardId are required.");
+                }
+
+                var emailNorm = NormalizeRegistrationEmail(request.Email);
+                var student = await _context.Students.AsNoTracking()
+                    .FirstOrDefaultAsync(s => s.Email != null && s.Email.ToLower() == emailNorm && s.BoardId == request.BoardId);
+
+                if (student == null)
+                {
+                    return NotFound("No student matches this email and board.");
+                }
+
+                var pending = await _context.FigmaOAuthPending.FirstOrDefaultAsync(p => p.Email == emailNorm);
+                if (pending == null || string.IsNullOrEmpty(pending.FigmaAccessToken))
+                {
+                    return Ok(new { success = true, applied = false });
+                }
+
+                var existing = await _context.Figma.FirstOrDefaultAsync(f => f.BoardId == request.BoardId);
+                if (existing != null)
+                {
+                    existing.FigmaAccessToken = pending.FigmaAccessToken;
+                    existing.FigmaRefreshToken = pending.FigmaRefreshToken;
+                    existing.FigmaTokenExpiry = pending.FigmaTokenExpiry;
+                    existing.FigmaLastSync = DateTime.UtcNow;
+                    existing.UpdatedAt = DateTime.UtcNow;
+                }
+                else
+                {
+                    _context.Figma.Add(new Figma
+                    {
+                        BoardId = request.BoardId,
+                        FigmaAccessToken = pending.FigmaAccessToken,
+                        FigmaRefreshToken = pending.FigmaRefreshToken,
+                        FigmaTokenExpiry = pending.FigmaTokenExpiry,
+                        FigmaLastSync = DateTime.UtcNow,
+                        CreatedAt = DateTime.UtcNow,
+                        UpdatedAt = DateTime.UtcNow
+                    });
+                }
+
+                _context.FigmaOAuthPending.Remove(pending);
+                await _context.SaveChangesAsync();
+
+                return Ok(new { success = true, applied = true });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error applying pending Figma tokens");
+                return StatusCode(500, "An error occurred while applying pending Figma tokens.");
+            }
+        }
+
+        private static string NormalizeRegistrationEmail(string email) => email.Trim().ToLowerInvariant();
 
         /// <summary>
         /// Get list of available Figma files for the user
@@ -532,12 +845,7 @@ namespace strAppersBackend.Controllers
                 // Check if access token is expired and refresh if needed
                 await RefreshTokenIfNeeded(figma);
 
-                // Log token information for debugging
-                _logger.LogInformation("Figma token details - AccessToken: {AccessToken}, RefreshToken: {RefreshToken}, Expiry: {Expiry}, LastSync: {LastSync}", 
-                    figma.FigmaAccessToken?.Substring(0, Math.Min(10, figma.FigmaAccessToken.Length)) + "...",
-                    figma.FigmaRefreshToken?.Substring(0, Math.Min(10, figma.FigmaRefreshToken.Length)) + "...",
-                    figma.FigmaTokenExpiry,
-                    figma.FigmaLastSync);
+                LogFigmaIntegrationSnapshot("get-public-files", figma);
 
                 // Fetch user's teams/projects/files structure from Figma API
                 var teamsStructure = await GetUserFigmaStructure(figma.FigmaAccessToken!);
@@ -662,6 +970,22 @@ namespace strAppersBackend.Controllers
 
                 var segments = path.Split('/', StringSplitOptions.RemoveEmptyEntries);
                 _logger.LogInformation("Path segments: {Segments}", string.Join(", ", segments));
+
+                // /file/{key}/..., /design/{key}/..., /proto/{key}/... (browser URLs)
+                for (int i = 0; i < segments.Length - 1; i++)
+                {
+                    if (segments[i].Equals("file", StringComparison.OrdinalIgnoreCase) ||
+                        segments[i].Equals("design", StringComparison.OrdinalIgnoreCase) ||
+                        segments[i].Equals("proto", StringComparison.OrdinalIgnoreCase))
+                    {
+                        var candidate = segments[i + 1];
+                        if (!string.IsNullOrEmpty(candidate))
+                        {
+                            _logger.LogInformation("Found file key (Figma path): {FileKey}", candidate);
+                            return candidate;
+                        }
+                    }
+                }
 
                 // Handle community URL structure: /community/file/{key}/{title}
                 for (int i = 0; i < segments.Length - 1; i++)
@@ -789,17 +1113,27 @@ namespace strAppersBackend.Controllers
         }
 
         /// <summary>
-        /// Download metadata of the Figma file as JSON
-        /// Requires file_content:read scope for Figma API access
+        /// Download file document JSON from Figma REST <c>GET /v1/files/:file_key</c> (OAuth Bearer).
+        /// <see cref="DownloadMetadataRequest.FigmaFileUrl"/> <b>must</b> include <c>node-id</c> or <c>node_id</c> (e.g. “Copy link to selection”); full-file export is not allowed on this endpoint.
+        /// <see cref="Figma"/> row is used only for OAuth tokens (<see cref="Figma.BoardId"/>).
         /// </summary>
         [HttpPost("use/download-metadata")]
         public async Task<ActionResult> DownloadMetadata([FromBody] DownloadMetadataRequest request)
         {
             try
             {
-                _logger.LogInformation("Downloading metadata for board {BoardId}", request.BoardId);
+                if (request == null || string.IsNullOrWhiteSpace(request.BoardId))
+                {
+                    return BadRequest("BoardId is required.");
+                }
 
-                // Get Figma integration for this board
+                if (string.IsNullOrWhiteSpace(request.FigmaFileUrl))
+                {
+                    return BadRequest("FigmaFileUrl is required (pass the file URL from your Resources or client).");
+                }
+
+                _logger.LogInformation("Downloading Figma file JSON for board {BoardId}", request.BoardId);
+
                 var figma = await _context.Figma
                     .FirstOrDefaultAsync(f => f.BoardId == request.BoardId);
 
@@ -808,35 +1142,191 @@ namespace strAppersBackend.Controllers
                     return NotFound($"Figma integration not found for board {request.BoardId}");
                 }
 
-                if (string.IsNullOrEmpty(figma.FigmaFileKey))
+                if (string.IsNullOrEmpty(figma.FigmaAccessToken))
                 {
-                    return BadRequest("No Figma file linked to this board");
+                    return BadRequest("No Figma access token for this board. Complete Figma OAuth first.");
                 }
 
-                // Check if access token is expired and refresh if needed
+                var trimmedUrl = request.FigmaFileUrl.Trim();
+                var fileKey = ExtractFileKeyFromUrl(trimmedUrl);
+                if (string.IsNullOrEmpty(fileKey))
+                {
+                    return BadRequest("Could not extract a file key from FigmaFileUrl. Use a standard figma.com design or file URL.");
+                }
+
+                var nodeIdsFilter = TryExtractNodeIdFromFigmaUrl(trimmedUrl);
+                if (string.IsNullOrEmpty(nodeIdsFilter))
+                {
+                    return BadRequest(new
+                    {
+                        success = false,
+                        message = "FigmaFileUrl must include a node id. Use a Figma “Copy link to selection” URL with ?node-id=… (or node_id=…) so only that subtree is fetched."
+                    });
+                }
+
+                _logger.LogInformation(
+                    "download-metadata: restricting GET /v1/files to node id(s) from URL (ids={Ids})",
+                    nodeIdsFilter);
+
                 await RefreshTokenIfNeeded(figma);
 
-                // Fetch file metadata from Figma API
-                var metadata = await GetFigmaFileMetadata(figma.FigmaAccessToken!, figma.FigmaFileKey);
-                if (metadata == null)
+                if (string.IsNullOrEmpty(figma.FigmaAccessToken))
                 {
-                    return BadRequest("Failed to fetch file metadata from Figma");
+                    return BadRequest("No Figma access token after refresh. Reconnect Figma for this board.");
                 }
 
-                // Update last sync time
-                figma.FigmaLastSync = DateTime.UtcNow;
+                var (metadata, figmaHttp, figmaErrBody, failureExtras) =
+                    await GetFigmaFileMetadata(figma.FigmaAccessToken, fileKey, nodeIdsFilter, request.Depth);
+                if (metadata == null)
+                {
+                    const int maxFigmaErrChars = 500_000;
+                    var errPreview = string.IsNullOrEmpty(figmaErrBody)
+                        ? "(empty body)"
+                        : (figmaErrBody.Length > maxFigmaErrChars ? figmaErrBody[..maxFigmaErrChars] + "…" : figmaErrBody);
+                    var payload = new
+                    {
+                        success = false,
+                        message = "Figma GET /v1/files did not return file JSON. Use figmaHttpStatus and figmaResponse below; typical fixes: share the file with the same Figma account that connected OAuth for this board, reconnect OAuth if the token is stale, or wait and retry after HTTP 429 (rate limit).",
+                        figmaHttpStatus = figmaHttp,
+                        figmaResponse = errPreview,
+                        fileKey,
+                        hadNodeIdsFilter = !string.IsNullOrEmpty(nodeIdsFilter),
+                        figmaRetryAfterSeconds = failureExtras?.RetryAfterSeconds,
+                        figmaRateLimitType = failureExtras?.RateLimitType,
+                        figmaPlanTier = failureExtras?.PlanTier
+                    };
+                    if (figmaHttp is >= 400 and <= 599)
+                        return StatusCode(figmaHttp, payload);
+                    return StatusCode(502, payload);
+                }
+
                 await _context.SaveChangesAsync();
 
-                // Return as downloadable JSON file
                 var jsonBytes = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(metadata, new JsonSerializerOptions { WriteIndented = true }));
-                
-                return File(jsonBytes, "application/json", $"figma-metadata-{request.BoardId}.json");
+
+                var safeKey = string.Join("_", fileKey.Split(Path.GetInvalidFileNameChars(), StringSplitOptions.RemoveEmptyEntries));
+                var filename = string.IsNullOrEmpty(nodeIdsFilter)
+                    ? $"figma-file-{request.BoardId}-{safeKey}.json"
+                    : $"figma-node-{request.BoardId}-{safeKey}-{SanitizeFileNameSegment(nodeIdsFilter)}.json";
+                return File(jsonBytes, "application/json", filename);
+            }
+            catch (InvalidOperationException ex) when (ex.Message.Contains("refresh", StringComparison.OrdinalIgnoreCase))
+            {
+                _logger.LogWarning(ex, "Figma token refresh failed for board {BoardId}", request?.BoardId);
+                return BadRequest("Figma token could not be refreshed. Reconnect Figma for this board.");
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Error downloading metadata for board {BoardId}", request.BoardId);
+                _logger.LogError(ex, "Error downloading metadata for board {BoardId}", request?.BoardId);
                 return StatusCode(500, "An error occurred while downloading metadata");
             }
+        }
+
+        /// <summary>Shared resolution for <see cref="ExportPngRequest"/> (board token, file key, node id).</summary>
+        private async Task<(ActionResult? Error, Figma? FigmaEntity, string? FileKey, string? NodeId, double Scale)> ResolveExportPngAsync(
+            ExportPngRequest request,
+            string logLabel)
+        {
+            if (request == null || string.IsNullOrWhiteSpace(request.BoardId))
+            {
+                return (BadRequest("BoardId is required."), null, null, null, 1d);
+            }
+
+            var boardFigmaRowCount = await _context.Figma.CountAsync(f => f.BoardId == request.BoardId);
+            _logger.LogInformation(
+                "{LogLabel}: BoardId={BoardId} matchingFigmaRows={RowCount}",
+                logLabel,
+                request.BoardId,
+                boardFigmaRowCount);
+            if (boardFigmaRowCount > 1)
+            {
+                _logger.LogWarning(
+                    "{LogLabel}: multiple Figma rows for BoardId={BoardId} count={Count}; FirstOrDefault may not match the row you queried in SQL.",
+                    logLabel,
+                    request.BoardId,
+                    boardFigmaRowCount);
+            }
+
+            var figma = await _context.Figma.FirstOrDefaultAsync(f => f.BoardId == request.BoardId);
+            if (figma == null)
+            {
+                _logger.LogWarning("{LogLabel}: no Figma row after count BoardId={BoardId}", logLabel, request.BoardId);
+                return (NotFound($"Figma integration not found for board {request.BoardId}"), null, null, null, 1d);
+            }
+
+            LogFigmaIntegrationSnapshot($"{logLabel}:loaded", figma);
+
+            if (string.IsNullOrEmpty(figma.FigmaAccessToken))
+            {
+                _logger.LogWarning(
+                    "{LogLabel}: blocked — empty access token BoardId={BoardId} FigmaId={FigmaId}",
+                    logLabel,
+                    request.BoardId,
+                    figma.Id);
+                return (BadRequest("No Figma access token for this board. Complete Figma OAuth first."), null, null, null, 1d);
+            }
+
+            var effectiveUrl = !string.IsNullOrWhiteSpace(request.FileUrl)
+                ? request.FileUrl.Trim()
+                : (figma.FigmaFileUrl ?? string.Empty).Trim();
+
+            if (string.IsNullOrEmpty(effectiveUrl))
+            {
+                return (BadRequest("FileUrl is missing and no FigmaFileUrl is stored for this board. Pass FileUrl or save a file URL on the Figma integration."), null, null, null, 1d);
+            }
+
+            await RefreshTokenIfNeeded(figma);
+            LogFigmaIntegrationSnapshot($"{logLabel}:after-refresh", figma);
+
+            var fileKey = ExtractFileKeyFromUrl(effectiveUrl);
+            if (string.IsNullOrEmpty(fileKey) && !string.IsNullOrEmpty(figma.FigmaFileKey))
+            {
+                fileKey = figma.FigmaFileKey;
+            }
+
+            if (string.IsNullOrEmpty(fileKey))
+            {
+                return (BadRequest("Could not determine file key from URL or database."), null, null, null, 1d);
+            }
+
+            var nodeRaw = !string.IsNullOrWhiteSpace(request.NodeId)
+                ? request.NodeId.Trim()
+                : TryExtractNodeIdFromFigmaUrl(effectiveUrl);
+
+            if (string.IsNullOrEmpty(nodeRaw))
+            {
+                return (BadRequest("NodeId is required, or FileUrl must include a node-id query parameter (e.g. …?node-id=1-2)."), null, null, null, 1d);
+            }
+
+            var nodeId = NormalizeFigmaNodeId(nodeRaw);
+            var scale = request.Scale is > 0 and <= 4 ? request.Scale.Value : 1d;
+
+            return (null, figma, fileKey, nodeId, scale);
+        }
+
+        private ActionResult<object>? MapFigmaPngUrlErrorToResult(FigmaPngUrlResult pngUrlResult)
+        {
+            if (pngUrlResult.ErrorMessage == null)
+            {
+                return null;
+            }
+
+            if (pngUrlResult.RetryAfterSeconds is { } ras)
+            {
+                Response.Headers.Append("Retry-After", ras.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            }
+
+            var errPayload = new
+            {
+                success = false,
+                message = pngUrlResult.ErrorMessage,
+                retryAfterSeconds = pngUrlResult.RetryAfterSeconds,
+                figmaRetryAfterSeconds = pngUrlResult.FigmaRetryAfterRawSeconds,
+                errorCode = pngUrlResult.ErrorCode
+            };
+            return pngUrlResult.ClientStatusCode is { } code
+                ? StatusCode(code, errPayload)
+                : BadRequest(errPayload);
         }
 
         /// <summary>
@@ -848,62 +1338,29 @@ namespace strAppersBackend.Controllers
         {
             try
             {
-                if (request == null || string.IsNullOrWhiteSpace(request.BoardId))
+                var (resolveErr, figma, fileKey, nodeId, scale) = await ResolveExportPngAsync(request, "export-png");
+                if (resolveErr != null)
                 {
-                    return BadRequest("BoardId is required.");
+                    return resolveErr;
                 }
 
-                var figma = await _context.Figma.FirstOrDefaultAsync(f => f.BoardId == request.BoardId);
-                if (figma == null)
+                _logger.LogInformation(
+                    "export-png: invoking Figma images API BoardId={BoardId} FigmaId={FigmaId} FileKey={FileKey} NodeId={NodeId} Scale={Scale} BearerToken={Bearer}",
+                    request!.BoardId,
+                    figma!.Id,
+                    fileKey,
+                    nodeId,
+                    scale,
+                    DescribeSecret(figma.FigmaAccessToken));
+
+                var pngUrlResult = await RequestFigmaPngExportUrl(figma.FigmaAccessToken!, fileKey!, nodeId!, scale);
+                var errResult = MapFigmaPngUrlErrorToResult(pngUrlResult);
+                if (errResult != null)
                 {
-                    return NotFound($"Figma integration not found for board {request.BoardId}");
+                    return errResult;
                 }
 
-                if (string.IsNullOrEmpty(figma.FigmaAccessToken))
-                {
-                    return BadRequest("No Figma access token for this board. Complete Figma OAuth first.");
-                }
-
-                var effectiveUrl = !string.IsNullOrWhiteSpace(request.FileUrl)
-                    ? request.FileUrl.Trim()
-                    : (figma.FigmaFileUrl ?? string.Empty).Trim();
-
-                if (string.IsNullOrEmpty(effectiveUrl))
-                {
-                    return BadRequest("FileUrl is missing and no FigmaFileUrl is stored for this board. Pass FileUrl or save a file URL on the Figma integration.");
-                }
-
-                await RefreshTokenIfNeeded(figma);
-
-                var fileKey = ExtractFileKeyFromUrl(effectiveUrl);
-                if (string.IsNullOrEmpty(fileKey) && !string.IsNullOrEmpty(figma.FigmaFileKey))
-                {
-                    fileKey = figma.FigmaFileKey;
-                }
-
-                if (string.IsNullOrEmpty(fileKey))
-                {
-                    return BadRequest("Could not determine file key from URL or database.");
-                }
-
-                var nodeRaw = !string.IsNullOrWhiteSpace(request.NodeId)
-                    ? request.NodeId.Trim()
-                    : TryExtractNodeIdFromFigmaUrl(effectiveUrl);
-
-                if (string.IsNullOrEmpty(nodeRaw))
-                {
-                    return BadRequest("NodeId is required, or FileUrl must include a node-id query parameter (e.g. …?node-id=1-2).");
-                }
-
-                var nodeId = NormalizeFigmaNodeId(nodeRaw);
-                var scale = request.Scale is > 0 and <= 4 ? request.Scale.Value : 1d;
-
-                var (apiErr, imageUrl) = await RequestFigmaPngExportUrl(figma.FigmaAccessToken!, fileKey, nodeId, scale);
-                if (!string.IsNullOrEmpty(apiErr))
-                {
-                    return BadRequest(new { success = false, message = apiErr });
-                }
-
+                var imageUrl = pngUrlResult.ImageUrl;
                 if (string.IsNullOrEmpty(imageUrl))
                 {
                     return BadRequest(new { success = false, message = "Figma did not return an image URL for this node. Check node id and file access." });
@@ -916,7 +1373,8 @@ namespace strAppersBackend.Controllers
                 if (!pngResponse.IsSuccessStatusCode)
                 {
                     _logger.LogWarning("Figma PNG download failed: {Status}", pngResponse.StatusCode);
-                    return BadRequest(new { success = false, message = "Failed to download rendered PNG from Figma." });
+                    var downstream = pngResponse.StatusCode == HttpStatusCode.NotFound ? 404 : 502;
+                    return StatusCode(downstream, new { success = false, message = "Failed to download rendered PNG from Figma." });
                 }
 
                 var pngBase64 = Convert.ToBase64String(pngBytes);
@@ -934,6 +1392,59 @@ namespace strAppersBackend.Controllers
             {
                 _logger.LogError(ex, "Error exporting Figma PNG for board {BoardId}", request?.BoardId);
                 return StatusCode(500, "An error occurred while exporting the Figma PNG.");
+            }
+        }
+
+        /// <summary>
+        /// Same flow as <c>export-png</c> through Figma <c>/v1/images</c>, but returns only the short-lived CDN <c>imageUrl</c> (no base64). Use immediately — link expires.
+        /// </summary>
+        [HttpPost("use/export-png-url")]
+        public async Task<ActionResult<object>> ExportPngRenderUrl([FromBody] ExportPngRequest request)
+        {
+            try
+            {
+                var (resolveErr, figma, fileKey, nodeId, scale) = await ResolveExportPngAsync(request, "export-png-url");
+                if (resolveErr != null)
+                {
+                    return resolveErr;
+                }
+
+                _logger.LogInformation(
+                    "export-png-url: invoking Figma images API BoardId={BoardId} FigmaId={FigmaId} FileKey={FileKey} NodeId={NodeId} Scale={Scale} BearerToken={Bearer}",
+                    request!.BoardId,
+                    figma!.Id,
+                    fileKey,
+                    nodeId,
+                    scale,
+                    DescribeSecret(figma.FigmaAccessToken));
+
+                var pngUrlResult = await RequestFigmaPngExportUrl(figma.FigmaAccessToken!, fileKey!, nodeId!, scale);
+                var errResult = MapFigmaPngUrlErrorToResult(pngUrlResult);
+                if (errResult != null)
+                {
+                    return errResult;
+                }
+
+                var imageUrl = pngUrlResult.ImageUrl;
+                if (string.IsNullOrEmpty(imageUrl))
+                {
+                    return BadRequest(new { success = false, message = "Figma did not return an image URL for this node. Check node id and file access." });
+                }
+
+                return Ok(new
+                {
+                    success = true,
+                    fileKey,
+                    nodeId,
+                    scale,
+                    imageUrl,
+                    hint = "URL expires soon; open or download in the browser immediately. Same rate limits as export-png."
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error resolving Figma PNG URL for board {BoardId}", request?.BoardId);
+                return StatusCode(500, "An error occurred while resolving the Figma image URL.");
             }
         }
 
@@ -1087,19 +1598,30 @@ namespace strAppersBackend.Controllers
                     });
                 }
 
-                var fileKey = ExtractFileKeyFromUrl(request.FileUrl);
+                var fileUrlTrimmed = request.FileUrl.Trim();
+                var fileKey = ExtractFileKeyFromUrl(fileUrlTrimmed);
                 if (string.IsNullOrEmpty(fileKey))
                 {
                     return BadRequest("Unable to extract file key from the provided URL.");
                 }
 
-                var metadata = await GetFigmaFileMetadata(tokenPayload.AccessToken, fileKey);
+                var nodeIdsFilter = TryExtractNodeIdFromFigmaUrl(fileUrlTrimmed);
+                var (metadata, figmaHttp, figmaErrBody, failureExtras) =
+                    await GetFigmaFileMetadata(tokenPayload.AccessToken, fileKey, nodeIdsFilter, null);
                 if (metadata == null)
                 {
+                    var errPreview = string.IsNullOrEmpty(figmaErrBody)
+                        ? "(empty body)"
+                        : (figmaErrBody.Length > 4000 ? figmaErrBody[..4000] + "…" : figmaErrBody);
                     return BadRequest(new
                     {
                         success = false,
-                        message = "Failed to fetch file metadata from Figma. Ensure the authenticated user has access to the file."
+                        message = "Failed to fetch file metadata from Figma.",
+                        figmaHttpStatus = figmaHttp,
+                        figmaResponse = errPreview,
+                        figmaRetryAfterSeconds = failureExtras?.RetryAfterSeconds,
+                        figmaRateLimitType = failureExtras?.RateLimitType,
+                        figmaPlanTier = failureExtras?.PlanTier
                     });
                 }
 
@@ -1137,8 +1659,7 @@ namespace strAppersBackend.Controllers
                 throw new InvalidOperationException("No refresh token available");
             }
 
-            _logger.LogInformation("Token expired, attempting refresh with refresh token: {RefreshToken}", 
-                figma.FigmaRefreshToken.Substring(0, Math.Min(10, figma.FigmaRefreshToken.Length)) + "...");
+            _logger.LogInformation("Token expired, attempting refresh; refresh token field {Refresh}", DescribeSecret(figma.FigmaRefreshToken));
 
             var clientId = _configuration["Figma:ClientId"];
             var clientSecret = _configuration["Figma:ClientSecret"];
@@ -1192,8 +1713,7 @@ namespace strAppersBackend.Controllers
                 throw new InvalidOperationException("No refresh token available");
             }
 
-            _logger.LogInformation("Force refreshing token with refresh token: {RefreshToken}", 
-                figma.FigmaRefreshToken.Substring(0, Math.Min(10, figma.FigmaRefreshToken.Length)) + "...");
+            _logger.LogInformation("Force refreshing token; refresh token field {Refresh}", DescribeSecret(figma.FigmaRefreshToken));
 
             var clientId = _configuration["Figma:ClientId"];
             var clientSecret = _configuration["Figma:ClientSecret"];
@@ -1246,18 +1766,20 @@ namespace strAppersBackend.Controllers
             try
             {
                 _httpClient.DefaultRequestHeaders.Clear();
-                _httpClient.DefaultRequestHeaders.Add("X-Figma-Token", accessToken);
-                
+                _httpClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
+
                 _logger.LogInformation("Validating Figma file with key: {FileKey}", fileKey);
-                _logger.LogInformation("Request headers: {Headers}", string.Join(", ", _httpClient.DefaultRequestHeaders.Select(h => $"{h.Key}: {string.Join(", ", h.Value)}")));
-                
-                var response = await _httpClient.GetAsync($"https://api.figma.com/v1/files/{fileKey}");
-                var content = await response.Content.ReadAsStringAsync();
-                
-                _logger.LogInformation("Figma file validation response - Status: {StatusCode}, Content: {Content}", response.StatusCode, content);
-                _logger.LogInformation("Response headers: {Headers}", string.Join(", ", response.Headers.Select(h => $"{h.Key}: {string.Join(", ", h.Value)}")));
-                
-                return response.IsSuccessStatusCode;
+
+                using var response = await _httpClient.GetAsync($"https://api.figma.com/v1/files/{Uri.EscapeDataString(fileKey)}");
+                var ok = response.IsSuccessStatusCode;
+                if (!ok)
+                {
+                    var err = await response.Content.ReadAsStringAsync();
+                    var preview = err.Length > 400 ? err.Substring(0, 400) + "…" : err;
+                    _logger.LogWarning("Figma file validation failed: {Status} {Body}", response.StatusCode, preview);
+                }
+
+                return ok;
             }
             catch (Exception ex)
             {
@@ -1267,7 +1789,8 @@ namespace strAppersBackend.Controllers
         }
 
         /// <summary>
-        /// Get user's Figma structure (teams/projects/files)
+        /// Get user's Figma structure (teams/projects/files). Requires <c>projects:read</c> for project endpoints;
+        /// public OAuth apps do not grant that scope — expect failures or empty data; file-level features still work with granular file scopes.
         /// </summary>
         private async Task<List<FigmaTeamStructure>?> GetUserFigmaStructure(string accessToken)
         {
@@ -1447,6 +1970,10 @@ namespace strAppersBackend.Controllers
             }
         }
 
+        /// <summary>
+        /// Figma URLs use <c>node-id=1-2</c>; REST API expects <c>1:2</c>. Replace every hyphen with a colon.
+        /// See <see href="https://developers.figma.com/docs/plugins/api/properties/nodes-id/">Figma node id</see>.
+        /// </summary>
         private static string NormalizeFigmaNodeId(string raw)
         {
             raw = raw.Trim();
@@ -1455,15 +1982,12 @@ namespace strAppersBackend.Controllers
                 return raw;
             }
 
+            // Normalize fancy dashes sometimes pasted from URLs
+            raw = raw.Replace('\u2011', '-').Replace('\u2010', '-').Replace('\u2013', '-').Replace('\u2014', '-');
+
             if (raw.Contains(':', StringComparison.Ordinal))
             {
                 return raw;
-            }
-
-            var parts = raw.Split('-', 2, StringSplitOptions.None);
-            if (parts.Length == 2 && parts[0].All(char.IsDigit) && parts[1].All(char.IsDigit))
-            {
-                return $"{parts[0]}:{parts[1]}";
             }
 
             return raw.Replace('-', ':');
@@ -1490,84 +2014,272 @@ namespace strAppersBackend.Controllers
             return null;
         }
 
-        private async Task<(string? Error, string? ImageUrl)> RequestFigmaPngExportUrl(string accessToken, string fileKey, string nodeId, double scale)
+        private async Task<FigmaPngUrlResult> RequestFigmaPngExportUrl(string accessToken, string fileKey, string nodeId, double scale)
         {
+            var maxExtraRetries = Math.Clamp(_configuration.GetValue("Figma:PngExport429ExtraRetries", 3), 0, 10);
+            var baseDelayMs = Math.Clamp(_configuration.GetValue("Figma:PngExport429BaseDelayMs", 2000), 200, 60_000);
+            var maxAttempts = maxExtraRetries + 1;
+
+            _logger.LogInformation(
+                "Figma images API: FileKey={FileKey} NodeId={NodeId} Scale={Scale} AccessToken={Access} Png429ExtraRetries={ExtraRetries}",
+                fileKey,
+                nodeId,
+                scale,
+                DescribeSecret(accessToken),
+                maxExtraRetries);
+
+            var scaleStr = scale.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            var requestUri =
+                $"https://api.figma.com/v1/images/{Uri.EscapeDataString(fileKey)}" +
+                $"?ids={Uri.EscapeDataString(nodeId)}&format=png&scale={Uri.EscapeDataString(scaleStr)}";
+
             try
             {
-                var scaleStr = scale.ToString(System.Globalization.CultureInfo.InvariantCulture);
-                var requestUri =
-                    $"https://api.figma.com/v1/images/{Uri.EscapeDataString(fileKey)}" +
-                    $"?ids={Uri.EscapeDataString(nodeId)}&format=png&scale={Uri.EscapeDataString(scaleStr)}";
-
-                _httpClient.DefaultRequestHeaders.Clear();
-                _httpClient.DefaultRequestHeaders.Add("X-Figma-Token", accessToken);
-                _httpClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
-
-                var response = await _httpClient.GetAsync(requestUri);
-                var content = await response.Content.ReadAsStringAsync();
-
-                if (!response.IsSuccessStatusCode)
+                for (var attempt = 0; attempt < maxAttempts; attempt++)
                 {
-                    _logger.LogWarning("Figma images API failed: {Status} {Body}", response.StatusCode, content);
-                    return ($"Figma images API error: {(int)response.StatusCode}", null);
+                    HttpResponseMessage response;
+                    string content;
+                    try
+                    {
+                        _httpClient.DefaultRequestHeaders.Clear();
+                        _httpClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
+                        response = await _httpClient.GetAsync(requestUri);
+                        content = await response.Content.ReadAsStringAsync();
+                    }
+                    catch (TaskCanceledException ex)
+                    {
+                        _logger.LogWarning(ex, "Figma images API timeout for file {FileKey}", fileKey);
+                        return new FigmaPngUrlResult(null, "Request to Figma timed out. Try again.", 504, null, ClientStatusToErrorCode(504));
+                    }
+                    catch (HttpRequestException ex)
+                    {
+                        _logger.LogWarning(ex, "Figma images API network error for file {FileKey}", fileKey);
+                        return new FigmaPngUrlResult(null, "Could not reach Figma. Check connectivity and try again.", 502, null, ClientStatusToErrorCode(502));
+                    }
+
+                    var retryAfterSec = TryGetRetryAfterSeconds(response);
+
+                    if (response.StatusCode == HttpStatusCode.TooManyRequests && attempt < maxAttempts - 1)
+                    {
+                        var waitMs = Compute429BackoffMs(retryAfterSec, baseDelayMs, attempt);
+                        _logger.LogWarning(
+                            "Figma images API 429, attempt {Attempt}/{Max}; waiting {WaitMs}ms. RetryAfterSeconds={RetryAfter}; Headers: {Headers}; Body: {Body}",
+                            attempt + 1,
+                            maxAttempts,
+                            waitMs,
+                            retryAfterSec,
+                            FormatFigmaResponseHeadersForLog(response),
+                            content);
+                        await Task.Delay(waitMs);
+                        continue;
+                    }
+
+                    if (!response.IsSuccessStatusCode)
+                    {
+                        if (response.StatusCode == HttpStatusCode.TooManyRequests)
+                        {
+                            _logger.LogWarning(
+                                "Figma images API failed: {Status}. RetryAfterSeconds={RetryAfter}; Headers: {Headers}; Body: {Body}",
+                                response.StatusCode,
+                                retryAfterSec,
+                                FormatFigmaResponseHeadersForLog(response),
+                                content.Length > 4000 ? content[..4000] + "…" : content);
+                        }
+                        else
+                            _logger.LogWarning("Figma images API failed: {Status} {Body}", response.StatusCode, content);
+                        var clientStatus = MapFigmaImagesHttpStatusToClient(response.StatusCode);
+                        var detail = string.IsNullOrWhiteSpace(content)
+                            ? $"HTTP {(int)response.StatusCode}"
+                            : content.Trim();
+
+                        if (clientStatus == 429)
+                        {
+                            var platformPat = _configuration["Figma:ImageExportPersonalAccessToken"]?.Trim();
+                            if (!string.IsNullOrEmpty(platformPat))
+                            {
+                                try
+                                {
+                                    _logger.LogInformation(
+                                        "Figma images 429 on user OAuth token; trying platform PAT. " +
+                                        "File must be accessible to that account. " +
+                                        "Note: for files in Starter, Figma still applies Starter Tier-1 caps (~6/month) even for an Enterprise PAT — host project files on your paid Org/Enterprise team to get per-minute limits.");
+                                    _httpClient.DefaultRequestHeaders.Clear();
+                                    _httpClient.DefaultRequestHeaders.TryAddWithoutValidation("X-Figma-Token", platformPat);
+                                    using var patResponse = await _httpClient.GetAsync(requestUri);
+                                    var patContent = await patResponse.Content.ReadAsStringAsync();
+                                    if (patResponse.IsSuccessStatusCode)
+                                    {
+                                        var fromPat = BuildResultFromFigmaImagesJson(patContent, nodeId, fileKey);
+                                        if (fromPat.ImageUrl != null)
+                                        {
+                                            return fromPat;
+                                        }
+
+                                        _logger.LogWarning("Platform PAT returned OK but no image URL: {Body}", patContent);
+                                    }
+                                    else
+                                    {
+                                        if (patResponse.StatusCode == HttpStatusCode.TooManyRequests)
+                                        {
+                                            var patRetry = TryGetRetryAfterSeconds(patResponse);
+                                            _logger.LogWarning(
+                                                "Platform PAT Figma images request 429. RetryAfterSeconds={RetryAfter}; Headers: {Headers}; Body: {Body}",
+                                                patRetry,
+                                                FormatFigmaResponseHeadersForLog(patResponse),
+                                                patContent.Length > 2000 ? patContent[..2000] + "…" : patContent);
+                                        }
+                                        else
+                                        {
+                                            _logger.LogWarning(
+                                                "Platform PAT Figma images request failed: {Status} {Body}",
+                                                patResponse.StatusCode,
+                                                patContent.Length > 500 ? patContent.Substring(0, 500) + "…" : patContent);
+                                        }
+                                    }
+                                }
+                                catch (Exception ex)
+                                {
+                                    _logger.LogWarning(ex, "Platform PAT Figma images fallback failed");
+                                }
+                            }
+                        }
+
+                        var human = clientStatus switch
+                        {
+                            401 => "Figma rejected the access token. Reconnect Figma for this board.",
+                            403 => "Figma denied access to this file for the connected account.",
+                            404 => "Figma file or resource was not found. Check the file key and link.",
+                            429 when retryAfterSec is int r429 && r429 > 3600 =>
+                                $"Figma rate limit exceeded. For this account/API tier Figma reports a long cooldown of about {r429 / 86400.0:F1} days (Retry-After seconds until quota may reset).",
+                            429 => "Figma rate limit exceeded after automatic retries. Try again later.",
+                            502 => "Figma had a temporary server error. Try again later.",
+                            _ => $"Figma images API error ({(int)response.StatusCode})."
+                        };
+                        var message = clientStatus == 400
+                            ? $"Figma images API error: {(int)response.StatusCode} - {detail}"
+                            : $"{human} ({detail})";
+                        var clientRetry = clientStatus == 429 ? ToClientRetryAfterSeconds(retryAfterSec) : null;
+                        return new FigmaPngUrlResult(
+                            null,
+                            message,
+                            clientStatus,
+                            clientRetry,
+                            ClientStatusToErrorCode(clientStatus),
+                            clientStatus == 429 ? retryAfterSec : null);
+                    }
+
+                    return BuildResultFromFigmaImagesJson(content, nodeId, fileKey);
                 }
 
-                var parsed = JsonSerializer.Deserialize<FigmaImagesApiResponse>(content, new JsonSerializerOptions
-                {
-                    PropertyNameCaseInsensitive = true
-                });
-
-                if (parsed == null)
-                {
-                    return ("Invalid response from Figma images API.", null);
-                }
-
-                if (!string.IsNullOrEmpty(parsed.Err))
-                {
-                    return (parsed.Err, null);
-                }
-
-                if (parsed.Images == null || parsed.Images.Count == 0)
-                {
-                    return ("Figma returned no images.", null);
-                }
-
-                if (!parsed.Images.TryGetValue(nodeId, out var url) || string.IsNullOrEmpty(url))
-                {
-                    url = parsed.Images.Values.FirstOrDefault(u => !string.IsNullOrEmpty(u));
-                }
-
-                return (null, url);
+                throw new InvalidOperationException("Figma images export loop exited without result.");
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Error calling Figma images API for file {FileKey}", fileKey);
-                return (ex.Message, null);
+                return new FigmaPngUrlResult(null, "An unexpected error occurred while calling Figma.", 500, null, ClientStatusToErrorCode(500));
             }
         }
 
+        private FigmaPngUrlResult BuildResultFromFigmaImagesJson(string content, string nodeId, string fileKey)
+        {
+            FigmaImagesApiResponse? parsed;
+            try
+            {
+                parsed = JsonSerializer.Deserialize<FigmaImagesApiResponse>(content, new JsonSerializerOptions
+                {
+                    PropertyNameCaseInsensitive = true
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Figma images JSON parse failed for file {FileKey}", fileKey);
+                return new FigmaPngUrlResult(null, "Invalid response from Figma images API.", 400, null, ClientStatusToErrorCode(400));
+            }
+
+            if (parsed == null)
+            {
+                return new FigmaPngUrlResult(null, "Invalid response from Figma images API.", 400, null, ClientStatusToErrorCode(400));
+            }
+
+            if (!string.IsNullOrEmpty(parsed.Err))
+            {
+                return new FigmaPngUrlResult(null, parsed.Err, 400, null, ClientStatusToErrorCode(400));
+            }
+
+            if (parsed.Images == null || parsed.Images.Count == 0)
+            {
+                return new FigmaPngUrlResult(null, "Figma returned no images.", 400, null, ClientStatusToErrorCode(400));
+            }
+
+            string? url;
+            if (!parsed.Images.TryGetValue(nodeId, out url) || string.IsNullOrEmpty(url))
+            {
+                url = parsed.Images.Values.FirstOrDefault(u => !string.IsNullOrEmpty(u));
+            }
+
+            return new FigmaPngUrlResult(url, null, null, null, null);
+        }
+
         /// <summary>
-        /// Get Figma file metadata
+        /// Figma REST <c>GET /v1/files/:key</c> — OAuth access tokens must use <c>Authorization: Bearer</c> (not <c>X-Figma-Token</c>).
+        /// When <paramref name="ids"/> is set (comma-separated node ids), Figma returns only those subtrees — required for selection links to avoid multi‑100MB responses.
+        /// <paramref name="depth"/> maps to Figma’s <c>depth</c> query param (limits tree depth; smaller payloads).
         /// </summary>
-        private async Task<object?> GetFigmaFileMetadata(string accessToken, string fileKey)
+        /// <returns>Metadata JSON on success; on failure <paramref name="metadata"/> is null and <paramref name="figmaHttpStatus"/> / <paramref name="figmaErrorBody"/> describe Figma’s response or transport error. <paramref name="failureExtras"/> is set for 429 responses.</returns>
+        private async Task<(object? metadata, int figmaHttpStatus, string? figmaErrorBody, FigmaFilesApiFailureExtras? failureExtras)> GetFigmaFileMetadata(string accessToken, string fileKey, string? ids = null, int? depth = null)
         {
             try
             {
                 _httpClient.DefaultRequestHeaders.Clear();
-                _httpClient.DefaultRequestHeaders.Add("X-Figma-Token", accessToken);
-                var response = await _httpClient.GetAsync($"https://api.figma.com/v1/files/{fileKey}");
-                
+                _httpClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
+
+                var path = $"https://api.figma.com/v1/files/{Uri.EscapeDataString(fileKey)}";
+                var url = path;
+                if (!string.IsNullOrEmpty(ids))
+                    url = QueryHelpers.AddQueryString(url, "ids", ids);
+                if (depth is > 0)
+                    url = QueryHelpers.AddQueryString(url, "depth", depth.Value.ToString(System.Globalization.CultureInfo.InvariantCulture));
+
+                using var response = await _httpClient.GetAsync(url);
+                var content = await response.Content.ReadAsStringAsync();
+                var status = (int)response.StatusCode;
+
                 if (!response.IsSuccessStatusCode)
                 {
-                    return null;
+                    var extras = BuildFigmaFilesApiFailureExtras(response, status);
+                    if (response.StatusCode == HttpStatusCode.TooManyRequests)
+                    {
+                        var retryAfterSec = TryGetRetryAfterSeconds(response);
+                        _logger.LogWarning(
+                            "Figma GET /v1/files 429 TooManyRequests. RetryAfterSeconds={RetryAfter}; Headers: {Headers}; Body: {Body}",
+                            retryAfterSec,
+                            FormatFigmaResponseHeadersForLog(response),
+                            content);
+                    }
+                    else
+                    {
+                        var preview = content.Length > 500 ? content.Substring(0, 500) + "…" : content;
+                        _logger.LogWarning("Figma GET /v1/files failed: {Status} {Body}", response.StatusCode, preview);
+                    }
+
+                    return (null, status, content, extras);
                 }
 
-                var content = await response.Content.ReadAsStringAsync();
-                return JsonSerializer.Deserialize<object>(content);
+                try
+                {
+                    var doc = JsonSerializer.Deserialize<object>(content);
+                    return (doc, status, null, null);
+                }
+                catch (JsonException jex)
+                {
+                    _logger.LogWarning(jex, "Figma GET /v1/files returned 200 but body is not valid JSON for key {FileKey}", fileKey);
+                    return (null, status, content.Length > 2000 ? content[..2000] + "…" : content, null);
+                }
             }
-            catch
+            catch (Exception ex)
             {
-                return null;
+                _logger.LogWarning(ex, "Error calling Figma GET /v1/files for key {FileKey}", fileKey);
+                return (null, 0, ex.Message, null);
             }
         }
     }
@@ -1576,6 +2288,17 @@ namespace strAppersBackend.Controllers
     public class StoreTokensRequest
     {
         public string AuthCode { get; set; } = string.Empty;
+        /// <summary>When set, tokens are stored on the board (normal flow).</summary>
+        public string? BoardId { get; set; }
+        /// <summary>During registration (no board yet); normalized server-side.</summary>
+        public string? Email { get; set; }
+        /// <summary>Must match the redirect URI used in the authorize step (must be in <c>Figma:RedirectUrls</c>).</summary>
+        public string? RedirectUri { get; set; }
+    }
+
+    public class ApplyPendingFigmaRequest
+    {
+        public string Email { get; set; } = string.Empty;
         public string BoardId { get; set; } = string.Empty;
     }
 
@@ -1594,6 +2317,12 @@ namespace strAppersBackend.Controllers
     public class DownloadMetadataRequest
     {
         public string BoardId { get; set; } = string.Empty;
+
+        /// <summary>Required. Figma URL with <c>?node-id=…</c> or <c>node_id=…</c> (e.g. “Copy link to selection”). Required for this endpoint.</summary>
+        public string FigmaFileUrl { get; set; } = string.Empty;
+
+        /// <summary>Optional. Figma <c>GET /v1/files … &amp;depth=</c> — limits how many levels deep to traverse under the selected node(s). Use ~4–12 to shrink huge frames while keeping hierarchy.</summary>
+        public int? Depth { get; set; }
     }
 
     public class FetchPublicFileRequest

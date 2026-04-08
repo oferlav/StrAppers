@@ -26,6 +26,7 @@ public class ApplicationDbContext : DbContext
         public DbSet<ModuleType> ModuleTypes { get; set; }
         public DbSet<ProjectModule> ProjectModules { get; set; }
         public DbSet<Figma> Figma { get; set; }
+        public DbSet<FigmaOAuthPending> FigmaOAuthPending { get; set; }
         public DbSet<ProgrammingLanguage> ProgrammingLanguages { get; set; }
         public DbSet<ProjectsIDE> ProjectsIDE { get; set; }
         public DbSet<Subscription> Subscriptions { get; set; }
@@ -630,6 +631,7 @@ public class ApplicationDbContext : DbContext
             entity.Property(e => e.Name).HasMaxLength(100).IsRequired();
             entity.Property(e => e.Url).HasMaxLength(1000).IsRequired();
             entity.Property(e => e.IsFigma).HasDefaultValue(false);
+            entity.Property(e => e.SprintNumber);
             entity.HasOne(e => e.ProjectBoard)
                 .WithMany()
                 .HasForeignKey(e => e.BoardId)
@@ -743,6 +745,17 @@ public class ApplicationDbContext : DbContext
             // Indexes for better performance
             entity.HasIndex(e => e.BoardId);
             entity.HasIndex(e => e.FigmaFileKey).IsUnique();
+        });
+
+        modelBuilder.Entity<FigmaOAuthPending>(entity =>
+        {
+            entity.HasKey(e => e.Id);
+            entity.Property(e => e.Email).IsRequired().HasMaxLength(255);
+            entity.Property(e => e.FigmaAccessToken).HasMaxLength(512);
+            entity.Property(e => e.FigmaRefreshToken).HasMaxLength(512);
+            entity.Property(e => e.CreatedAt).HasDefaultValueSql("NOW()");
+            entity.Property(e => e.UpdatedAt).HasDefaultValueSql("NOW()");
+            entity.HasIndex(e => e.Email).IsUnique();
         });
 
         // Configure ProgrammingLanguage entity

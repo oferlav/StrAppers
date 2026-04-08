@@ -33,6 +33,10 @@ public class Resource
     [Column("IsFigma")]
     public bool IsFigma { get; set; } = false;
 
+    /// <summary>Optional sprint number (e.g. 1 for Sprint 1) when the resource is scoped to a sprint.</summary>
+    [Column("SprintNumber")]
+    public int? SprintNumber { get; set; }
+
     [ForeignKey(nameof(BoardId))]
     public virtual ProjectBoard? ProjectBoard { get; set; }
 

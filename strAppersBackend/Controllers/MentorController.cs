@@ -15,7 +15,7 @@ namespace strAppersBackend.Controllers
 {
     [ApiController]
     [Route("api/[controller]")]
-    public class MentorController : ControllerBase
+    public partial class MentorController : ControllerBase
     {
         private readonly ApplicationDbContext _context;
         private readonly ILogger<MentorController> _logger;
@@ -32,6 +32,7 @@ namespace strAppersBackend.Controllers
         private readonly DeploymentsConfig _deploymentsConfig;
         private readonly IOptions<TestingConfig> _testingConfig;
         private readonly IServiceScopeFactory _serviceScopeFactory;
+        private readonly IAzureBlobStorageService _azureBlobStorage;
 
         public MentorController(
             ApplicationDbContext context,
@@ -48,7 +49,8 @@ namespace strAppersBackend.Controllers
             IChatCompletionService chatCompletionService,
             IOptions<DeploymentsConfig> deploymentsConfig,
             IOptions<TestingConfig> testingConfig,
-            IServiceScopeFactory serviceScopeFactory)
+            IServiceScopeFactory serviceScopeFactory,
+            IAzureBlobStorageService azureBlobStorage)
         {
             _context = context;
             _logger = logger;
@@ -65,6 +67,7 @@ namespace strAppersBackend.Controllers
             _deploymentsConfig = deploymentsConfig.Value;
             _testingConfig = testingConfig;
             _serviceScopeFactory = serviceScopeFactory;
+            _azureBlobStorage = azureBlobStorage;
         }
 
         /// <summary>When DebugSystemPrompt is true, returns a source marker for logging; otherwise empty.</summary>
@@ -1658,6 +1661,8 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                     sb.Append("\n\n?? ROLE: UI/UX DESIGNER (present only for this role):\n");
                     sb.Append("- Figma: The platform has a Figma button where you can enter your Figma file URL so the design is available to all team members. When guiding the designer, direct them to use it.\n");
                     sb.Append("- For the design to be viewable by the team and by external tools, the Figma file must be shared appropriately: set file access to \"Anyone with the link\" (or your organization's equivalent). If your organization uses link expiration or password protection, ensure the link remains valid for the team. Organization admins can restrict public link sharing—if viewing fails, the designer may need to check sharing settings or ask their admin.\n");
+                    sb.Append("- Naming in Figma: Guide the designer to use clear, meaningful names for all elements to improve communication and review quality. Emphasize that descriptive naming helps both humans and AI understand the structure and intent of the design.\n");
+                    sb.Append("  For example, instead of generic names like \"Rectangle 1\", suggest names such as \"Primary CTA Button\", \"Header Navigation\", or \"Login Form Container\".\n");
                 }
             }
             // Product Manager
@@ -2757,7 +2762,8 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                                 scopedChatCompletionService,
                                 scopedDeploymentsConfig,
                                 scopedTestingConfig,
-                                scope.ServiceProvider.GetRequiredService<IServiceScopeFactory>());
+                                scope.ServiceProvider.GetRequiredService<IServiceScopeFactory>(),
+                                scope.ServiceProvider.GetRequiredService<IAzureBlobStorageService>());
                             await tempController.ValidateBackendInternal(capturedBoardId, capturedBranch, fromRailwayWebhook: true);
                             scopedLogger.LogInformation("[RAILWAY WEBHOOK] BuildValidation updated for BoardId={BoardId}, Branch={Branch}", capturedBoardId, capturedBranch);
                         }
@@ -2798,6 +2804,20 @@ Your intelligence is strictly tethered to the Current Project Context and the us
             public string? StackTrace { get; set; }
         }
 
+        /// <summary>Matches BoardStates varchar columns so PostgreSQL does not reject INSERT (e.g. long paths, IIS HTML bodies).</summary>
+        private static string TruncateBoardStateVarchar(string? value, int maxLen)
+        {
+            if (string.IsNullOrEmpty(value)) return string.Empty;
+            return value.Length <= maxLen ? value : value[..maxLen];
+        }
+
+        /// <summary>Cap text columns to avoid multi‑MB parameters and slow queries.</summary>
+        private static string TruncateBoardStateText(string? value, int maxLen)
+        {
+            if (string.IsNullOrEmpty(value)) return string.Empty;
+            return value.Length <= maxLen ? value : value[..maxLen] + "\n… [truncated]";
+        }
+
         /// <summary>
         /// Endpoint to receive runtime errors from generated backend services
         /// Populates BoardStates table with File, Line, StackTrace, LatestErrorSummary
@@ -2822,6 +2842,20 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                     return BadRequest(new { Success = false, Message = "BoardId is required to store error in BoardStates table" });
                 }
 
+                const int maxFile = 500;
+                const int maxRequestUrl = 500;
+                const int maxRequestMethod = 10;
+                const int maxBoardIdLen = 50;
+                const int maxTextField = 500_000;
+                const int maxStackForAi = 120_000;
+
+                if (request.BoardId.Length > maxBoardIdLen)
+                {
+                    return BadRequest(new { Success = false, Message = $"BoardId exceeds maximum length ({maxBoardIdLen})" });
+                }
+
+                var messageSafe = request.Message ?? string.Empty;
+
                 // Validate that BoardId exists in ProjectBoards table (foreign key constraint)
                 var boardExists = await _context.ProjectBoards
                     .AnyAsync(pb => pb.Id == request.BoardId);
@@ -2838,14 +2872,19 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                 // If file or line is missing, try to parse from stack trace using AI
                 var file = request.File;
                 var line = request.Line;
-                
-                if ((string.IsNullOrWhiteSpace(file) || line == null) && !string.IsNullOrWhiteSpace(request.StackTrace))
+                var stackTraceRaw = request.StackTrace;
+
+                if ((string.IsNullOrWhiteSpace(file) || line == null) && !string.IsNullOrWhiteSpace(stackTraceRaw))
                 {
+                    var stackForAi = stackTraceRaw!.Length > maxStackForAi
+                        ? stackTraceRaw[..maxStackForAi]
+                        : stackTraceRaw;
+
                     _logger.LogInformation("File or line missing, attempting AI parsing of stack trace for BoardId: {BoardId}", request.BoardId);
                     
                     try
                     {
-                        var parsedOutput = await _aiService.ParseBuildOutputAsync(request.StackTrace);
+                        var parsedOutput = await _aiService.ParseBuildOutputAsync(stackForAi);
                         if (parsedOutput != null)
                         {
                             if (string.IsNullOrWhiteSpace(file) && !string.IsNullOrWhiteSpace(parsedOutput.File))
@@ -2872,17 +2911,28 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                     }
                 }
 
-                // Prepare error output
-                var errorOutput = !string.IsNullOrEmpty(request.StackTrace)
-                    ? $"[RUNTIME ERROR] {request.Timestamp:yyyy-MM-dd HH:mm:ss} UTC\n" +
-                      $"File: {file ?? "Unknown"}\n" +
-                      $"Line: {line?.ToString() ?? "Unknown"}\n" +
-                      $"Message: {request.Message}\n" +
-                      $"Exception Type: {request.ExceptionType ?? "Unknown"}\n" +
-                      $"Request Path: {request.RequestPath ?? "Unknown"}\n" +
-                      $"Request Method: {request.RequestMethod ?? "Unknown"}\n" +
-                      $"StackTrace:\n{request.StackTrace}"
-                    : null;
+                file = TruncateBoardStateVarchar(file, maxFile);
+                var requestUrl = TruncateBoardStateVarchar(request.RequestPath, maxRequestUrl);
+                var requestMethod = TruncateBoardStateVarchar(request.RequestMethod, maxRequestMethod);
+                var stackTraceDb = TruncateBoardStateText(stackTraceRaw, maxTextField);
+                var errorMessageDb = TruncateBoardStateText(messageSafe, maxTextField);
+                var latestSummaryDb = errorMessageDb;
+
+                // Prepare error output (bounded before insert)
+                string? errorOutput = null;
+                if (!string.IsNullOrEmpty(stackTraceDb))
+                {
+                    errorOutput =
+                        $"[RUNTIME ERROR] {request.Timestamp:yyyy-MM-dd HH:mm:ss} UTC\n" +
+                        $"File: {file}\n" +
+                        $"Line: {line?.ToString() ?? "Unknown"}\n" +
+                        $"Message: {errorMessageDb}\n" +
+                        $"Exception Type: {request.ExceptionType ?? "Unknown"}\n" +
+                        $"Request Path: {requestUrl}\n" +
+                        $"Request Method: {requestMethod}\n" +
+                        $"StackTrace:\n{stackTraceDb}";
+                    errorOutput = TruncateBoardStateText(errorOutput, maxTextField);
+                }
 
                 // Use PostgreSQL upsert (INSERT ... ON CONFLICT DO UPDATE) to handle race conditions
                 // Unique constraint is on (BoardId, Source, Webhook)
@@ -2926,9 +2976,9 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                         ""CreatedAt"", ""UpdatedAt""
                     ) VALUES (
                         {request.BoardId}, {source}, {webhook}, 
-                        {buildStatus}, {errorOutput}, {request.Message}, 
-                        {file}, {line}, {request.StackTrace}, {request.Message}, {timestamp}, 
-                        {request.RequestPath}, {request.RequestMethod}, {(string?)null},
+                        {buildStatus}, {errorOutput}, {errorMessageDb}, 
+                        {file}, {line}, {stackTraceDb}, {latestSummaryDb}, {timestamp}, 
+                        {requestUrl}, {requestMethod}, {(string?)null},
                         {createdAt}, {updatedAt}
                     )
                     ON CONFLICT (""BoardId"", ""Source"", ""Webhook"", ""GithubBranch"") 
@@ -10434,7 +10484,8 @@ APPROVAL: no    (request changes before merge)";
                                                         scopedChatCompletionService,
                                                         scopedDeploymentsConfig,
                                                         scopedTestingConfig,
-                                                        scope.ServiceProvider.GetRequiredService<IServiceScopeFactory>());
+                                                        scope.ServiceProvider.GetRequiredService<IServiceScopeFactory>(),
+                                                        scope.ServiceProvider.GetRequiredService<IAzureBlobStorageService>());
                                                     
                                                     // Call ProcessValidationAsync with scoped services (isWebhook=true for webhook-initiated)
                                                     var (success, feedback, errorMessage) = await tempController.ProcessValidationAsync(

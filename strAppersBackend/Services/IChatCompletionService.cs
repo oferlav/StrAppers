@@ -15,6 +15,17 @@ namespace strAppersBackend.Services
             string systemPrompt,
             string userPrompt,
             IReadOnlyList<ChatMessageEntry>? chatHistory = null);
+
+        /// <summary>
+        /// OpenAI only. When <paramref name="imageDataUrlOrHttpsUrl"/> is set, the user message uses Chat Completions vision format
+        /// (text part + <c>image_url</c>). Use a <c>data:image/…;base64,…</c> URL so the model does not need to fetch Azure (SAS links in plain text are not loaded as images).
+        /// </summary>
+        Task<(string Response, int InputTokens, int OutputTokens)> GetOpenAiChatCompletionWithOptionalVisionAsync(
+            AIModel aiModel,
+            string systemPrompt,
+            string userText,
+            string? imageDataUrlOrHttpsUrl,
+            IReadOnlyList<ChatMessageEntry>? chatHistory = null);
     }
 
     /// <summary>

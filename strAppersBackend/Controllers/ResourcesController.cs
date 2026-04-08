@@ -1,3 +1,4 @@
+using System.Text.Json.Serialization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using strAppersBackend.Data;
@@ -18,7 +19,7 @@ public class ResourcesController : ControllerBase
         _logger = logger;
     }
 
-    /// <summary>Add a resource to a board. Requires BoardId, StudentId, Name, Url; isFigma defaults to false.</summary>
+    /// <summary>Add a resource to a board. Requires BoardId, StudentId, Name, Url; isFigma defaults to false. Optional sprintNumber.</summary>
     [HttpPost("add")]
     public async Task<ActionResult<ResourceResponse>> Add([FromBody] AddResourceRequest request)
     {
@@ -49,7 +50,8 @@ public class ResourcesController : ControllerBase
             StudentId = request.StudentId,
             Name = name,
             Url = url,
-            IsFigma = request.IsFigma
+            IsFigma = request.IsFigma,
+            SprintNumber = request.SprintNumber
         };
         _context.Resources.Add(resource);
         await _context.SaveChangesAsync(HttpContext.RequestAborted);
@@ -57,7 +59,7 @@ public class ResourcesController : ControllerBase
         return Ok(ToResponse(resource));
     }
 
-    /// <summary>Modify an existing resource's Name and Url.</summary>
+    /// <summary>Modify an existing resource. Optional name, url, sprintNumber; set clearSprintNumber to drop sprintNumber.</summary>
     [HttpPost("modify")]
     public async Task<ActionResult<ResourceResponse>> Modify([FromBody] ModifyResourceRequest request)
     {
@@ -74,6 +76,10 @@ public class ResourcesController : ControllerBase
             resource.Name = request.Name.Trim().Length > 100 ? request.Name.Trim().Substring(0, 100) : request.Name.Trim();
         if (!string.IsNullOrWhiteSpace(request.Url))
             resource.Url = request.Url.Trim().Length > 1000 ? request.Url.Trim().Substring(0, 1000) : request.Url.Trim();
+        if (request.ClearSprintNumber)
+            resource.SprintNumber = null;
+        else if (request.SprintNumber.HasValue)
+            resource.SprintNumber = request.SprintNumber;
 
         await _context.SaveChangesAsync(HttpContext.RequestAborted);
         _logger.LogInformation("Resource modified: Id={Id}", resource.Id);
@@ -99,56 +105,65 @@ public class ResourcesController : ControllerBase
         return Ok(new { Success = true, Message = "Resource deleted successfully." });
     }
 
-    /// <summary>Get all resources for a board where isFigma = true.</summary>
+    /// <summary>Get Figma resources for a board (isFigma = true). Optional sprintNumber filters to that sprint.</summary>
     [HttpGet("figma")]
-    public async Task<ActionResult<List<ResourceResponse>>> GetFigma([FromQuery] string boardId)
+    public async Task<ActionResult<List<ResourceResponse>>> GetFigma([FromQuery] string boardId, [FromQuery] int? sprintNumber)
     {
         if (string.IsNullOrWhiteSpace(boardId))
             return BadRequest(new { Message = "boardId is required." });
-        var list = await _context.Resources
+        var q = _context.Resources
             .AsNoTracking()
-            .Where(r => r.BoardId == boardId.Trim() && r.IsFigma)
+            .Where(r => r.BoardId == boardId.Trim() && r.IsFigma);
+        if (sprintNumber.HasValue)
+            q = q.Where(r => r.SprintNumber == sprintNumber.Value);
+        var list = await q
             .OrderBy(r => r.Id)
-            .Select(r => new ResourceResponse { Id = r.Id, BoardId = r.BoardId, StudentId = r.StudentId, Name = r.Name, Url = r.Url, IsFigma = r.IsFigma })
+            .Select(r => new ResourceResponse { Id = r.Id, BoardId = r.BoardId, StudentId = r.StudentId, Name = r.Name, Url = r.Url, IsFigma = r.IsFigma, SprintNumber = r.SprintNumber })
             .ToListAsync(HttpContext.RequestAborted);
         return Ok(list);
     }
 
-    /// <summary>Get all resources for a board where isFigma = false.</summary>
+    /// <summary>Get all resources for a board where isFigma = false. Optional sprintNumber filters to that sprint.</summary>
     [HttpGet("resources-all")]
-    public async Task<ActionResult<List<ResourceResponse>>> GetResourcesAll([FromQuery] string boardId)
+    public async Task<ActionResult<List<ResourceResponse>>> GetResourcesAll([FromQuery] string boardId, [FromQuery] int? sprintNumber)
     {
         if (string.IsNullOrWhiteSpace(boardId))
             return BadRequest(new { Message = "boardId is required." });
-        var list = await _context.Resources
+        var q = _context.Resources
             .AsNoTracking()
-            .Where(r => r.BoardId == boardId.Trim() && !r.IsFigma)
+            .Where(r => r.BoardId == boardId.Trim() && !r.IsFigma);
+        if (sprintNumber.HasValue)
+            q = q.Where(r => r.SprintNumber == sprintNumber.Value);
+        var list = await q
             .OrderBy(r => r.Id)
-            .Select(r => new ResourceResponse { Id = r.Id, BoardId = r.BoardId, StudentId = r.StudentId, Name = r.Name, Url = r.Url, IsFigma = r.IsFigma })
+            .Select(r => new ResourceResponse { Id = r.Id, BoardId = r.BoardId, StudentId = r.StudentId, Name = r.Name, Url = r.Url, IsFigma = r.IsFigma, SprintNumber = r.SprintNumber })
             .ToListAsync(HttpContext.RequestAborted);
         return Ok(list);
     }
 
-    /// <summary>Get resources for a board where isFigma = false and StudentId = studentId.</summary>
+    /// <summary>Get resources for a board where isFigma = false and StudentId = studentId. Optional sprintNumber filters to that sprint.</summary>
     [HttpGet("resources-by-student")]
-    public async Task<ActionResult<List<ResourceResponse>>> GetResourcesByStudent([FromQuery] string boardId, [FromQuery] int studentId)
+    public async Task<ActionResult<List<ResourceResponse>>> GetResourcesByStudent([FromQuery] string boardId, [FromQuery] int studentId, [FromQuery] int? sprintNumber)
     {
         if (string.IsNullOrWhiteSpace(boardId))
             return BadRequest(new { Message = "boardId is required." });
         if (studentId <= 0)
             return BadRequest(new { Message = "studentId is required and must be positive." });
-        var list = await _context.Resources
+        var q = _context.Resources
             .AsNoTracking()
-            .Where(r => r.BoardId == boardId.Trim() && !r.IsFigma && r.StudentId == studentId)
+            .Where(r => r.BoardId == boardId.Trim() && !r.IsFigma && r.StudentId == studentId);
+        if (sprintNumber.HasValue)
+            q = q.Where(r => r.SprintNumber == sprintNumber.Value);
+        var list = await q
             .OrderBy(r => r.Id)
-            .Select(r => new ResourceResponse { Id = r.Id, BoardId = r.BoardId, StudentId = r.StudentId, Name = r.Name, Url = r.Url, IsFigma = r.IsFigma })
+            .Select(r => new ResourceResponse { Id = r.Id, BoardId = r.BoardId, StudentId = r.StudentId, Name = r.Name, Url = r.Url, IsFigma = r.IsFigma, SprintNumber = r.SprintNumber })
             .ToListAsync(HttpContext.RequestAborted);
         return Ok(list);
     }
 
     private static ResourceResponse ToResponse(Resource r)
     {
-        return new ResourceResponse { Id = r.Id, BoardId = r.BoardId, StudentId = r.StudentId, Name = r.Name, Url = r.Url, IsFigma = r.IsFigma };
+        return new ResourceResponse { Id = r.Id, BoardId = r.BoardId, StudentId = r.StudentId, Name = r.Name, Url = r.Url, IsFigma = r.IsFigma, SprintNumber = r.SprintNumber };
     }
 }
 
@@ -159,6 +174,9 @@ public class AddResourceRequest
     public string Name { get; set; } = string.Empty;
     public string Url { get; set; } = string.Empty;
     public bool IsFigma { get; set; } = false;
+    /// <summary>Optional sprint number (e.g. 1 for Sprint 1).</summary>
+    [JsonPropertyName("sprintNumber")]
+    public int? SprintNumber { get; set; }
 }
 
 public class ModifyResourceRequest
@@ -166,6 +184,11 @@ public class ModifyResourceRequest
     public int Id { get; set; }
     public string? Name { get; set; }
     public string? Url { get; set; }
+    [JsonPropertyName("sprintNumber")]
+    public int? SprintNumber { get; set; }
+    /// <summary>When true, clears <see cref="Resource.SprintNumber"/> (takes precedence over <see cref="SprintNumber"/>).</summary>
+    [JsonPropertyName("clearSprintNumber")]
+    public bool ClearSprintNumber { get; set; }
 }
 
 public class DeleteResourceRequest
@@ -181,4 +204,6 @@ public class ResourceResponse
     public string Name { get; set; } = string.Empty;
     public string Url { get; set; } = string.Empty;
     public bool IsFigma { get; set; }
+    [JsonPropertyName("sprintNumber")]
+    public int? SprintNumber { get; set; }
 }

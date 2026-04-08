@@ -8,8 +8,22 @@ using Microsoft.Extensions.Logging;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.FileProviders;
+using strAppersBackend.Logging;
 
 var builder = WebApplication.CreateBuilder(args);
+
+// Large multipart uploads (resource file attachments)
+builder.Services.Configure<Microsoft.AspNetCore.Http.Features.FormOptions>(o =>
+{
+    o.MultipartBodyLengthLimit = 30 * 1024 * 1024;
+});
+
+var apiBaseForCors = builder.Configuration["ApiBaseUrl"];
+Uri? apiBaseUriForCors = null;
+if (!string.IsNullOrWhiteSpace(apiBaseForCors) && Uri.TryCreate(apiBaseForCors.Trim(), UriKind.Absolute, out var tmpApiUri))
+{
+    apiBaseUriForCors = tmpApiUri;
+}
 
 // Azure App Service: wire ILogger to filesystem diagnostics (portal Log stream, LogFiles\Application).
 // WEBSITE_INSTANCE_ID is set on App Service workers; skip locally.
@@ -32,6 +46,11 @@ builder.Services.AddCors(options =>
                               if (string.IsNullOrEmpty(origin)) return false;
                               
                               var uri = new Uri(origin);
+
+                              // Same host as ApiBaseUrl (e.g. Swagger UI / fetch from the App Service URL)
+                              if (apiBaseUriForCors != null &&
+                                  uri.Host.Equals(apiBaseUriForCors.Host, StringComparison.OrdinalIgnoreCase))
+                                  return true;
                               
                               // Allow GitHub Pages (*.github.io) - for generated frontend projects
                               if (uri.Host.EndsWith(".github.io", StringComparison.OrdinalIgnoreCase))
@@ -116,6 +135,11 @@ builder.Services.AddScoped<IGmailService, GmailService>();
 
 // Add SMTP email service
 builder.Services.AddScoped<ISmtpEmailService, SmtpEmailService>();
+
+// Azure Blob Storage (optional — uploads return 503 if AzureStorage:ConnectionString is unset)
+builder.Services.Configure<AzureBlobStorageOptions>(
+    builder.Configuration.GetSection(AzureBlobStorageOptions.SectionName));
+builder.Services.AddSingleton<IAzureBlobStorageService, AzureBlobStorageService>();
 
 // Shared SSL callback: accept all certificate errors for GitHub (UntrustedRoot, corporate proxy, VM restart)
 // so GitHub API calls work reliably in restricted networks
@@ -244,16 +268,23 @@ builder.Services.AddHttpClient<AffindaService>(client =>
 // Configure GetChat log suppression
 var disableGetChatLogs = builder.Configuration.GetValue<bool>("Logging:DisableGetChatLogs", true);
 
+var suppressBoardChatPollHostingDiagnostics = builder.Configuration.GetValue("Logging:SuppressBoardChatPollHostingDiagnostics", true);
+
 if (disableGetChatLogs)
 {
-    // Suppress Info/Warning logs for framework categories when GetChat logs are disabled
-    // This is done via appsettings.json, but we also set it here programmatically
-    builder.Logging.AddFilter("Microsoft.AspNetCore.Hosting.Diagnostics", LogLevel.Warning);
+    // Framework noise reduction when GetChat polls (controller logs already gated in BoardsController).
+    // Hosting "Request starting/finished" for GET /api/Boards/use/chat is stripped by BoardChatPollHostingLogSuppression instead of silencing all routes.
+    if (!suppressBoardChatPollHostingDiagnostics)
+        builder.Logging.AddFilter("Microsoft.AspNetCore.Hosting.Diagnostics", LogLevel.Warning);
+
     builder.Logging.AddFilter("Microsoft.AspNetCore.Routing", LogLevel.Warning);
     builder.Logging.AddFilter("Microsoft.AspNetCore.Mvc", LogLevel.Warning);
     builder.Logging.AddFilter("Microsoft.EntityFrameworkCore.Database.Command", LogLevel.Warning);
     builder.Logging.AddFilter("Microsoft.AspNetCore.DataProtection", LogLevel.Warning);
 }
+
+if (suppressBoardChatPollHostingDiagnostics)
+    BoardChatPollHostingLogSuppression.WrapLoggerProviders(builder.Services);
 
 var app = builder.Build();
 

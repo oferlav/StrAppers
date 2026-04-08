@@ -37,6 +37,109 @@ namespace strAppersBackend.Services
             throw new NotSupportedException($"Unsupported AI provider: {aiModel.Provider}");
         }
 
+        /// <inheritdoc />
+        public async Task<(string Response, int InputTokens, int OutputTokens)> GetOpenAiChatCompletionWithOptionalVisionAsync(
+            AIModel aiModel,
+            string systemPrompt,
+            string userText,
+            string? imageDataUrlOrHttpsUrl,
+            IReadOnlyList<ChatMessageEntry>? chatHistory = null)
+        {
+            if (!aiModel.Provider.Equals("OpenAI", StringComparison.OrdinalIgnoreCase))
+                throw new NotSupportedException($"Vision completion is implemented for OpenAI only, not {aiModel.Provider}.");
+
+            if (string.IsNullOrWhiteSpace(imageDataUrlOrHttpsUrl))
+                return await CallOpenAIAsync(aiModel, systemPrompt, userText, chatHistory);
+
+            return await CallOpenAiVisionAsync(aiModel, systemPrompt, userText, imageDataUrlOrHttpsUrl.Trim(), chatHistory);
+        }
+
+        private async Task<(string Response, int InputTokens, int OutputTokens)> CallOpenAiVisionAsync(
+            AIModel aiModel,
+            string systemPrompt,
+            string userText,
+            string imageUrl,
+            IReadOnlyList<ChatMessageEntry>? chatHistory)
+        {
+            var apiKey = _configuration["OpenAI:ApiKey"];
+            if (string.IsNullOrEmpty(apiKey))
+                throw new InvalidOperationException("OpenAI API key not configured");
+
+            var baseUrl = aiModel.BaseUrl ?? "https://api.openai.com/v1";
+            var maxTokens = aiModel.MaxTokens ?? 16384;
+            var temperature = aiModel.DefaultTemperature ?? 0.2;
+
+            using var httpClient = new HttpClient();
+            httpClient.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", apiKey);
+            httpClient.Timeout = TimeSpan.FromMinutes(10);
+
+            var messages = new List<object> { new { role = "system", content = systemPrompt } };
+            if (chatHistory != null && chatHistory.Count > 0)
+            {
+                foreach (var h in chatHistory)
+                {
+                    var role = h.Role == "assistant" ? "assistant" : "user";
+                    messages.Add(new { role, content = h.Message });
+                }
+            }
+
+            var userContent = new List<Dictionary<string, object>>
+            {
+                new() { ["type"] = "text", ["text"] = userText },
+                new()
+                {
+                    ["type"] = "image_url",
+                    ["image_url"] = new Dictionary<string, object> { ["url"] = imageUrl },
+                },
+            };
+            messages.Add(new { role = "user", content = userContent });
+
+            var requestBody = new
+            {
+                model = aiModel.Name,
+                messages = messages.ToArray(),
+                max_tokens = maxTokens,
+                temperature = temperature,
+            };
+
+            var jsonContent = JsonSerializer.Serialize(requestBody);
+            var content = new StringContent(jsonContent, Encoding.UTF8, "application/json");
+
+            _logger.LogInformation("Calling OpenAI API with model {Model} (multimodal user message)", aiModel.Name);
+            var response = await httpClient.PostAsync($"{baseUrl}/chat/completions", content);
+
+            if (!response.IsSuccessStatusCode)
+            {
+                var errorContent = await response.Content.ReadAsStringAsync();
+                _logger.LogError("OpenAI API error: {StatusCode} - {Error}", response.StatusCode, errorContent);
+                throw new Exception($"OpenAI API error: {response.StatusCode}. {errorContent}");
+            }
+
+            var responseContent = await response.Content.ReadAsStringAsync();
+            var openAIResponse = JsonSerializer.Deserialize<JsonElement>(responseContent);
+
+            int inputTokens = 0, outputTokens = 0;
+            if (openAIResponse.TryGetProperty("usage", out var usageProp))
+            {
+                if (usageProp.TryGetProperty("prompt_tokens", out var promptTokensProp))
+                    inputTokens = promptTokensProp.GetInt32();
+                if (usageProp.TryGetProperty("completion_tokens", out var completionTokensProp))
+                    outputTokens = completionTokensProp.GetInt32();
+            }
+
+            if (openAIResponse.TryGetProperty("choices", out var choicesProp) && choicesProp.ValueKind == JsonValueKind.Array && choicesProp.GetArrayLength() > 0)
+            {
+                var firstChoice = choicesProp[0];
+                if (firstChoice.TryGetProperty("message", out var messageProp) && messageProp.TryGetProperty("content", out var contentProp))
+                {
+                    var responseText = contentProp.GetString() ?? "";
+                    return (responseText, inputTokens, outputTokens);
+                }
+            }
+
+            throw new Exception("Failed to parse OpenAI response");
+        }
+
         private async Task<(string Response, int InputTokens, int OutputTokens)> CallOpenAIAsync(
             AIModel aiModel,
             string systemPrompt,

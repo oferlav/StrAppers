@@ -6,7 +6,9 @@ using Microsoft.Extensions.Options;
 using strAppersBackend.Data;
 using strAppersBackend.Models;
 using strAppersBackend.Services;
+using strAppersBackend.Utilities;
 // using strAppersBackend.Services; // SLACK TEMPORARILY DISABLED
+using System.Text;
 using System.Text.Json;
 using System.Net.Http;
 using Npgsql;
@@ -25,6 +27,7 @@ namespace strAppersBackend.Controllers
         private readonly IOptions<SystemDesignAIAgentConfig> _systemDesignConfig;
         private readonly IConfiguration _configuration;
         private readonly IHttpClientFactory _httpClientFactory;
+        private readonly IChatCompletionService _chatCompletion;
         // private readonly SlackService _slackService; // SLACK TEMPORARILY DISABLED
 
         public TestController(
@@ -35,7 +38,8 @@ namespace strAppersBackend.Controllers
             IOptions<SystemDesignAIAgentConfig> systemDesignConfig,
             ISmtpEmailService smtpEmailService,
             IConfiguration configuration,
-            IHttpClientFactory httpClientFactory) // SlackService slack service disabled
+            IHttpClientFactory httpClientFactory,
+            IChatCompletionService chatCompletion) // SlackService slack service disabled
         {
             _context = context;
             _logger = logger;
@@ -45,6 +49,7 @@ namespace strAppersBackend.Controllers
             _smtpEmailService = smtpEmailService;
             _configuration = configuration;
             _httpClientFactory = httpClientFactory;
+            _chatCompletion = chatCompletion;
             // _slackService = slackService; // SLACK TEMPORARILY DISABLED
         }
 
@@ -1159,6 +1164,181 @@ namespace strAppersBackend.Controllers
                     error = ex.Message,
                     message = "Performance test failed"
                 });
+            }
+        }
+
+        #endregion
+
+        #region Figma test (metadata + LLM)
+
+        /// <summary>
+        /// Calls <c>POST /api/Figma/use/download-metadata</c>, then sends the returned Figma JSON to the configured cheap OpenAI model
+        /// (<c>OpenAI:CheapModel</c>, e.g. gpt-4o-mini) with separate system and user prompts.
+        /// <c>figmaFileUrl</c> must include <c>node-id</c> (required by <c>download-metadata</c>). Also: <see cref="FigmaMetadataLlmTestRequest.FigmaDepth"/>, <see cref="FigmaMetadataLlmTestRequest.PruneHeavyFigmaKeys"/>,
+        /// <see cref="FigmaMetadataLlmTestRequest.UseSemanticFigmaTransform"/>, <c>FigmaMetadataLlm:MaxMetadataChars</c>.
+        /// </summary>
+        [HttpPost("figma/metadata-llm")]
+        public async Task<ActionResult<object>> TestFigmaMetadataWithLlm([FromBody] FigmaMetadataLlmTestRequest request)
+        {
+            if (request == null || string.IsNullOrWhiteSpace(request.BoardId))
+                return BadRequest(new { success = false, message = "BoardId is required." });
+            if (string.IsNullOrWhiteSpace(request.FigmaFileUrl))
+                return BadRequest(new { success = false, message = "FigmaFileUrl is required." });
+            if (string.IsNullOrWhiteSpace(request.SystemPrompt))
+                return BadRequest(new { success = false, message = "SystemPrompt is required." });
+
+            try
+            {
+                var baseUrl = (_configuration["ApiBaseUrl"] ?? $"{Request.Scheme}://{Request.Host.Value}").TrimEnd('/');
+                var figmaPayload = new DownloadMetadataRequest
+                {
+                    BoardId = request.BoardId.Trim(),
+                    FigmaFileUrl = request.FigmaFileUrl.Trim(),
+                    Depth = request.FigmaDepth
+                };
+                var figmaJson = JsonSerializer.Serialize(figmaPayload, new JsonSerializerOptions
+                {
+                    PropertyNamingPolicy = JsonNamingPolicy.CamelCase
+                });
+
+                using var http = _httpClientFactory.CreateClient();
+                http.Timeout = TimeSpan.FromMinutes(10);
+                using var figmaResponse = await http.PostAsync(
+                    $"{baseUrl}/api/Figma/use/download-metadata",
+                    new StringContent(figmaJson, Encoding.UTF8, "application/json"));
+
+                var metadataBody = await figmaResponse.Content.ReadAsStringAsync();
+                if (!figmaResponse.IsSuccessStatusCode)
+                {
+                    _logger.LogWarning(
+                        "figma/metadata-llm: download-metadata returned {Status}. Body length={Len}",
+                        (int)figmaResponse.StatusCode,
+                        metadataBody.Length);
+                    return StatusCode((int)figmaResponse.StatusCode, new
+                    {
+                        success = false,
+                        message = "Figma download-metadata failed.",
+                        statusCode = (int)figmaResponse.StatusCode,
+                        figmaErrorBody = metadataBody.Length > 8000 ? metadataBody[..8000] + "…" : metadataBody
+                    });
+                }
+
+                var rawCharLength = metadataBody.Length;
+                var pruned = false;
+                if (request.PruneHeavyFigmaKeys)
+                {
+                    var prunedBody = FigmaMetadataPruner.PruneHeavyKeys(metadataBody);
+                    pruned = prunedBody.Length < rawCharLength;
+                    metadataBody = prunedBody;
+                    _logger.LogInformation(
+                        "figma/metadata-llm: prune applied={Applied} chars {Raw}->{Len}",
+                        pruned,
+                        rawCharLength,
+                        metadataBody.Length);
+                }
+
+                var preSemanticLength = metadataBody.Length;
+                var semanticApplied = false;
+                if (request.UseSemanticFigmaTransform)
+                {
+                    var semantic = FigmaSemanticJsonTransformer.TryTransform(metadataBody);
+                    if (!string.IsNullOrEmpty(semantic))
+                    {
+                        metadataBody = semantic;
+                        semanticApplied = true;
+                        _logger.LogInformation(
+                            "figma/metadata-llm: semantic transform chars {Pre}->{Post}",
+                            preSemanticLength,
+                            metadataBody.Length);
+                    }
+                    else
+                        _logger.LogWarning("figma/metadata-llm: semantic transform failed; sending pruned/raw Figma JSON to LLM");
+                }
+
+                var maxMetadataChars = _configuration.GetValue("FigmaMetadataLlm:MaxMetadataChars", 2_000_000);
+                if (metadataBody.Length > maxMetadataChars)
+                {
+                    return BadRequest(new
+                    {
+                        success = false,
+                        message =
+                            "Figma JSON is still too large after optional pruning. Try: (1) smaller `node-id` selection, (2) `figmaDepth` (e.g. 6–10) on this request for `download-metadata`, " +
+                            "(3) ensure `pruneHeavyFigmaKeys` is true, (4) raise `FigmaMetadataLlm:MaxMetadataChars` — note the LLM may still refuse if input exceeds its token window.",
+                        metadataCharLength = metadataBody.Length,
+                        maxMetadataChars,
+                        rawCharLengthBeforePrune = rawCharLength,
+                        pruned,
+                        semanticApplied,
+                        hintFigmaDepth = request.FigmaDepth,
+                        hintUseSemantic = request.UseSemanticFigmaTransform
+                    });
+                }
+
+                try
+                {
+                    using var _ = JsonDocument.Parse(metadataBody);
+                }
+                catch (JsonException ex)
+                {
+                    return BadRequest(new
+                    {
+                        success = false,
+                        message = "Payload is not valid JSON after prune/semantic steps.",
+                        detail = ex.Message
+                    });
+                }
+
+                var cheapName = _configuration["OpenAI:CheapModel"] ?? "gpt-4o-mini";
+                var aiModel = new AIModel
+                {
+                    Name = cheapName,
+                    Provider = "OpenAI",
+                    BaseUrl = _configuration["OpenAI:BaseUrl"] ?? "https://api.openai.com/v1",
+                    MaxTokens = 16384,
+                    DefaultTemperature = 0.2
+                };
+
+                var payloadKind = semanticApplied
+                    ? "logic-first semantic Figma JSON (hierarchy, auto-layout intent, text content, inferred roles/tokens — not a raw Figma API dump)."
+                    : "Figma file metadata JSON from GET /v1/files (download-metadata).";
+                var userPrompt =
+                    $"The following is {payloadKind} Follow your system instructions when analyzing it.\n\n--- BEGIN FIGMA PAYLOAD ---\n" +
+                    metadataBody +
+                    "\n--- END FIGMA PAYLOAD ---";
+
+                _logger.LogInformation(
+                    "figma/metadata-llm: calling LLM model={Model}, systemPromptLen={Slen}, userPromptLen={Ulen}",
+                    cheapName,
+                    request.SystemPrompt.Length,
+                    userPrompt.Length);
+
+                var (llmText, inputTokens, outputTokens) = await _chatCompletion.GetChatCompletionAsync(
+                    aiModel,
+                    request.SystemPrompt.Trim(),
+                    userPrompt);
+
+                var totalTokensConsumed = inputTokens + outputTokens;
+
+                return Ok(new
+                {
+                    success = true,
+                    model = cheapName,
+                    figmaJsonCharLength = metadataBody.Length,
+                    rawFigmaJsonCharLength = rawCharLength,
+                    figmaJsonPruned = pruned,
+                    semanticFigmaTransformApplied = semanticApplied,
+                    charLengthBeforeSemantic = preSemanticLength,
+                    figmaDepth = request.FigmaDepth,
+                    inputTokens,
+                    outputTokens,
+                    totalTokensConsumed,
+                    llmResponse = llmText
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "figma/metadata-llm failed for board {BoardId}", request.BoardId);
+                return StatusCode(500, new { success = false, message = ex.Message });
             }
         }
 
@@ -4837,6 +5017,25 @@ Return ONLY valid JSON with exactly {totalSprints} sprints (NO EPICS):
         public List<object> Results { get; set; } = new List<object>();
         public List<string> Errors { get; set; } = new List<string>();
         public string? ConnectionStringUsed { get; set; }
+    }
+
+    public class FigmaMetadataLlmTestRequest
+    {
+        public string BoardId { get; set; } = string.Empty;
+        public string FigmaFileUrl { get; set; } = string.Empty;
+        public string SystemPrompt { get; set; } = string.Empty;
+
+        /// <summary>Forwarded to Figma <c>GET /v1/files … &amp;depth=</c>. Typical trial values: 6–10 for a single screen frame.</summary>
+        public int? FigmaDepth { get; set; }
+
+        /// <summary>Strip large non-essential keys (bounds, vector networks, etc.) before the LLM. Default true.</summary>
+        public bool PruneHeavyFigmaKeys { get; set; } = true;
+
+        /// <summary>
+        /// Reduce token noise further: convert file JSON under <c>document</c> to logic-first schema (IA, layout, TEXT, roles, no raw geometry).
+        /// Runs after optional prune. Default true.
+        /// </summary>
+        public bool UseSemanticFigmaTransform { get; set; } = true;
     }
 }
 
