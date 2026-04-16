@@ -15,7 +15,7 @@ public class EarlyBirds
     [Required]
     [MaxLength(50)]
     [Column("Type")]
-    public string Type { get; set; } = string.Empty; // "Junior" or "Employer"
+    public string Type { get; set; } = string.Empty; // "Junior", "Employer", "Sales", "Demo"
 
     [Required]
     [MaxLength(200)]

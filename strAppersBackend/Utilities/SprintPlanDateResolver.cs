@@ -15,7 +15,45 @@ public static class SprintPlanDateResolver
     };
 
     /// <summary>
+    /// Inclusive UTC range from <see cref="ProjectBoardSprintMerge"/> — same rules as
+    /// <c>GET /api/Boards/use/sprint-schedule</c> (DueDate, MergedAt for sprint 1, and <paramref name="sprintLengthInWeeks"/>).
+    /// Prefer this over <see cref="TryGetSprintInclusiveUtcRange"/> when merge rows exist so CRM and the board UI agree.
+    /// </summary>
+    public static bool TryGetInclusiveUtcRangeFromSprintMerge(
+        ProjectBoardSprintMerge? merge,
+        int sprintNumber,
+        int sprintLengthInWeeks,
+        out DateTime startUtc,
+        out DateTime endInclusiveUtc)
+    {
+        startUtc = default;
+        endInclusiveUtc = default;
+        if (merge == null || sprintNumber <= 0 || merge.DueDate == null)
+            return false;
+
+        var sprintDays = Math.Max(1, sprintLengthInWeeks * 7);
+        DateTime? startRaw;
+        if (sprintNumber == 1)
+            startRaw = merge.MergedAt;
+        else
+            startRaw = merge.DueDate.Value.AddDays(-(sprintDays - 1));
+
+        if (startRaw == null)
+            return false;
+
+        startUtc = ToUtc(startRaw.Value);
+        var endRaw = ToUtc(merge.DueDate.Value);
+        endInclusiveUtc = endRaw.TimeOfDay == TimeSpan.Zero
+            ? endRaw.Date.AddDays(1).AddTicks(-1)
+            : endRaw;
+        if (endInclusiveUtc < startUtc)
+            (startUtc, endInclusiveUtc) = (endInclusiveUtc, startUtc);
+        return true;
+    }
+
+    /// <summary>
     /// Inclusive UTC range for stakeholders / time-bounded queries: <c>CreatedAt &gt;= start</c> and <c>CreatedAt &lt;= endInclusive</c>.
+    /// Uses <see cref="ProjectBoard.SprintPlan"/> list Start/End dates, or board <see cref="ProjectBoard.StartDate"/> + plan totals as fallback.
     /// </summary>
     public static bool TryGetSprintInclusiveUtcRange(
         string? sprintPlanJson,

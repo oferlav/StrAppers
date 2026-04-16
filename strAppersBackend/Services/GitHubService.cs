@@ -74,7 +74,15 @@ public interface IGitHubService
     Task<GitHubCommitDiff?> GetCompareDiffAsync(string owner, string repo, string baseBranch, string headBranch, string? accessToken = null);
     Task<string?> GetBranchShaAsync(string owner, string repo, string branchName, string? accessToken = null);
     Task<GitHubPullRequest?> GetPullRequestByBranchAsync(string owner, string repo, string branchName, string? accessToken = null);
+    /// <summary>Pull requests for this head branch (open or merged), newest first — used for gap analysis.</summary>
+    Task<GitHubPullRequest?> GetPullRequestForGapAnalysisAsync(string owner, string repo, string branchName, string? accessToken = null);
     Task<List<GitHubPullRequest>> GetOpenPullRequestsAsync(string owner, string repo, string? accessToken = null);
+    /// <summary>Count commits on a branch (paginated, capped).</summary>
+    Task<int> CountCommitsOnBranchPagedAsync(string owner, string repo, string branch, int maxPages = 15, string? accessToken = null);
+    /// <summary>Open vs merged (closed) PRs whose head branch matches <paramref name="headBranch"/>.</summary>
+    Task<(int Open, int Merged)> CountPullRequestsForHeadBranchPagedAsync(string owner, string repo, string headBranch, int maxPages = 30, string? accessToken = null);
+    /// <summary>List branch names (paginated, capped).</summary>
+    Task<List<string>> ListBranchNamesPagedAsync(string owner, string repo, int maxPages = 10, string? accessToken = null);
     Task<GitHubPullRequest?> CreatePullRequestAsync(string owner, string repo, string headBranch, string baseBranch, string title, string body, string? accessToken = null);
     Task<GitHubCommitStatus?> GetCommitStatusAsync(string owner, string repo, string sha, string context, string? accessToken = null);
     Task<MergePullRequestResult> MergePullRequestAsync(string owner, string repo, int pullRequestNumber, string commitTitle, string? accessToken = null);
@@ -2600,6 +2608,19 @@ public class GitHubService : IGitHubService
                 }
             }
 
+            var commitsCount = 0;
+            string compareStatus = "";
+            var aheadBy = 0;
+            var behindBy = 0;
+            if (compareData.TryGetProperty("commits", out var commitsCountProp) && commitsCountProp.ValueKind == JsonValueKind.Array)
+                commitsCount = commitsCountProp.GetArrayLength();
+            if (compareData.TryGetProperty("status", out var statusEl) && statusEl.ValueKind == JsonValueKind.String)
+                compareStatus = statusEl.GetString() ?? "";
+            if (compareData.TryGetProperty("ahead_by", out var aheadEl) && aheadEl.TryGetInt32(out var ai))
+                aheadBy = ai;
+            if (compareData.TryGetProperty("behind_by", out var behindEl) && behindEl.TryGetInt32(out var bi))
+                behindBy = bi;
+
             // Get commit information
             string commitMessage = "";
             DateTime commitDate = DateTime.UtcNow;
@@ -2653,7 +2674,11 @@ public class GitHubService : IGitHubService
                 FileChanges = fileChanges,
                 TotalAdditions = totalAdditions,
                 TotalDeletions = totalDeletions,
-                TotalFilesChanged = fileChanges.Count
+                TotalFilesChanged = fileChanges.Count,
+                CommitsCount = commitsCount,
+                CompareStatus = compareStatus,
+                AheadBy = aheadBy,
+                BehindBy = behindBy
             };
         }
         catch (Exception ex)
@@ -2789,7 +2814,8 @@ public class GitHubService : IGitHubService
                 Number = prData.TryGetProperty("number", out var numProp) ? numProp.GetInt32() : 0,
                 State = prData.TryGetProperty("state", out var stateProp) ? stateProp.GetString() ?? "" : "",
                 Mergeable = prData.TryGetProperty("mergeable", out var mergeableProp) && mergeableProp.ValueKind != JsonValueKind.Null ? mergeableProp.GetBoolean() : null,
-                Merged = prData.TryGetProperty("merged", out var mergedProp) && mergedProp.ValueKind != JsonValueKind.Null ? mergedProp.GetBoolean() : false
+                Merged = ReadPullRequestMerged(prData),
+                Title = prData.TryGetProperty("title", out var titleProp) ? titleProp.GetString() ?? "" : ""
             };
 
             // Get head SHA
@@ -2799,6 +2825,9 @@ public class GitHubService : IGitHubService
                 {
                     pr.HeadSha = shaProp.GetString() ?? "";
                 }
+
+                if (headProp.TryGetProperty("ref", out var refProp))
+                    pr.HeadBranch = refProp.GetString() ?? "";
             }
 
             _logger.LogInformation("✅ [GITHUB PR] Found PR #{Number} for branch {Branch}, Mergeable: {Mergeable}", pr.Number, branchName, pr.Mergeable);
@@ -2809,6 +2838,104 @@ public class GitHubService : IGitHubService
             _logger.LogError(ex, "Error getting PR for branch {Branch} in repo {Owner}/{Repo}", branchName, owner, repo);
             return null;
         }
+    }
+
+    /// <inheritdoc />
+    public async Task<GitHubPullRequest?> GetPullRequestForGapAnalysisAsync(string owner, string repo, string branchName, string? accessToken = null)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(owner) || string.IsNullOrWhiteSpace(repo) || string.IsNullOrWhiteSpace(branchName))
+            {
+                _logger.LogWarning("GetPullRequestForGapAnalysisAsync: Invalid parameters");
+                return null;
+            }
+
+            var token = accessToken ?? _configuration["GitHub:AccessToken"];
+            var headQuery = $"{owner}:{branchName}";
+            var url =
+                $"{GitHubApiBaseUrl}/repos/{owner}/{repo}/pulls?state=all&head={Uri.EscapeDataString(headQuery)}&sort=updated&direction=desc&per_page=10";
+
+            _logger.LogInformation("📊 [GITHUB PR][GapAnalysis] Listing PRs (open+merged) for head {Head} in {Owner}/{Repo}", headQuery, owner, repo);
+
+            var request = new HttpRequestMessage(HttpMethod.Get, url);
+            if (!string.IsNullOrEmpty(token))
+                request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", token);
+
+            var response = await _httpClient.SendAsync(request);
+            if (!response.IsSuccessStatusCode)
+            {
+                var errorContent = await response.Content.ReadAsStringAsync();
+                _logger.LogWarning(
+                    "GetPullRequestForGapAnalysisAsync failed for {Head} in {Owner}/{Repo}: {Status} {Body}",
+                    headQuery, owner, repo, response.StatusCode, TruncateForLog(errorContent));
+                return null;
+            }
+
+            var content = await response.Content.ReadAsStringAsync();
+            var prsArray = JsonSerializer.Deserialize<JsonElement>(content, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+            if (prsArray.ValueKind != JsonValueKind.Array || prsArray.GetArrayLength() == 0)
+            {
+                _logger.LogWarning(
+                    "📊 [GITHUB PR][GapAnalysis] No PR found (open or merged) for head {Head} in {Owner}/{Repo}",
+                    headQuery, owner, repo);
+                return null;
+            }
+
+            var prData = prsArray[0];
+            var pr = new GitHubPullRequest
+            {
+                Number = prData.TryGetProperty("number", out var numProp) ? numProp.GetInt32() : 0,
+                State = prData.TryGetProperty("state", out var stateProp) ? stateProp.GetString() ?? "" : "",
+                Mergeable = prData.TryGetProperty("mergeable", out var mergeableProp) && mergeableProp.ValueKind != JsonValueKind.Null ? mergeableProp.GetBoolean() : null,
+                Merged = ReadPullRequestMerged(prData),
+                Title = prData.TryGetProperty("title", out var titleProp) ? titleProp.GetString() ?? "" : ""
+            };
+
+            if (prData.TryGetProperty("head", out var headProp))
+            {
+                if (headProp.TryGetProperty("sha", out var shaProp))
+                    pr.HeadSha = shaProp.GetString() ?? "";
+                if (headProp.TryGetProperty("ref", out var refProp))
+                    pr.HeadBranch = refProp.GetString() ?? "";
+            }
+
+            _logger.LogInformation(
+                "✅ [GITHUB PR][GapAnalysis] PR #{Num} state={State} merged={Merged} for head {Head}",
+                pr.Number, pr.State, pr.Merged, headQuery);
+            return pr;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "GetPullRequestForGapAnalysisAsync failed for {Branch} in {Owner}/{Repo}", branchName, owner, repo);
+            return null;
+        }
+    }
+
+    private static string TruncateForLog(string s, int max = 500)
+    {
+        if (string.IsNullOrEmpty(s) || s.Length <= max) return s;
+        return s[..max] + "…";
+    }
+
+    /// <summary>
+    /// <c>GET /pulls</c> list responses use a simplified schema: <c>merged</c> is often omitted even when the PR was merged.
+    /// Non-null <c>merged_at</c> means merged (see GitHub REST “pull request simple” vs full object).
+    /// </summary>
+    private static bool ReadPullRequestMerged(JsonElement prData)
+    {
+        if (prData.TryGetProperty("merged", out var mergedProp))
+        {
+            if (mergedProp.ValueKind == JsonValueKind.True)
+                return true;
+            if (mergedProp.ValueKind == JsonValueKind.False)
+                return false;
+        }
+
+        if (prData.TryGetProperty("merged_at", out var mergedAtProp) && mergedAtProp.ValueKind == JsonValueKind.String)
+            return !string.IsNullOrEmpty(mergedAtProp.GetString());
+
+        return false;
     }
 
     /// <summary>
@@ -2866,7 +2993,7 @@ public class GitHubService : IGitHubService
                     Number = prData.TryGetProperty("number", out var numProp) ? numProp.GetInt32() : 0,
                     State = prData.TryGetProperty("state", out var stateProp) ? stateProp.GetString() ?? "" : "",
                     Mergeable = prData.TryGetProperty("mergeable", out var mergeableProp) && mergeableProp.ValueKind != JsonValueKind.Null ? mergeableProp.GetBoolean() : null,
-                    Merged = prData.TryGetProperty("merged", out var mergedProp) && mergedProp.ValueKind != JsonValueKind.Null ? mergedProp.GetBoolean() : false
+                    Merged = ReadPullRequestMerged(prData)
                 };
 
                 // Get head branch name
@@ -2899,6 +3026,135 @@ public class GitHubService : IGitHubService
             _logger.LogError(ex, "Error getting open PRs in repo {Owner}/{Repo}", owner, repo);
             return openPRs;
         }
+    }
+
+    /// <inheritdoc />
+    public async Task<int> CountCommitsOnBranchPagedAsync(string owner, string repo, string branch, int maxPages = 15, string? accessToken = null)
+    {
+        if (string.IsNullOrWhiteSpace(owner) || string.IsNullOrWhiteSpace(repo) || string.IsNullOrWhiteSpace(branch))
+            return 0;
+        var token = accessToken ?? _configuration["GitHub:AccessToken"];
+        var total = 0;
+        try
+        {
+            for (var page = 1; page <= maxPages; page++)
+            {
+                var url = $"{GitHubApiBaseUrl}/repos/{Uri.EscapeDataString(owner)}/{Uri.EscapeDataString(repo)}/commits?sha={Uri.EscapeDataString(branch)}&per_page=100&page={page}";
+                var request = new HttpRequestMessage(HttpMethod.Get, url);
+                if (!string.IsNullOrEmpty(token))
+                    request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", token);
+                var response = await _httpClient.SendAsync(request);
+                if (!response.IsSuccessStatusCode)
+                {
+                    if (page == 1)
+                        _logger.LogWarning("CountCommitsOnBranchPagedAsync: {Status} for {Owner}/{Repo}@{Branch}", response.StatusCode, owner, repo, branch);
+                    break;
+                }
+                var content = await response.Content.ReadAsStringAsync();
+                var arr = JsonSerializer.Deserialize<JsonElement>(content);
+                if (arr.ValueKind != JsonValueKind.Array)
+                    break;
+                var n = arr.GetArrayLength();
+                total += n;
+                if (n < 100)
+                    break;
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "CountCommitsOnBranchPagedAsync error {Owner}/{Repo}@{Branch}", owner, repo, branch);
+        }
+        return total;
+    }
+
+    /// <inheritdoc />
+    public async Task<(int Open, int Merged)> CountPullRequestsForHeadBranchPagedAsync(string owner, string repo, string headBranch, int maxPages = 30, string? accessToken = null)
+    {
+        if (string.IsNullOrWhiteSpace(owner) || string.IsNullOrWhiteSpace(repo) || string.IsNullOrWhiteSpace(headBranch))
+            return (0, 0);
+        var token = accessToken ?? _configuration["GitHub:AccessToken"];
+        var open = 0;
+        var merged = 0;
+        try
+        {
+            var headParam = $"{owner}:{headBranch}";
+            for (var page = 1; page <= maxPages; page++)
+            {
+                var url = $"{GitHubApiBaseUrl}/repos/{Uri.EscapeDataString(owner)}/{Uri.EscapeDataString(repo)}/pulls?state=all&head={Uri.EscapeDataString(headParam)}&per_page=100&page={page}";
+                var request = new HttpRequestMessage(HttpMethod.Get, url);
+                if (!string.IsNullOrEmpty(token))
+                    request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", token);
+                var response = await _httpClient.SendAsync(request);
+                if (!response.IsSuccessStatusCode)
+                {
+                    if (page == 1)
+                        _logger.LogWarning("CountPullRequestsForHeadBranchPagedAsync: {Status} for {Owner}/{Repo} head {Head}", response.StatusCode, owner, repo, headBranch);
+                    break;
+                }
+                var content = await response.Content.ReadAsStringAsync();
+                var arr = JsonSerializer.Deserialize<JsonElement>(content);
+                if (arr.ValueKind != JsonValueKind.Array)
+                    break;
+                foreach (var pr in arr.EnumerateArray())
+                {
+                    var state = pr.TryGetProperty("state", out var st) ? st.GetString() ?? "" : "";
+                    var isMerged = ReadPullRequestMerged(pr);
+                    if (string.Equals(state, "open", StringComparison.OrdinalIgnoreCase))
+                        open++;
+                    else if (isMerged)
+                        merged++;
+                }
+                if (arr.GetArrayLength() < 100)
+                    break;
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "CountPullRequestsForHeadBranchPagedAsync error {Owner}/{Repo} head {Head}", owner, repo, headBranch);
+        }
+        return (open, merged);
+    }
+
+    /// <inheritdoc />
+    public async Task<List<string>> ListBranchNamesPagedAsync(string owner, string repo, int maxPages = 10, string? accessToken = null)
+    {
+        var names = new List<string>();
+        if (string.IsNullOrWhiteSpace(owner) || string.IsNullOrWhiteSpace(repo))
+            return names;
+        var token = accessToken ?? _configuration["GitHub:AccessToken"];
+        try
+        {
+            for (var page = 1; page <= maxPages; page++)
+            {
+                var url = $"{GitHubApiBaseUrl}/repos/{Uri.EscapeDataString(owner)}/{Uri.EscapeDataString(repo)}/branches?per_page=100&page={page}";
+                var request = new HttpRequestMessage(HttpMethod.Get, url);
+                if (!string.IsNullOrEmpty(token))
+                    request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", token);
+                var response = await _httpClient.SendAsync(request);
+                if (!response.IsSuccessStatusCode)
+                    break;
+                var content = await response.Content.ReadAsStringAsync();
+                var arr = JsonSerializer.Deserialize<JsonElement>(content);
+                if (arr.ValueKind != JsonValueKind.Array)
+                    break;
+                foreach (var b in arr.EnumerateArray())
+                {
+                    if (b.TryGetProperty("name", out var nm))
+                    {
+                        var s = nm.GetString();
+                        if (!string.IsNullOrEmpty(s))
+                            names.Add(s);
+                    }
+                }
+                if (arr.GetArrayLength() < 100)
+                    break;
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "ListBranchNamesPagedAsync error {Owner}/{Repo}", owner, repo);
+        }
+        return names;
     }
 
     /// <summary>
@@ -2962,7 +3218,7 @@ public class GitHubService : IGitHubService
                 Number = prData.TryGetProperty("number", out var numProp) ? numProp.GetInt32() : 0,
                 State = prData.TryGetProperty("state", out var stateProp) ? stateProp.GetString() ?? "" : "",
                 Mergeable = prData.TryGetProperty("mergeable", out var mergeableProp) && mergeableProp.ValueKind != JsonValueKind.Null ? mergeableProp.GetBoolean() : null,
-                Merged = prData.TryGetProperty("merged", out var mergedProp) && mergedProp.ValueKind != JsonValueKind.Null ? mergedProp.GetBoolean() : false
+                Merged = ReadPullRequestMerged(prData)
             };
 
             // Get head SHA
@@ -3109,7 +3365,7 @@ public class GitHubService : IGitHubService
                     PropertyNameCaseInsensitive = true 
                 });
 
-                var merged = mergeData.TryGetProperty("merged", out var mergedProp) ? mergedProp.GetBoolean() : false;
+                var merged = ReadPullRequestMerged(mergeData);
                 if (merged)
                 {
                     _logger.LogInformation("✅ [GITHUB MERGE] Successfully merged PR #{PRNumber}", pullRequestNumber);
@@ -11257,7 +11513,7 @@ if (typeof window !== 'undefined') {{
     window.CONFIG = CONFIG;
 }}
 
-// 2. Mentor Tracking Logic
+// SKILL-IN SYSTEM: REQUIRED CODE - DO NOT MODIFY
 // --- MENTOR TRACKING START ---
 (function() {{
     // Extract boardId from API_URL pattern: https://webapi{{boardId}}.railway.app (no hyphen)
@@ -12754,6 +13010,12 @@ public class GitHubCommitDiff
     public int TotalAdditions { get; set; }
     public int TotalDeletions { get; set; }
     public int TotalFilesChanged { get; set; }
+    /// <summary>Commits in the compare range (GitHub <c>commits</c> array length).</summary>
+    public int CommitsCount { get; set; }
+    /// <summary>GitHub compare <c>status</c>: e.g. identical, ahead, behind, diverged.</summary>
+    public string CompareStatus { get; set; } = "";
+    public int AheadBy { get; set; }
+    public int BehindBy { get; set; }
 }
 
 public class GitHubPullRequest

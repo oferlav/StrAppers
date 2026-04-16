@@ -1,4 +1,5 @@
 using System.ComponentModel.DataAnnotations;
+using System.Linq;
 
 namespace strAppersBackend.Models
 {
@@ -167,6 +168,89 @@ namespace strAppersBackend.Models
         public string? ChecklistName { get; set; }
         /// <summary>Optional sprint number for user-story cards in the User Stories list (custom field in template).</summary>
         public int? SprintNumber { get; set; }
+        /// <summary>Checkbox custom field "Required Skill Data" (template JSON; applied when creating cards on a board).</summary>
+        public bool? RequiredSkillData { get; set; }
+        /// <summary>Checkbox custom field "Required Resource Data" (template JSON; applied when creating cards on a board).</summary>
+        public bool? RequiredResourceData { get; set; }
+
+        /// <summary>Optional text custom field <c>BranchContext</c> (developer cards; gap analysis Git branch override).</summary>
+        public string? BranchContext { get; set; }
+    }
+
+    /// <summary>Result of <see cref="Services.ITrelloService.UpdateExistingBoardWithBranchContextAsync"/>.</summary>
+    public class BranchContextUtilityResult
+    {
+        public bool Success { get; set; }
+        public string Message { get; set; } = "";
+        public List<string> Log { get; set; } = new();
+    }
+
+    /// <summary>Sets <see cref="TrelloCard.BranchContext"/> on Backend/Frontend developer cards for a specific sprint list in template JSON.</summary>
+    public static class TrelloBranchContextTemplateHelper
+    {
+        public const string BackendDeveloperLabel = "Backend Developer";
+        public const string FrontendDeveloperLabel = "Frontend Developer";
+        public const string DefaultBackendBranchContext = "Bugs-B";
+        public const string DefaultFrontendBranchContext = "Bugs-F";
+
+        public static bool IsCardInSprintList(string? listName, int sprintNumber)
+        {
+            var ln = listName?.Trim() ?? "";
+            return string.Equals(ln, $"Sprint {sprintNumber}", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(ln, $"Sprint{sprintNumber}", StringComparison.OrdinalIgnoreCase);
+        }
+
+        /// <summary>Sets BranchContext on cards in <paramref name="sprintNumber"/> list that have Backend or Frontend developer labels.</summary>
+        /// <returns>Number of cards that received a BranchContext value.</returns>
+        public static int ApplyToDeveloperCardsInSprint(
+            TrelloProjectCreationRequest request,
+            int sprintNumber,
+            string backendValue = DefaultBackendBranchContext,
+            string frontendValue = DefaultFrontendBranchContext)
+        {
+            if (request.SprintPlan?.Cards == null || request.SprintPlan.Cards.Count == 0)
+                return 0;
+            var n = 0;
+            foreach (var card in request.SprintPlan.Cards)
+            {
+                if (!IsCardInSprintList(card.ListName, sprintNumber))
+                    continue;
+                if (card.Labels == null || card.Labels.Count == 0)
+                    continue;
+                if (card.Labels.Any(l => string.Equals(l.Trim(), BackendDeveloperLabel, StringComparison.OrdinalIgnoreCase)))
+                {
+                    card.BranchContext = backendValue;
+                    n++;
+                }
+                else if (card.Labels.Any(l => string.Equals(l.Trim(), FrontendDeveloperLabel, StringComparison.OrdinalIgnoreCase)))
+                {
+                    card.BranchContext = frontendValue;
+                    n++;
+                }
+            }
+
+            return n;
+        }
+    }
+
+    /// <summary>Names and per-list defaults for the Adherence checkbox custom fields on Trello cards.</summary>
+    public static class TrelloRequiredDataFieldRules
+    {
+        public const string RequiredSkillDataFieldName = "Required Skill Data";
+        public const string RequiredResourceDataFieldName = "Required Resource Data";
+
+        /// <summary>Bugs: skill true, resource false. User Stories: both false. All other lists (e.g. Sprint N): both true.</summary>
+        public static (bool RequiredSkillData, bool RequiredResourceData) ValuesForListName(string? listName)
+        {
+            if (string.IsNullOrWhiteSpace(listName))
+                return (true, true);
+            var n = listName.Trim();
+            if (string.Equals(n, "Bugs", StringComparison.OrdinalIgnoreCase))
+                return (true, false);
+            if (string.Equals(n, "User Stories", StringComparison.OrdinalIgnoreCase))
+                return (false, false);
+            return (true, true);
+        }
     }
 
     public class TrelloProjectCreationResponse

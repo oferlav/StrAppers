@@ -22,5 +22,10 @@ namespace strAppersBackend.Models
         /// When false, the AI response is returned without the token usage line.
         /// </summary>
         public bool ShowTokenUsage { get; set; } = false;
+
+        /// <summary>
+        /// Staff dashboard <c>GET /api/Boards/use/staff-squads</c>: when true, include every live project board even if it has no students (default: false).
+        /// </summary>
+        public bool ShowAllStaffSquads { get; set; } = false;
     }
 }

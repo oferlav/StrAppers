@@ -39,7 +39,9 @@ namespace strAppersBackend.Controllers
         /// Filters by StudentId and SprintNumber (CustomerChatHistory.StudentId stores the actual student Id).
         /// </summary>
         [HttpGet("use/chat-history")]
-        public async Task<ActionResult<object>> GetCustomerChatHistory([FromQuery] int studentId, [FromQuery] int sprintNumber)
+        public async Task<ActionResult<object>> GetCustomerChatHistory(
+            [FromQuery] int studentId,
+            [FromQuery] int sprintNumber)
         {
             try
             {

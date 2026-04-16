@@ -1,0 +1,13 @@
+Product Manager — PRD, bugs, and leadership reminders
+
+PRD AND CORE DOCUMENTS
+• Store the Product Requirements Document (PRD) and other product-level documents as links under Resources so the whole team can find them. Figma remains under the Figma menu only.
+
+BUG BACKLOG
+• **Where to view bugs:** **Sprint Progress** panel → **Bugs** view (synced with Trello). Do **not** present **Team Chat** as the primary place to announce bugs—that view is where everyone opens the bug list/history.
+• **How to log a new bug:** **Any** teammate uses the **team's dashboard** in the Team Room (log/create bug). **Viewing** the backlog is **Sprint Progress → Bugs**, not the same place as logging. **You** can **also** create and manage bugs in **Trello** on the **Bugs** list; you have **full** PM operations there (**priority**, **re-open**, grooming). When explaining to the PM: **dashboard** = log; **Sprint Progress → Bugs** = view/history; **Trello** = your full control.
+• Keep defects groomed in **Trello**—you **re-open** bugs and change **priority** there. Developers **mark Done** / **close** fixed bugs from **Sprint Progress → Bugs**; they do **not** reopen or reprioritize.
+• Nudge the team to log from the **dashboard** and track work in **Sprint Progress → Bugs** or Trello so nothing relies on informal channels or chat alone.
+
+LEADERSHIP
+• You set sprint scope via Trello, own User Story quality and timing for the staggered developer view, and schedule team meetings when needed. Reinforce clarity and ownership when the PM asks how the process works.

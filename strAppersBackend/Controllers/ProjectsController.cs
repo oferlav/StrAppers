@@ -35,6 +35,14 @@ public class ProjectsController : ControllerBase
         _aiService = aiService;
     }
 
+    public sealed class ProjectTemplateDto
+    {
+        public int ProjectId { get; set; }
+        public string ProjectName { get; set; } = string.Empty;
+        public string? ProjectBrief { get; set; }
+        public string? TrelloBoardJson { get; set; }
+    }
+
     /// <summary>
     /// Get all projects
     /// </summary>
@@ -567,6 +575,181 @@ public class ProjectsController : ControllerBase
         {
             _logger.LogError(ex, "Error retrieving available projects");
             return StatusCode(500, "An error occurred while retrieving available projects");
+        }
+    }
+
+    /// <summary>
+    /// Get the saved Trello template JSON for a project.
+    /// Uses <see cref="Project.TrelloBoardJson"/> unless <paramref name="instituteId"/> is set and a row exists in
+    /// <c>TrelloTemplates</c> for that project + institute — then that institute copy is returned.
+    /// </summary>
+    [HttpGet("use/templates")]
+    public async Task<ActionResult<ProjectTemplateDto>> GetProjectTemplateByProjectId(
+        [FromQuery] int projectId,
+        [FromQuery] int? instituteId = null)
+    {
+        if (projectId <= 0)
+        {
+            return BadRequest("projectId must be a positive number.");
+        }
+
+        try
+        {
+            var project = await _context.Projects
+                .Where(p => p.Id == projectId)
+                .Select(p => new ProjectTemplateDto
+                {
+                    ProjectId = p.Id,
+                    ProjectName = p.Title,
+                    ProjectBrief = p.Description,
+                    TrelloBoardJson = p.TrelloBoardJson
+                })
+                .FirstOrDefaultAsync();
+
+            if (project == null)
+            {
+                return NotFound($"Project with ID {projectId} not found.");
+            }
+
+            if (instituteId is > 0)
+            {
+                var instituteJson = await _context.TrelloTemplates
+                    .AsNoTracking()
+                    .Where(t => t.ProjectId == projectId && t.InstituteId == instituteId.Value)
+                    .OrderByDescending(t => t.Id)
+                    .Select(t => t.TrelloBoardJson)
+                    .FirstOrDefaultAsync();
+
+                if (instituteJson != null)
+                {
+                    project.TrelloBoardJson = instituteJson;
+                }
+            }
+
+            return Ok(project);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error retrieving Trello template for project {ProjectId}", projectId);
+            return StatusCode(500, "An error occurred while retrieving the project template.");
+        }
+    }
+
+    /// <summary>
+    /// Get projects that already have a saved Trello template JSON and <see cref="Project.IsAvailable"/> is true.
+    /// </summary>
+    [HttpGet("use/available-with-template")]
+    public async Task<ActionResult<IEnumerable<ProjectTemplateDto>>> GetProjectsAvailableWithTemplate()
+    {
+        try
+        {
+            var projects = await _context.Projects
+                .Where(p => p.IsAvailable && p.TrelloBoardJson != null && p.TrelloBoardJson.Trim() != "")
+                .OrderBy(p => p.Title)
+                .Select(p => new ProjectTemplateDto
+                {
+                    ProjectId = p.Id,
+                    ProjectName = p.Title,
+                    ProjectBrief = p.Description,
+                    TrelloBoardJson = p.TrelloBoardJson
+                })
+                .ToListAsync();
+
+            return Ok(projects);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error retrieving projects with Trello templates");
+            return StatusCode(500, "An error occurred while retrieving projects with templates.");
+        }
+    }
+
+    /// <summary>
+    /// Save Task Builder template JSON for an institute and project (upserts <see cref="TrelloTemplate"/> by <c>InstituteId</c> + <c>ProjectId</c>).
+    /// Query: <c>?projectId=</c> and <c>?instituteId=</c> (or <c>InstituteId</c>).
+    /// The client should send <see cref="AddTrelloTemplateRequest.TrelloBoardJson"/> already merged so the selected sprint+role card’s
+    /// <c>description</c>/<c>Description</c> and <c>checklistItems</c>/<c>ChecklistItems</c> match the loaded template’s <c>sprintPlan</c> / <c>SprintPlan</c> structure.
+    /// </summary>
+    [HttpPost("use/add-template")]
+    public async Task<ActionResult<object>> AddTrelloTemplate(
+        [FromQuery] int projectId,
+        [FromQuery] int instituteId,
+        [FromBody] AddTrelloTemplateRequest request)
+    {
+        if (projectId <= 0 || instituteId <= 0)
+        {
+            return BadRequest("projectId and instituteId must be positive integers.");
+        }
+
+        if (request == null || string.IsNullOrWhiteSpace(request.TrelloBoardJson))
+        {
+            return BadRequest("Request body must include a non-empty trelloBoardJson string.");
+        }
+
+        try
+        {
+            var instituteExists = await _context.Institutes.AnyAsync(i => i.Id == instituteId);
+            if (!instituteExists)
+            {
+                return NotFound($"Institute with ID {instituteId} not found.");
+            }
+
+            var projectExists = await _context.Projects.AnyAsync(p => p.Id == projectId);
+            if (!projectExists)
+            {
+                return NotFound($"Project with ID {projectId} not found.");
+            }
+
+            var json = request.TrelloBoardJson.Trim();
+
+            var existingRows = await _context.TrelloTemplates
+                .Where(t => t.InstituteId == instituteId && t.ProjectId == projectId)
+                .OrderByDescending(t => t.Id)
+                .ToListAsync();
+
+            TrelloTemplate row;
+            var duplicatesRemoved = 0;
+            if (existingRows.Count == 0)
+            {
+                row = new TrelloTemplate
+                {
+                    InstituteId = instituteId,
+                    ProjectId = projectId,
+                    TrelloBoardJson = json
+                };
+                _context.TrelloTemplates.Add(row);
+            }
+            else
+            {
+                row = existingRows[0];
+                row.TrelloBoardJson = json;
+                if (existingRows.Count > 1)
+                {
+                    _context.TrelloTemplates.RemoveRange(existingRows.Skip(1));
+                    duplicatesRemoved = existingRows.Count - 1;
+                }
+            }
+
+            await _context.SaveChangesAsync();
+
+            _logger.LogInformation(
+                "Upserted TrelloTemplates row {Id} for InstituteId={InstituteId}, ProjectId={ProjectId} (duplicatesRemoved={DuplicatesRemoved})",
+                row.Id, instituteId, projectId, duplicatesRemoved);
+
+            return Ok(new
+            {
+                Success = true,
+                Id = row.Id,
+                InstituteId = instituteId,
+                ProjectId = projectId,
+                Updated = existingRows.Count > 0,
+                DuplicatesRemoved = duplicatesRemoved
+            });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error saving Trello template for InstituteId={InstituteId}, ProjectId={ProjectId}", instituteId, projectId);
+            return StatusCode(500, "An error occurred while saving the template.");
         }
     }
 

@@ -64,6 +64,10 @@ public class Student
     public string? BoardId { get; set; }
     public ProjectBoard? ProjectBoard { get; set; }
 
+    /// <summary>Optional link to the student home institute (university, campus, etc.).</summary>
+    public int? InstituteId { get; set; }
+    public Institute? Institute { get; set; }
+
     /// <summary>
     /// FK to ProjectInstances.InstanceId (which instance of a project the student is in).
     /// </summary>
@@ -86,6 +90,15 @@ public class Student
 
     /// <summary>When true, student has opted into assist-me flows. Default false.</summary>
     public bool AssistMe { get; set; } = false;
+
+    /// <summary>Staff-scheduled 1:1 help session (Teams); same semantics as <see cref="ProjectBoard.NextMeetingTime"/>.</summary>
+    [Column("NextMeetingTime")]
+    public DateTime? NextMeetingTime { get; set; }
+
+    /// <summary>Join URL for the scheduled help session (Teams).</summary>
+    [Column("NextMeetingUrl")]
+    [MaxLength(1000)]
+    public string? NextMeetingUrl { get; set; }
     
     // Photo field (base64 encoded image or URL)
     [Column("Photo")]

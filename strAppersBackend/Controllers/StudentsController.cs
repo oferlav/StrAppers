@@ -1176,13 +1176,74 @@ public class StudentsController : ControllerBase
                 NightShiftWork = student.NightShiftWork,
                 RelocationWork = student.RelocationWork,
                 StudentWork = student.StudentWork,
-                MultilingualWork = student.MultilingualWork
+                MultilingualWork = student.MultilingualWork,
+                AssistMe = student.AssistMe,
+                NextMeetingTime = student.NextMeetingTime,
+                NextMeetingUrl = student.NextMeetingUrl,
+                B2c = student.B2c
             });
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error retrieving student with email {Email}: {Message}", email, ex.Message);
             return StatusCode(500, $"An error occurred while retrieving the student: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Student self-service: set <see cref="Student.AssistMe"/>. Blocked while <see cref="Student.NextMeetingTime"/> is in the future.
+    /// </summary>
+    [HttpPost("use/set-assist-me")]
+    public async Task<ActionResult<object>> SetAssistMe([FromBody] SetAssistMeRequest request)
+    {
+        if (request == null)
+            return BadRequest(new { success = false, message = "Body required." });
+
+        var email = (request.Email ?? string.Empty).Trim();
+        if (string.IsNullOrEmpty(email))
+            return BadRequest(new { success = false, message = "Email is required." });
+
+        try
+        {
+            var student = await _context.Students.FirstOrDefaultAsync(s => s.Email == email);
+            if (student == null)
+                return NotFound(new { success = false, message = "Student not found." });
+
+            if (student.B2c)
+                return BadRequest(new
+                {
+                    success = false,
+                    message = "Human assistance is only available for institute (non-B2C) students."
+                });
+
+            var now = DateTime.UtcNow;
+            if (student.NextMeetingTime.HasValue && student.NextMeetingTime.Value > now)
+            {
+                return Conflict(new
+                {
+                    success = false,
+                    message = "A meeting is already scheduled. You can change this after the meeting time passes."
+                });
+            }
+
+            student.AssistMe = request.AssistMe;
+            student.UpdatedAt = DateTime.UtcNow;
+            await _context.SaveChangesAsync();
+
+            _logger.LogInformation("Student {StudentId} AssistMe set to {AssistMe}", student.Id, student.AssistMe);
+
+            return Ok(new
+            {
+                success = true,
+                assistMe = student.AssistMe,
+                nextMeetingTime = student.NextMeetingTime,
+                nextMeetingUrl = student.NextMeetingUrl
+            });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "SetAssistMe failed for {Email}", email);
+            return StatusCode(500, new { success = false, message = "Failed to update assist flag." });
         }
     }
 
@@ -1852,5 +1913,14 @@ public class AllocateStudentRequest
 public class DeallocateStudentRequest
 {
     // StudentId removed - will be determined by authentication or other means
+}
+
+public class SetAssistMeRequest
+{
+    [Required]
+    [EmailAddress]
+    public string Email { get; set; } = string.Empty;
+
+    public bool AssistMe { get; set; }
 }
 

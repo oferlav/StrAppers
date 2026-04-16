@@ -12,8 +12,24 @@
 | `strAppersFrontend/src/components/projects/v2/ProjectSection.jsx` | Student sections grid; desktop details panel with `attachedBelowTabs` |
 | `strAppersFrontend/src/api/projectsStudentStrAppers.js` | `invokeGetProjectStudents` → `/api/Projects/use/get-students/{id}` |
 | `strAppersFrontend/src/lib/cookieConsentStorage.js` | Landing cookie consent: `localStorage` key `skillin_cookie_consent_v1`, `openCookieSettings()`, `hasAnalyticsConsent()` / `hasMarketingConsent()` for gating tags |
-| `strAppersFrontend/src/pages/LandingNew.jsx` | Marketing landing; footer: logo, Privacy Policy / Terms of Use / Cookie settings (`createPageUrl`), social + mail |
+| `strAppersFrontend/src/pages/SchoolsAndUniversities.jsx` | Marketing `/SchoolsAndUniversities`: Solutions → schools/universities audience; hero + 5 feature cards (3+2 grid) + CTA; `activeNav="universities"` |
+| `strAppersFrontend/src/pages/BootcampsTrainingCenters.jsx` | Marketing `/BootcampsTrainingCenters`: Solutions → bootcamps audience; hero + 4-card `#EDEEF3` features + dark CTA; same header/footer strip pattern as Features; `LandingMarketingHeader` `activeNav="bootcamps"` |
+| `strAppersFrontend/src/pages/Features.jsx` | Marketing `/Features`: shared `LandingMarketingHeader` (`activeNav="features"`), hero, grid, mockup band, dark CTA, landing-style footer + `CookieConsentBar`; Privacy/Terms `returnTo=Features` |
+| `strAppersFrontend/src/pages/Pricing.jsx` | Marketing `/Pricing`: `#EDEEF3` hero + equal-height plan cards, CTAs match header “Join a Squad” button; landing-style footer (Privacy / Terms / Cookie + LinkedIn + mail); `activeNav="pricing"`; `CookieConsentBar` |
+| `strAppersFrontend/src/components/landing/LandingMarketingHeader.jsx` | Sticky marketing nav: desktop nav + mobile full-screen menu (hamburger); Solutions links → Bootcamps & Training Centers, Universities & Schools; Join a Squad matches teal pill style; `activeNav` `landing` / `features` / `pricing` / `bootcamps` / `universities` |
+| `strAppersFrontend/public/features-board-mockup.png` | Features page board room UI screenshot |
+| `strAppersFrontend/src/pages/LandingNew.jsx` | Marketing landing; header: Features / Pricing / Solutions (dropdown TBD), For Employers, Join the Pilot; `#features` / `#pricing` sections; footer: Privacy / Terms / Cookie, social + mail |
+| `strAppersFrontend/src/components/landing/RegistrationModal.jsx` | Employer/Junior signup; optional `title` overrides dialog heading (e.g. Features demo: `Register for a Demo`) |
 | `strAppersFrontend/src/components/landing/CookieConsentBar.jsx` | Landing cookie banner + settings modal + FAB; footer uses `openCookieSettings()` from `LandingNew.jsx` |
+| `strAppersFrontend/src/components/SkillInDiamondLogo.jsx` | Shared Checkout hero diamond (`bb0d13df2` on media.base44.com); staff nav/headers + Checkout header/hero |
+| `strAppersFrontend/src/pages/StaffDashboard.jsx` | Staff squad grid: `GET /api/Boards/use/staff-squads`, roles `GET /api/Roles/use`, GitHub stats `GET /api/Boards/use/github/stats` (sprint + role filters); CRM read-only modal → `GET /api/CRM/use/stakeholder?boardId=`; **Assessment Report** button → `fetchAssessmentReport` (board from Squad filter or single filtered squad); route **`/staffdashboard`**; institute users redirect to **`InstituteStaff`**; optional **`embedInInstituteShell`** hides top bar when nested in that shell |
+| `strAppersFrontend/src/pages/InstituteStaff.jsx` | Institute staff home after login: navy sidebar + white content card; default embedded Staff Dashboard; **`?view=taskbuilder`** embeds Task Builder; uses **`localStorage.instituteId`** for template save; route **`/institutestaff`** |
+| `strAppersFrontend/src/components/metrics/AssessmentReportBody.jsx` | Shared printable assessment report HTML (Print / Save as PDF); used by Management Dashboard and Staff Dashboard modal |
+| `strAppersFrontend/src/api/staffDashboardStrAppers.js` | `fetchStaffSquads`, `fetchActiveRoles`, `fetchBoardGitHubStats`, `fetchStaffBoardTrelloBundle`, `fetchCrmStakeholders` |
+| `strAppersFrontend/src/components/staff/ClassroomCard.jsx` | Squad card actions: Live/API/GitHub/Trello/Figma/Resources/**CRM** (stakeholders modal) |
+| `strAppersFrontend/src/components/staff/StaffStakeholdersReadOnlyModal.jsx` | Read-only CRM stakeholders table for staff (board-scoped; not driven by sprint/role filters) |
+| `strAppersFrontend/src/pages/ManagementDashboard.jsx` | Management dashboard: assessment report filters (board / optional student & sprint), `fetchAssessmentReport` → `GET /api/Metrics/use/assessment-report`, printable preview window; route `/ManagementDashboard` |
+| `strAppersFrontend/src/api/metricsStrAppers.js` | `fetchSquadNamesSearch` → `GET /api/Metrics/use/squad-names-search`; `fetchAssessmentReport` → `GET /api/Metrics/use/assessment-report` (`squadName` or `boardId`) |
 | `strAppersFrontend/src/pages/ManagementDashboardMock.jsx` | Staff management dashboard **UI mockup** (classes/boards, stats, URLs, resources, assistance flags); static data only, route `/ManagementDashboardMock` |
 | `strAppersFrontend/src/api/figmaStrAppers.js` | OAuth: `getFigmaOAuthStart`, `storeFigmaOAuthTokens`, `beginBoardFigmaOAuth`, `beginRegistrationFigmaOAuth`, `applyPendingFigmaToBoard`, `getFigmaConnection`; mentor UI → `postMentorFigmaFrameReview` (`POST /api/Mentor/use/figma-frame-review`) |
 | `strAppersFrontend/src/api/resourceReviewStrAppers.js` | Mentor reviews: `postMentorResourceReview`, `postMentorStoryReview`, `postMentorCrmReview`; resources list + `pickResourceForMentorReview` |
@@ -21,6 +37,8 @@
 | `strAppersFrontend/src/components/boards/FigmaLinksModal.jsx` | Figma links list + “Connect Figma account” (API) for designers when StrAppers backend is configured |
 | `strAppersFrontend/src/pages/StudentRegistration.jsx` | **UI/UX Designer (role id 4):** optional “Connect Figma account” during registration; OAuth redirect `…/StudentRegistration` stores tokens by email until a board exists (`apply-pending` from BoardRoom) |
 | `strAppersFrontend/src/pages/BoardRoom.jsx` | Figma OAuth redirect target (`…/BoardRoom`); exchanges `code`; calls `apply-pending` when `boardId` + email to merge registration-stored Figma tokens |
+| `strAppersFrontend/src/pages/TaskBuilder.jsx` | Staff maintenance page for task templates; project/module/sprint/role selectors bound to StrAppers backend endpoints; optional **`embedInInstituteShell`** + **`instituteId`** props when opened from **`InstituteStaff`**; left **Task assistant** chat → `POST /api/Mentor/use/task-builder`; **Save to Template** merges sprint+role edits into JSON then `POST /api/Projects/use/add-template` |
+| `strAppersFrontend/src/api/taskBuilderStrAppers.js` | Task Builder GETs + `postAddTrelloTemplate` + **`postTaskBuilderMentor`** → `POST /api/Mentor/use/task-builder` |
 
 ### Preview ProjectsStudentV2 locally (before deploy)
 

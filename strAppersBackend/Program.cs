@@ -9,6 +9,7 @@ using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.FileProviders;
 using strAppersBackend.Logging;
+using strAppersBackend.Swagger;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -106,7 +107,10 @@ builder.Services.AddControllers()
     });
 // Learn more about configuring Swagger/OpenAPI at https://aka.ms/aspnetcore/swashbuckle
 builder.Services.AddEndpointsApiExplorer();
-builder.Services.AddSwaggerGen();
+builder.Services.AddSwaggerGen(c =>
+{
+    c.SchemaFilter<GapAnalysisRequestSchemaFilter>();
+});
 
 // Add Entity Framework
 builder.Services.AddDbContext<ApplicationDbContext>(options =>
@@ -285,6 +289,10 @@ if (disableGetChatLogs)
 
 if (suppressBoardChatPollHostingDiagnostics)
     BoardChatPollHostingLogSuppression.WrapLoggerProviders(builder.Services);
+
+// Default HttpClient handlers log every outbound request URI at Information — Trello (and others) put key/token in the query string.
+if (!builder.Configuration.GetValue("Logging:LogHttpClientOutboundUrls", false))
+    builder.Logging.AddFilter("System.Net.Http.HttpClient", LogLevel.Warning);
 
 var app = builder.Build();
 

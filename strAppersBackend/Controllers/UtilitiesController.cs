@@ -1700,6 +1700,189 @@ jobs:
     }
 
     /// <summary>
+    /// Sets <see cref="TrelloCard.RequiredSkillData"/> and <see cref="TrelloCard.RequiredResourceData"/> on every card in Projects.TrelloBoardJson
+    /// (by <see cref="TrelloCard.ListName"/>): default sprint lists both true; Bugs: skill true, resource false; User Stories: both false.
+    /// Values are applied on the live Trello board when cards are created from this template (see TrelloService SetCardCustomFieldsAsync).
+    /// POST api/Utilities/trello/add-required-fields-to-template
+    /// </summary>
+    [HttpPost("trello/add-required-fields-to-template")]
+    public async Task<ActionResult<object>> AddRequiredFieldsToTrelloTemplate([FromBody] AddRequiredFieldsToTrelloTemplateRequest request)
+    {
+        if (request == null || request.ProjectId <= 0)
+            return BadRequest(new { Success = false, Message = "ProjectId is required and must be greater than 0." });
+
+        var project = await _context.Projects.FirstOrDefaultAsync(p => p.Id == request.ProjectId);
+        if (project == null)
+            return NotFound(new { Success = false, Message = $"Project {request.ProjectId} not found." });
+        if (string.IsNullOrWhiteSpace(project.TrelloBoardJson))
+            return BadRequest(new { Success = false, Message = "Project has no TrelloBoardJson. Use POST api/Utilities/trello/store-board-json first." });
+
+        TrelloProjectCreationRequest? trelloRequest;
+        try
+        {
+            trelloRequest = JsonSerializer.Deserialize<TrelloProjectCreationRequest>(project.TrelloBoardJson);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to deserialize TrelloBoardJson for project {ProjectId}", project.Id);
+            return BadRequest(new { Success = false, Message = "Invalid TrelloBoardJson." });
+        }
+
+        if (trelloRequest == null)
+            return BadRequest(new { Success = false, Message = "TrelloBoardJson deserialized to null." });
+        if (trelloRequest.SprintPlan == null)
+            return BadRequest(new { Success = false, Message = "TrelloBoardJson has no SprintPlan." });
+        if (trelloRequest.SprintPlan.Cards == null || trelloRequest.SprintPlan.Cards.Count == 0)
+            return BadRequest(new { Success = false, Message = "TrelloBoardJson.SprintPlan has no cards." });
+
+        var updated = 0;
+        foreach (var card in trelloRequest.SprintPlan.Cards)
+        {
+            var (skill, res) = TrelloRequiredDataFieldRules.ValuesForListName(card.ListName);
+            card.RequiredSkillData = skill;
+            card.RequiredResourceData = res;
+            updated++;
+        }
+
+        var newJson = JsonSerializer.Serialize(trelloRequest);
+        project.TrelloBoardJson = newJson;
+        project.UpdatedAt = DateTime.UtcNow;
+        await _context.SaveChangesAsync();
+
+        _logger.LogInformation("[AddRequiredFieldsToTrelloTemplate] Project {ProjectId}: set RequiredSkillData/RequiredResourceData on {CardCount} cards.", project.Id, updated);
+        return Ok(new
+        {
+            Success = true,
+            Message = $"Updated {updated} card(s) in TrelloBoardJson with Required Skill Data / Required Resource Data defaults per list.",
+            ProjectId = project.Id,
+            CardsUpdated = updated,
+            Rules = new
+            {
+                DefaultSprintLists = "RequiredSkillData and RequiredResourceData both true",
+                Bugs = "RequiredSkillData true, RequiredResourceData false",
+                UserStories = "both false"
+            },
+            NextStep = "New boards created from this template will set Trello checkbox fields when cards are created. For an existing board, use POST api/Utilities/trello/add-required-fields-to-board."
+        });
+    }
+
+    /// <summary>
+    /// Ensures checkbox custom fields "Required Skill Data" and "Required Resource Data" exist on the live Trello board and sets them on every card using the same rules as add-required-fields-to-template.
+    /// POST api/Utilities/trello/add-required-fields-to-board
+    /// </summary>
+    [HttpPost("trello/add-required-fields-to-board")]
+    public async Task<ActionResult<object>> AddRequiredFieldsToTrelloBoard([FromBody] AddRequiredFieldsToTrelloBoardRequest request)
+    {
+        if (request == null || string.IsNullOrWhiteSpace(request.BoardId))
+            return BadRequest(new { Success = false, Message = "BoardId is required." });
+
+        var boardId = request.BoardId.Trim();
+        var (success, cardsProcessed, errors) = await _trelloService.ApplyRequiredDataCustomFieldsToBoardAsync(boardId);
+        if (!success && cardsProcessed == 0)
+            return StatusCode(500, new { Success = false, Message = "Failed to apply custom fields.", BoardId = boardId, CardsProcessed = cardsProcessed, Errors = errors });
+
+        return Ok(new
+        {
+            Success = success,
+            Message = success
+                ? $"Applied Required Skill Data / Required Resource Data to {cardsProcessed} card(s)."
+                : $"Applied with some errors; processed {cardsProcessed} card(s). See Errors.",
+            BoardId = boardId,
+            CardsProcessed = cardsProcessed,
+            Errors = errors
+        });
+    }
+
+    /// <summary>
+    /// Ensures the <c>BranchContext</c> custom field exists on the live Trello board and sets Backend Developer → <c>Bugs-B</c> and Frontend Developer → <c>Bugs-F</c> for the given sprint list only (default Sprint 8).
+    /// POST api/Utilities/trello/update-existing-board-with-branch-context
+    /// </summary>
+    [HttpPost("trello/update-existing-board-with-branch-context")]
+    public async Task<ActionResult<object>> UpdateExistingBoardWithBranchContext(
+        [FromBody] UpdateExistingBoardWithBranchContextRequest request,
+        CancellationToken cancellationToken)
+    {
+        if (request == null || string.IsNullOrWhiteSpace(request.BoardId))
+            return BadRequest(new { Success = false, Message = "BoardId is required." });
+        if (request.SprintNumber < 0)
+            return BadRequest(new { Success = false, Message = "SprintNumber must be >= 0." });
+
+        var r = await _trelloService.UpdateExistingBoardWithBranchContextAsync(request.BoardId.Trim(), request.SprintNumber, cancellationToken);
+        if (!r.Success)
+            return BadRequest(new { Success = false, Message = r.Message, Log = r.Log });
+
+        return Ok(new
+        {
+            Success = true,
+            Message = r.Message,
+            BoardId = request.BoardId.Trim(),
+            SprintNumber = request.SprintNumber,
+            Log = r.Log
+        });
+    }
+
+    /// <summary>
+    /// Updates <see cref="Project.TrelloBoardJson"/>: sets <see cref="TrelloCard.BranchContext"/> to <c>Bugs-B</c> / <c>Bugs-F</c> on Backend Developer / Frontend Developer cards in the Sprint N list only (default N = 8).
+    /// POST api/Utilities/trello/update-trello-template-with-branch-context
+    /// </summary>
+    [HttpPost("trello/update-trello-template-with-branch-context")]
+    public async Task<ActionResult<object>> UpdateTrelloTemplateWithBranchContext(
+        [FromBody] UpdateTrelloTemplateWithBranchContextRequest request)
+    {
+        if (request == null || request.ProjectId <= 0)
+            return BadRequest(new { Success = false, Message = "ProjectId is required and must be greater than 0." });
+        if (request.SprintNumber < 0)
+            return BadRequest(new { Success = false, Message = "SprintNumber must be >= 0." });
+
+        var project = await _context.Projects.FirstOrDefaultAsync(p => p.Id == request.ProjectId);
+        if (project == null)
+            return NotFound(new { Success = false, Message = $"Project {request.ProjectId} not found." });
+        if (string.IsNullOrWhiteSpace(project.TrelloBoardJson))
+            return BadRequest(new { Success = false, Message = "Project has no TrelloBoardJson. Use POST api/Utilities/trello/store-board-json first." });
+
+        TrelloProjectCreationRequest? trelloRequest;
+        try
+        {
+            trelloRequest = JsonSerializer.Deserialize<TrelloProjectCreationRequest>(project.TrelloBoardJson);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to deserialize TrelloBoardJson for project {ProjectId}", project.Id);
+            return BadRequest(new { Success = false, Message = "Invalid TrelloBoardJson." });
+        }
+
+        if (trelloRequest?.SprintPlan?.Cards == null || trelloRequest.SprintPlan.Cards.Count == 0)
+            return BadRequest(new { Success = false, Message = "TrelloBoardJson has no SprintPlan cards." });
+
+        var updated = TrelloBranchContextTemplateHelper.ApplyToDeveloperCardsInSprint(trelloRequest, request.SprintNumber);
+        if (updated == 0)
+            return BadRequest(new
+            {
+                Success = false,
+                Message = $"No Backend Developer or Frontend Developer cards found in Sprint {request.SprintNumber} list (ListName \"Sprint {request.SprintNumber}\" or \"Sprint{request.SprintNumber}\").",
+                SprintNumber = request.SprintNumber
+            });
+
+        var newJson = JsonSerializer.Serialize(trelloRequest);
+        project.TrelloBoardJson = newJson;
+        project.UpdatedAt = DateTime.UtcNow;
+        await _context.SaveChangesAsync();
+
+        _logger.LogInformation(
+            "[UpdateTrelloTemplateWithBranchContext] Project {ProjectId}: BranchContext set on {Count} card(s) for sprint {Sprint}.",
+            project.Id, updated, request.SprintNumber);
+
+        return Ok(new
+        {
+            Success = true,
+            Message = $"Set BranchContext on {updated} card(s) in Sprint {request.SprintNumber} (Backend → {TrelloBranchContextTemplateHelper.DefaultBackendBranchContext}, Frontend → {TrelloBranchContextTemplateHelper.DefaultFrontendBranchContext}).",
+            ProjectId = project.Id,
+            SprintNumber = request.SprintNumber,
+            CardsUpdated = updated
+        });
+    }
+
+    /// <summary>
     /// Modifies a User Story card in the project's TrelloBoardJson (template). Finds the card in the "User Stories" list by SprintNumber and updates Title and/or ModuleId.
     /// POST api/Utilities/trello/modify-user-story-list
     /// </summary>
@@ -4046,6 +4229,37 @@ public class AddUserStoryListRequest
 {
     /// <summary>Project ID whose TrelloBoardJson will be updated with the User Stories list.</summary>
     public int ProjectId { get; set; }
+}
+
+/// <summary>Request for POST api/Utilities/trello/add-required-fields-to-template</summary>
+public class AddRequiredFieldsToTrelloTemplateRequest
+{
+    /// <summary>Project ID whose TrelloBoardJson will receive RequiredSkillData / RequiredResourceData on each card.</summary>
+    public int ProjectId { get; set; }
+}
+
+/// <summary>Request for POST api/Utilities/trello/add-required-fields-to-board</summary>
+public class AddRequiredFieldsToTrelloBoardRequest
+{
+    /// <summary>Trello board ID (live board).</summary>
+    public string? BoardId { get; set; }
+}
+
+/// <summary>Request for POST api/Utilities/trello/update-existing-board-with-branch-context</summary>
+public class UpdateExistingBoardWithBranchContextRequest
+{
+    /// <summary>Live Trello board id.</summary>
+    public string? BoardId { get; set; }
+    /// <summary>Sprint list to target (e.g. 8 for &quot;Sprint 8&quot;). Default 8.</summary>
+    public int SprintNumber { get; set; } = 8;
+}
+
+/// <summary>Request for POST api/Utilities/trello/update-trello-template-with-branch-context</summary>
+public class UpdateTrelloTemplateWithBranchContextRequest
+{
+    public int ProjectId { get; set; }
+    /// <summary>Sprint list in template JSON (TrelloCard.ListName). Default 8.</summary>
+    public int SprintNumber { get; set; } = 8;
 }
 
 /// <summary>Request for POST api/Utilities/trello/modify-user-story-list</summary>

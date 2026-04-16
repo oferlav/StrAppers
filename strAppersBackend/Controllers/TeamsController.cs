@@ -355,6 +355,7 @@ public class TeamsController : ControllerBase
             projectBoard.NextMeetingTime = startTime;
             projectBoard.NextMeetingUrl = result.JoinUrl;
             projectBoard.NextMeetingTitle = request.Title;
+            projectBoard.NextMeetingTeacherAttendance = false;
             projectBoard.UpdatedAt = DateTime.UtcNow;
             
             await _context.SaveChangesAsync();
@@ -390,6 +391,135 @@ public class TeamsController : ControllerBase
             {
                 Success = false,
                 Message = $"An error occurred while creating the Teams meeting for board: {ex.Message}"
+            });
+        }
+    }
+
+    /// <summary>
+    /// Create a Teams meeting for a single student (staff assist flow): SMTP invites to staff + student,
+    /// then updates <see cref="Student.NextMeetingTime"/>, <see cref="Student.NextMeetingUrl"/>, and clears <see cref="Student.AssistMe"/>.
+    /// </summary>
+    [HttpPost("create-meeting-smtp-for-student-help")]
+    public async Task<ActionResult<object>> CreateTeamsMeetingForStudentHelp(CreateTeamsMeetingForStudentHelpRequest request)
+    {
+        try
+        {
+            _logger.LogInformation(
+                "Creating student-help Teams meeting for board {BoardId}, student {StudentId}: {Title} at {DateTime}",
+                request.BoardId, request.StudentId, request.Title, request.DateTime);
+
+            if (!ModelState.IsValid)
+                return BadRequest(ModelState);
+
+            var boardId = (request.BoardId ?? string.Empty).Trim();
+            if (string.IsNullOrEmpty(boardId))
+                return BadRequest(new { Success = false, Message = "BoardId is required" });
+
+            var staffEmail = (request.StaffEmail ?? string.Empty).Trim();
+            if (string.IsNullOrEmpty(staffEmail))
+                return BadRequest(new { Success = false, Message = "StaffEmail is required" });
+
+            var projectBoard = await _context.ProjectBoards.AsNoTracking().FirstOrDefaultAsync(pb => pb.Id == boardId);
+            if (projectBoard == null)
+            {
+                _logger.LogWarning("ProjectBoard {BoardId} not found for student-help meeting", boardId);
+                return NotFound(new { Success = false, Message = $"ProjectBoard with ID {boardId} not found" });
+            }
+
+            var student = await _context.Students.FirstOrDefaultAsync(s => s.Id == request.StudentId);
+            if (student == null || !string.Equals(student.BoardId, boardId, StringComparison.Ordinal))
+            {
+                _logger.LogWarning("Student {StudentId} not on board {BoardId}", request.StudentId, boardId);
+                return NotFound(new { Success = false, Message = "Student not found for this board" });
+            }
+
+            if (!System.DateTime.TryParse(request.DateTime, out var startTime))
+            {
+                _logger.LogError("Invalid DateTime format: {DateTime}", request.DateTime);
+                return BadRequest(new { Success = false, Message = "Invalid DateTime format" });
+            }
+
+            startTime = NormalizeMeetingTimeToUtc(startTime);
+            var endTime = startTime.AddMinutes(request.DurationMinutes);
+            var dateTimeUtcString = startTime.ToString("yyyy-MM-ddTHH:mm:ssZ");
+
+            var meetingTitle = (request.Title ?? string.Empty).Trim();
+            var teacherForTitle = await _context.Teachers.AsNoTracking()
+                .FirstOrDefaultAsync(t => t.Email.ToLower() == staffEmail.ToLower());
+            if (teacherForTitle != null)
+            {
+                var fn = (teacherForTitle.FirstName ?? string.Empty).Trim();
+                var ln = (teacherForTitle.LastName ?? string.Empty).Trim();
+                var displayName = $"{fn} {ln}".Trim();
+                if (!string.IsNullOrEmpty(displayName))
+                    meetingTitle = $"Personal Meeting with {displayName}";
+            }
+            if (string.IsNullOrEmpty(meetingTitle))
+                meetingTitle = "Personal Meeting";
+
+            var serviceRequest = new Services.CreateTeamsMeetingRequest
+            {
+                Title = meetingTitle,
+                DateTime = dateTimeUtcString,
+                DurationMinutes = request.DurationMinutes,
+                Attendees = new List<string>()
+            };
+
+            var result = await _graphService.CreateTeamsMeetingWithoutAttendeesAsync(serviceRequest);
+            if (!result.Success)
+            {
+                _logger.LogError("Failed to create Teams meeting: {Message}", result.Message);
+                return StatusCode(500, result);
+            }
+
+            var attendees = new[] { staffEmail, student.Email }
+                .Where(e => !string.IsNullOrWhiteSpace(e))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
+            _logger.LogInformation("Sending SMTP invitations for student-help meeting to {Count} addresses", attendees.Count);
+            var emailsSent = await _smtpEmailService.SendBulkMeetingEmailsAsync(
+                attendees,
+                meetingTitle,
+                startTime,
+                endTime,
+                result.JoinUrl ?? "Meeting link not available",
+                $"Join this Teams meeting: {meetingTitle}");
+
+            student.NextMeetingTime = startTime;
+            student.NextMeetingUrl = result.JoinUrl;
+            student.AssistMe = false;
+            student.UpdatedAt = DateTime.UtcNow;
+
+            await _context.SaveChangesAsync();
+
+            _logger.LogInformation("Updated student {StudentId} NextMeetingTime and cleared AssistMe", student.Id);
+
+            return Ok(new
+            {
+                result.Success,
+                Message = emailsSent
+                    ? "Teams meeting created, invitations sent, and student updated"
+                    : "Teams meeting created and student updated; some emails may have failed",
+                result.MeetingId,
+                result.MeetingTitle,
+                result.StartTime,
+                result.EndTime,
+                result.DurationMinutes,
+                result.JoinUrl,
+                BoardId = boardId,
+                StudentId = student.Id,
+                NextMeetingTime = startTime,
+                EmailsSent = emailsSent,
+            });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error creating student-help Teams meeting: {Message}", ex.Message);
+            return StatusCode(500, new
+            {
+                Success = false,
+                Message = $"An error occurred while creating the meeting: {ex.Message}"
             });
         }
     }
@@ -878,6 +1008,7 @@ public class TeamsController : ControllerBase
                 projectBoard.NextMeetingTime = startTime;
                 projectBoard.NextMeetingUrl = result.JoinUrl;
                 projectBoard.NextMeetingTitle = request.Title;
+                projectBoard.NextMeetingTeacherAttendance = false;
                 projectBoard.UpdatedAt = DateTime.UtcNow;
                 
                 await _context.SaveChangesAsync();
@@ -1215,6 +1346,7 @@ public class TeamsController : ControllerBase
                 projectBoard.NextMeetingTime = startTime;
                 projectBoard.NextMeetingUrl = result.JoinUrl;
                 projectBoard.NextMeetingTitle = request.Title;
+                projectBoard.NextMeetingTeacherAttendance = false;
                 projectBoard.UpdatedAt = DateTime.UtcNow;
                 
                 await _context.SaveChangesAsync();
@@ -1354,4 +1486,16 @@ public class CreateTeamsMeetingForBoardEmployerRequest
     public string SenderName { get; set; } = string.Empty; // Display name of the sender
     public string? Message { get; set; } // Optional message from the sender
     public string? Organization { get; set; } // Optional organization name
+}
+
+/// <summary>Staff dashboard: schedule 1:1 assist meeting; updates <see cref="Student"/> row.</summary>
+public class CreateTeamsMeetingForStudentHelpRequest
+{
+    public string BoardId { get; set; } = string.Empty;
+    public int StudentId { get; set; }
+    public string Title { get; set; } = string.Empty;
+    public string DateTime { get; set; } = string.Empty;
+    public int DurationMinutes { get; set; }
+    /// <summary>Staff user email (receives invitation alongside the student).</summary>
+    public string StaffEmail { get; set; } = string.Empty;
 }

@@ -154,7 +154,7 @@ public class SkillInWebsiteController : ControllerBase
     }
 
     /// <summary>
-    /// Register an early bird user (Junior or Employer)
+    /// Register an early bird user (Junior, Employer, Sales, or Demo)
     /// </summary>
     /// <param name="request">Registration request data</param>
     /// <returns>Success response with registration ID</returns>
@@ -166,14 +166,22 @@ public class SkillInWebsiteController : ControllerBase
             // Validate required fields
             if (string.IsNullOrWhiteSpace(request.Type))
             {
-                return BadRequest(new { Success = false, Message = "Type is required (must be 'Junior' or 'Employer')" });
+                return BadRequest(new { Success = false, Message = "Type is required (must be 'Junior', 'Employer', 'Sales', or 'Demo')" });
             }
 
-            // Validate Type value
+            // Validate Type value — stored on EarlyBirds.Type
             var typeUpper = request.Type.Trim().ToUpperInvariant();
-            if (typeUpper != "JUNIOR" && typeUpper != "EMPLOYER")
+            string? normalizedType = typeUpper switch
             {
-                return BadRequest(new { Success = false, Message = "Type must be either 'Junior' or 'Employer'" });
+                "JUNIOR" => "Junior",
+                "EMPLOYER" => "Employer",
+                "SALES" => "Sales",
+                "DEMO" => "Demo",
+                _ => null
+            };
+            if (normalizedType is null)
+            {
+                return BadRequest(new { Success = false, Message = "Type must be 'Junior', 'Employer', 'Sales', or 'Demo'" });
             }
 
             if (string.IsNullOrWhiteSpace(request.Name))
@@ -212,7 +220,7 @@ public class SkillInWebsiteController : ControllerBase
             // Create new early bird registration
             var earlyBird = new EarlyBirds
             {
-                Type = typeUpper == "JUNIOR" ? "Junior" : "Employer", // Normalize to proper case
+                Type = normalizedType,
                 Name = request.Name.Trim(),
                 Email = request.Email.Trim().ToLower(),
                 OrgName = string.IsNullOrWhiteSpace(request.OrgName) ? null : request.OrgName.Trim(),
@@ -251,7 +259,7 @@ public class SkillInWebsiteController : ControllerBase
     /// </summary>
     public class EarlyBirdRegistrationRequest
     {
-        public string Type { get; set; } = string.Empty; // "Junior" or "Employer"
+        public string Type { get; set; } = string.Empty; // "Junior", "Employer", "Sales", or "Demo"
         public string Name { get; set; } = string.Empty;
         public string Email { get; set; } = string.Empty;
         public string? OrgName { get; set; }

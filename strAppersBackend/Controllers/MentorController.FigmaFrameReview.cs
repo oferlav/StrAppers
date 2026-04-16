@@ -16,7 +16,7 @@ public partial class MentorController
     /// When <see cref="FigmaFrameReviewRequest.Test"/> is true, returns <c>generatedSystemPrompt</c> and skips Figma + LLM (for Swagger inspection).
     /// </summary>
     [HttpPost("use/figma-frame-review")]
-    public async Task<ActionResult<object>> FigmaFrameReview([FromBody] FigmaFrameReviewRequest? request)
+    public async Task<ActionResult<object>> FigmaFrameReview([FromBody] FigmaFrameReviewRequest? request, CancellationToken cancellationToken)
     {
         if (request == null)
             return BadRequest(new { success = false, message = "Request body is required." });
@@ -162,6 +162,9 @@ public partial class MentorController
                 userPrompt);
 
             var totalTokensConsumed = inputTokens + outputTokens;
+
+            if (!request.Test)
+                await TryPersistCacheReviewAsync(boardId, request.StudentId, request.SprintNumber, CacheReviewType.Skill, llmText, cancellationToken);
 
             return Ok(new
             {

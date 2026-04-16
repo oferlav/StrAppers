@@ -101,6 +101,7 @@ public class Project
     // Navigation properties
     public ICollection<DesignVersion> DesignVersions { get; set; } = new List<DesignVersion>();
     public ICollection<ProjectsIDE> IDEChunks { get; set; } = new List<ProjectsIDE>();
+    public ICollection<TrelloTemplate> TrelloTemplates { get; set; } = new List<TrelloTemplate>();
 }
 
 public class CreateProjectRequest

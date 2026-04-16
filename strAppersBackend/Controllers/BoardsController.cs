@@ -40,7 +40,7 @@ public class ProjectBoardInfoResponse
 
 [ApiController]
 [Route("api/[controller]/use")]
-public class BoardsController : ControllerBase
+public partial class BoardsController : ControllerBase
 {
     private readonly ApplicationDbContext _context;
     private readonly ILogger<BoardsController> _logger;
@@ -2992,7 +2992,16 @@ public class BoardsController : ControllerBase
                 _logger.LogError(commitEx, "Error committing transaction: {CommitException}", commitEx.Message);
                 throw;
             }
-            
+
+            try
+            {
+                await AssignUniqueSquadNameForLiveBoardAsync(trelloBoardId);
+            }
+            catch (Exception exSq)
+            {
+                _logger.LogWarning(exSq, "Squad name AI assignment failed for board {BoardId}", trelloBoardId);
+            }
+
             // Create Teams meeting AFTER ProjectBoard is committed (so TeamsController can find it)
             // Use the create-meeting-smtp-for-board-auth endpoint which handles custom URLs and tracking
             if (!string.IsNullOrEmpty(request.Title) && request.DurationMinutes.HasValue)
@@ -3053,6 +3062,7 @@ public class BoardsController : ControllerBase
                                 
                                 // Update ProjectBoard with the actual meeting URL (transaction already committed)
                                 projectBoard.NextMeetingUrl = meetingUrl;
+                                projectBoard.NextMeetingTeacherAttendance = false;
                                 await _context.SaveChangesAsync();
                                 _logger.LogInformation("Updated ProjectBoard with meeting URL: {MeetingUrl}", meetingUrl);
                             }
@@ -3110,11 +3120,17 @@ public class BoardsController : ControllerBase
                 ? "Board and repositories created successfully!" 
                 : "Board created successfully! (GitHub repository creation was skipped or failed)";
 
+            var squadSnap = await _context.ProjectBoards.AsNoTracking()
+                .Where(b => b.Id == trelloBoardId)
+                .Select(b => b.SquadName)
+                .FirstOrDefaultAsync();
+
             return Ok(new CreateBoardResponse
             {
                 Success = true,
                 Message = message,
                 BoardId = trelloBoardId,
+                SquadName = squadSnap,
                 BoardUrl = trelloResponse.BoardUrl,
                 RepositoryUrl = backendRepositoryUrl, // Deprecated - kept for backward compatibility
                 FrontendRepositoryUrl = frontendRepositoryUrl,
@@ -7968,6 +7984,82 @@ INSERT INTO ""TestProjects"" (""Name"") VALUES
             _logger.LogError(ex, "[RAILWAY] Error polling for service URL: {Message}", ex.Message);
         }
     }
+
+    /// <summary>
+    /// AI-generates a single-word <see cref="ProjectBoard.SquadName"/> for the live (non-system) board; retries if the word already exists.
+    /// </summary>
+    private async Task AssignUniqueSquadNameForLiveBoardAsync(string boardId)
+    {
+        const int maxAttempts = 12;
+        var board = await _context.ProjectBoards.FirstOrDefaultAsync(b => b.Id == boardId);
+        if (board == null || board.IsSystemBoard)
+            return;
+
+        string? lastRejected = null;
+        for (var attempt = 0; attempt < maxAttempts; attempt++)
+        {
+            var prompt = attempt == 0
+                ? "Invent ONE cool, catchy, random English word as a squad codename for an edtech / capstone student team. Output ONLY that single word: letters A–Z and a–z, no spaces, punctuation, numbers, quotes, or explanation. Max 18 letters."
+                : $"The squad name \"{lastRejected}\" is already taken. Output a DIFFERENT single English word (letters A–z only), max 18 letters — another cool random edtech squad codename. Output ONLY the word, nothing else.";
+
+            var raw = await _aiService.GenerateTextResponseAsync(prompt);
+            var word = NormalizeSquadOneWord(raw);
+            if (string.IsNullOrEmpty(word))
+            {
+                _logger.LogWarning("Squad name AI returned empty/unusable text on attempt {Attempt}", attempt + 1);
+                continue;
+            }
+
+            if (word.Length > 100)
+                word = word[..100];
+
+            var lower = word.ToLowerInvariant();
+            var taken = await _context.ProjectBoards.AsNoTracking()
+                .AnyAsync(b => b.Id != boardId && b.SquadName != null && b.SquadName.ToLower() == lower);
+            if (taken)
+            {
+                lastRejected = word;
+                _logger.LogInformation("Squad name {Word} already exists; asking AI again", word);
+                continue;
+            }
+
+            board.SquadName = word;
+            board.UpdatedAt = DateTime.UtcNow;
+            await _context.SaveChangesAsync();
+            _logger.LogInformation("Assigned SquadName={Squad} to board {BoardId}", word, boardId);
+            return;
+        }
+
+        _logger.LogWarning("Could not assign a unique SquadName for board {BoardId} after {Attempts} attempts", boardId, maxAttempts);
+    }
+
+    private static string? NormalizeSquadOneWord(string? raw)
+    {
+        if (string.IsNullOrWhiteSpace(raw))
+            return null;
+        var t = raw.Trim();
+        var nl = t.IndexOfAny(new[] { '\r', '\n' });
+        if (nl >= 0)
+            t = t[..nl].Trim();
+        var parts = t.Split(new[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Length == 0)
+            return null;
+        var token = parts[0];
+        var sb = new System.Text.StringBuilder();
+        foreach (var c in token)
+        {
+            if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z'))
+                sb.Append(c);
+            else if (sb.Length > 0)
+                break;
+        }
+        if (sb.Length == 0)
+            return null;
+        var s = sb.ToString();
+        if (s.Length > 100)
+            s = s[..100];
+        return char.ToUpperInvariant(s[0]) + s[1..].ToLowerInvariant();
+    }
 }
 
 // Request/Response DTOs
@@ -7985,6 +8077,8 @@ public class CreateBoardResponse
     public bool Success { get; set; }
     public string Message { get; set; } = string.Empty;
     public string BoardId { get; set; } = string.Empty;
+    /// <summary>AI-assigned one-word squad codename when generation succeeded.</summary>
+    public string? SquadName { get; set; }
     public string? BoardUrl { get; set; }
     /// <summary>
     /// Backend repository URL (deprecated - use FrontendRepositoryUrl and BackendRepositoryUrl instead)

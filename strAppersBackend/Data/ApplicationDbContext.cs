@@ -10,6 +10,8 @@ public class ApplicationDbContext : DbContext
     }
 
     public DbSet<Student> Students { get; set; }
+    public DbSet<Institute> Institutes { get; set; }
+    public DbSet<Teacher> Teachers { get; set; }
     public DbSet<Organization> Organizations { get; set; }
     public DbSet<Project> Projects { get; set; }
     public DbSet<ProjectInstance> ProjectInstances { get; set; }
@@ -49,6 +51,10 @@ public class ApplicationDbContext : DbContext
     public DbSet<PrivateChat> PrivateChats { get; set; }
     public DbSet<Support> Supports { get; set; }
     public DbSet<Resource> Resources { get; set; }
+    public DbSet<CacheReview> CacheReviews { get; set; }
+    public DbSet<Metric> Metrics { get; set; }
+    public DbSet<CacheMetrics> CacheMetrics { get; set; }
+    public DbSet<TrelloTemplate> TrelloTemplates { get; set; }
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -72,6 +78,86 @@ public class ApplicationDbContext : DbContext
                 new Major { Id = 5, Name = "Information Technology", Description = "Management and use of technology", Department = "Information Systems", IsActive = true, CreatedAt = DateTime.UtcNow.AddDays(-60) },
                 new Major { Id = 6, Name = "Business Administration", Description = "General business management", Department = "Business", IsActive = true, CreatedAt = DateTime.UtcNow.AddDays(-60) }
             );
+        });
+
+        // Configure Institute entity
+        modelBuilder.Entity<Institute>(entity =>
+        {
+            entity.ToTable("Institutes");
+            entity.HasKey(e => e.Id);
+            entity.Property(e => e.Name).IsRequired().HasMaxLength(200);
+            entity.Property(e => e.Description).HasMaxLength(500);
+            entity.Property(e => e.Website).HasMaxLength(100);
+            entity.Property(e => e.ContactEmail).HasMaxLength(255);
+            entity.Property(e => e.Phone).HasMaxLength(20);
+            entity.Property(e => e.Address).HasMaxLength(200);
+            entity.Property(e => e.Type).HasMaxLength(50);
+            entity.Property(e => e.Logo).HasColumnName("Logo").HasColumnType("text");
+            entity.Property(e => e.TermsUse).HasColumnType("text");
+            entity.Property(e => e.TermsAccepted).HasDefaultValue(false);
+            entity.Property(e => e.TermsAcceptedAt).HasColumnType("timestamp with time zone");
+            entity.Property(e => e.CreatedAt).HasDefaultValueSql("CURRENT_TIMESTAMP");
+            entity.Property(e => e.State).HasMaxLength(100);
+            entity.Property(e => e.Country).HasMaxLength(100);
+            entity.Property(e => e.PasswordHash).HasMaxLength(256);
+
+            entity.HasData(
+                new Institute
+                {
+                    Id = 1,
+                    Name = "StrAppers Academy of Technology",
+                    Description = "Technology-focused institute and applied learning campus.",
+                    Website = "https://academy.strappers.example.org",
+                    ContactEmail = "contact@strappers-academy.example.org",
+                    Phone = "555-2100",
+                    Type = "Institute",
+                    Address = "42 Innovation Way, Suite 100",
+                    State = "Tel Aviv District",
+                    Country = "Israel",
+                    IsActive = true,
+                    TermsAccepted = false,
+                    CreatedAt = DateTime.UtcNow.AddDays(-30),
+                });
+        });
+
+        modelBuilder.Entity<Teacher>(entity =>
+        {
+            entity.ToTable("Teachers");
+            entity.HasKey(e => e.Id);
+            entity.Property(e => e.FirstName).IsRequired().HasMaxLength(100).HasColumnName("FirstName");
+            entity.Property(e => e.LastName).IsRequired().HasMaxLength(100).HasColumnName("LastName");
+            entity.Property(e => e.Email).IsRequired().HasMaxLength(255);
+            entity.Property(e => e.PasswordHash).HasMaxLength(256);
+            entity.Property(e => e.CreatedAt).HasDefaultValueSql("CURRENT_TIMESTAMP");
+            entity.Property(e => e.UpdatedAt).HasColumnType("timestamp with time zone");
+
+            entity.HasIndex(e => e.Email).IsUnique();
+            entity.HasIndex(e => e.InstituteId);
+
+            entity.HasOne(e => e.Institute)
+                .WithMany(i => i.Teachers)
+                .HasForeignKey(e => e.InstituteId)
+                .OnDelete(DeleteBehavior.Restrict);
+        });
+
+        modelBuilder.Entity<TrelloTemplate>(entity =>
+        {
+            entity.ToTable("TrelloTemplates");
+            entity.HasKey(e => e.Id);
+            entity.Property(e => e.TrelloBoardJson).HasColumnType("text").IsRequired();
+            entity.HasIndex(e => e.InstituteId);
+            entity.HasIndex(e => e.ProjectId);
+            entity.HasIndex(e => new { e.InstituteId, e.ProjectId });
+
+            entity.HasOne(e => e.Institute)
+                .WithMany(i => i.TrelloTemplates)
+                .HasForeignKey(e => e.InstituteId)
+                .OnDelete(DeleteBehavior.Restrict);
+
+            entity.HasOne(e => e.Project)
+                .WithMany(p => p.TrelloTemplates)
+                .HasForeignKey(e => e.ProjectId)
+                .OnDelete(DeleteBehavior.Cascade);
         });
 
         // Configure Year entity
@@ -226,6 +312,11 @@ public class ApplicationDbContext : DbContext
                   .WithMany()
                   .HasForeignKey(e => e.InstanceId)
                   .HasPrincipalKey(pi => pi.InstanceId)
+                  .OnDelete(DeleteBehavior.SetNull);
+
+            entity.HasOne(e => e.Institute)
+                  .WithMany(i => i.Students)
+                  .HasForeignKey(e => e.InstituteId)
                   .OnDelete(DeleteBehavior.SetNull);
 
             // Foreign key relationship to ProgrammingLanguage
@@ -423,6 +514,7 @@ public class ApplicationDbContext : DbContext
             entity.Property(e => e.NextMeetingTime).HasColumnName("NextMeetingTime").HasColumnType("timestamp with time zone");
             entity.Property(e => e.NextMeetingUrl).HasColumnName("NextMeetingUrl").HasMaxLength(1000);
             entity.Property(e => e.NextMeetingTitle).HasColumnName("NextMeetingTitle").HasMaxLength(500);
+            entity.Property(e => e.NextMeetingTeacherAttendance).HasColumnName("NextMeetingTeacherAttendance").HasDefaultValue(false);
             entity.Property(e => e.GithubBackendUrl).HasColumnName("GithubBackendUrl").HasMaxLength(1000);
             entity.Property(e => e.GithubFrontendUrl).HasColumnName("GithubFrontendUrl").HasMaxLength(1000);
             entity.Property(e => e.WebApiUrl).HasColumnName("WebApiUrl").HasMaxLength(1000);
@@ -447,6 +539,7 @@ public class ApplicationDbContext : DbContext
             entity.Property(e => e.NeonBranchId).HasColumnName("NeonBranchId").HasMaxLength(100);
             entity.Property(e => e.SystemBoardId).HasColumnName("SystemBoardId").HasMaxLength(50);
             entity.Property(e => e.IsSystemBoard).HasColumnName("IsSystemBoard").HasDefaultValue(false);
+            entity.Property(e => e.SquadName).HasColumnName("SquadName").HasMaxLength(100);
             
             // Foreign key relationships
             entity.HasOne(e => e.Project)
@@ -479,6 +572,7 @@ public class ApplicationDbContext : DbContext
             entity.HasIndex(e => e.CreatedAt);
             entity.HasIndex(e => e.StatusId);
             entity.HasIndex(e => e.SystemBoardId);
+            entity.HasIndex(e => e.SquadName);
 
             entity.HasMany(e => e.SprintMerges)
                   .WithOne(s => s.ProjectBoard)
@@ -513,6 +607,7 @@ public class ApplicationDbContext : DbContext
             entity.Property(e => e.CreatedAt).HasColumnType("timestamp with time zone");
             entity.HasIndex(e => e.StudentId);
             entity.HasIndex(e => e.SprintId);
+            entity.HasIndex(e => new { e.StudentId, e.SprintId });
         });
 
         // Configure PromptCategory entity
@@ -645,6 +740,78 @@ public class ApplicationDbContext : DbContext
                 .OnDelete(DeleteBehavior.Cascade);
             entity.HasIndex(e => e.BoardId);
             entity.HasIndex(e => e.StudentId);
+        });
+
+        modelBuilder.Entity<CacheReview>(entity =>
+        {
+            entity.HasKey(e => e.Id);
+            entity.ToTable("CacheReview");
+            entity.Property(e => e.Id).ValueGeneratedOnAdd();
+            entity.Property(e => e.BoardId).HasMaxLength(50).IsRequired();
+            entity.Property(e => e.SprintNumber).IsRequired();
+            entity.Property(e => e.SequenceNumber).IsRequired();
+            entity.Property(e => e.Type)
+                .HasConversion<string>()
+                .HasMaxLength(20)
+                .IsRequired();
+            entity.Property(e => e.ReviewContent).HasColumnType("text").IsRequired();
+            entity.HasOne(e => e.ProjectBoard)
+                .WithMany()
+                .HasForeignKey(e => e.BoardId)
+                .HasPrincipalKey(pb => pb.Id)
+                .OnDelete(DeleteBehavior.Cascade);
+            entity.HasOne(e => e.Student)
+                .WithMany()
+                .HasForeignKey(e => e.StudentId)
+                .OnDelete(DeleteBehavior.Cascade);
+            entity.HasIndex(e => e.BoardId);
+            entity.HasIndex(e => e.StudentId);
+            entity.HasIndex(e => new { e.BoardId, e.StudentId, e.SprintNumber, e.SequenceNumber }).IsUnique();
+        });
+
+        modelBuilder.Entity<Metric>(entity =>
+        {
+            entity.HasKey(e => e.Id);
+            entity.ToTable("Metrics");
+            entity.Property(e => e.Id).ValueGeneratedOnAdd();
+            entity.Property(e => e.Name).HasMaxLength(100).IsRequired();
+            entity.Property(e => e.Endpoint).HasMaxLength(100);
+            entity.HasData(
+                new Metric { Id = 1, Name = "Adherence", Endpoint = null },
+                new Metric { Id = 2, Name = "GapAnalysis", Endpoint = null },
+                new Metric { Id = 3, Name = "Improvement", Endpoint = null },
+                new Metric { Id = 4, Name = "Communication", Endpoint = null },
+                new Metric { Id = 5, Name = "Attendance", Endpoint = null },
+                new Metric { Id = 6, Name = "Strengths&weaknesses", Endpoint = null },
+                new Metric { Id = 7, Name = "CustomerEngagement", Endpoint = null });
+        });
+
+        modelBuilder.Entity<CacheMetrics>(entity =>
+        {
+            entity.HasKey(e => e.Id);
+            entity.ToTable("CacheMetrics");
+            entity.Property(e => e.Id).ValueGeneratedOnAdd();
+            entity.Property(e => e.BoardId).HasMaxLength(50).IsRequired();
+            entity.Property(e => e.SprintNumber).IsRequired();
+            entity.Property(e => e.ReviewContent).HasColumnType("text").IsRequired();
+            entity.Property(e => e.Graph).HasColumnType("text");
+            entity.Property(e => e.Graph2).HasColumnType("text");
+            entity.HasOne(e => e.ProjectBoard)
+                .WithMany()
+                .HasForeignKey(e => e.BoardId)
+                .HasPrincipalKey(pb => pb.Id)
+                .OnDelete(DeleteBehavior.Cascade);
+            entity.HasOne(e => e.Student)
+                .WithMany()
+                .HasForeignKey(e => e.StudentId)
+                .OnDelete(DeleteBehavior.Cascade);
+            entity.HasOne(e => e.Metric)
+                .WithMany()
+                .HasForeignKey(e => e.MetricId)
+                .OnDelete(DeleteBehavior.Restrict);
+            entity.HasIndex(e => e.BoardId);
+            entity.HasIndex(e => e.StudentId);
+            entity.HasIndex(e => e.MetricId);
         });
 
         // Configure MentorChatHistory entity (Id is identity; ensure value-generated on add to avoid duplicate key when sequence is out of sync)
@@ -936,6 +1103,8 @@ public class ApplicationDbContext : DbContext
             entity.Property(e => e.EmployerExposure).HasDefaultValue(true);
             entity.Property(e => e.B2c).HasDefaultValue(true);
             entity.Property(e => e.AssistMe).HasDefaultValue(false);
+            entity.Property(e => e.NextMeetingTime).HasColumnName("NextMeetingTime").HasColumnType("timestamp with time zone");
+            entity.Property(e => e.NextMeetingUrl).HasColumnName("NextMeetingUrl").HasMaxLength(1000);
             
             entity.HasOne(e => e.SubscriptionType)
                   .WithMany(s => s.Students)
@@ -943,6 +1112,7 @@ public class ApplicationDbContext : DbContext
                   .OnDelete(DeleteBehavior.SetNull);
             
             entity.HasIndex(e => e.SubscriptionTypeId);
+            entity.HasIndex(e => e.InstituteId);
         });
 
         // Configure AIModel entity

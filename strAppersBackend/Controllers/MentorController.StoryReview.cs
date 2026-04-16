@@ -11,7 +11,7 @@ public partial class MentorController
     /// <summary>
     /// PM-oriented review: user story card vs customer chat; internal scope/backstory for reasoning only.
     /// ModuleId is read from the Product Manager sprint card; requires a matching user story card in Trello.
-    /// Sprint task lists from mentor context are not passed to the model (system-generated, not PM work).
+    /// Includes the same <see cref="GetMentorContextInternal"/> workspace text as other mentor reviews (this sprint’s Trello tasks for the student and teammates) so the model can compare planned sprint work to the story.
     /// </summary>
     [HttpPost("use/story-review")]
     public async Task<ActionResult<object>> StoryReview([FromBody] ResourceReviewRequest? request, CancellationToken cancellationToken)
@@ -135,6 +135,18 @@ public partial class MentorController
                 request.SprintNumber,
                 cancellationToken);
 
+            var mentorCtx = await GetMentorContextInternal(request.StudentId, request.SprintNumber, null);
+            if (mentorCtx == null)
+                return BadRequest(new { success = false, message = "Could not build mentor workspace context (board, sprint list, or project missing?)." });
+
+            var mentorCtxJson = JsonSerializer.Serialize(mentorCtx);
+            var mentorCtxEl = JsonSerializer.Deserialize<JsonElement>(mentorCtxJson);
+            var workspaceUserPrompt = "";
+            if (mentorCtxEl.TryGetProperty("UserPrompt", out var up1))
+                workspaceUserPrompt = up1.GetString() ?? "";
+            else if (mentorCtxEl.TryGetProperty("userPrompt", out var up2))
+                workspaceUserPrompt = up2.GetString() ?? "";
+
             var project = await _context.Projects.AsNoTracking()
                 .FirstOrDefaultAsync(p => p.Id == board.ProjectId, cancellationToken);
             var customerPastStory = string.IsNullOrWhiteSpace(project?.CustomerPastStory)
@@ -142,7 +154,7 @@ public partial class MentorController
                 : project!.CustomerPastStory!.Trim();
 
             var reviewInstructions = LoadMentorPromptFile("StoryReviewSystem")?.Trim()
-                ?? "Review only the user story card and customer chat. Do not review system sprint tasks. Do not name internal scope/backstory. If gaps vs customer chat exist, suggest follow-up with the customer without listing hidden backstory details.";
+                ?? "Review the user story card and customer chat; use MENTOR WORKSPACE (sprint tasks) as context for planned vs story coverage. Do not name internal scope/backstory.";
 
             var baseSystem = StripDebugMarkers(DbgConfig("SystemPrompt") + (_promptConfig.Mentor.SystemPrompt ?? ""));
             var fullStackBlock = BuildFullStackDeveloperMentorInstructions(originalRoleName);
@@ -157,13 +169,16 @@ public partial class MentorController
             userMessage.AppendLine("=== STRUCTURED CONTEXT (internal scope + user story card) ===");
             userMessage.AppendLine(contextMd.ToString().Trim());
             userMessage.AppendLine();
+            userMessage.AppendLine("=== MENTOR WORKSPACE (this sprint — Trello tasks for the student and teammates; planned work vs user story) ===");
+            userMessage.AppendLine(string.IsNullOrWhiteSpace(workspaceUserPrompt) ? "(Empty — no task summary was built.)" : workspaceUserPrompt.Trim());
+            userMessage.AppendLine();
             userMessage.AppendLine("=== CUSTOMER CONVERSATION THIS SPRINT (simulated customer chat — OK to reference as conversation with the customer) ===");
             userMessage.AppendLine(customerChatSection.Trim());
             userMessage.AppendLine();
             userMessage.AppendLine("=== [INTERNAL] Additional customer/product backstory (reasoning only — do not mention, title, or summarize for the student) ===");
             userMessage.AppendLine(customerPastStory);
             userMessage.AppendLine();
-            userMessage.AppendLine("Write the review now: only the user story card and the customer conversation. Do not review system-generated sprint tasks. Do not output sections about “module description,” “database,” or “customer past story.”");
+            userMessage.AppendLine("Write the review now: primary focus is the **user story card** and the **customer conversation**, informed by **MENTOR WORKSPACE** (sprint tasks — what the team committed to this sprint). Do not output sections about “module description,” “database,” or “customer past story” as labeled topics.");
 
             var userPromptFinal = userMessage.ToString();
 
@@ -199,6 +214,9 @@ public partial class MentorController
 
             var (llmText, inputTokens, outputTokens) =
                 await _chatCompletionService.GetChatCompletionAsync(aiModel, systemPrompt, userPromptFinal);
+
+            if (!request.Test)
+                await TryPersistCacheReviewAsync(boardId, request.StudentId, request.SprintNumber, CacheReviewType.Skill, llmText, cancellationToken);
 
             return Ok(new
             {

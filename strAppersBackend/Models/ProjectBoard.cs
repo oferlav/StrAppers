@@ -115,6 +115,13 @@ namespace strAppersBackend.Models
         public string? NextMeetingTitle { get; set; }
 
         /// <summary>
+        /// Institute contact requested the meeting invite email for the current <see cref="NextMeetingTime"/> (staff dashboard &quot;Get Invited&quot;).
+        /// Reset when the next meeting is rescheduled (Teams flow updates next meeting fields).
+        /// </summary>
+        [Column("NextMeetingTeacherAttendance")]
+        public bool NextMeetingTeacherAttendance { get; set; }
+
+        /// <summary>
         /// GitHub backend repository URL for the project board
         /// </summary>
         [MaxLength(1000)]
@@ -285,6 +292,13 @@ namespace strAppersBackend.Models
         /// </summary>
         [Column("IsSystemBoard")]
         public bool IsSystemBoard { get; set; }
+
+        /// <summary>
+        /// Short unique squad codename (one word, AI-generated for non-system boards).
+        /// </summary>
+        [MaxLength(100)]
+        [Column("SquadName")]
+        public string? SquadName { get; set; }
 
         // Navigation properties
         /// <summary>

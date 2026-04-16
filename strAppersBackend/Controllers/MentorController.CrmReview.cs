@@ -11,7 +11,8 @@ public partial class MentorController
 {
     /// <summary>
     /// Reviews stakeholder (CRM) rows created or last updated in the sprint’s date window, with the same mentor context as resource-review
-    /// (module, user story, workspace tasks, customer chat). Requires sprint dates from board SprintPlan or board StartDate fallback.
+    /// (module, user story, workspace tasks, customer chat). Sprint window matches the board UI when
+    /// <see cref="ProjectBoardSprintMerge"/> has a row (same as GET sprint-schedule); otherwise uses SprintPlan JSON or board StartDate fallback.
     /// </summary>
     [HttpPost("use/crm-review")]
     public async Task<ActionResult<object>> CrmReview([FromBody] ResourceReviewRequest? request, CancellationToken cancellationToken)
@@ -30,7 +31,7 @@ public partial class MentorController
         const string noWindowMessage =
             "Could not resolve this sprint’s dates from the board plan. Ensure Sprint lists in the board plan have Start/End dates, or set the board start date.";
         const string noStakeholdersMessage =
-            "No new stakeholder data has been added to this sprint.";
+            "There are no stakeholder entries on your board for this sprint yet. Add them in CRM during this sprint, then try CRM review again.";
 
         if (request.SprintNumber == 0)
         {
@@ -62,12 +63,23 @@ public partial class MentorController
             if (board == null)
                 return NotFound(new { success = false, message = $"Board {boardId} not found." });
 
-            if (!SprintPlanDateResolver.TryGetSprintInclusiveUtcRange(
+            var sprintLengthWeeks = _configuration.GetValue<int>("BusinessLogicConfig:SprintLengthInWeeks", 1);
+            var sprintMerge = await _context.ProjectBoardSprintMerges.AsNoTracking()
+                .FirstOrDefaultAsync(m => m.ProjectBoardId == boardId && m.SprintNumber == request.SprintNumber, cancellationToken);
+
+            DateTime windowStartUtc;
+            DateTime windowEndInclusiveUtc;
+            var haveSprintWindow =
+                SprintPlanDateResolver.TryGetInclusiveUtcRangeFromSprintMerge(
+                    sprintMerge, request.SprintNumber, sprintLengthWeeks, out windowStartUtc, out windowEndInclusiveUtc)
+                || SprintPlanDateResolver.TryGetSprintInclusiveUtcRange(
                     board.SprintPlan,
                     board.StartDate,
                     request.SprintNumber,
-                    out var windowStartUtc,
-                    out var windowEndInclusiveUtc))
+                    out windowStartUtc,
+                    out windowEndInclusiveUtc);
+
+            if (!haveSprintWindow)
             {
                 return Ok(new
                 {
@@ -92,6 +104,9 @@ public partial class MentorController
                     break;
             }
 
+            var hasProjectModule = false;
+            var hasUserStoryCard = false;
+
             var contextMd = new StringBuilder();
             contextMd.AppendLine("## Sprint / module / user story");
             contextMd.AppendLine($"- **BoardId:** `{boardId}`");
@@ -114,6 +129,7 @@ public partial class MentorController
                 }
                 else
                 {
+                    hasProjectModule = true;
                     contextMd.AppendLine($"- **ModuleId:** {pm.Id}");
                     contextMd.AppendLine($"- **Title:** {pm.Title ?? "(none)"}");
                     contextMd.AppendLine("- **Description:**");
@@ -125,6 +141,7 @@ public partial class MentorController
                 var usCard = ExtractUserStoryCardFromResourceReviewResult(usResult);
                 if (usCard != null)
                 {
+                    hasUserStoryCard = true;
                     contextMd.AppendLine("### User story (Trello — User Stories list)");
                     contextMd.AppendLine(FormatResourceReviewUserStoryCard(usCard));
                     contextMd.AppendLine();
@@ -136,6 +153,24 @@ public partial class MentorController
                 contextMd.AppendLine("Skipped: ModuleId could not be read from the student’s sprint card (custom field on role-labeled card).");
                 contextMd.AppendLine();
             }
+
+            contextMd.AppendLine("### Review constraints (for the mentor model)");
+            if (!hasProjectModule && !hasUserStoryCard)
+            {
+                contextMd.AppendLine("- **No project module** and **no user story card** are present in this sprint’s context above.");
+                contextMd.AppendLine("- **Do not** relate stakeholder entries to a user story, feature, or sprint scope that is not explicitly shown. Do not use the internal customer/product backstory alone to invent such a link.");
+                contextMd.AppendLine("- **Do** infer what this sprint is about from **MENTOR WORKSPACE** (task titles, checklists). If work is testing, QA, or bug-fixing, say so and judge whether CRM entries fit that phase.");
+            }
+            else if (hasProjectModule && !hasUserStoryCard)
+            {
+                contextMd.AppendLine("- A **project module** is present but **no user story card** was found. Do not invent user-story wording; reference only the module title/description above.");
+            }
+            else if (!hasProjectModule && hasUserStoryCard)
+            {
+                contextMd.AppendLine("- A **user story** is present but **no matching project module row** was found. Ground scope in the user story section only.");
+            }
+
+            contextMd.AppendLine();
 
             var mentorCtx = await GetMentorContextInternal(request.StudentId, request.SprintNumber, null);
             if (mentorCtx == null)
@@ -219,7 +254,7 @@ public partial class MentorController
             }
 
             var reviewInstructions = LoadMentorPromptFile("CrmReviewSystem")?.Trim()
-                ?? "Review the stakeholder (CRM) entries for this sprint. Use module, user story, workspace, and customer chat as context. Be specific and actionable.";
+                ?? "Review CRM stakeholder entries for this sprint. If module/user story are missing from context, do not invent them; use MENTOR WORKSPACE tasks. Be specific.";
 
             var baseSystem = StripDebugMarkers(DbgConfig("SystemPrompt") + (_promptConfig.Mentor.SystemPrompt ?? ""));
             var fullStackBlock = BuildFullStackDeveloperMentorInstructions(originalRoleName);
@@ -229,7 +264,7 @@ public partial class MentorController
             var systemPrompt = $"{GetPlatformInterfaceAndRolePermissions()}\n\n{baseSystem}\n\n{reviewInstructions}".Trim();
 
             var userMessage = new StringBuilder();
-            userMessage.AppendLine("=== STRUCTURED CONTEXT (module + user story) ===");
+            userMessage.AppendLine("=== STRUCTURED CONTEXT (sprint, module, user story — may be incomplete) ===");
             userMessage.AppendLine(contextMd.ToString().Trim());
             userMessage.AppendLine();
             userMessage.AppendLine("=== MENTOR WORKSPACE (Trello tasks, team, sprint summary) ===");
@@ -281,6 +316,9 @@ public partial class MentorController
 
             var (llmText, inputTokens, outputTokens) =
                 await _chatCompletionService.GetChatCompletionAsync(aiModel, systemPrompt, userPromptFinal);
+
+            if (!request.Test)
+                await TryPersistCacheReviewAsync(boardId, request.StudentId, request.SprintNumber, CacheReviewType.Skill, llmText, cancellationToken);
 
             return Ok(new
             {

@@ -5,6 +5,7 @@ using Microsoft.Extensions.Options;
 using strAppersBackend.Data;
 using strAppersBackend.Models;
 using strAppersBackend.Services;
+using strAppersBackend.Utilities;
 using System.Text;
 using System.Text.Json;
 using System.IO;
@@ -1087,7 +1088,7 @@ namespace strAppersBackend.Controllers
                                 // For checkbox fields
                                 else if (valueProp.TryGetProperty("checked", out var checkedProp))
                                 {
-                                    fieldValue = checkedProp.GetBoolean().ToString();
+                                    fieldValue = TrelloCheckboxJson.CheckedToString(checkedProp);
                                 }
                             }
                             else if (valueProp.ValueKind == JsonValueKind.Number)
@@ -9952,6 +9953,23 @@ APPROVAL: no    (request changes before merge)";
                     // Continue even if recording fails
                 }
 
+                // PR validation flows use source GitHub-Success-PR: one CacheReview row with Type PR (not Skill).
+                // Standalone POST /use/code-review uses source Junior → Skill.
+                var cacheStudentId = await ResolveCacheReviewStudentIdForBranchAsync(request.BoardId, request.GithubBranch, HttpContext.RequestAborted);
+                if (cacheStudentId.HasValue)
+                {
+                    var cacheType = string.Equals(source, "GitHub-Success-PR", StringComparison.Ordinal)
+                        ? CacheReviewType.PR
+                        : CacheReviewType.Skill;
+                    await TryPersistCacheReviewAsync(
+                        request.BoardId,
+                        cacheStudentId.Value,
+                        sprintNumber,
+                        cacheType,
+                        feedbackWithoutApprovalLine,
+                        HttpContext.RequestAborted);
+                }
+
                 return Ok(new
                 {
                     Success = true,
@@ -11996,6 +12014,7 @@ APPROVAL: no    (request changes before merge)";
 
                 if (success)
                 {
+                    // CacheReview Type PR is written inside CodeReviewInternal (source GitHub-Success-PR), not here, so PR flows get a single row.
                     return Ok(new 
                     { 
                         Success = true, 

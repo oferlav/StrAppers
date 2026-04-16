@@ -72,7 +72,7 @@ namespace strAppersBackend.Controllers
         }
 
         /// <summary>
-        /// Get all modules for a specific project
+        /// Get all modules for a specific project (only <see cref="ProjectModule.ModuleType"/> = 2 — e.g. feature modules for Task Builder linking).
         /// </summary>
         [HttpGet("by-project/{projectId}")]
         public async Task<ActionResult<IEnumerable<ProjectModule>>> GetProjectModulesByProject(int projectId)
@@ -82,7 +82,7 @@ namespace strAppersBackend.Controllers
                 _logger.LogInformation($"Retrieving modules for project ID: {projectId}");
                 var projectModules = await _context.ProjectModules
                     .Include(pm => pm.ModuleTypeNavigation)
-                    .Where(pm => pm.ProjectId == projectId)
+                    .Where(pm => pm.ProjectId == projectId && pm.ModuleType == 2)
                     .ToListAsync();
                 _logger.LogInformation($"Retrieved {projectModules.Count} modules for project {projectId}");
                 return Ok(projectModules);

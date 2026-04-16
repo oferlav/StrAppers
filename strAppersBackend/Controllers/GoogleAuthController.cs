@@ -204,6 +204,38 @@ public class GoogleAuthController : ControllerBase
                 ("organizationId", organization.Id.ToString())));
         }
 
+        // Institute contacts (same email must not exist on both Students and Institutes)
+        var institute = await _db.Institutes
+            .AsNoTracking()
+            .FirstOrDefaultAsync(i =>
+                i.ContactEmail != null &&
+                i.ContactEmail.ToLower() == normalizedEmail.ToLower());
+
+        if (institute != null)
+        {
+            var studentWithSameEmail = await _db.Students
+                .AsNoTracking()
+                .AnyAsync(s =>
+                    s.Email != null &&
+                    s.Email.ToLower() == normalizedEmail.ToLower());
+
+            if (studentWithSameEmail)
+            {
+                _logger.LogWarning(
+                    "Google login: email {Email} exists on both Student and Institute",
+                    normalizedEmail);
+                return Redirect(BuildGoogleCallbackUrl(frontendBase,
+                    ("status", "error"),
+                    ("message", "institute_student_email_conflict")));
+            }
+
+            return Redirect(BuildGoogleCallbackUrl(frontendBase,
+                ("status", "ok"),
+                ("userType", "institute"),
+                ("email", normalizedEmail),
+                ("instituteId", institute.Id.ToString())));
+        }
+
         var student = await _db.Students
             .AsNoTracking()
             .FirstOrDefaultAsync(s =>

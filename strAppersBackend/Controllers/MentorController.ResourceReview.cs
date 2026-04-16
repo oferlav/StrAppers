@@ -125,7 +125,7 @@ public partial class MentorController
                            ?? await baseQ.Where(r => r.SprintNumber == null).FirstOrDefaultAsync(cancellationToken);
 
             if (resource == null)
-                return BadRequest(new { success = false, message = "No non-Figma resource for this sprint (and no board-level resource). Add a file in Resources for this sprint, or set a board-level resource with no sprint." });
+                return BadRequest(new { success = false, message = "❌ No resource found for this sprint. Add a file in Resources for this sprint." });
 
             if (!ResourceDocumentContentExtractor.IsAzureBlobStorageHttpsUrl(resource.Url))
             {
@@ -344,6 +344,9 @@ public partial class MentorController
                     aiModel, systemPrompt, userPromptFinal, visionDataUrl)
                 : await _chatCompletionService.GetChatCompletionAsync(aiModel, systemPrompt, userPromptFinal);
 
+            if (!request.Test)
+                await TryPersistCacheReviewAsync(boardId, request.StudentId, request.SprintNumber, CacheReviewType.Resource, llmText, cancellationToken);
+
             return Ok(new
             {
                 success = true,
@@ -371,8 +374,9 @@ public partial class MentorController
     }
 
     /// <summary>
-    /// Same filter as <see cref="CustomerController.GetCustomerChatHistory"/>: <see cref="CustomerChatHistory.StudentId"/> and
-    /// <see cref="CustomerChatHistory.SprintId"/> (= sprint number). Limited by <see cref="PromptConfig.Customer"/>.<c>ChatHistoryLength</c> × 2 rows.
+    /// Same filter as <see cref="CustomerController.GetCustomerChatHistory"/>: <see cref="CustomerChatHistory.StudentId"/>
+    /// and <see cref="CustomerChatHistory.SprintId"/> (= sprint number).
+    /// Limited by <see cref="PromptConfig.Customer"/>.<c>ChatHistoryLength</c> × 2 rows.
     /// </summary>
     private async Task<(string Text, int Count)> BuildResourceReviewCustomerChatSectionAsync(
         int studentId,
