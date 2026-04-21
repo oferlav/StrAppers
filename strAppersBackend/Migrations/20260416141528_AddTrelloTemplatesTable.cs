@@ -12,7 +12,7 @@ namespace strAppersBackend.Migrations
         protected override void Up(MigrationBuilder migrationBuilder)
         {
             migrationBuilder.CreateTable(
-                name: "TrelloTemplates",
+                name: "InstituteTemplates",
                 columns: table => new
                 {
                     Id = table.Column<int>(type: "integer", nullable: false)
@@ -23,15 +23,15 @@ namespace strAppersBackend.Migrations
                 },
                 constraints: table =>
                 {
-                    table.PrimaryKey("PK_TrelloTemplates", x => x.Id);
+                    table.PrimaryKey("PK_InstituteTemplates", x => x.Id);
                     table.ForeignKey(
-                        name: "FK_TrelloTemplates_Institutes_InstituteId",
+                        name: "FK_InstituteTemplates_Institutes_InstituteId",
                         column: x => x.InstituteId,
                         principalTable: "Institutes",
                         principalColumn: "Id",
                         onDelete: ReferentialAction.Restrict);
                     table.ForeignKey(
-                        name: "FK_TrelloTemplates_Projects_ProjectId",
+                        name: "FK_InstituteTemplates_Projects_ProjectId",
                         column: x => x.ProjectId,
                         principalTable: "Projects",
                         principalColumn: "Id",
@@ -39,18 +39,18 @@ namespace strAppersBackend.Migrations
                 });
 
             migrationBuilder.CreateIndex(
-                name: "IX_TrelloTemplates_InstituteId",
-                table: "TrelloTemplates",
+                name: "IX_InstituteTemplates_InstituteId",
+                table: "InstituteTemplates",
                 column: "InstituteId");
 
             migrationBuilder.CreateIndex(
-                name: "IX_TrelloTemplates_InstituteId_ProjectId",
-                table: "TrelloTemplates",
+                name: "IX_InstituteTemplates_InstituteId_ProjectId",
+                table: "InstituteTemplates",
                 columns: new[] { "InstituteId", "ProjectId" });
 
             migrationBuilder.CreateIndex(
-                name: "IX_TrelloTemplates_ProjectId",
-                table: "TrelloTemplates",
+                name: "IX_InstituteTemplates_ProjectId",
+                table: "InstituteTemplates",
                 column: "ProjectId");
         }
 
@@ -58,7 +58,7 @@ namespace strAppersBackend.Migrations
         protected override void Down(MigrationBuilder migrationBuilder)
         {
             migrationBuilder.DropTable(
-                name: "TrelloTemplates");
+                name: "InstituteTemplates");
         }
     }
 }

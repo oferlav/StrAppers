@@ -955,6 +955,59 @@ namespace strAppersBackend.Migrations
                         });
                 });
 
+            modelBuilder.Entity("strAppersBackend.Models.InstituteRole", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
+
+                    b.Property<string>("Category")
+                        .HasMaxLength(50)
+                        .HasColumnType("character varying(50)");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("timestamp with time zone")
+                        .HasDefaultValueSql("CURRENT_TIMESTAMP");
+
+                    b.Property<string>("Description")
+                        .HasMaxLength(500)
+                        .HasColumnType("character varying(500)");
+
+                    b.Property<int>("InstituteId")
+                        .HasColumnType("integer");
+
+                    b.Property<bool>("IsActive")
+                        .HasColumnType("boolean");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)");
+
+                    b.Property<int?>("TemplateId")
+                        .HasColumnType("integer");
+
+                    b.Property<int>("Type")
+                        .HasColumnType("integer")
+                        .HasDefaultValue(0);
+
+                    b.Property<DateTime?>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("InstituteId");
+
+                    b.HasIndex("TemplateId");
+
+                    b.HasIndex("Type");
+
+                    b.ToTable("InstituteRoles");
+                });
+
             modelBuilder.Entity("strAppersBackend.Models.JoinRequest", b =>
                 {
                     b.Property<int>("Id")
@@ -2484,6 +2537,48 @@ namespace strAppersBackend.Migrations
                     b.ToTable("Resources", (string)null);
                 });
 
+            modelBuilder.Entity("strAppersBackend.Models.RoleType", b =>
+                {
+                    b.Property<string>("Description")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)");
+
+                    b.Property<int>("Id")
+                        .HasColumnType("integer");
+
+                    b.HasKey("Id");
+
+                    b.ToTable("RoleTypes");
+
+                    b.HasData(
+                        new
+                        {
+                            Id = 0,
+                            Description = "Default"
+                        },
+                        new
+                        {
+                            Id = 1,
+                            Description = "bundle"
+                        },
+                        new
+                        {
+                            Id = 2,
+                            Description = "bundle"
+                        },
+                        new
+                        {
+                            Id = 3,
+                            Description = "Required"
+                        },
+                        new
+                        {
+                            Id = 4,
+                            Description = "leadership"
+                        });
+                });
+
             modelBuilder.Entity("strAppersBackend.Models.Role", b =>
                 {
                     b.Property<int>("Id")
@@ -2514,7 +2609,6 @@ namespace strAppersBackend.Migrations
                         .HasColumnType("character varying(100)");
 
                     b.Property<int>("Type")
-                        .ValueGeneratedOnAdd()
                         .HasColumnType("integer")
                         .HasDefaultValue(0);
 
@@ -2522,6 +2616,8 @@ namespace strAppersBackend.Migrations
                         .HasColumnType("timestamp with time zone");
 
                     b.HasKey("Id");
+
+                    b.HasIndex("Type");
 
                     b.ToTable("Roles");
                 });
@@ -3236,7 +3332,7 @@ namespace strAppersBackend.Migrations
                     b.ToTable("Teachers", (string)null);
                 });
 
-            modelBuilder.Entity("strAppersBackend.Models.TrelloTemplate", b =>
+            modelBuilder.Entity("strAppersBackend.Models.InstituteTemplate", b =>
                 {
                     b.Property<int>("Id")
                         .ValueGeneratedOnAdd()
@@ -3250,6 +3346,11 @@ namespace strAppersBackend.Migrations
                     b.Property<int>("ProjectId")
                         .HasColumnType("integer");
 
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)");
+
                     b.Property<string>("TrelloBoardJson")
                         .IsRequired()
                         .HasColumnType("text");
@@ -3262,7 +3363,7 @@ namespace strAppersBackend.Migrations
 
                     b.HasIndex("InstituteId", "ProjectId");
 
-                    b.ToTable("TrelloTemplates", (string)null);
+                    b.ToTable("InstituteTemplates", (string)null);
                 });
 
             modelBuilder.Entity("strAppersBackend.Models.Year", b =>
@@ -3809,6 +3910,43 @@ namespace strAppersBackend.Migrations
                     b.Navigation("Student");
                 });
 
+            modelBuilder.Entity("strAppersBackend.Models.Role", b =>
+                {
+                    b.HasOne("strAppersBackend.Models.RoleType", "RoleType")
+                        .WithMany("Roles")
+                        .HasForeignKey("Type")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.Navigation("RoleType");
+
+                    b.Navigation("StudentRoles");
+                });
+
+            modelBuilder.Entity("strAppersBackend.Models.InstituteRole", b =>
+                {
+                    b.HasOne("strAppersBackend.Models.Institute", "Institute")
+                        .WithMany("InstituteRoles")
+                        .HasForeignKey("InstituteId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("strAppersBackend.Models.RoleType", "RoleType")
+                        .WithMany("InstituteRoles")
+                        .HasForeignKey("Type")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("strAppersBackend.Models.InstituteTemplate", "Template")
+                        .WithMany("InstituteRoles")
+                        .HasForeignKey("TemplateId")
+                        .OnDelete(DeleteBehavior.SetNull);
+
+                    b.Navigation("Institute");
+
+                    b.Navigation("RoleType");
+                });
+
             modelBuilder.Entity("strAppersBackend.Models.Teacher", b =>
                 {
                     b.HasOne("strAppersBackend.Models.Institute", "Institute")
@@ -3820,21 +3958,23 @@ namespace strAppersBackend.Migrations
                     b.Navigation("Institute");
                 });
 
-            modelBuilder.Entity("strAppersBackend.Models.TrelloTemplate", b =>
+            modelBuilder.Entity("strAppersBackend.Models.InstituteTemplate", b =>
                 {
                     b.HasOne("strAppersBackend.Models.Institute", "Institute")
-                        .WithMany("TrelloTemplates")
+                        .WithMany("InstituteTemplates")
                         .HasForeignKey("InstituteId")
                         .OnDelete(DeleteBehavior.Restrict)
                         .IsRequired();
 
                     b.HasOne("strAppersBackend.Models.Project", "Project")
-                        .WithMany("TrelloTemplates")
+                        .WithMany("InstituteTemplates")
                         .HasForeignKey("ProjectId")
                         .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();
 
                     b.Navigation("Institute");
+
+                    b.Navigation("InstituteRoles");
 
                     b.Navigation("Project");
                 });
@@ -3850,11 +3990,13 @@ namespace strAppersBackend.Migrations
 
             modelBuilder.Entity("strAppersBackend.Models.Institute", b =>
                 {
+                    b.Navigation("InstituteRoles");
+
                     b.Navigation("Students");
 
                     b.Navigation("Teachers");
 
-                    b.Navigation("TrelloTemplates");
+                    b.Navigation("InstituteTemplates");
                 });
 
             modelBuilder.Entity("strAppersBackend.Models.Major", b =>
@@ -3883,7 +4025,7 @@ namespace strAppersBackend.Migrations
 
                     b.Navigation("IDEChunks");
 
-                    b.Navigation("TrelloTemplates");
+                    b.Navigation("InstituteTemplates");
                 });
 
             modelBuilder.Entity("strAppersBackend.Models.ProjectBoard", b =>
@@ -3901,9 +4043,11 @@ namespace strAppersBackend.Migrations
                     b.Navigation("MentorPrompts");
                 });
 
-            modelBuilder.Entity("strAppersBackend.Models.Role", b =>
+            modelBuilder.Entity("strAppersBackend.Models.RoleType", b =>
                 {
-                    b.Navigation("StudentRoles");
+                    b.Navigation("InstituteRoles");
+
+                    b.Navigation("Roles");
                 });
 
             modelBuilder.Entity("strAppersBackend.Models.StakeholderCategory", b =>

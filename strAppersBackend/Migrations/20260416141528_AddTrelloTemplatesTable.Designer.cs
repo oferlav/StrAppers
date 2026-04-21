@@ -3239,7 +3239,7 @@ namespace strAppersBackend.Migrations
                     b.ToTable("Teachers", (string)null);
                 });
 
-            modelBuilder.Entity("strAppersBackend.Models.TrelloTemplate", b =>
+            modelBuilder.Entity("strAppersBackend.Models.InstituteTemplate", b =>
                 {
                     b.Property<int>("Id")
                         .ValueGeneratedOnAdd()
@@ -3265,7 +3265,7 @@ namespace strAppersBackend.Migrations
 
                     b.HasIndex("InstituteId", "ProjectId");
 
-                    b.ToTable("TrelloTemplates", (string)null);
+                    b.ToTable("InstituteTemplates", (string)null);
                 });
 
             modelBuilder.Entity("strAppersBackend.Models.Year", b =>
@@ -3823,16 +3823,16 @@ namespace strAppersBackend.Migrations
                     b.Navigation("Institute");
                 });
 
-            modelBuilder.Entity("strAppersBackend.Models.TrelloTemplate", b =>
+            modelBuilder.Entity("strAppersBackend.Models.InstituteTemplate", b =>
                 {
                     b.HasOne("strAppersBackend.Models.Institute", "Institute")
-                        .WithMany("TrelloTemplates")
+                        .WithMany("InstituteTemplates")
                         .HasForeignKey("InstituteId")
                         .OnDelete(DeleteBehavior.Restrict)
                         .IsRequired();
 
                     b.HasOne("strAppersBackend.Models.Project", "Project")
-                        .WithMany("TrelloTemplates")
+                        .WithMany("InstituteTemplates")
                         .HasForeignKey("ProjectId")
                         .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();
@@ -3857,7 +3857,7 @@ namespace strAppersBackend.Migrations
 
                     b.Navigation("Teachers");
 
-                    b.Navigation("TrelloTemplates");
+                    b.Navigation("InstituteTemplates");
                 });
 
             modelBuilder.Entity("strAppersBackend.Models.Major", b =>
@@ -3886,7 +3886,7 @@ namespace strAppersBackend.Migrations
 
                     b.Navigation("IDEChunks");
 
-                    b.Navigation("TrelloTemplates");
+                    b.Navigation("InstituteTemplates");
                 });
 
             modelBuilder.Entity("strAppersBackend.Models.ProjectBoard", b =>

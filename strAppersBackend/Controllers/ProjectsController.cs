@@ -40,7 +40,14 @@ public class ProjectsController : ControllerBase
         public int ProjectId { get; set; }
         public string ProjectName { get; set; } = string.Empty;
         public string? ProjectBrief { get; set; }
+        public string? Name { get; set; }
         public string? TrelloBoardJson { get; set; }
+    }
+
+    public sealed class InstituteTemplateListItemDto
+    {
+        public int Id { get; set; }
+        public string Name { get; set; } = string.Empty;
     }
 
     /// <summary>
@@ -579,18 +586,55 @@ public class ProjectsController : ControllerBase
     }
 
     /// <summary>
+    /// List saved institute templates for a project (names + ids for Task Builder picker).
+    /// </summary>
+    [HttpGet("use/templates/list")]
+    public async Task<ActionResult<IEnumerable<InstituteTemplateListItemDto>>> GetInstituteTemplatesListForProject(
+        [FromQuery] int projectId,
+        [FromQuery] int instituteId)
+    {
+        if (projectId <= 0 || instituteId <= 0)
+        {
+            return BadRequest("projectId and instituteId must be positive integers.");
+        }
+
+        try
+        {
+            var items = await _context.InstituteTemplates
+                .AsNoTracking()
+                .Where(t => t.ProjectId == projectId && t.InstituteId == instituteId)
+                .OrderByDescending(t => t.Id)
+                .Select(t => new InstituteTemplateListItemDto { Id = t.Id, Name = t.Name })
+                .ToListAsync();
+
+            return Ok(items);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error listing institute templates for project {ProjectId}", projectId);
+            return StatusCode(500, "An error occurred while listing institute templates.");
+        }
+    }
+
+    /// <summary>
     /// Get the saved Trello template JSON for a project.
-    /// Uses <see cref="Project.TrelloBoardJson"/> unless <paramref name="instituteId"/> is set and a row exists in
-    /// <c>TrelloTemplates</c> for that project + institute — then that institute copy is returned.
+    /// Uses <see cref="Project.TrelloBoardJson"/> unless <paramref name="instituteTemplateId"/> targets a row in
+    /// <c>InstituteTemplates</c>, or unless <paramref name="instituteId"/> is set without <paramref name="instituteTemplateId"/> — then the latest institute row for that project + institute is returned.
     /// </summary>
     [HttpGet("use/templates")]
     public async Task<ActionResult<ProjectTemplateDto>> GetProjectTemplateByProjectId(
         [FromQuery] int projectId,
-        [FromQuery] int? instituteId = null)
+        [FromQuery] int? instituteId = null,
+        [FromQuery] int? instituteTemplateId = null)
     {
         if (projectId <= 0)
         {
             return BadRequest("projectId must be a positive number.");
+        }
+
+        if (instituteTemplateId is > 0 && instituteId is not > 0)
+        {
+            return BadRequest("instituteTemplateId requires a positive instituteId.");
         }
 
         try
@@ -611,18 +655,39 @@ public class ProjectsController : ControllerBase
                 return NotFound($"Project with ID {projectId} not found.");
             }
 
-            if (instituteId is > 0)
+            if (instituteTemplateId is > 0)
             {
-                var instituteJson = await _context.TrelloTemplates
+                var byId = await _context.InstituteTemplates
+                    .AsNoTracking()
+                    .Where(t =>
+                        t.Id == instituteTemplateId.Value &&
+                        t.ProjectId == projectId &&
+                        t.InstituteId == instituteId!.Value)
+                    .Select(t => new { t.TrelloBoardJson, t.Name })
+                    .FirstOrDefaultAsync();
+
+                if (byId == null)
+                {
+                    return NotFound(
+                        $"Institute template {instituteTemplateId.Value} not found for project {projectId} and institute {instituteId}.");
+                }
+
+                project.TrelloBoardJson = byId.TrelloBoardJson;
+                project.Name = byId.Name;
+            }
+            else if (instituteId is > 0)
+            {
+                var instituteRow = await _context.InstituteTemplates
                     .AsNoTracking()
                     .Where(t => t.ProjectId == projectId && t.InstituteId == instituteId.Value)
                     .OrderByDescending(t => t.Id)
-                    .Select(t => t.TrelloBoardJson)
+                    .Select(t => new { t.TrelloBoardJson, t.Name })
                     .FirstOrDefaultAsync();
 
-                if (instituteJson != null)
+                if (instituteRow != null)
                 {
-                    project.TrelloBoardJson = instituteJson;
+                    project.TrelloBoardJson = instituteRow.TrelloBoardJson;
+                    project.Name = instituteRow.Name;
                 }
             }
 
@@ -665,16 +730,16 @@ public class ProjectsController : ControllerBase
     }
 
     /// <summary>
-    /// Save Task Builder template JSON for an institute and project (upserts <see cref="TrelloTemplate"/> by <c>InstituteId</c> + <c>ProjectId</c>).
-    /// Query: <c>?projectId=</c> and <c>?instituteId=</c> (or <c>InstituteId</c>).
-    /// The client should send <see cref="AddTrelloTemplateRequest.TrelloBoardJson"/> already merged so the selected sprint+role card’s
-    /// <c>description</c>/<c>Description</c> and <c>checklistItems</c>/<c>ChecklistItems</c> match the loaded template’s <c>sprintPlan</c> / <c>SprintPlan</c> structure.
+    /// Save Task Builder template JSON for an institute and project.
+    /// Query: <c>?projectId=</c> and <c>?instituteId=</c>.
+    /// Insert: omit <see cref="AddInstituteTemplateRequest.InstituteTemplateId"/> and send a unique <see cref="AddInstituteTemplateRequest.Name"/> (per institute + project, case-insensitive).
+    /// Update: set <see cref="AddInstituteTemplateRequest.InstituteTemplateId"/> to an existing row id for this institute + project; optional <see cref="AddInstituteTemplateRequest.Name"/> renames if unique.
     /// </summary>
     [HttpPost("use/add-template")]
-    public async Task<ActionResult<object>> AddTrelloTemplate(
+    public async Task<ActionResult<object>> AddInstituteTemplate(
         [FromQuery] int projectId,
         [FromQuery] int instituteId,
-        [FromBody] AddTrelloTemplateRequest request)
+        [FromBody] AddInstituteTemplateRequest request)
     {
         if (projectId <= 0 || instituteId <= 0)
         {
@@ -694,56 +759,110 @@ public class ProjectsController : ControllerBase
                 return NotFound($"Institute with ID {instituteId} not found.");
             }
 
-            var projectExists = await _context.Projects.AnyAsync(p => p.Id == projectId);
-            if (!projectExists)
+            var project = await _context.Projects.AsNoTracking()
+                .Where(p => p.Id == projectId)
+                .Select(p => new { p.Id, p.Title })
+                .FirstOrDefaultAsync();
+            if (project == null)
             {
                 return NotFound($"Project with ID {projectId} not found.");
             }
 
             var json = request.TrelloBoardJson.Trim();
 
-            var existingRows = await _context.TrelloTemplates
-                .Where(t => t.InstituteId == instituteId && t.ProjectId == projectId)
-                .OrderByDescending(t => t.Id)
-                .ToListAsync();
-
-            TrelloTemplate row;
-            var duplicatesRemoved = 0;
-            if (existingRows.Count == 0)
+            static string ClampName(string s)
             {
-                row = new TrelloTemplate
+                var t = s.Trim();
+                return t.Length <= 100 ? t : t[..100];
+            }
+
+            if (request.InstituteTemplateId is > 0)
+            {
+                var row = await _context.InstituteTemplates
+                    .FirstOrDefaultAsync(t =>
+                        t.Id == request.InstituteTemplateId.Value &&
+                        t.InstituteId == instituteId &&
+                        t.ProjectId == projectId);
+
+                if (row == null)
                 {
+                    return NotFound(
+                        $"Institute template {request.InstituteTemplateId.Value} not found for this institute and project.");
+                }
+
+                if (!string.IsNullOrWhiteSpace(request.Name))
+                {
+                    var newName = ClampName(request.Name);
+                    var taken = await _context.InstituteTemplates.AsNoTracking()
+                        .AnyAsync(t =>
+                            t.InstituteId == instituteId &&
+                            t.ProjectId == projectId &&
+                            t.Id != row.Id &&
+                            t.Name.ToLower() == newName.ToLower());
+                    if (taken)
+                    {
+                        return Conflict($"A template named \"{newName}\" already exists for this project.");
+                    }
+
+                    row.Name = newName;
+                }
+
+                row.TrelloBoardJson = json;
+                await _context.SaveChangesAsync();
+
+                _logger.LogInformation(
+                    "Updated InstituteTemplates row {Id} for InstituteId={InstituteId}, ProjectId={ProjectId}",
+                    row.Id, instituteId, projectId);
+
+                return Ok(new
+                {
+                    Success = true,
+                    Id = row.Id,
                     InstituteId = instituteId,
                     ProjectId = projectId,
-                    TrelloBoardJson = json
-                };
-                _context.TrelloTemplates.Add(row);
-            }
-            else
-            {
-                row = existingRows[0];
-                row.TrelloBoardJson = json;
-                if (existingRows.Count > 1)
-                {
-                    _context.TrelloTemplates.RemoveRange(existingRows.Skip(1));
-                    duplicatesRemoved = existingRows.Count - 1;
-                }
+                    Name = row.Name,
+                    Updated = true,
+                });
             }
 
+            if (string.IsNullOrWhiteSpace(request.Name))
+            {
+                return BadRequest("Name is required when creating a new institute template.");
+            }
+
+            var insertName = ClampName(request.Name!);
+            var insertNameTaken = await _context.InstituteTemplates.AsNoTracking()
+                .AnyAsync(t =>
+                    t.InstituteId == instituteId &&
+                    t.ProjectId == projectId &&
+                    t.Name.ToLower() == insertName.ToLower());
+            if (insertNameTaken)
+            {
+                return Conflict($"A template named \"{insertName}\" already exists for this project.");
+            }
+
+            var newRow = new InstituteTemplate
+            {
+                InstituteId = instituteId,
+                ProjectId = projectId,
+                Name = insertName,
+                TrelloBoardJson = json
+            };
+            _context.InstituteTemplates.Add(newRow);
             await _context.SaveChangesAsync();
 
             _logger.LogInformation(
-                "Upserted TrelloTemplates row {Id} for InstituteId={InstituteId}, ProjectId={ProjectId} (duplicatesRemoved={DuplicatesRemoved})",
-                row.Id, instituteId, projectId, duplicatesRemoved);
+                "Created InstituteTemplates row {Id} for InstituteId={InstituteId}, ProjectId={ProjectId}",
+                newRow.Id, instituteId, projectId);
 
             return Ok(new
             {
                 Success = true,
-                Id = row.Id,
+                Id = newRow.Id,
                 InstituteId = instituteId,
                 ProjectId = projectId,
-                Updated = existingRows.Count > 0,
-                DuplicatesRemoved = duplicatesRemoved
+                Name = newRow.Name,
+                Updated = false,
             });
         }
         catch (Exception ex)

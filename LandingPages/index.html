@@ -1,0 +1,405 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>FoodBridge — Contribution Platform</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          fontFamily: { sans: ["Noto Sans", "sans-serif"] },
+        },
+      },
+    };
+  </script>
+</head>
+<body class="min-h-screen bg-[#F7F8FA] font-sans antialiased" style="font-family: 'Noto Sans', sans-serif">
+
+  <!-- Header -->
+  <header class="bg-[#1A1D24] sticky top-0 z-50 border-b border-white/10">
+    <div class="max-w-screen-xl mx-auto px-6 py-4 flex items-center justify-between">
+      <div class="flex items-center gap-3">
+        <div class="w-9 h-9 rounded-xl bg-gradient-to-br from-[#4BBFAC] to-[#08957E] flex items-center justify-center">
+          <i data-lucide="utensils" class="w-5 h-5 text-white"></i>
+        </div>
+        <div>
+          <span class="text-white font-bold text-lg leading-none block">FoodBridge</span>
+          <span class="text-[#4BBFAC] text-[10px] font-mono uppercase tracking-widest">Contribution Platform</span>
+        </div>
+      </div>
+      <nav class="hidden md:flex items-center gap-6">
+        <a href="#modules" class="text-slate-400 hover:text-white text-sm font-medium transition-colors">Modules</a>
+        <a href="#portals" class="text-slate-400 hover:text-white text-sm font-medium transition-colors">Portals</a>
+        <a href="#services" class="text-slate-400 hover:text-white text-sm font-medium transition-colors">Services</a>
+        <a href="#contact" class="text-slate-400 hover:text-white text-sm font-medium transition-colors">Contact</a>
+      </nav>
+      <button type="button" class="bg-[#4BBFAC] hover:bg-[#3DAF9C] text-white text-sm font-semibold px-5 py-2 rounded-xl transition-colors">
+        Request Demo
+      </button>
+    </div>
+  </header>
+
+  <!-- Hero -->
+  <section class="bg-[#1A1D24] pt-20 pb-32 px-6 relative overflow-hidden">
+    <div class="absolute top-0 left-1/4 w-96 h-96 bg-[#4BBFAC]/10 rounded-full blur-3xl pointer-events-none"></div>
+    <div class="absolute bottom-0 right-1/4 w-80 h-80 bg-[#3D76FF]/10 rounded-full blur-3xl pointer-events-none"></div>
+
+    <div class="max-w-screen-xl mx-auto text-center relative z-10">
+      <div class="inline-flex items-center gap-2 bg-[#4BBFAC]/10 border border-[#4BBFAC]/30 rounded-full px-4 py-1.5 mb-8">
+        <span class="w-2 h-2 rounded-full bg-[#4BBFAC] animate-pulse"></span>
+        <span class="text-[#4BBFAC] text-xs font-semibold font-mono uppercase tracking-wider">Food Donation Management System</span>
+      </div>
+
+      <h1 class="text-4xl md:text-6xl font-bold text-white leading-tight mb-6">
+        Connecting Contributors<br />
+        <span class="text-[#4BBFAC]">to Communities in Need</span>
+      </h1>
+
+      <p class="text-slate-400 text-lg md:text-xl max-w-2xl mx-auto mb-10 leading-relaxed">
+        A full-stack platform for managing food donations — from contributor order creation to NPO approval, smart routing, AI freshness checks, and automated notifications.
+      </p>
+
+      <div class="flex flex-wrap justify-center gap-4">
+        <button type="button" class="inline-flex items-center gap-2 bg-[#4BBFAC] hover:bg-[#3DAF9C] text-white font-semibold px-8 py-3.5 rounded-xl text-sm transition-all">
+          Explore the Platform <i data-lucide="arrow-right" class="w-4 h-4"></i>
+        </button>
+        <button type="button" class="inline-flex items-center gap-2 border border-white/20 text-white/80 hover:border-white/40 hover:text-white font-medium px-8 py-3.5 rounded-xl text-sm transition-all">
+          View All Modules
+        </button>
+      </div>
+    </div>
+
+    <!-- Stats strip -->
+    <div class="max-w-screen-xl mx-auto mt-20 grid grid-cols-2 md:grid-cols-4 gap-4 relative z-10">
+      <div class="bg-white/5 border border-white/10 rounded-2xl px-6 py-5 text-center">
+        <p class="text-3xl font-bold text-white mb-1">2</p>
+        <p class="text-slate-400 text-sm">User Portals</p>
+      </div>
+      <div class="bg-white/5 border border-white/10 rounded-2xl px-6 py-5 text-center">
+        <p class="text-3xl font-bold text-white mb-1">7</p>
+        <p class="text-slate-400 text-sm">Modules</p>
+      </div>
+      <div class="bg-white/5 border border-white/10 rounded-2xl px-6 py-5 text-center">
+        <p class="text-3xl font-bold text-white mb-1">AI</p>
+        <p class="text-slate-400 text-sm">Powered Freshness</p>
+      </div>
+      <div class="bg-white/5 border border-white/10 rounded-2xl px-6 py-5 text-center">
+        <p class="text-3xl font-bold text-white mb-1">∞</p>
+        <p class="text-slate-400 text-sm">Impact Potential</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- Two Portals -->
+  <section id="portals" class="max-w-screen-xl mx-auto px-6 -mt-8 mb-16">
+    <div class="grid md:grid-cols-2 gap-5">
+      <div class="bg-white rounded-2xl border border-[#E5E7EB] shadow-sm p-7">
+        <div class="flex items-center gap-3 mb-4">
+          <div class="w-10 h-10 rounded-xl bg-[#E8F5F2] flex items-center justify-center">
+            <i data-lucide="clipboard-list" class="w-5 h-5 text-[#08957E]"></i>
+          </div>
+          <div>
+            <p class="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Portal</p>
+            <h3 class="font-bold text-[#1A1D24] text-lg">NPO Centre Portal</h3>
+          </div>
+        </div>
+        <p class="text-slate-500 text-sm leading-relaxed mb-5">
+          Manage incoming food orders, review and approve contributions from donors, generate daily reports, and celebrate top contributors with the weekly champions board.
+        </p>
+        <div class="flex flex-wrap gap-2">
+          <span class="text-[11px] font-medium bg-[#E8F5F2] text-[#08957E] px-2.5 py-1 rounded-full">Order Approval</span>
+          <span class="text-[11px] font-medium bg-[#E8F5F2] text-[#08957E] px-2.5 py-1 rounded-full">Print Labels</span>
+          <span class="text-[11px] font-medium bg-[#E8F5F2] text-[#08957E] px-2.5 py-1 rounded-full">Reports</span>
+          <span class="text-[11px] font-medium bg-[#E8F5F2] text-[#08957E] px-2.5 py-1 rounded-full">Champions Board</span>
+        </div>
+      </div>
+
+      <div class="bg-white rounded-2xl border border-[#E5E7EB] shadow-sm p-7">
+        <div class="flex items-center gap-3 mb-4">
+          <div class="w-10 h-10 rounded-xl bg-[#EEF2FF] flex items-center justify-center">
+            <i data-lucide="heart" class="w-5 h-5 text-[#3D76FF]"></i>
+          </div>
+          <div>
+            <p class="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Portal</p>
+            <h3 class="font-bold text-[#1A1D24] text-lg">Contributor Portal</h3>
+          </div>
+        </div>
+        <p class="text-slate-500 text-sm leading-relaxed mb-5">
+          Submit new food donations with detailed line items, track past order history, and print QR codes that link directly to the receiving centre's details for seamless drop-off.
+        </p>
+        <div class="flex flex-wrap gap-2">
+          <span class="text-[11px] font-medium bg-[#EEF2FF] text-[#3D76FF] px-2.5 py-1 rounded-full">Create Orders</span>
+          <span class="text-[11px] font-medium bg-[#EEF2FF] text-[#3D76FF] px-2.5 py-1 rounded-full">Line Items</span>
+          <span class="text-[11px] font-medium bg-[#EEF2FF] text-[#3D76FF] px-2.5 py-1 rounded-full">QR Code Print</span>
+          <span class="text-[11px] font-medium bg-[#EEF2FF] text-[#3D76FF] px-2.5 py-1 rounded-full">Order History</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Modules Grid -->
+  <section id="modules" class="max-w-screen-xl mx-auto px-6 mb-20">
+    <div class="text-center mb-12">
+      <p class="text-xs font-bold text-slate-400 uppercase tracking-widest mb-3">System Architecture</p>
+      <h2 class="text-3xl md:text-4xl font-bold text-[#1A1D24]">7 Modules. One Platform.</h2>
+      <p class="text-slate-500 mt-3 max-w-xl mx-auto">Every piece of the donation pipeline — from contributor registration to AI-powered freshness checks — built into a single cohesive system.</p>
+    </div>
+
+    <div class="grid md:grid-cols-2 xl:grid-cols-3 gap-5">
+      <!-- 01 -->
+      <div class="bg-white rounded-2xl border border-[#E5E7EB] shadow-sm p-6 flex flex-col gap-4 transition-all duration-200 hover:shadow-md hover:-translate-y-0.5 cursor-default">
+        <div class="flex items-start justify-between">
+          <div class="w-11 h-11 rounded-xl flex items-center justify-center flex-shrink-0 bg-[#EEF2FF]">
+            <i data-lucide="users" class="w-5 h-5 text-[#3D76FF]"></i>
+          </div>
+          <span class="font-mono text-2xl font-bold text-slate-100">01</span>
+        </div>
+        <div>
+          <h3 class="font-bold text-[#1A1D24] mb-2">Registration & Authentication</h3>
+          <p class="text-slate-500 text-sm leading-relaxed">Separate registration flows for Contributors and NPO Centres. Secure authentication management for all user types.</p>
+        </div>
+        <div class="flex flex-wrap gap-1.5 mt-auto pt-2 border-t border-[#F1F5F9]">
+          <span class="text-[10px] font-semibold px-2.5 py-1 rounded-full bg-[#EEF2FF] text-[#3D76FF]">Contributor Signup</span>
+          <span class="text-[10px] font-semibold px-2.5 py-1 rounded-full bg-[#EEF2FF] text-[#3D76FF]">NPO Onboarding</span>
+          <span class="text-[10px] font-semibold px-2.5 py-1 rounded-full bg-[#EEF2FF] text-[#3D76FF]">Auth Management</span>
+        </div>
+      </div>
+      <!-- 02 -->
+      <div class="bg-white rounded-2xl border border-[#E5E7EB] shadow-sm p-6 flex flex-col gap-4 transition-all duration-200 hover:shadow-md hover:-translate-y-0.5 cursor-default">
+        <div class="flex items-start justify-between">
+          <div class="w-11 h-11 rounded-xl flex items-center justify-center flex-shrink-0 bg-[#E8F5F2]">
+            <i data-lucide="clipboard-list" class="w-5 h-5 text-[#08957E]"></i>
+          </div>
+          <span class="font-mono text-2xl font-bold text-slate-100">02</span>
+        </div>
+        <div>
+          <h3 class="font-bold text-[#1A1D24] mb-2">Orders Management (NPO Portal)</h3>
+          <p class="text-slate-500 text-sm leading-relaxed">View daily orders with full drill-down to contribution line items. Approve or reject orders, and print sticker labels for approved boxes.</p>
+        </div>
+        <div class="flex flex-wrap gap-1.5 mt-auto pt-2 border-t border-[#F1F5F9]">
+          <span class="text-[10px] font-semibold px-2.5 py-1 rounded-full bg-[#E8F5F2] text-[#08957E]">Daily Orders</span>
+          <span class="text-[10px] font-semibold px-2.5 py-1 rounded-full bg-[#E8F5F2] text-[#08957E]">Approve / Reject</span>
+          <span class="text-[10px] font-semibold px-2.5 py-1 rounded-full bg-[#E8F5F2] text-[#08957E]">Print Stickers</span>
+        </div>
+      </div>
+      <!-- 03 -->
+      <div class="bg-white rounded-2xl border border-[#E5E7EB] shadow-sm p-6 flex flex-col gap-4 transition-all duration-200 hover:shadow-md hover:-translate-y-0.5 cursor-default">
+        <div class="flex items-start justify-between">
+          <div class="w-11 h-11 rounded-xl flex items-center justify-center flex-shrink-0 bg-[#FEF9EC]">
+            <i data-lucide="bar-chart-2" class="w-5 h-5 text-[#DDA83E]"></i>
+          </div>
+          <span class="font-mono text-2xl font-bold text-slate-100">03</span>
+        </div>
+        <div>
+          <h3 class="font-bold text-[#1A1D24] mb-2">Reports (NPO Portal)</h3>
+          <p class="text-slate-500 text-sm leading-relaxed">Daily contribution summaries, historical orders by date range or contributor, and weekly champion leaderboards.</p>
+        </div>
+        <div class="flex flex-wrap gap-1.5 mt-auto pt-2 border-t border-[#F1F5F9]">
+          <span class="text-[10px] font-semibold px-2.5 py-1 rounded-full bg-[#FEF9EC] text-[#DDA83E]">Daily Summary</span>
+          <span class="text-[10px] font-semibold px-2.5 py-1 rounded-full bg-[#FEF9EC] text-[#DDA83E]">History Reports</span>
+          <span class="text-[10px] font-semibold px-2.5 py-1 rounded-full bg-[#FEF9EC] text-[#DDA83E]">Weekly Champions</span>
+        </div>
+      </div>
+      <!-- 04 -->
+      <div class="bg-white rounded-2xl border border-[#E5E7EB] shadow-sm p-6 flex flex-col gap-4 transition-all duration-200 hover:shadow-md hover:-translate-y-0.5 cursor-default">
+        <div class="flex items-start justify-between">
+          <div class="w-11 h-11 rounded-xl flex items-center justify-center flex-shrink-0 bg-[#FDF0F9]">
+            <i data-lucide="package" class="w-5 h-5 text-[#D763AE]"></i>
+          </div>
+          <span class="font-mono text-2xl font-bold text-slate-100">04</span>
+        </div>
+        <div>
+          <h3 class="font-bold text-[#1A1D24] mb-2">Orders Screen (Contributor Portal)</h3>
+          <p class="text-slate-500 text-sm leading-relaxed">Contributors view past orders, create new contributions with target date and line items (description, quantity, time made), and generate QR codes for centre drop-off.</p>
+        </div>
+        <div class="flex flex-wrap gap-1.5 mt-auto pt-2 border-t border-[#F1F5F9]">
+          <span class="text-[10px] font-semibold px-2.5 py-1 rounded-full bg-[#FDF0F9] text-[#D763AE]">New Order</span>
+          <span class="text-[10px] font-semibold px-2.5 py-1 rounded-full bg-[#FDF0F9] text-[#D763AE]">Line Items</span>
+          <span class="text-[10px] font-semibold px-2.5 py-1 rounded-full bg-[#FDF0F9] text-[#D763AE]">QR Code Print</span>
+        </div>
+      </div>
+      <!-- 05 -->
+      <div class="bg-white rounded-2xl border border-[#E5E7EB] shadow-sm p-6 flex flex-col gap-4 transition-all duration-200 hover:shadow-md hover:-translate-y-0.5 cursor-default">
+        <div class="flex items-start justify-between">
+          <div class="w-11 h-11 rounded-xl flex items-center justify-center flex-shrink-0 bg-[#FEF2F2]">
+            <i data-lucide="map-pin" class="w-5 h-5 text-[#EF4444]"></i>
+          </div>
+          <span class="font-mono text-2xl font-bold text-slate-100">05</span>
+        </div>
+        <div>
+          <h3 class="font-bold text-[#1A1D24] mb-2">Google Maps Service</h3>
+          <p class="text-slate-500 text-sm leading-relaxed">Automatically generate an optimised daily route for food pickup and delivery, output as a ready-to-use Google Maps URL.</p>
+        </div>
+        <div class="flex flex-wrap gap-1.5 mt-auto pt-2 border-t border-[#F1F5F9]">
+          <span class="text-[10px] font-semibold px-2.5 py-1 rounded-full bg-[#FEF2F2] text-[#EF4444]">Route Generation</span>
+          <span class="text-[10px] font-semibold px-2.5 py-1 rounded-full bg-[#FEF2F2] text-[#EF4444]">Maps URL</span>
+          <span class="text-[10px] font-semibold px-2.5 py-1 rounded-full bg-[#FEF2F2] text-[#EF4444]">Daily Logistics</span>
+        </div>
+      </div>
+      <!-- 06 -->
+      <div class="bg-white rounded-2xl border border-[#E5E7EB] shadow-sm p-6 flex flex-col gap-4 transition-all duration-200 hover:shadow-md hover:-translate-y-0.5 cursor-default">
+        <div class="flex items-start justify-between">
+          <div class="w-11 h-11 rounded-xl flex items-center justify-center flex-shrink-0 bg-[#F4F0FF]">
+            <i data-lucide="brain" class="w-5 h-5 text-[#6C47FF]"></i>
+          </div>
+          <span class="font-mono text-2xl font-bold text-slate-100">06</span>
+        </div>
+        <div>
+          <h3 class="font-bold text-[#1A1D24] mb-2">AI Freshness Service</h3>
+          <p class="text-slate-500 text-sm leading-relaxed">AI-powered check that analyses TimeMade and item description to determine whether food donations are still fresh and safe to distribute.</p>
+        </div>
+        <div class="flex flex-wrap gap-1.5 mt-auto pt-2 border-t border-[#F1F5F9]">
+          <span class="text-[10px] font-semibold px-2.5 py-1 rounded-full bg-[#F4F0FF] text-[#6C47FF]">Freshness Check</span>
+          <span class="text-[10px] font-semibold px-2.5 py-1 rounded-full bg-[#F4F0FF] text-[#6C47FF]">AI Analysis</span>
+          <span class="text-[10px] font-semibold px-2.5 py-1 rounded-full bg-[#F4F0FF] text-[#6C47FF]">Food Safety</span>
+        </div>
+      </div>
+      <!-- 07 -->
+      <div class="bg-white rounded-2xl border border-[#E5E7EB] shadow-sm p-6 flex flex-col gap-4 transition-all duration-200 hover:shadow-md hover:-translate-y-0.5 cursor-default">
+        <div class="flex items-start justify-between">
+          <div class="w-11 h-11 rounded-xl flex items-center justify-center flex-shrink-0 bg-[#FFF7ED]">
+            <i data-lucide="mail" class="w-5 h-5 text-[#F97316]"></i>
+          </div>
+          <span class="font-mono text-2xl font-bold text-slate-100">07</span>
+        </div>
+        <div>
+          <h3 class="font-bold text-[#1A1D24] mb-2">Push Email Service</h3>
+          <p class="text-slate-500 text-sm leading-relaxed">Automated email reminders for heavy contributors who go quiet, personalised guidance for private/non-kosher/Saturday contributors, and approval/rejection notifications.</p>
+        </div>
+        <div class="flex flex-wrap gap-1.5 mt-auto pt-2 border-t border-[#F1F5F9]">
+          <span class="text-[10px] font-semibold px-2.5 py-1 rounded-full bg-[#FFF7ED] text-[#F97316]">Contributor Reminders</span>
+          <span class="text-[10px] font-semibold px-2.5 py-1 rounded-full bg-[#FFF7ED] text-[#F97316]">Smart Notifications</span>
+          <span class="text-[10px] font-semibold px-2.5 py-1 rounded-full bg-[#FFF7ED] text-[#F97316]">Order Alerts</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Services -->
+  <section id="services" class="bg-[#1A1D24] py-20 px-6 mb-16">
+    <div class="max-w-screen-xl mx-auto">
+      <div class="text-center mb-12">
+        <p class="text-xs font-bold text-[#4BBFAC] uppercase tracking-widest mb-3">Smart Services</p>
+        <h2 class="text-3xl md:text-4xl font-bold text-white">Built-in Intelligence</h2>
+      </div>
+      <div class="grid md:grid-cols-3 gap-5">
+        <div class="bg-white/5 border border-white/10 rounded-2xl p-6">
+          <div class="w-10 h-10 rounded-xl mb-4 flex items-center justify-center bg-[#EF444433]">
+            <i data-lucide="map-pin" class="w-5 h-5 text-[#EF4444]"></i>
+          </div>
+          <h3 class="font-bold text-white mb-2">Route Optimisation</h3>
+          <p class="text-slate-400 text-sm leading-relaxed">Daily Google Maps route generation for efficient pickup and delivery across all active drop-off points.</p>
+        </div>
+        <div class="bg-white/5 border border-white/10 rounded-2xl p-6">
+          <div class="w-10 h-10 rounded-xl mb-4 flex items-center justify-center bg-[#6C47FF33]">
+            <i data-lucide="brain" class="w-5 h-5 text-[#6C47FF]"></i>
+          </div>
+          <h3 class="font-bold text-white mb-2">AI Freshness Check</h3>
+          <p class="text-slate-400 text-sm leading-relaxed">Analyses item description and preparation time to flag potentially unsafe donations before distribution.</p>
+        </div>
+        <div class="bg-white/5 border border-white/10 rounded-2xl p-6">
+          <div class="w-10 h-10 rounded-xl mb-4 flex items-center justify-center bg-[#F9731633]">
+            <i data-lucide="bell" class="w-5 h-5 text-[#F97316]"></i>
+          </div>
+          <h3 class="font-bold text-white mb-2">Smart Notifications</h3>
+          <p class="text-slate-400 text-sm leading-relaxed">Automated email nudges for dormant contributors, special handling for non-kosher / Saturday donors, and order status alerts.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Workflow -->
+  <section class="max-w-screen-xl mx-auto px-6 mb-20">
+    <div class="text-center mb-12">
+      <p class="text-xs font-bold text-slate-400 uppercase tracking-widest mb-3">Workflow</p>
+      <h2 class="text-3xl md:text-4xl font-bold text-[#1A1D24]">From Kitchen to Community</h2>
+    </div>
+    <div class="grid md:grid-cols-4 gap-4">
+      <div class="bg-white rounded-2xl border border-[#E5E7EB] p-6 text-center relative">
+        <div class="absolute -top-3 left-1/2 -translate-x-1/2 w-7 h-7 rounded-full bg-[#1A1D24] text-white text-xs font-bold font-mono flex items-center justify-center">1</div>
+        <div class="w-12 h-12 rounded-xl mx-auto mb-4 mt-2 flex items-center justify-center bg-[#EEF2FF]">
+          <i data-lucide="users" class="w-6 h-6 text-[#3D76FF]"></i>
+        </div>
+        <h3 class="font-bold text-[#1A1D24] text-sm mb-2">Contributor Registers</h3>
+        <p class="text-slate-500 text-xs leading-relaxed">Signs up and sets up their profile and preferred donation type.</p>
+      </div>
+      <div class="bg-white rounded-2xl border border-[#E5E7EB] p-6 text-center relative">
+        <div class="absolute -top-3 left-1/2 -translate-x-1/2 w-7 h-7 rounded-full bg-[#1A1D24] text-white text-xs font-bold font-mono flex items-center justify-center">2</div>
+        <div class="w-12 h-12 rounded-xl mx-auto mb-4 mt-2 flex items-center justify-center bg-[#E8F5F2]">
+          <i data-lucide="package" class="w-6 h-6 text-[#08957E]"></i>
+        </div>
+        <h3 class="font-bold text-[#1A1D24] text-sm mb-2">Creates an Order</h3>
+        <p class="text-slate-500 text-xs leading-relaxed">Adds food items with descriptions, quantities, and preparation times.</p>
+      </div>
+      <div class="bg-white rounded-2xl border border-[#E5E7EB] p-6 text-center relative">
+        <div class="absolute -top-3 left-1/2 -translate-x-1/2 w-7 h-7 rounded-full bg-[#1A1D24] text-white text-xs font-bold font-mono flex items-center justify-center">3</div>
+        <div class="w-12 h-12 rounded-xl mx-auto mb-4 mt-2 flex items-center justify-center bg-[#FEF9EC]">
+          <i data-lucide="check-circle" class="w-6 h-6 text-[#DDA83E]"></i>
+        </div>
+        <h3 class="font-bold text-[#1A1D24] text-sm mb-2">NPO Reviews & Approves</h3>
+        <p class="text-slate-500 text-xs leading-relaxed">Centre staff approve or reject the order and print box stickers.</p>
+      </div>
+      <div class="bg-white rounded-2xl border border-[#E5E7EB] p-6 text-center relative">
+        <div class="absolute -top-3 left-1/2 -translate-x-1/2 w-7 h-7 rounded-full bg-[#1A1D24] text-white text-xs font-bold font-mono flex items-center justify-center">4</div>
+        <div class="w-12 h-12 rounded-xl mx-auto mb-4 mt-2 flex items-center justify-center bg-[#E8F5F2]">
+          <i data-lucide="truck" class="w-6 h-6 text-[#4BBFAC]"></i>
+        </div>
+        <h3 class="font-bold text-[#1A1D24] text-sm mb-2">Route Generated</h3>
+        <p class="text-slate-500 text-xs leading-relaxed">Google Maps route created for efficient daily collection and distribution.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- CTA -->
+  <section id="contact" class="max-w-screen-xl mx-auto px-6 mb-20">
+    <div class="bg-gradient-to-br from-[#4BBFAC] to-[#08957E] rounded-3xl px-8 py-14 text-center relative overflow-hidden">
+      <div class="absolute inset-0 opacity-10">
+        <div class="absolute top-4 left-8 w-32 h-32 rounded-full bg-white blur-2xl"></div>
+        <div class="absolute bottom-4 right-8 w-48 h-48 rounded-full bg-white blur-3xl"></div>
+      </div>
+      <div class="relative z-10">
+        <h2 class="text-3xl md:text-4xl font-bold text-white mb-4">Ready to Bridge the Gap?</h2>
+        <p class="text-white/80 text-lg mb-8 max-w-xl mx-auto">
+          Let's build a smarter, more connected food donation ecosystem for your community.
+        </p>
+        <div class="flex flex-wrap justify-center gap-4">
+          <button type="button" class="bg-white text-[#08957E] font-bold px-8 py-3.5 rounded-xl hover:bg-white/90 transition-colors text-sm">
+            Request a Demo
+          </button>
+          <button type="button" class="border-2 border-white/40 text-white font-semibold px-8 py-3.5 rounded-xl hover:border-white/70 transition-colors text-sm">
+            Learn More
+          </button>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Footer -->
+  <footer class="bg-[#1A1D24] border-t border-white/10 px-6 py-8">
+    <div class="max-w-screen-xl mx-auto flex flex-col md:flex-row items-center justify-between gap-4">
+      <div class="flex items-center gap-3">
+        <div class="w-8 h-8 rounded-xl bg-gradient-to-br from-[#4BBFAC] to-[#08957E] flex items-center justify-center">
+          <i data-lucide="utensils" class="w-4 h-4 text-white"></i>
+        </div>
+        <span class="text-white font-bold">FoodBridge</span>
+      </div>
+      <p class="text-slate-500 text-sm">© 2026 FoodBridge Contribution Platform. All rights reserved.</p>
+      <div class="flex gap-5 text-sm text-slate-400">
+        <a href="#" class="hover:text-white transition-colors">Privacy</a>
+        <a href="#" class="hover:text-white transition-colors">Terms</a>
+        <a href="#" class="hover:text-white transition-colors">Contact</a>
+      </div>
+    </div>
+  </footer>
+
+  <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
+  <script>
+    lucide.createIcons({ attrs: { "stroke-width": 2 } });
+  </script>
+</body>
+</html>

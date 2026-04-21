@@ -54,7 +54,7 @@ public partial class MentorController
         userSb.AppendLine("## Selected sprint / role");
         userSb.AppendLine($"- Sprint list name: {(string.IsNullOrWhiteSpace(request.SprintName) ? "(none)" : request.SprintName.Trim())}");
         userSb.AppendLine($"- Role: {(string.IsNullOrWhiteSpace(request.RoleName) ? "(none)" : request.RoleName.Trim())}");
-        userSb.AppendLine("- Task Builder may only return updates for this card’s task description + checklist (General Description + Checklist in the UI). Module and project text below is context only — not editable via this endpoint.");
+        userSb.AppendLine("- Task Builder may only return updates for this card’s task description + checklist (Sprint Overview + Checklist in the UI). Module and project text below is context only — not editable via this endpoint.");
         userSb.AppendLine();
         userSb.AppendLine("## Project");
         userSb.AppendLine($"- Id: {project.Id}");

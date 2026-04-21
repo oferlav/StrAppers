@@ -17,7 +17,9 @@ public class ApplicationDbContext : DbContext
     public DbSet<ProjectInstance> ProjectInstances { get; set; }
     public DbSet<ProjectStatus> ProjectStatuses { get; set; }
     public DbSet<ProjectCriteria> ProjectCriterias { get; set; }
+    public DbSet<RoleType> RoleTypes { get; set; }
     public DbSet<Role> Roles { get; set; }
+    public DbSet<InstituteRole> InstituteRoles { get; set; }
     public DbSet<StudentRole> StudentRoles { get; set; }
     public DbSet<Major> Majors { get; set; }
     public DbSet<Year> Years { get; set; }
@@ -54,7 +56,7 @@ public class ApplicationDbContext : DbContext
     public DbSet<CacheReview> CacheReviews { get; set; }
     public DbSet<Metric> Metrics { get; set; }
     public DbSet<CacheMetrics> CacheMetrics { get; set; }
-    public DbSet<TrelloTemplate> TrelloTemplates { get; set; }
+    public DbSet<InstituteTemplate> InstituteTemplates { get; set; }
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -140,22 +142,23 @@ public class ApplicationDbContext : DbContext
                 .OnDelete(DeleteBehavior.Restrict);
         });
 
-        modelBuilder.Entity<TrelloTemplate>(entity =>
+        modelBuilder.Entity<InstituteTemplate>(entity =>
         {
-            entity.ToTable("TrelloTemplates");
+            entity.ToTable("InstituteTemplates");
             entity.HasKey(e => e.Id);
+            entity.Property(e => e.Name).IsRequired().HasMaxLength(100);
             entity.Property(e => e.TrelloBoardJson).HasColumnType("text").IsRequired();
             entity.HasIndex(e => e.InstituteId);
             entity.HasIndex(e => e.ProjectId);
             entity.HasIndex(e => new { e.InstituteId, e.ProjectId });
 
             entity.HasOne(e => e.Institute)
-                .WithMany(i => i.TrelloTemplates)
+                .WithMany(i => i.InstituteTemplates)
                 .HasForeignKey(e => e.InstituteId)
                 .OnDelete(DeleteBehavior.Restrict);
 
             entity.HasOne(e => e.Project)
-                .WithMany(p => p.TrelloTemplates)
+                .WithMany(p => p.InstituteTemplates)
                 .HasForeignKey(e => e.ProjectId)
                 .OnDelete(DeleteBehavior.Cascade);
         });
@@ -389,6 +392,21 @@ public class ApplicationDbContext : DbContext
                   .OnDelete(DeleteBehavior.Restrict);
         });
 
+        modelBuilder.Entity<RoleType>(entity =>
+        {
+            entity.ToTable("RoleTypes");
+            entity.HasKey(e => e.Id);
+            entity.Property(e => e.Id).ValueGeneratedNever();
+            entity.Property(e => e.Description).IsRequired().HasMaxLength(200);
+
+            entity.HasData(
+                new RoleType { Id = 0, Description = "Default" },
+                new RoleType { Id = 1, Description = "bundle" },
+                new RoleType { Id = 2, Description = "bundle" },
+                new RoleType { Id = 3, Description = "Required" },
+                new RoleType { Id = 4, Description = "leadership" });
+        });
+
         // Configure Role entity
         modelBuilder.Entity<Role>(entity =>
         {
@@ -398,6 +416,12 @@ public class ApplicationDbContext : DbContext
             entity.Property(e => e.Category).HasMaxLength(50);
             entity.Property(e => e.Type).IsRequired().HasDefaultValue(0);
             entity.Property(e => e.CreatedAt).HasDefaultValueSql("CURRENT_TIMESTAMP");
+
+            entity.HasOne(e => e.RoleType)
+                  .WithMany(rt => rt.Roles)
+                  .HasForeignKey(e => e.Type)
+                  .HasPrincipalKey(rt => rt.Id)
+                  .OnDelete(DeleteBehavior.Restrict);
 
             // Note: Seed data removed from HasData() to prevent overwriting production data
             // Roles are seeded via migration (20250127000000_EnsureRolesDataWithoutOverwrite) 
@@ -410,6 +434,37 @@ public class ApplicationDbContext : DbContext
             // 6. Full Stack Developer (Leadership, Type 1)
             // 7. Marketing (Academic, Type 0)
             // 8. Documentation Specialist (Administrative, Type 0, IsActive: false)
+        });
+
+        modelBuilder.Entity<InstituteRole>(entity =>
+        {
+            entity.ToTable("InstituteRoles");
+            entity.HasKey(e => e.Id);
+            entity.Property(e => e.Name).IsRequired().HasMaxLength(100);
+            entity.Property(e => e.Description).HasMaxLength(500);
+            entity.Property(e => e.Category).HasMaxLength(50);
+            entity.Property(e => e.Type).IsRequired().HasDefaultValue(0);
+            entity.Property(e => e.CreatedAt).HasDefaultValueSql("CURRENT_TIMESTAMP");
+
+            entity.HasOne(e => e.Institute)
+                .WithMany(i => i.InstituteRoles)
+                .HasForeignKey(e => e.InstituteId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            entity.HasOne(e => e.Template)
+                .WithMany(t => t.InstituteRoles)
+                .HasForeignKey(e => e.TemplateId)
+                .OnDelete(DeleteBehavior.SetNull);
+
+            entity.HasOne(e => e.RoleType)
+                .WithMany(rt => rt.InstituteRoles)
+                .HasForeignKey(e => e.Type)
+                .HasPrincipalKey(rt => rt.Id)
+                .OnDelete(DeleteBehavior.Restrict);
+
+            entity.HasIndex(e => e.InstituteId);
+            entity.HasIndex(e => e.Type);
+            entity.HasIndex(e => e.TemplateId);
         });
 
         // Configure StudentRole entity (many-to-many relationship)
