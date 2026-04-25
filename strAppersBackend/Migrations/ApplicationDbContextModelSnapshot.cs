@@ -2314,6 +2314,10 @@ namespace strAppersBackend.Migrations
                         .HasColumnType("integer")
                         .HasColumnName("Sequence");
 
+                    b.Property<int?>("OriginalModuleId")
+                        .HasColumnType("integer")
+                        .HasColumnName("OriginalModuleId");
+
                     b.Property<string>("Title")
                         .HasMaxLength(100)
                         .HasColumnType("character varying(100)")
@@ -2326,6 +2330,8 @@ namespace strAppersBackend.Migrations
                     b.HasIndex("ProjectId");
 
                     b.HasIndex("Sequence");
+
+                    b.HasIndex("ProjectId", "OriginalModuleId");
 
                     b.ToTable("ProjectModules");
                 });

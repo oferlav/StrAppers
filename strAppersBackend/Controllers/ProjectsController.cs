@@ -1,4 +1,5 @@
 using System.ComponentModel.DataAnnotations;
+using System.Globalization;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
@@ -3251,23 +3252,46 @@ Staff request:
                     Title = pm.Title,
                     Description = pm.Description,
                     Sequence = pm.Sequence,
+                    OriginalModuleId = pm.Id,
                 }).ToList();
                 _context.ProjectModules.AddRange(duplicatedModules);
                 await _context.SaveChangesAsync();
 
-                for (var i = 0; i < sourceModules.Count && i < duplicatedModules.Count; i++)
+                // Build old -> new from OriginalModuleId (reliable; not dependent on sort order / index alignment).
+                var newModuleRows = await _context.ProjectModules
+                    .AsNoTracking()
+                    .Where(pm => pm.ProjectId == duplicate.Id && pm.OriginalModuleId != null)
+                    .ToListAsync();
+                if (newModuleRows.Count != sourceModules.Count)
                 {
-                    var fromId = sourceModules[i].Id;
-                    var toId = duplicatedModules[i].Id;
-                    if (fromId > 0 && toId > 0 && fromId != toId)
+                    _logger.LogWarning(
+                        "DuplicateProject: new module row count with OriginalModuleId {NewCount} != source {SourceCount} for NewProjectId={NewProjectId}; Trello module-id remap may be incomplete.",
+                        newModuleRows.Count,
+                        sourceModules.Count,
+                        duplicate.Id);
+                }
+                foreach (var row in newModuleRows)
+                {
+                    var fromId = row.OriginalModuleId!.Value;
+                    if (fromId > 0 && row.Id > 0 && fromId != row.Id)
                     {
-                        oldToNewModuleIdMap[fromId] = toId;
+                        oldToNewModuleIdMap[fromId] = row.Id;
                     }
                 }
+
+                if (oldToNewModuleIdMap.Count == 0)
+                {
+                    _logger.LogWarning(
+                        "DuplicateProject: module id map is empty after copy (source modules={SourceCount}, new rows={NewCount}) for NewProjectId={NewProjectId}; TrelloBoardJson will keep source module ids.",
+                        sourceModules.Count,
+                        newModuleRows.Count,
+                        duplicate.Id);
+                }
+
                 _logger.LogInformation(
-                    "DuplicateProject: copied {CopiedModulesCount} modules to NewProjectId={NewProjectId}",
-                    sourceModules.Count,
-                    duplicate.Id);
+                    "DuplicateProject: module id map for Trello (NewProjectId={NewProjectId}): {MapDetails}",
+                    duplicate.Id,
+                    FormatModuleIdMapForLog(oldToNewModuleIdMap));
             }
             else
             {
@@ -3297,15 +3321,52 @@ Staff request:
                 }
             }
 
-            if (!string.IsNullOrWhiteSpace(duplicate.TrelloBoardJson) && oldToNewModuleIdMap.Count > 0)
+            if (!string.IsNullOrWhiteSpace(duplicate.TrelloBoardJson))
             {
-                var updatedJson = TryRemapModuleIdsInTrelloBoardJson(duplicate.TrelloBoardJson!, oldToNewModuleIdMap);
-                if (!string.IsNullOrWhiteSpace(updatedJson))
+                var jsonIn = duplicate.TrelloBoardJson!;
+                _logger.LogInformation(
+                    "DuplicateProject: TrelloBoardJson remap START NewProjectId={NewProjectId} sourceProjectId={SourceProjectId} inputLen={Len} mapSize={MapSize} map=[{Map}]",
+                    duplicate.Id,
+                    id,
+                    jsonIn.Length,
+                    oldToNewModuleIdMap.Count,
+                    FormatModuleIdMapForLog(oldToNewModuleIdMap));
+                var updatedJson = TryRemapTrelloJsonAfterProjectDuplicate(
+                    jsonIn,
+                    oldToNewModuleIdMap,
+                    sourceProjectId: id,
+                    newProjectId: duplicate.Id);
+                if (string.IsNullOrWhiteSpace(updatedJson))
+                {
+                    _logger.LogWarning(
+                        "DuplicateProject: TrelloBoardJson remapper returned empty; DB json NOT updated. NewProjectId={NewProjectId}",
+                        duplicate.Id);
+                }
+                else if (string.Equals(updatedJson, jsonIn, StringComparison.Ordinal))
+                {
+                    _logger.LogWarning(
+                        "DuplicateProject: TrelloBoardJson remapper made NO string change — DB still has source ids. NewProjectId={NewProjectId} sourceProjectId={Source} mapSize={MapSize} map=[{Map}] (see TryRemapTrelloJson RESIDUAL logs if any)",
+                        duplicate.Id,
+                        id,
+                        oldToNewModuleIdMap.Count,
+                        FormatModuleIdMapForLog(oldToNewModuleIdMap));
+                }
+                else
                 {
                     duplicate.TrelloBoardJson = updatedJson;
                     duplicate.UpdatedAt = DateTime.UtcNow;
+                    _context.Entry(duplicate).Property(p => p.TrelloBoardJson).IsModified = true;
                     await _context.SaveChangesAsync();
+                    _logger.LogInformation(
+                        "DuplicateProject: TrelloBoardJson SAVED after remap. NewProjectId={NewProjectId} oldLen={OldLen} newLen={NewLen}",
+                        duplicate.Id,
+                        jsonIn.Length,
+                        updatedJson.Length);
                 }
+            }
+            else
+            {
+                _logger.LogInformation("DuplicateProject: TrelloBoardJson is empty; no remap. NewProjectId={NewProjectId}", duplicate.Id);
             }
 
             return Ok(new Project
@@ -3336,75 +3397,442 @@ Staff request:
         }
     }
 
-    /// <summary>
-    /// Rewrites Trello template card ModuleId values using source->duplicate module id mapping.
-    /// Handles both "ModuleId" and "moduleId" keys recursively.
-    /// </summary>
-    private static string? TryRemapModuleIdsInTrelloBoardJson(
-        string rawJson,
-        IReadOnlyDictionary<int, int> sourceToTargetModuleIds)
+    private static string FormatModuleIdMapForLog(IReadOnlyDictionary<int, int> map, int maxPairs = 40)
     {
-        if (string.IsNullOrWhiteSpace(rawJson) || sourceToTargetModuleIds == null || sourceToTargetModuleIds.Count == 0)
+        if (map is null or { Count: 0 })
+        {
+            return "(empty)";
+        }
+
+        var parts = map.Take(maxPairs).Select(kv => $"{kv.Key}→{kv.Value}");
+        var s = string.Join(", ", parts);
+        if (map.Count > maxPairs)
+        {
+            s += $" …(+{map.Count - maxPairs})";
+        }
+
+        return s;
+    }
+
+    /// <summary>
+    /// After duplicating a project, rewrites <c>*ModuleId</c> (JSON number or string of digits) and
+    /// <c>ProjectId</c> (number or string) via regex passes, then logs warnings if any old map id or source project id
+    /// still appears in those fields. No <see cref="JsonNode"/> walk. On failure returns <paramref name="rawJson"/>.
+    /// </summary>
+    private string? TryRemapTrelloJsonAfterProjectDuplicate(
+        string rawJson,
+        IReadOnlyDictionary<int, int> sourceToTargetModuleIds,
+        int sourceProjectId,
+        int newProjectId)
+    {
+        if (string.IsNullOrWhiteSpace(rawJson))
         {
             return rawJson;
         }
+
+        var moduleMap = sourceToTargetModuleIds ?? new Dictionary<int, int>();
+        if (sourceProjectId == newProjectId)
+        {
+            _logger.LogWarning(
+                "TryRemapTrelloJsonAfterProjectDuplicate: sourceProjectId == newProjectId ({Id}); skipping remap",
+                sourceProjectId);
+            return rawJson;
+        }
+
+        _logger.LogInformation(
+            "TryRemapTrelloJsonAfterProjectDuplicate: enter SourceProjectId={Src} NewProjectId={New} mapSize={N} map=[{Map}] jsonLen={Len}",
+            sourceProjectId,
+            newProjectId,
+            moduleMap.Count,
+            FormatModuleIdMapForLog(moduleMap),
+            rawJson.Length);
+
+        var modRxTrelloNum = 0;
+        var modRxTrelloStr = 0;
+        var modRxNum = 0;
+        var modRxStr = 0;
+        var projRxNum = 0;
+        var projRxStr = 0;
 
         try
         {
-            var root = JsonNode.Parse(rawJson);
-            if (root == null)
+            // Regex-only: JsonNode graph walks are not safe (shared nodes → "The node already has a parent.").
+            var s = rawJson;
+            if (moduleMap.Count > 0)
             {
-                return rawJson;
+                // TrelloProjectCreationRequest / TrelloTask JSON uses JsonProperty "moduleId" (string) for DB module row id
+                // — that exact shape is handled first; generic *ModuleId pass follows.
+                s = ApplyTrelloModelModuleIdNumeric(s, moduleMap, out modRxTrelloNum);
+                s = ApplyTrelloModelModuleIdStringValue(s, moduleMap, out modRxTrelloStr);
+                s = ApplyModuleIdMapNumericRegex(s, moduleMap, out modRxNum);
+                s = ApplyModuleIdMapStringValueRegex(s, moduleMap, out modRxStr);
             }
 
-            static JsonNode? RemapNode(JsonNode? node, IReadOnlyDictionary<int, int> map)
+            s = ApplyProjectIdNumericRegex(s, sourceProjectId, newProjectId, out projRxNum);
+            s = ApplyProjectIdStringValueRegex(s, sourceProjectId, newProjectId, out projRxStr);
+
+            var moduleTotal = modRxTrelloNum + modRxTrelloStr + modRxNum + modRxStr;
+            var projectTotal = projRxNum + projRxStr;
+            var outChanged = !string.Equals(s, rawJson, StringComparison.Ordinal);
+            _logger.LogInformation(
+                "TryRemapTrelloJsonAfterProjectDuplicate: done (regex) NewProjectId={New} outChanged={Changed} trlNum={TrelloN} trlStr={TrelloS} modNum={ModN} modStr={ModS} modTotal={ModT} projNum={PrN} projStr={PrS} projTotal={PrT} mapSize={MapSize} inLen={InLen} outLen={OutLen}",
+                newProjectId,
+                outChanged,
+                modRxTrelloNum,
+                modRxTrelloStr,
+                modRxNum,
+                modRxStr,
+                moduleTotal,
+                projRxNum,
+                projRxStr,
+                projectTotal,
+                moduleMap.Count,
+                rawJson.Length,
+                s.Length);
+
+            if (moduleMap.Count > 0 && moduleTotal == 0)
             {
-                if (node is JsonObject obj)
-                {
-                    foreach (var key in obj.Select(kv => kv.Key).ToList())
-                    {
-                        var child = obj[key];
-                        if (string.Equals(key, "ModuleId", StringComparison.OrdinalIgnoreCase)
-                            && child is JsonValue jv)
-                        {
-                            int? oldId = null;
-                            if (jv.TryGetValue<int>(out var intVal))
-                            {
-                                oldId = intVal;
-                            }
-                            else if (jv.TryGetValue<string>(out var s) && int.TryParse(s?.Trim(), out var parsed))
-                            {
-                                oldId = parsed;
-                            }
-
-                            if (oldId.HasValue && map.TryGetValue(oldId.Value, out var newId))
-                            {
-                                obj[key] = JsonValue.Create(newId.ToString());
-                                continue;
-                            }
-                        }
-
-                        obj[key] = RemapNode(child, map);
-                    }
-                }
-                else if (node is JsonArray arr)
-                {
-                    for (var i = 0; i < arr.Count; i++)
-                    {
-                        arr[i] = RemapNode(arr[i], map);
-                    }
-                }
-
-                return node;
+                var hasModuleIdKey = rawJson.Contains("oduleId", StringComparison.OrdinalIgnoreCase);
+                _logger.LogWarning(
+                    "TryRemapTrelloJsonAfterProjectDuplicate: 0 module id replacements. JSON contains oduleId-like text={HasKey} SourceProjectId={SourceId} NewProjectId={NewId} map=[{Map}]",
+                    hasModuleIdKey,
+                    sourceProjectId,
+                    newProjectId,
+                    FormatModuleIdMapForLog(moduleMap));
             }
 
-            var remapped = RemapNode(root, sourceToTargetModuleIds);
-            return remapped?.ToJsonString(new JsonSerializerOptions { WriteIndented = false }) ?? rawJson;
+            LogTrelloRemapResiduals(
+                s,
+                moduleMap,
+                sourceProjectId,
+                newProjectId);
+
+            if (!outChanged)
+            {
+                _logger.LogWarning(
+                    "TryRemapTrelloJsonAfterProjectDuplicate: output equals input (no net change). NewProjectId={NewId} SourceProjectId={Src} modT={ModT} projT={PrT}",
+                    newProjectId,
+                    sourceProjectId,
+                    moduleTotal,
+                    projectTotal);
+            }
+
+            return s;
         }
-        catch (JsonException)
+        catch (Exception ex)
         {
+            _logger.LogError(
+                ex,
+                "TryRemapTrelloJsonAfterProjectDuplicate: failed during regex remap; leaving Trello JSON unchanged (length={Length}) NewProjectId={New} SourceProjectId={Src}",
+                rawJson.Length,
+                newProjectId,
+                sourceProjectId);
             return rawJson;
         }
+    }
+
+    /// <summary>Post-remap: warn if any <c>*ModuleId</c> field still holds a value that is a key in the old→new map, or <c>ProjectId</c> still equals the source id.</summary>
+    private void LogTrelloRemapResiduals(
+        string json,
+        IReadOnlyDictionary<int, int> moduleMap,
+        int sourceProjectId,
+        int newProjectId)
+    {
+        if (string.IsNullOrEmpty(json))
+        {
+            return;
+        }
+
+        var valuePat = new Regex(
+            @"""([^""]*)""\s*:\s*(?:([0-9]+)|""\s*([0-9]+)\s*"")",
+            RegexOptions.CultureInvariant);
+        var stale = new List<int>();
+        foreach (Match m in valuePat.Matches(json))
+        {
+            var key = m.Groups[1].Value;
+            if (!key.EndsWith("ModuleId", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            var vs = m.Groups[2].Success ? m.Groups[2].Value : m.Groups[3].Value;
+            if (!int.TryParse(vs, NumberStyles.Integer, CultureInfo.InvariantCulture, out var n))
+            {
+                continue;
+            }
+
+            if (moduleMap.Count > 0 && moduleMap.ContainsKey(n))
+            {
+                stale.Add(n);
+            }
+        }
+
+        if (stale.Count > 0)
+        {
+            var sample = string.Join(
+                ", ",
+                stale.Distinct().Order().Take(24).Select(x => x.ToString(CultureInfo.InvariantCulture)));
+            if (stale.Distinct().Count() > 24)
+            {
+                sample += " …";
+            }
+
+            _logger.LogWarning(
+                "TryRemapTrelloJsonAfterProjectDuplicate: RESIDUAL old module id value(s) still in *ModuleId fields: [{Stale}] (should have been remapped). NewProjectId={New} SourceProjectId={Src}",
+                sample,
+                newProjectId,
+                sourceProjectId);
+        }
+
+        if (sourceProjectId == newProjectId)
+        {
+            return;
+        }
+
+        var prx = new Regex(
+            @"(?i)""(projectid)""\s*:\s*(?:([0-9]+)|""\s*([0-9]+)\s*"")",
+            RegexOptions.CultureInvariant);
+        foreach (Match m in prx.Matches(json))
+        {
+            var vs = m.Groups[2].Success ? m.Groups[2].Value : m.Groups[3].Value;
+            if (int.TryParse(vs, NumberStyles.Integer, CultureInfo.InvariantCulture, out var p) && p == sourceProjectId)
+            {
+                _logger.LogWarning(
+                    "TryRemapTrelloJsonAfterProjectDuplicate: RESIDUAL source ProjectId={Src} still in JSON. NewProjectId={New}",
+                    sourceProjectId,
+                    newProjectId);
+                return;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Trello sprint / card JSON: the property is exactly <c>moduleId</c> (case-insensitive), value a JSON <b>number</b>.
+    /// This matches the common serialized shape before generic <c>*ModuleId</c> sweeps.
+    /// </summary>
+    private static string ApplyTrelloModelModuleIdNumeric(
+        string json,
+        IReadOnlyDictionary<int, int> moduleMap,
+        out int replacements)
+    {
+        replacements = 0;
+        if (string.IsNullOrEmpty(json) || moduleMap.Count == 0)
+        {
+            return json;
+        }
+
+        var replBox = new int[1];
+        var rx = new Regex(
+            @"(?i)""(moduleid)""\s*:\s*([0-9]+)(?![0-9.""])",
+            RegexOptions.CultureInvariant);
+        var result = rx.Replace(
+            json,
+            m =>
+            {
+                if (!int.TryParse(m.Groups[2].Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var n)
+                    || !moduleMap.TryGetValue(n, out var toId))
+                {
+                    return m.Value;
+                }
+
+                replBox[0]++;
+                return $@"""{m.Groups[1].Value}"" : {toId.ToString(CultureInfo.InvariantCulture)}";
+            });
+        replacements = replBox[0];
+        return result;
+    }
+
+    /// <summary>Same as <see cref="ApplyTrelloModelModuleIdNumeric"/> but value is a JSON string of digits (with optional internal spaces).</summary>
+    private static string ApplyTrelloModelModuleIdStringValue(
+        string json,
+        IReadOnlyDictionary<int, int> moduleMap,
+        out int replacements)
+    {
+        replacements = 0;
+        if (string.IsNullOrEmpty(json) || moduleMap.Count == 0)
+        {
+            return json;
+        }
+
+        var replBox = new int[1];
+        var rx = new Regex(
+            @"(?i)""(moduleid)""\s*:\s*""\s*([0-9][0-9 \t]*[0-9]|[0-9]+)\s*""",
+            RegexOptions.CultureInvariant);
+        var result = rx.Replace(
+            json,
+            m =>
+            {
+                var raw = m.Groups[2].Value;
+                if (!int.TryParse(
+                        raw,
+                        NumberStyles.Integer,
+                        CultureInfo.InvariantCulture,
+                        out var n)
+                    || !moduleMap.TryGetValue(n, out var toId))
+                {
+                    return m.Value;
+                }
+
+                replBox[0]++;
+                return $@"""{m.Groups[1].Value}"" : ""{toId.ToString(CultureInfo.InvariantCulture)}""";
+            });
+        replacements = replBox[0];
+        return result;
+    }
+
+    /// <summary>
+    /// <c>&quot;…ModuleId&quot;: 123</c> (JSON number) when 123 is in the old→new map.
+    /// </summary>
+    private static string ApplyModuleIdMapNumericRegex(
+        string json,
+        IReadOnlyDictionary<int, int> moduleMap,
+        out int replacements)
+    {
+        replacements = 0;
+        if (string.IsNullOrEmpty(json) || moduleMap.Count == 0)
+        {
+            return json;
+        }
+
+        var rx = new Regex(
+            @"""([^""]*)""\s*:\s*([0-9]+)(?![0-9.""])",
+            RegexOptions.CultureInvariant);
+        var replBox = new int[1];
+        var result = rx.Replace(
+            json,
+            m =>
+            {
+                var key = m.Groups[1].Value;
+                if (!key.EndsWith("ModuleId", StringComparison.OrdinalIgnoreCase))
+                {
+                    return m.Value;
+                }
+
+                if (!int.TryParse(m.Groups[2].Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var n)
+                    || !moduleMap.TryGetValue(n, out var toId))
+                {
+                    return m.Value;
+                }
+
+                replBox[0]++;
+                return $@"""{key}"" : {toId.ToString(CultureInfo.InvariantCulture)}";
+            });
+        replacements = replBox[0];
+        return result;
+    }
+
+    /// <summary>
+    /// <c>&quot;…ModuleId&quot;: "123"</c> (JSON string of digits, optional internal spaces) when 123 is in the old→new map.
+    /// </summary>
+    private static string ApplyModuleIdMapStringValueRegex(
+        string json,
+        IReadOnlyDictionary<int, int> moduleMap,
+        out int replacements)
+    {
+        replacements = 0;
+        if (string.IsNullOrEmpty(json) || moduleMap.Count == 0)
+        {
+            return json;
+        }
+
+        var rx = new Regex(
+            @"""([^""]*)""\s*:\s*""\s*([0-9][0-9 \t]*[0-9]|[0-9]+)\s*""",
+            RegexOptions.CultureInvariant);
+        var replBox = new int[1];
+        var result = rx.Replace(
+            json,
+            m =>
+            {
+                var key = m.Groups[1].Value;
+                if (!key.EndsWith("ModuleId", StringComparison.OrdinalIgnoreCase))
+                {
+                    return m.Value;
+                }
+
+                if (!int.TryParse(
+                        m.Groups[2].Value,
+                        NumberStyles.Integer,
+                        CultureInfo.InvariantCulture,
+                        out var n)
+                    || !moduleMap.TryGetValue(n, out var toId))
+                {
+                    return m.Value;
+                }
+
+                replBox[0]++;
+                return $@"""{key}"" : ""{toId.ToString(CultureInfo.InvariantCulture)}""";
+            });
+        replacements = replBox[0];
+        return result;
+    }
+
+    /// <summary><c>ProjectId</c> as JSON number.</summary>
+    private static string ApplyProjectIdNumericRegex(
+        string json,
+        int sourceProjectId,
+        int newProjectId,
+        out int replacements)
+    {
+        replacements = 0;
+        if (string.IsNullOrEmpty(json) || sourceProjectId == newProjectId)
+        {
+            return json;
+        }
+
+        var replBox = new int[1];
+        var rx = new Regex(
+            @"(?i)""(projectid)""\s*:\s*([0-9]+)(?![0-9""])",
+            RegexOptions.CultureInvariant);
+        var result = rx.Replace(
+            json,
+            m =>
+            {
+                if (!int.TryParse(m.Groups[2].Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var n)
+                    || n != sourceProjectId)
+                {
+                    return m.Value;
+                }
+
+                replBox[0]++;
+                return $@"""{m.Groups[1].Value}"" : {newProjectId.ToString(CultureInfo.InvariantCulture)}";
+            });
+        replacements = replBox[0];
+        return result;
+    }
+
+    /// <summary><c>ProjectId</c> as a JSON string of digits.</summary>
+    private static string ApplyProjectIdStringValueRegex(
+        string json,
+        int sourceProjectId,
+        int newProjectId,
+        out int replacements)
+    {
+        replacements = 0;
+        if (string.IsNullOrEmpty(json) || sourceProjectId == newProjectId)
+        {
+            return json;
+        }
+
+        var newStr = newProjectId.ToString(CultureInfo.InvariantCulture);
+        var replBox = new int[1];
+        var rx = new Regex(
+            @"(?i)""(projectid)""\s*:\s*""\s*([0-9]+)\s*""",
+            RegexOptions.CultureInvariant);
+        var result = rx.Replace(
+            json,
+            m =>
+            {
+                if (!int.TryParse(m.Groups[2].Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var n)
+                    || n != sourceProjectId)
+                {
+                    return m.Value;
+                }
+
+                replBox[0]++;
+                return $@"""{m.Groups[1].Value}"" : ""{newStr}""";
+            });
+        replacements = replBox[0];
+        return result;
     }
 
     /// <summary>

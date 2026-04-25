@@ -28,6 +28,13 @@ namespace strAppersBackend.Models
         [Column("Sequence")]
         public int? Sequence { get; set; }
 
+        /// <summary>
+        /// When this row was created by copying another project, the source <see cref="Id"/> from that copy.
+        /// Used to rewrite TrelloBoardJson module references to the new Ids. Null for modules created normally.
+        /// </summary>
+        [Column("OriginalModuleId")]
+        public int? OriginalModuleId { get; set; }
+
         // Navigation properties
         public virtual Project? Project { get; set; }
         public virtual ModuleType? ModuleTypeNavigation { get; set; }

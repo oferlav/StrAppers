@@ -990,6 +990,7 @@ public class ApplicationDbContext : DbContext
             entity.Property(e => e.Title).HasMaxLength(100);
             entity.Property(e => e.Description).HasColumnType("text");
             entity.Property(e => e.Sequence).HasColumnName("Sequence");
+            entity.Property(e => e.OriginalModuleId).HasColumnName("OriginalModuleId");
 
             // Foreign key relationships
             entity.HasOne(e => e.Project)
@@ -1006,6 +1007,7 @@ public class ApplicationDbContext : DbContext
             entity.HasIndex(e => e.ProjectId);
             entity.HasIndex(e => e.ModuleType);
             entity.HasIndex(e => e.Sequence);
+            entity.HasIndex(e => new { e.ProjectId, e.OriginalModuleId });
         });
 
         // Configure Figma entity
