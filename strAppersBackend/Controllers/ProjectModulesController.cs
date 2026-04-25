@@ -1,5 +1,7 @@
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using System.Text.Json;
+using System.Text.Json.Nodes;
 using strAppersBackend.Data;
 using strAppersBackend.Models;
 
@@ -72,7 +74,7 @@ namespace strAppersBackend.Controllers
         }
 
         /// <summary>
-        /// Get all modules for a specific project (only <see cref="ProjectModule.ModuleType"/> = 2 — e.g. feature modules for Task Builder linking).
+        /// Get all modules for a specific project (only ModuleType = 2).
         /// </summary>
         [HttpGet("by-project/{projectId}")]
         public async Task<ActionResult<IEnumerable<ProjectModule>>> GetProjectModulesByProject(int projectId)
@@ -83,6 +85,8 @@ namespace strAppersBackend.Controllers
                 var projectModules = await _context.ProjectModules
                     .Include(pm => pm.ModuleTypeNavigation)
                     .Where(pm => pm.ProjectId == projectId && pm.ModuleType == 2)
+                    .OrderBy(pm => pm.Sequence ?? int.MaxValue)
+                    .ThenBy(pm => pm.Id)
                     .ToListAsync();
                 _logger.LogInformation($"Retrieved {projectModules.Count} modules for project {projectId}");
                 return Ok(projectModules);
@@ -120,16 +124,28 @@ namespace strAppersBackend.Controllers
                     return BadRequest(new { error = "Module type not found" });
                 }
 
+                int? nextSequence = request.Sequence;
+                if (!nextSequence.HasValue)
+                {
+                    var maxSeq = await _context.ProjectModules
+                        .Where(pm => pm.ProjectId == request.ProjectId)
+                        .Select(pm => (int?)(pm.Sequence ?? 0))
+                        .MaxAsync() ?? 0;
+                    nextSequence = maxSeq + 1;
+                }
+
                 var projectModule = new ProjectModule
                 {
                     ProjectId = request.ProjectId,
                     ModuleType = request.ModuleType,
                     Title = request.Title,
-                    Description = request.Description
+                    Description = request.Description,
+                    Sequence = nextSequence
                 };
 
                 _context.ProjectModules.Add(projectModule);
                 await _context.SaveChangesAsync();
+                await SanitizeProjectTrelloBoardModuleIdsAsync(projectModule.ProjectId);
 
                 // Load the created module with navigation properties
                 var createdModule = await _context.ProjectModules
@@ -194,10 +210,19 @@ namespace strAppersBackend.Controllers
                 if (request.Description != null)
                     projectModule.Description = request.Description;
 
+                if (request.Sequence.HasValue)
+                    projectModule.Sequence = request.Sequence;
+
                 await _context.SaveChangesAsync();
+                await SanitizeProjectTrelloBoardModuleIdsAsync(projectModule.ProjectId);
 
                 _logger.LogInformation($"Updated project module with ID: {id}");
                 return NoContent();
+            }
+            catch (DbUpdateConcurrencyException)
+            {
+                _logger.LogWarning("Update concurrency miss for project module {ModuleId}; row no longer exists.", id);
+                return NotFound(new { error = "Project module not found" });
             }
             catch (Exception ex)
             {
@@ -225,8 +250,14 @@ namespace strAppersBackend.Controllers
 
                 _context.ProjectModules.Remove(projectModule);
                 await _context.SaveChangesAsync();
+                await SanitizeProjectTrelloBoardModuleIdsAsync(projectModule.ProjectId);
 
                 _logger.LogInformation($"Deleted project module with ID: {id}");
+                return NoContent();
+            }
+            catch (DbUpdateConcurrencyException)
+            {
+                _logger.LogWarning("Delete concurrency miss for project module {ModuleId}; treating as already deleted.", id);
                 return NoContent();
             }
             catch (Exception ex)
@@ -234,6 +265,98 @@ namespace strAppersBackend.Controllers
                 _logger.LogError(ex, $"Error deleting project module with ID: {id}");
                 return StatusCode(500, new { error = "An error occurred while deleting the project module", message = ex.Message });
             }
+        }
+
+        /// <summary>
+        /// Removes stale ModuleId references from Projects.TrelloBoardJson when modules changed.
+        /// </summary>
+        private async Task SanitizeProjectTrelloBoardModuleIdsAsync(int? projectId)
+        {
+            if (!projectId.HasValue || projectId.Value <= 0)
+            {
+                return;
+            }
+
+            var pid = projectId.Value;
+            var project = await _context.Projects.FirstOrDefaultAsync(p => p.Id == pid);
+            if (project == null || string.IsNullOrWhiteSpace(project.TrelloBoardJson))
+            {
+                return;
+            }
+
+            var validModuleIds = await _context.ProjectModules
+                .AsNoTracking()
+                .Where(pm => pm.ProjectId == pid)
+                .Select(pm => pm.Id)
+                .ToListAsync();
+            var validSet = validModuleIds.ToHashSet();
+
+            JsonNode? root;
+            try
+            {
+                root = JsonNode.Parse(project.TrelloBoardJson);
+            }
+            catch (JsonException)
+            {
+                return;
+            }
+
+            if (root == null)
+            {
+                return;
+            }
+
+            var changed = false;
+
+            void Walk(JsonNode? node)
+            {
+                if (node is JsonObject obj)
+                {
+                    foreach (var key in obj.Select(kv => kv.Key).ToList())
+                    {
+                        var child = obj[key];
+                        if (string.Equals(key, "ModuleId", StringComparison.OrdinalIgnoreCase)
+                            && child is JsonValue jv)
+                        {
+                            int? idVal = null;
+                            if (jv.TryGetValue<int>(out var i))
+                            {
+                                idVal = i;
+                            }
+                            else if (jv.TryGetValue<string>(out var s) && int.TryParse(s?.Trim(), out var parsed))
+                            {
+                                idVal = parsed;
+                            }
+
+                            if (idVal.HasValue && !validSet.Contains(idVal.Value))
+                            {
+                                obj[key] = JsonValue.Create(string.Empty);
+                                changed = true;
+                                continue;
+                            }
+                        }
+
+                        Walk(child);
+                    }
+                }
+                else if (node is JsonArray arr)
+                {
+                    for (var i = 0; i < arr.Count; i++)
+                    {
+                        Walk(arr[i]);
+                    }
+                }
+            }
+
+            Walk(root);
+            if (!changed)
+            {
+                return;
+            }
+
+            project.TrelloBoardJson = root.ToJsonString(new JsonSerializerOptions { WriteIndented = false });
+            project.UpdatedAt = DateTime.UtcNow;
+            await _context.SaveChangesAsync();
         }
     }
 }

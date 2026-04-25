@@ -26,4 +26,10 @@ public interface IAzureBlobStorageService
     /// Returns null if blob missing, host invalid, or SAS cannot be generated (e.g. no account key).
     /// </summary>
     Task<string?> GetBlobReadSasUriAsync(Uri blobUri, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Deletes a blob by its HTTPS URL when it belongs to this configured storage account/container.
+    /// Returns false when URL is invalid/mismatched or delete fails.
+    /// </summary>
+    Task<bool> DeleteBlobIfExistsAsync(Uri blobUri, CancellationToken cancellationToken = default);
 }

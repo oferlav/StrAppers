@@ -1,9 +1,9 @@
+using strAppersBackend;
 using Microsoft.EntityFrameworkCore;
 using strAppersBackend.Data;
 using strAppersBackend.Models;
 using strAppersBackend.Services;
 using System.Text.Json;
-using System.Linq;
 using Microsoft.Extensions.Logging;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.DependencyInjection;
@@ -19,12 +19,18 @@ builder.Services.Configure<Microsoft.AspNetCore.Http.Features.FormOptions>(o =>
     o.MultipartBodyLengthLimit = 30 * 1024 * 1024;
 });
 
+// JSON bodies (e.g. large Task Builder requests). Kestrel default is ~30 MiB; web.config should match for IIS. Prefer small body via institute template id on the client when possible.
+const long maxRequestBodyBytes = 52_428_800; // 50 MiB
+builder.WebHost.ConfigureKestrel(o => o.Limits.MaxRequestBodySize = maxRequestBodyBytes);
+
 var apiBaseForCors = builder.Configuration["ApiBaseUrl"];
 Uri? apiBaseUriForCors = null;
 if (!string.IsNullOrWhiteSpace(apiBaseForCors) && Uri.TryCreate(apiBaseForCors.Trim(), UriKind.Absolute, out var tmpApiUri))
 {
     apiBaseUriForCors = tmpApiUri;
 }
+
+var corsExtraAllowedOrigins = CorsOriginHelper.GetExtraOrigins(builder.Configuration);
 
 // Azure App Service: wire ILogger to filesystem diagnostics (portal Log stream, LogFiles\Application).
 // WEBSITE_INSTANCE_ID is set on App Service workers; skip locally.
@@ -41,42 +47,10 @@ builder.Services.AddCors(options =>
     options.AddPolicy(name: "AllowFrontend",
                       policy =>
                       {
-                          // Allow requests from GitHub Pages (*.github.io), specific frontend domains, and localhost
+                          // Allow requests from GitHub Pages (*.github.io), specific frontend domains, localhost, and
+                          // Cors:ExtraAllowedOrigins (e.g. http://localhost:5173 when a dev build calls a hosted API).
                           policy.SetIsOriginAllowed(origin =>
-                          {
-                              if (string.IsNullOrEmpty(origin)) return false;
-                              
-                              var uri = new Uri(origin);
-
-                              // Same host as ApiBaseUrl (e.g. Swagger UI / fetch from the App Service URL)
-                              if (apiBaseUriForCors != null &&
-                                  uri.Host.Equals(apiBaseUriForCors.Host, StringComparison.OrdinalIgnoreCase))
-                                  return true;
-                              
-                              // Allow GitHub Pages (*.github.io) - for generated frontend projects
-                              if (uri.Host.EndsWith(".github.io", StringComparison.OrdinalIgnoreCase))
-                                  return true;
-
-                              // Azure Static Web Apps (e.g. *.4.azurestaticapps.net)
-                              if (uri.Host.EndsWith(".azurestaticapps.net", StringComparison.OrdinalIgnoreCase))
-                                  return true;
-                              
-                              // Allow specific frontend domains
-                              var allowedOrigins = new[]
-                              {
-                                  "preview--skill-in-ce9dcf39.base44.app",
-                                  "skill-in.com",
-                                  "localhost",
-                                  "127.0.0.1",
-                                  "20.126.90.3"
-                              };
-                              
-                              if (allowedOrigins.Any(allowed => uri.Host.Equals(allowed, StringComparison.OrdinalIgnoreCase) || 
-                                                               uri.Host.EndsWith($".{allowed}", StringComparison.OrdinalIgnoreCase)))
-                                  return true;
-                              
-                              return false;
-                          })
+                              CorsOriginHelper.IsOriginAllowed(origin, apiBaseUriForCors, corsExtraAllowedOrigins))
                           .AllowAnyHeader()
                           .AllowAnyMethod()
                           .AllowCredentials(); // Allow credentials for CORS requests
@@ -144,6 +118,10 @@ builder.Services.AddScoped<ISmtpEmailService, SmtpEmailService>();
 builder.Services.Configure<AzureBlobStorageOptions>(
     builder.Configuration.GetSection(AzureBlobStorageOptions.SectionName));
 builder.Services.AddSingleton<IAzureBlobStorageService, AzureBlobStorageService>();
+
+// Project design (Institute) header field word limits — see ProjectsInstitute:MaxLengthFields in appsettings
+builder.Services.Configure<ProjectsInstituteMaxLengthFieldsOptions>(
+    builder.Configuration.GetSection(ProjectsInstituteMaxLengthFieldsOptions.SectionName));
 
 // Shared SSL callback: accept all certificate errors for GitHub (UntrustedRoot, corporate proxy, VM restart)
 // so GitHub API calls work reliably in restricted networks

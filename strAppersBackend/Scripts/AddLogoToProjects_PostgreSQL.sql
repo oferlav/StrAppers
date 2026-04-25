@@ -1,0 +1,6 @@
+BEGIN;
+
+ALTER TABLE "Projects"
+    ADD COLUMN IF NOT EXISTS "Logo" text;
+
+COMMIT;

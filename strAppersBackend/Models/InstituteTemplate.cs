@@ -40,4 +40,6 @@ public class InstituteTemplate
 
     [Column(TypeName = "TEXT")]
     public string TrelloBoardJson { get; set; } = string.Empty;
+
+    public bool IsActive { get; set; } = false;
 }

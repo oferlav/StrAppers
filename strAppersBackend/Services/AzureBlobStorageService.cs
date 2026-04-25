@@ -186,6 +186,41 @@ public class AzureBlobStorageService : IAzureBlobStorageService
         return blob.GenerateSasUri(sasBuilder).AbsoluteUri;
     }
 
+    public async Task<bool> DeleteBlobIfExistsAsync(Uri blobUri, CancellationToken cancellationToken = default)
+    {
+        if (!IsConfigured || _client == null || string.IsNullOrEmpty(_containerName))
+            return false;
+
+        if (!IsAzureBlobStorageHost(blobUri.Host))
+            return false;
+
+        if (!string.Equals(blobUri.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase))
+            return false;
+
+        if (TryGetAccountNameFromBlobHost(blobUri.Host, out var urlAccount) &&
+            !string.Equals(urlAccount, _client.AccountName, StringComparison.OrdinalIgnoreCase))
+            return false;
+
+        if (!TryResolveBlobContainerAndName(blobUri, out var containerFromUrl, out var blobPath))
+            return false;
+
+        if (!string.Equals(containerFromUrl, _containerName, StringComparison.OrdinalIgnoreCase))
+            return false;
+
+        try
+        {
+            var container = _client.GetBlobContainerClient(_containerName);
+            var blob = container.GetBlobClient(blobPath);
+            await blob.DeleteIfExistsAsync(cancellationToken: cancellationToken);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "DeleteBlobIfExistsAsync failed for {BlobUri}", blobUri);
+            return false;
+        }
+    }
+
     /// <summary>
     /// Resolves container and blob name from a blob HTTPS URL. Uses <see cref="BlobUriBuilder"/> so
     /// percent-encoded paths (e.g. Hebrew filenames) decode to the same logical name Azure stores — unlike

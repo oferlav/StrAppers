@@ -55,6 +55,8 @@ public class Institute
 
     public ICollection<Teacher> Teachers { get; set; } = new List<Teacher>();
 
+    public ICollection<Project> Projects { get; set; } = new List<Project>();
+
     public ICollection<InstituteTemplate> InstituteTemplates { get; set; } = new List<InstituteTemplate>();
 
     public ICollection<InstituteRole> InstituteRoles { get; set; } = new List<InstituteRole>();

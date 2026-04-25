@@ -22,7 +22,8 @@ public interface IAIService
     Task<TranslateTextResponse> TranslateTextToEnglishAsync(string text);
     Task<ProjectCriteriaClassificationResponse> ClassifyProjectCriteriaAsync(string projectTitle, string projectDescription, string? extendedDescription, List<ProjectCriteria> availableCriteria);
     Task<ParsedBuildOutput?> ParseBuildOutputAsync(string buildOutput);
-    Task<string?> GenerateTextResponseAsync(string prompt, string? serviceName = null);
+    /// <param name="modelName">OpenAI model id (e.g. gpt-4o-mini), or null to use <c>AIConfig:Model</c>. Not a logical scenario name.</param>
+    Task<string?> GenerateTextResponseAsync(string prompt, string? modelName = null);
 }
 
 public class AIService : IAIService
@@ -2552,15 +2553,14 @@ Return the JSON response now:";
     }
 
     /// <summary>
-    /// Generates a text response using AI service (OpenAI or Anthropic)
+    /// Generates a text response using OpenAI. <paramref name="modelName"/> must be a valid OpenAI model id, or null for <c>AIConfig:Model</c>.
     /// </summary>
-    public async Task<string?> GenerateTextResponseAsync(string prompt, string? serviceName = null)
+    public async Task<string?> GenerateTextResponseAsync(string prompt, string? modelName = null)
     {
         try
         {
-            // Use provided model name, or fall back to default from config
-            var model = !string.IsNullOrWhiteSpace(serviceName) ? serviceName : _aiConfig.Model;
-            
+            var model = !string.IsNullOrWhiteSpace(modelName) ? modelName : _aiConfig.Model;
+
             _logger.LogInformation("Using AI model: {Model} for text generation", model);
             var result = await CallOpenAIAsync(prompt, model);
             

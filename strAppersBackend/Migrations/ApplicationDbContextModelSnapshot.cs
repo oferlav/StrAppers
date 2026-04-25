@@ -955,6 +955,54 @@ namespace strAppersBackend.Migrations
                         });
                 });
 
+            modelBuilder.Entity("strAppersBackend.Models.InstituteAssistantChatHistory", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer")
+                        .HasColumnName("Id");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("CreatedAt");
+
+                    b.Property<int>("InstituteId")
+                        .HasColumnType("integer")
+                        .HasColumnName("InstituteId");
+
+                    b.Property<bool>("IsAssistant")
+                        .HasColumnType("boolean")
+                        .HasColumnName("IsAssistant");
+
+                    b.Property<string>("Message")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("Message");
+
+                    b.Property<int>("ProjectId")
+                        .HasColumnType("integer")
+                        .HasColumnName("ProjectId");
+
+                    b.Property<string>("Source")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)")
+                        .HasColumnName("Source");
+
+                    b.Property<int>("TeacherId")
+                        .HasColumnType("integer")
+                        .HasColumnName("TeacherId");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("InstituteId", "TeacherId", "ProjectId", "Source", "CreatedAt")
+                        .HasDatabaseName("IX_IACH_InstituteId_TeacherId_ProjectId_Source_CreatedAt");
+
+                    b.ToTable("InstituteAssistantChatHistory", (string)null);
+                });
+
             modelBuilder.Entity("strAppersBackend.Models.InstituteRole", b =>
                 {
                     b.Property<int>("Id")
@@ -976,6 +1024,11 @@ namespace strAppersBackend.Migrations
                         .HasMaxLength(500)
                         .HasColumnType("character varying(500)");
 
+                    b.Property<bool>("CustomerEngagement")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("boolean")
+                        .HasDefaultValue(false);
+
                     b.Property<int>("InstituteId")
                         .HasColumnType("integer");
 
@@ -986,6 +1039,9 @@ namespace strAppersBackend.Migrations
                         .IsRequired()
                         .HasMaxLength(100)
                         .HasColumnType("character varying(100)");
+
+                    b.Property<int?>("SkillId")
+                        .HasColumnType("integer");
 
                     b.Property<int?>("TemplateId")
                         .HasColumnType("integer");
@@ -1000,6 +1056,8 @@ namespace strAppersBackend.Migrations
                     b.HasKey("Id");
 
                     b.HasIndex("InstituteId");
+
+                    b.HasIndex("SkillId");
 
                     b.HasIndex("TemplateId");
 
@@ -1658,6 +1716,9 @@ namespace strAppersBackend.Migrations
                     b.Property<string>("ExtendedDescription")
                         .HasColumnType("TEXT");
 
+                    b.Property<string>("Logo")
+                        .HasColumnType("TEXT");
+
                     b.Property<string>("IdeGenerationStatus")
                         .IsRequired()
                         .HasMaxLength(50)
@@ -1677,8 +1738,8 @@ namespace strAppersBackend.Migrations
                         .HasColumnName("Kickoff");
 
                     b.Property<string>("Mission")
-                        .HasMaxLength(250)
-                        .HasColumnType("character varying(250)");
+                        .HasMaxLength(2000)
+                        .HasColumnType("character varying(2000)");
 
                     b.Property<int>("MockRecordsCount")
                         .HasColumnType("integer")
@@ -1687,6 +1748,9 @@ namespace strAppersBackend.Migrations
                     b.Property<string>("OneLiner")
                         .HasMaxLength(250)
                         .HasColumnType("character varying(250)");
+
+                    b.Property<int?>("InstituteId")
+                        .HasColumnType("integer");
 
                     b.Property<int?>("OrganizationId")
                         .HasColumnType("integer");
@@ -1697,8 +1761,8 @@ namespace strAppersBackend.Migrations
                         .HasColumnType("character varying(50)");
 
                     b.Property<string>("ShortBrief")
-                        .HasMaxLength(1000)
-                        .HasColumnType("character varying(1000)")
+                        .HasMaxLength(2000)
+                        .HasColumnType("character varying(2000)")
                         .HasColumnName("ShortBrief");
 
                     b.Property<string>("SystemDesign")
@@ -1731,6 +1795,8 @@ namespace strAppersBackend.Migrations
                     b.HasKey("Id");
 
                     b.HasIndex("OrganizationId");
+
+                    b.HasIndex("InstituteId");
 
                     b.ToTable("Projects");
 
@@ -2579,6 +2645,27 @@ namespace strAppersBackend.Migrations
                         });
                 });
 
+            modelBuilder.Entity("strAppersBackend.Models.Skill", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasMaxLength(150)
+                        .HasColumnType("character varying(150)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("Name")
+                        .IsUnique();
+
+                    b.ToTable("Skills");
+                });
+
             modelBuilder.Entity("strAppersBackend.Models.Role", b =>
                 {
                     b.Property<int>("Id")
@@ -2596,6 +2683,11 @@ namespace strAppersBackend.Migrations
                         .HasColumnType("timestamp with time zone")
                         .HasDefaultValueSql("CURRENT_TIMESTAMP");
 
+                    b.Property<bool>("CustomerEngagement")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("boolean")
+                        .HasDefaultValue(false);
+
                     b.Property<string>("Description")
                         .HasMaxLength(500)
                         .HasColumnType("character varying(500)");
@@ -2608,6 +2700,9 @@ namespace strAppersBackend.Migrations
                         .HasMaxLength(100)
                         .HasColumnType("character varying(100)");
 
+                    b.Property<int?>("SkillId")
+                        .HasColumnType("integer");
+
                     b.Property<int>("Type")
                         .HasColumnType("integer")
                         .HasDefaultValue(0);
@@ -2616,6 +2711,8 @@ namespace strAppersBackend.Migrations
                         .HasColumnType("timestamp with time zone");
 
                     b.HasKey("Id");
+
+                    b.HasIndex("SkillId");
 
                     b.HasIndex("Type");
 
@@ -3343,6 +3440,11 @@ namespace strAppersBackend.Migrations
                     b.Property<int>("InstituteId")
                         .HasColumnType("integer");
 
+                    b.Property<bool>("IsActive")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("boolean")
+                        .HasDefaultValue(false);
+
                     b.Property<int>("ProjectId")
                         .HasColumnType("integer");
 
@@ -3668,10 +3770,17 @@ namespace strAppersBackend.Migrations
 
             modelBuilder.Entity("strAppersBackend.Models.Project", b =>
                 {
+                    b.HasOne("strAppersBackend.Models.Institute", "Institute")
+                        .WithMany("Projects")
+                        .HasForeignKey("InstituteId")
+                        .OnDelete(DeleteBehavior.SetNull);
+
                     b.HasOne("strAppersBackend.Models.Organization", "Organization")
                         .WithMany("Projects")
                         .HasForeignKey("OrganizationId")
                         .OnDelete(DeleteBehavior.SetNull);
+
+                    b.Navigation("Institute");
 
                     b.Navigation("Organization");
                 });
@@ -3912,6 +4021,11 @@ namespace strAppersBackend.Migrations
 
             modelBuilder.Entity("strAppersBackend.Models.Role", b =>
                 {
+                    b.HasOne("strAppersBackend.Models.Skill", "Skill")
+                        .WithMany("Roles")
+                        .HasForeignKey("SkillId")
+                        .OnDelete(DeleteBehavior.SetNull);
+
                     b.HasOne("strAppersBackend.Models.RoleType", "RoleType")
                         .WithMany("Roles")
                         .HasForeignKey("Type")
@@ -3920,7 +4034,36 @@ namespace strAppersBackend.Migrations
 
                     b.Navigation("RoleType");
 
+                    b.Navigation("Skill");
+
                     b.Navigation("StudentRoles");
+                });
+
+            modelBuilder.Entity("strAppersBackend.Models.InstituteAssistantChatHistory", b =>
+                {
+                    b.HasOne("strAppersBackend.Models.Institute", "Institute")
+                        .WithMany()
+                        .HasForeignKey("InstituteId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("strAppersBackend.Models.Project", "Project")
+                        .WithMany()
+                        .HasForeignKey("ProjectId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("strAppersBackend.Models.Teacher", "Teacher")
+                        .WithMany()
+                        .HasForeignKey("TeacherId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.Navigation("Institute");
+
+                    b.Navigation("Project");
+
+                    b.Navigation("Teacher");
                 });
 
             modelBuilder.Entity("strAppersBackend.Models.InstituteRole", b =>
@@ -3937,6 +4080,11 @@ namespace strAppersBackend.Migrations
                         .OnDelete(DeleteBehavior.Restrict)
                         .IsRequired();
 
+                    b.HasOne("strAppersBackend.Models.Skill", "Skill")
+                        .WithMany("InstituteRoles")
+                        .HasForeignKey("SkillId")
+                        .OnDelete(DeleteBehavior.SetNull);
+
                     b.HasOne("strAppersBackend.Models.InstituteTemplate", "Template")
                         .WithMany("InstituteRoles")
                         .HasForeignKey("TemplateId")
@@ -3945,6 +4093,10 @@ namespace strAppersBackend.Migrations
                     b.Navigation("Institute");
 
                     b.Navigation("RoleType");
+
+                    b.Navigation("Skill");
+
+                    b.Navigation("Template");
                 });
 
             modelBuilder.Entity("strAppersBackend.Models.Teacher", b =>
@@ -3991,6 +4143,8 @@ namespace strAppersBackend.Migrations
             modelBuilder.Entity("strAppersBackend.Models.Institute", b =>
                 {
                     b.Navigation("InstituteRoles");
+
+                    b.Navigation("Projects");
 
                     b.Navigation("Students");
 
@@ -4044,6 +4198,13 @@ namespace strAppersBackend.Migrations
                 });
 
             modelBuilder.Entity("strAppersBackend.Models.RoleType", b =>
+                {
+                    b.Navigation("InstituteRoles");
+
+                    b.Navigation("Roles");
+                });
+
+            modelBuilder.Entity("strAppersBackend.Models.Skill", b =>
                 {
                     b.Navigation("InstituteRoles");
 

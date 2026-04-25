@@ -100,7 +100,18 @@ try {
         Remove-Item -Path $publishPath -Recurse -Force -ErrorAction SilentlyContinue
     }
 
-    dotnet publish -c Release -o $publishPath
+    $publishArgs = @(
+        "publish",
+        "-c", "Release",
+        "-o", $publishPath,
+        "/p:DebugType=None",
+        "/p:DebugSymbols=false",
+        "/p:GenerateDocumentationFile=false"
+    )
+    if ($SkipCleanBuild) {
+        $publishArgs += "--no-build"
+    }
+    dotnet @publishArgs
     if ($LASTEXITCODE -ne 0) {
         throw "Publish failed!"
     }
@@ -117,21 +128,14 @@ try {
         Remove-Item -Path $zipPath -Force
     }
 
-    # Prefer tar.exe (ships with Windows 10+); Compress-Archive often fails with "file in use" on DLLs.
-    $tar = Get-Command tar.exe -ErrorAction SilentlyContinue
-    if ($tar) {
-        Push-Location $publishPath
-        try {
-            & tar.exe -a -c -f $zipPath .
-            if ($LASTEXITCODE -ne 0) {
-                throw "tar zip failed with exit code $LASTEXITCODE"
-            }
-        } finally {
-            Pop-Location
-        }
-    } else {
-        Compress-Archive -Path "$publishPath\*" -DestinationPath $zipPath -Force
-    }
+    # Use .NET ZipFile with NoCompression for stable/faster packaging on Windows.
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    [System.IO.Compression.ZipFile]::CreateFromDirectory(
+        $publishPath,
+        $zipPath,
+        [System.IO.Compression.CompressionLevel]::NoCompression,
+        $false
+    )
 
     if (-not (Test-Path $zipPath)) {
         throw "Failed to create zip file!"

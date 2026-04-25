@@ -11,11 +11,11 @@ public class Project
     [MaxLength(200)]
     public string Title { get; set; } = string.Empty;
 
-    /// <summary>Short mission statement for the project (max 250 characters).</summary>
-    [MaxLength(250)]
+    /// <summary>Short mission statement (enforced: max 45 words; column supports long copy).</summary>
+    [MaxLength(2000)]
     public string? Mission { get; set; }
 
-    /// <summary>Single-line pitch or tagline (max 250 characters).</summary>
+    /// <summary>Single-line pitch or tagline (enforced: max 8 words).</summary>
     [MaxLength(250)]
     public string? OneLiner { get; set; }
     
@@ -30,6 +30,9 @@ public class Project
     
     [Column(TypeName = "TEXT")]
     public string? DataSchema { get; set; }
+
+    [Column(TypeName = "TEXT")]
+    public string? Logo { get; set; }
     
     public byte[]? SystemDesignDoc { get; set; }
     
@@ -42,10 +45,16 @@ public class Project
     
     public int? OrganizationId { get; set; }
     public Organization? Organization { get; set; }
+
+    public int? InstituteId { get; set; }
+    public Institute? Institute { get; set; }
     
     // Project availability
     [Column("isAvailable")]
     public bool IsAvailable { get; set; } = true;
+
+    [Column("InUse")]
+    public bool InUse { get; set; } = true;
     
     [Column("Kickoff")]
     public bool? Kickoff { get; set; } = false;
@@ -65,10 +74,8 @@ public class Project
     [Column("CustomerPastStory", TypeName = "TEXT")]
     public string? CustomerPastStory { get; set; }
 
-    /// <summary>
-    /// Short brief/summary of the project (max 1000 characters).
-    /// </summary>
-    [MaxLength(1000)]
+    /// <summary>Short brief/summary (enforced: max 150 words; column supports long copy).</summary>
+    [MaxLength(2000)]
     [Column("ShortBrief")]
     public string? ShortBrief { get; set; }
 
@@ -132,6 +139,8 @@ public class CreateProjectRequest
     
     [MaxLength(500)]
     public string? CriteriaIds { get; set; }
+
+    public int? InstituteId { get; set; }
 }
 
 public class CreateProjectSimpleRequest
@@ -160,6 +169,8 @@ public class CreateProjectSimpleRequest
     
     [MaxLength(500)]
     public string? CriteriaIds { get; set; }
+
+    public int? InstituteId { get; set; }
 }
 
 public class UpdateProjectRequest
@@ -189,4 +200,11 @@ public class UpdateProjectRequest
     
     [MaxLength(500)]
     public string? CriteriaIds { get; set; }
+
+    public int? InstituteId { get; set; }
+}
+
+public class SetProjectInUseRequest
+{
+    public bool InUse { get; set; } = true;
 }

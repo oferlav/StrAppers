@@ -13,6 +13,12 @@ public class SaveInstituteRolesRequest
     /// <summary>Optional UI flag (session); not written to DB in this endpoint.</summary>
     public bool? RequireDeveloperRule { get; set; }
 
+    /// <summary>
+    /// When set, only rows with this <see cref="InstituteRole.TemplateId"/> are replaced; other institute rows are untouched.
+    /// Used when persisting roles together with Task Builder institute template saves.
+    /// </summary>
+    public int? TemplateScopeId { get; set; }
+
     /// <summary>Full set of institute role rows to keep (desired + available). Omitted existing Ids are removed.</summary>
     [Required]
     public List<InstituteRoleSaveDto> Roles { get; set; } = new();
@@ -38,6 +44,11 @@ public class InstituteRoleSaveDto
 
     /// <summary>FK to RoleTypes.Id.</summary>
     public int Type { get; set; }
+
+    /// <summary>Optional FK to Skills.Id.</summary>
+    public int? SkillId { get; set; }
+
+    public bool CustomerEngagement { get; set; } = false;
 
     public bool IsActive { get; set; } = true;
 }

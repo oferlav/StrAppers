@@ -18,6 +18,7 @@ public class ApplicationDbContext : DbContext
     public DbSet<ProjectStatus> ProjectStatuses { get; set; }
     public DbSet<ProjectCriteria> ProjectCriterias { get; set; }
     public DbSet<RoleType> RoleTypes { get; set; }
+    public DbSet<Skill> Skills { get; set; }
     public DbSet<Role> Roles { get; set; }
     public DbSet<InstituteRole> InstituteRoles { get; set; }
     public DbSet<StudentRole> StudentRoles { get; set; }
@@ -57,6 +58,7 @@ public class ApplicationDbContext : DbContext
     public DbSet<Metric> Metrics { get; set; }
     public DbSet<CacheMetrics> CacheMetrics { get; set; }
     public DbSet<InstituteTemplate> InstituteTemplates { get; set; }
+    public DbSet<InstituteAssistantChatHistory> InstituteAssistantChatHistory { get; set; }
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -142,12 +144,39 @@ public class ApplicationDbContext : DbContext
                 .OnDelete(DeleteBehavior.Restrict);
         });
 
+        modelBuilder.Entity<InstituteAssistantChatHistory>(entity =>
+        {
+            entity.ToTable("InstituteAssistantChatHistory");
+            entity.HasKey(e => e.Id);
+            entity.Property(e => e.Source).IsRequired().HasMaxLength(32);
+            entity.Property(e => e.Message).HasColumnType("text").IsRequired();
+            entity.Property(e => e.CreatedAt).HasColumnType("timestamp with time zone");
+            entity.HasIndex(e => new { e.InstituteId, e.TeacherId, e.ProjectId, e.Source, e.CreatedAt })
+                .HasDatabaseName("IX_IACH_InstituteId_TeacherId_ProjectId_Source_CreatedAt");
+
+            entity.HasOne(e => e.Institute)
+                .WithMany()
+                .HasForeignKey(e => e.InstituteId)
+                .OnDelete(DeleteBehavior.Restrict);
+
+            entity.HasOne(e => e.Teacher)
+                .WithMany()
+                .HasForeignKey(e => e.TeacherId)
+                .OnDelete(DeleteBehavior.Restrict);
+
+            entity.HasOne(e => e.Project)
+                .WithMany()
+                .HasForeignKey(e => e.ProjectId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
         modelBuilder.Entity<InstituteTemplate>(entity =>
         {
             entity.ToTable("InstituteTemplates");
             entity.HasKey(e => e.Id);
             entity.Property(e => e.Name).IsRequired().HasMaxLength(100);
             entity.Property(e => e.TrelloBoardJson).HasColumnType("text").IsRequired();
+            entity.Property(e => e.IsActive).HasDefaultValue(false);
             entity.HasIndex(e => e.InstituteId);
             entity.HasIndex(e => e.ProjectId);
             entity.HasIndex(e => new { e.InstituteId, e.ProjectId });
@@ -343,25 +372,33 @@ public class ApplicationDbContext : DbContext
         {
             entity.HasKey(e => e.Id);
             entity.Property(e => e.Title).IsRequired().HasMaxLength(200);
-            entity.Property(e => e.Mission).HasMaxLength(250);
+            entity.Property(e => e.Mission).HasMaxLength(2000);
             entity.Property(e => e.OneLiner).HasMaxLength(250);
             entity.Property(e => e.Description).HasMaxLength(1000);
             entity.Property(e => e.ExtendedDescription).HasColumnType("TEXT");
+            entity.Property(e => e.Logo).HasColumnType("TEXT");
             entity.Property(e => e.SystemDesign).HasColumnType("TEXT");
             entity.Property(e => e.SystemDesignFormatted).HasColumnName("SystemDesignFormatted").HasMaxLength(2000);
             entity.Property(e => e.Priority).HasMaxLength(50);
             entity.Property(e => e.CreatedAt).HasDefaultValueSql("CURRENT_TIMESTAMP");
             entity.Property(e => e.IsAvailable).HasDefaultValue(true);
+            entity.Property(e => e.InUse).HasDefaultValue(true);
             entity.Property(e => e.Kickoff).HasColumnName("Kickoff").HasDefaultValue(false);
             entity.Property(e => e.CriteriaIds).HasColumnName("CriteriaIds").HasMaxLength(500);
             entity.Property(e => e.TrelloBoardJson).HasColumnName("TrelloBoardJson").HasColumnType("TEXT");
             entity.Property(e => e.CustomerPastStory).HasColumnName("CustomerPastStory").HasColumnType("TEXT");
-            entity.Property(e => e.ShortBrief).HasColumnName("ShortBrief").HasMaxLength(1000);
+            entity.Property(e => e.ShortBrief).HasColumnName("ShortBrief").HasMaxLength(2000);
+            entity.HasIndex(e => e.InstituteId);
 
             // Foreign key relationships
             entity.HasOne(e => e.Organization)
                   .WithMany(o => o.Projects)
                   .HasForeignKey(e => e.OrganizationId)
+                  .OnDelete(DeleteBehavior.SetNull);
+
+            entity.HasOne(e => e.Institute)
+                  .WithMany(i => i.Projects)
+                  .HasForeignKey(e => e.InstituteId)
                   .OnDelete(DeleteBehavior.SetNull);
 
 
@@ -407,6 +444,14 @@ public class ApplicationDbContext : DbContext
                 new RoleType { Id = 4, Description = "leadership" });
         });
 
+        modelBuilder.Entity<Skill>(entity =>
+        {
+            entity.ToTable("Skills");
+            entity.HasKey(e => e.Id);
+            entity.Property(e => e.Name).IsRequired().HasMaxLength(150);
+            entity.HasIndex(e => e.Name).IsUnique();
+        });
+
         // Configure Role entity
         modelBuilder.Entity<Role>(entity =>
         {
@@ -415,6 +460,7 @@ public class ApplicationDbContext : DbContext
             entity.Property(e => e.Description).HasMaxLength(500);
             entity.Property(e => e.Category).HasMaxLength(50);
             entity.Property(e => e.Type).IsRequired().HasDefaultValue(0);
+            entity.Property(e => e.CustomerEngagement).HasDefaultValue(false);
             entity.Property(e => e.CreatedAt).HasDefaultValueSql("CURRENT_TIMESTAMP");
 
             entity.HasOne(e => e.RoleType)
@@ -422,6 +468,14 @@ public class ApplicationDbContext : DbContext
                   .HasForeignKey(e => e.Type)
                   .HasPrincipalKey(rt => rt.Id)
                   .OnDelete(DeleteBehavior.Restrict);
+
+            entity.HasOne(e => e.Skill)
+                  .WithMany(s => s.Roles)
+                  .HasForeignKey(e => e.SkillId)
+                  .HasPrincipalKey(s => s.Id)
+                  .OnDelete(DeleteBehavior.SetNull);
+
+            entity.HasIndex(e => e.SkillId);
 
             // Note: Seed data removed from HasData() to prevent overwriting production data
             // Roles are seeded via migration (20250127000000_EnsureRolesDataWithoutOverwrite) 
@@ -444,6 +498,7 @@ public class ApplicationDbContext : DbContext
             entity.Property(e => e.Description).HasMaxLength(500);
             entity.Property(e => e.Category).HasMaxLength(50);
             entity.Property(e => e.Type).IsRequired().HasDefaultValue(0);
+            entity.Property(e => e.CustomerEngagement).HasDefaultValue(false);
             entity.Property(e => e.CreatedAt).HasDefaultValueSql("CURRENT_TIMESTAMP");
 
             entity.HasOne(e => e.Institute)
@@ -462,9 +517,16 @@ public class ApplicationDbContext : DbContext
                 .HasPrincipalKey(rt => rt.Id)
                 .OnDelete(DeleteBehavior.Restrict);
 
+            entity.HasOne(e => e.Skill)
+                .WithMany(s => s.InstituteRoles)
+                .HasForeignKey(e => e.SkillId)
+                .HasPrincipalKey(s => s.Id)
+                .OnDelete(DeleteBehavior.SetNull);
+
             entity.HasIndex(e => e.InstituteId);
             entity.HasIndex(e => e.Type);
             entity.HasIndex(e => e.TemplateId);
+            entity.HasIndex(e => e.SkillId);
         });
 
         // Configure StudentRole entity (many-to-many relationship)

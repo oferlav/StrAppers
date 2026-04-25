@@ -2,7 +2,34 @@ using System.ComponentModel.DataAnnotations;
 
 namespace strAppersBackend.Models;
 
-/// <summary>POST body for <c>/api/Mentor/use/task-builder</c>.</summary>
+/// <summary>POST body for <c>POST /api/Projects/use/by-institute/ai-assistant/Templates/{id}</c> (project id in route, not in body).</summary>
+public class ProjectInstituteTemplatesAssistantRequest
+{
+    /// <summary>Optional; 0 = no module selected.</summary>
+    public int ModuleId { get; set; }
+
+    /// <summary>When set, server loads Trello JSON from <c>InstituteTemplates</c> (avoids a large <see cref="TrelloBoardJson"/> in the POST). Must match institute + <c>ProjectId</c> from the route.</summary>
+    public int? InstituteTemplateId { get; set; }
+
+    /// <summary>Full Trello template JSON. Omit or send <c>{}</c> when <see cref="InstituteTemplateId"/> is set.</summary>
+    public string TrelloBoardJson { get; set; } = string.Empty;
+
+    public string SprintName { get; set; } = string.Empty;
+
+    public string RoleName { get; set; } = string.Empty;
+
+    /// <summary>Validated in controller (non-empty).</summary>
+    public string UserMessage { get; set; } = string.Empty;
+
+    public string? CurrentDescription { get; set; }
+
+    public List<string>? CurrentChecklistItems { get; set; }
+
+    /// <summary>When true, returns prompts only and does not call the LLM.</summary>
+    public bool Test { get; set; }
+}
+
+/// <summary>Legacy: POST body when using <c>/api/Mentor/use/task-builder</c> (deprecated; project id in body).</summary>
 public class TaskBuilderMentorRequest
 {
     [Required]

@@ -37,6 +37,15 @@ public class InstituteRole
 
     public virtual RoleType? RoleType { get; set; }
 
+    /// <summary>
+    /// Optional FK to <see cref="Skill"/>.
+    /// </summary>
+    public int? SkillId { get; set; }
+
+    public virtual Skill? Skill { get; set; }
+
+    public bool CustomerEngagement { get; set; } = false;
+
     public bool IsActive { get; set; } = true;
 
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;

@@ -1,6 +1,9 @@
+using System;
 using System.Net;
 using System.Text.Json;
 using Microsoft.AspNetCore.Http;
+using Microsoft.Extensions.Configuration;
+using strAppersBackend;
 
 namespace strAppersBackend.Middleware
 {
@@ -13,15 +16,18 @@ namespace strAppersBackend.Middleware
         private readonly RequestDelegate _next;
         private readonly ILogger<GlobalExceptionHandlerMiddleware> _logger;
         private readonly IWebHostEnvironment _environment;
+        private readonly IConfiguration _configuration;
 
         public GlobalExceptionHandlerMiddleware(
             RequestDelegate next,
             ILogger<GlobalExceptionHandlerMiddleware> logger,
-            IWebHostEnvironment environment)
+            IWebHostEnvironment environment,
+            IConfiguration configuration)
         {
             _next = next;
             _logger = logger;
             _environment = environment;
+            _configuration = configuration;
         }
 
         public async Task InvokeAsync(HttpContext context)
@@ -63,38 +69,26 @@ namespace strAppersBackend.Middleware
         /// When an exception is handled here, the normal CORS pipeline may not attach headers to the
         /// replacement response. Browsers then show a CORS error even though the root issue is server-side.
         /// </summary>
-        private static void TryAddCorsHeadersForErrorResponse(HttpContext context)
+        private void TryAddCorsHeadersForErrorResponse(HttpContext context)
         {
             if (context.Response.HasStarted) return;
 
             var origin = context.Request.Headers["Origin"].FirstOrDefault();
             if (string.IsNullOrEmpty(origin)) return;
 
-            try
+            Uri? apiBase = null;
+            var apiBaseStr = _configuration["ApiBaseUrl"];
+            if (!string.IsNullOrWhiteSpace(apiBaseStr) && Uri.TryCreate(apiBaseStr.Trim(), UriKind.Absolute, out var u))
             {
-                var uri = new Uri(origin);
-                var host = uri.Host;
-                // Keep in sync with AllowFrontend CORS origin rules in Program.cs (incl. skill-in.com).
-                var allowed =
-                    host.EndsWith(".github.io", StringComparison.OrdinalIgnoreCase) ||
-                    host.EndsWith(".azurestaticapps.net", StringComparison.OrdinalIgnoreCase) ||
-                    host.Equals("localhost", StringComparison.OrdinalIgnoreCase) ||
-                    host.Equals("127.0.0.1", StringComparison.OrdinalIgnoreCase) ||
-                    host.Equals("20.126.90.3", StringComparison.OrdinalIgnoreCase) ||
-                    host.Equals("preview--skill-in-ce9dcf39.base44.app", StringComparison.OrdinalIgnoreCase) ||
-                    host.Equals("skill-in.com", StringComparison.OrdinalIgnoreCase) ||
-                    host.EndsWith(".skill-in.com", StringComparison.OrdinalIgnoreCase);
-
-                if (!allowed) return;
-
-                context.Response.Headers["Access-Control-Allow-Origin"] = origin;
-                context.Response.Headers["Access-Control-Allow-Credentials"] = "true";
-                context.Response.Headers["Vary"] = "Origin";
+                apiBase = u;
             }
-            catch (UriFormatException)
-            {
-                // ignore invalid Origin
-            }
+
+            var extra = CorsOriginHelper.GetExtraOrigins(_configuration);
+            if (!CorsOriginHelper.IsOriginAllowed(origin, apiBase, extra)) return;
+
+            context.Response.Headers["Access-Control-Allow-Origin"] = origin;
+            context.Response.Headers["Access-Control-Allow-Credentials"] = "true";
+            context.Response.Headers["Vary"] = "Origin";
         }
     }
 }
