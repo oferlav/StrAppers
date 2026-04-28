@@ -170,6 +170,7 @@ namespace strAppersBackend.Controllers
                     {
                         row.Name = name;
                         row.Description = dto.Description;
+                        row.Competencies = dto.Competencies;
                         row.Category = dto.Category;
                         row.TemplateId = assignedTemplate;
                         row.Type = dto.Type;
@@ -185,6 +186,7 @@ namespace strAppersBackend.Controllers
                             InstituteId = request.InstituteId,
                             Name = name,
                             Description = dto.Description,
+                            Competencies = dto.Competencies,
                             Category = dto.Category,
                             TemplateId = assignedTemplate,
                             Type = dto.Type,

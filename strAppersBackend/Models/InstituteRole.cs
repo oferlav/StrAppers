@@ -27,6 +27,11 @@ public class InstituteRole
     [MaxLength(500)]
     public string? Description { get; set; }
 
+    /// <summary>
+    /// Free-text technical competencies expected from this role.
+    /// </summary>
+    public string? Competencies { get; set; }
+
     [MaxLength(50)]
     public string? Category { get; set; }
 

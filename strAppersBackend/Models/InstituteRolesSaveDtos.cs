@@ -36,6 +36,8 @@ public class InstituteRoleSaveDto
     [MaxLength(500)]
     public string? Description { get; set; }
 
+    public string? Competencies { get; set; }
+
     [MaxLength(50)]
     public string? Category { get; set; }
 

@@ -496,6 +496,7 @@ public class ApplicationDbContext : DbContext
             entity.HasKey(e => e.Id);
             entity.Property(e => e.Name).IsRequired().HasMaxLength(100);
             entity.Property(e => e.Description).HasMaxLength(500);
+            entity.Property(e => e.Competencies).HasColumnType("text");
             entity.Property(e => e.Category).HasMaxLength(50);
             entity.Property(e => e.Type).IsRequired().HasDefaultValue(0);
             entity.Property(e => e.CustomerEngagement).HasDefaultValue(false);

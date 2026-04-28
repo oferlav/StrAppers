@@ -2380,27 +2380,67 @@ Staff request:
                 });
             }
 
-            var firstActive = instituteTemplates.FirstOrDefault(t => t.IsActive) ?? instituteTemplates.FirstOrDefault();
-            var templatesForProject = instituteTemplates;
+            // Prefer an explicitly active row; if none, use the built-in board (id 0) when the project has Trello JSON;
+            // otherwise the first custom row when the built-in is unavailable.
+            var firstExplicitActive = instituteTemplates.FirstOrDefault(t => t.IsActive);
+            int activeId;
+            string activeName;
+            if (firstExplicitActive != null)
+            {
+                activeId = firstExplicitActive.Id;
+                activeName = firstExplicitActive.Name ?? "System";
+            }
+            else if (hasSystemTemplate)
+            {
+                activeId = 0;
+                activeName = "System";
+            }
+            else if (instituteTemplates.Count > 0)
+            {
+                var firstT = instituteTemplates[0];
+                activeId = firstT.Id;
+                activeName = firstT.Name;
+            }
+            else
+            {
+                activeId = 0;
+                activeName = string.Empty;
+            }
+
+            List<TemplateOptionDto> templatesForProject;
             if (hasSystemTemplate)
             {
                 templatesForProject = new List<TemplateOptionDto>
                 {
-                    new()
-                    {
-                        Id = 0,
-                        Name = "System",
-                        IsActive = firstActive == null
-                    }
+                    new() { Id = 0, Name = "System", IsActive = activeId == 0 }
                 };
-                templatesForProject.AddRange(instituteTemplates);
+                foreach (var t in instituteTemplates)
+                {
+                    templatesForProject.Add(new TemplateOptionDto
+                    {
+                        Id = t.Id,
+                        Name = t.Name,
+                        IsActive = t.Id == activeId
+                    });
+                }
+            }
+            else
+            {
+                templatesForProject = instituteTemplates
+                    .Select(t => new TemplateOptionDto
+                    {
+                        Id = t.Id,
+                        Name = t.Name,
+                        IsActive = t.Id == activeId
+                    })
+                    .ToList();
             }
 
             return Ok(new ProjectHeaderTemplatesResponseDto
             {
                 Templates = templatesForProject,
-                ActiveTemplateId = firstActive?.Id ?? (hasSystemTemplate ? 0 : 0),
-                ActiveTemplateName = firstActive?.Name ?? (hasSystemTemplate ? "System" : string.Empty),
+                ActiveTemplateId = activeId,
+                ActiveTemplateName = activeName
             });
         }
         catch (Exception ex)
@@ -3367,6 +3407,99 @@ Staff request:
             else
             {
                 _logger.LogInformation("DuplicateProject: TrelloBoardJson is empty; no remap. NewProjectId={NewProjectId}", duplicate.Id);
+            }
+
+            // Copy institute syllabus template rows to the new project (same InstituteId + new ProjectId).
+            // All remain inactive so the default selection is the built-in board (Project.TrelloBoardJson / id 0) in the UI.
+            var sourceItRows = await _context.InstituteTemplates
+                .AsNoTracking()
+                .Where(t => t.InstituteId == instituteId && t.ProjectId == id)
+                .OrderBy(t => t.Id)
+                .ToListAsync();
+            if (sourceItRows.Count > 0)
+            {
+                // InstituteTemplates.UX_InstituteTemplates_InstituteId_Name_CI: Name is unique per institute
+                // (any ProjectId), so we cannot reuse the source name if another project already has it, or
+                // if two source rows would yield the same name in one batch.
+                const int itNameMax = 100;
+                var nameTaken = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                var existingItNames = await _context.InstituteTemplates
+                    .AsNoTracking()
+                    .Where(t => t.InstituteId == instituteId)
+                    .Select(t => t.Name ?? string.Empty)
+                    .ToListAsync();
+                foreach (var n in existingItNames)
+                {
+                    if (n.Length > 0) nameTaken.Add(n);
+                }
+
+                string NextUniqueItName(string? baseRaw)
+                {
+                    var baseName = string.IsNullOrWhiteSpace(baseRaw) ? "Template" : baseRaw!.Trim();
+                    if (baseName.Length > itNameMax)
+                    {
+                        baseName = baseName[..itNameMax];
+                    }
+                    if (nameTaken.Add(baseName))
+                    {
+                        return baseName;
+                    }
+                    for (var n = 1; n < 10_000; n++)
+                    {
+                        var suffix = $" (P{duplicate.Id}-{n})";
+                        var headLen = itNameMax - suffix.Length;
+                        if (headLen < 1) headLen = 1;
+                        var head = baseName.Length > headLen ? baseName[..headLen] : baseName;
+                        var candidate = string.Concat(head, suffix);
+                        if (candidate.Length > itNameMax) candidate = candidate[..itNameMax];
+                        if (nameTaken.Add(candidate)) return candidate;
+                    }
+                    var g = Guid.NewGuid().ToString("N", CultureInfo.InvariantCulture);
+                    if (g.Length > 12) g = g[..12];
+                    var fall = $"P{duplicate.Id}-{g}";
+                    if (fall.Length > itNameMax) fall = fall[..itNameMax];
+                    if (!nameTaken.Add(fall))
+                    {
+                        var alt = "T-" + Guid.NewGuid().ToString("N", CultureInfo.InvariantCulture);
+                        if (alt.Length > itNameMax) alt = alt[..itNameMax];
+                        nameTaken.Add(alt);
+                        return alt;
+                    }
+                    return fall;
+                }
+
+                foreach (var it in sourceItRows)
+                {
+                    var jsonIn = it.TrelloBoardJson ?? string.Empty;
+                    var newJson = jsonIn;
+                    if (!string.IsNullOrWhiteSpace(jsonIn))
+                    {
+                        var remapped = TryRemapTrelloJsonAfterProjectDuplicate(
+                            jsonIn,
+                            oldToNewModuleIdMap,
+                            sourceProjectId: id,
+                            newProjectId: duplicate.Id);
+                        if (!string.IsNullOrWhiteSpace(remapped))
+                        {
+                            newJson = remapped;
+                        }
+                    }
+                    var newName = NextUniqueItName(it.Name);
+                    _context.InstituteTemplates.Add(new InstituteTemplate
+                    {
+                        Name = newName,
+                        InstituteId = instituteId,
+                        ProjectId = duplicate.Id,
+                        TrelloBoardJson = newJson,
+                        IsActive = false,
+                    });
+                }
+                await _context.SaveChangesAsync();
+                _logger.LogInformation(
+                    "DuplicateProject: copied {Count} InstituteTemplates rows to NewProjectId={NewProjectId} from SourceProjectId={SourceProjectId}.",
+                    sourceItRows.Count,
+                    duplicate.Id,
+                    id);
             }
 
             return Ok(new Project

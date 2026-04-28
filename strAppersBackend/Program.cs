@@ -96,6 +96,7 @@ builder.Services.AddDbContext<ApplicationDbContext>(options =>
 
 // Add AI services
 builder.Services.AddScoped<IAIService, AIService>();
+builder.Services.AddScoped<ICourseBoardBuilderService, CourseBoardBuilderService>();
 builder.Services.AddScoped<IDesignDocumentService, DesignDocumentService>();
 builder.Services.AddScoped<IChatCompletionService, ChatCompletionService>();
 
