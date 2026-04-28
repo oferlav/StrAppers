@@ -51,6 +51,13 @@ public class InstituteRole
 
     public bool CustomerEngagement { get; set; } = false;
 
+    /// <summary>
+    /// When true, this role follows the technical track: modules are assigned one sprint later than non-technical roles
+    /// (Sprint 3-7 for implementation, Sprints 1-2 are foundation/setup with no module).
+    /// When false, the role follows either the leadership track (Type=4: Sprints 2-6) or the customer-facing track (Type≠4: Sprints 2-5 + special Sprint 6).
+    /// </summary>
+    public bool IsTechnical { get; set; } = false;
+
     public bool IsActive { get; set; } = true;
 
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;

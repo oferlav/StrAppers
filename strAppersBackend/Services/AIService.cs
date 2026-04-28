@@ -24,6 +24,12 @@ public interface IAIService
     Task<ParsedBuildOutput?> ParseBuildOutputAsync(string buildOutput);
     /// <param name="modelName">OpenAI model id (e.g. gpt-4o-mini), or null to use <c>AIConfig:Model</c>. Not a logical scenario name.</param>
     Task<string?> GenerateTextResponseAsync(string prompt, string? modelName = null);
+
+    /// <summary>
+    /// Generates a course board using a system + user message pair (single AI call).
+    /// Returns the raw AI content and token usage counts.
+    /// </summary>
+    Task<CourseGenerationResult> GenerateCourseAsync(string systemPrompt, string userPrompt, string? modelName = null);
 }
 
 public class AIService : IAIService
@@ -2563,7 +2569,7 @@ Return the JSON response now:";
 
             _logger.LogInformation("Using AI model: {Model} for text generation", model);
             var result = await CallOpenAIAsync(prompt, model);
-            
+
             if (result.Success)
             {
                 return result.Content;
@@ -2580,6 +2586,68 @@ Return the JSON response now:";
             return null;
         }
     }
+
+    public async Task<CourseGenerationResult> GenerateCourseAsync(string systemPrompt, string userPrompt, string? modelName = null)
+    {
+        var model = !string.IsNullOrWhiteSpace(modelName) ? modelName : _aiConfig.Model;
+        _logger.LogInformation("Generating course board with model {Model}", model);
+
+        try
+        {
+            var requestBody = new
+            {
+                model,
+                messages = new object[]
+                {
+                    new { role = "system", content = systemPrompt },
+                    new { role = "user",   content = userPrompt }
+                },
+                max_tokens = _aiConfig.MaxTokens,
+                temperature = _aiConfig.Temperature
+            };
+
+            var json = JsonSerializer.Serialize(requestBody);
+            var httpContent = new StringContent(json, Encoding.UTF8, "application/json");
+
+            var response = await _httpClient.PostAsync("https://api.openai.com/v1/chat/completions", httpContent);
+            var responseContent = await response.Content.ReadAsStringAsync();
+
+            if (!response.IsSuccessStatusCode)
+            {
+                _logger.LogError("OpenAI course generation error: {StatusCode} - {Content}", response.StatusCode, responseContent);
+                return new CourseGenerationResult { Success = false, ErrorMessage = $"OpenAI API error: {response.StatusCode}" };
+            }
+
+            var openAIResponse = JsonSerializer.Deserialize<OpenAIResponse>(responseContent, new JsonSerializerOptions
+            {
+                PropertyNameCaseInsensitive = true
+            });
+
+            var content = openAIResponse?.Choices?.FirstOrDefault()?.Message?.Content;
+            if (string.IsNullOrWhiteSpace(content))
+            {
+                _logger.LogError("Empty course generation response from OpenAI");
+                return new CourseGenerationResult { Success = false, ErrorMessage = "Empty response from OpenAI" };
+            }
+
+            _logger.LogInformation("Course generation completed. PromptTokens={PromptTokens} CompletionTokens={CompletionTokens}",
+                openAIResponse?.Usage?.Prompt_Tokens ?? 0,
+                openAIResponse?.Usage?.Completion_Tokens ?? 0);
+
+            return new CourseGenerationResult
+            {
+                Success = true,
+                Content = content,
+                PromptTokens = openAIResponse?.Usage?.Prompt_Tokens ?? 0,
+                CompletionTokens = openAIResponse?.Usage?.Completion_Tokens ?? 0
+            };
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Exception during course generation");
+            return new CourseGenerationResult { Success = false, ErrorMessage = ex.Message };
+        }
+    }
 }
 
 // Helper class for parsing modules response
@@ -2591,6 +2659,23 @@ public class ModulesResponse
 public class OpenAIResponse
 {
     public List<Choice> Choices { get; set; } = new List<Choice>();
+    public OpenAIUsage? Usage { get; set; }
+}
+
+public class OpenAIUsage
+{
+    public int Prompt_Tokens { get; set; }
+    public int Completion_Tokens { get; set; }
+    public int Total_Tokens { get; set; }
+}
+
+public class CourseGenerationResult
+{
+    public bool Success { get; set; }
+    public string? Content { get; set; }
+    public string? ErrorMessage { get; set; }
+    public int PromptTokens { get; set; }
+    public int CompletionTokens { get; set; }
 }
 
 public class Choice
