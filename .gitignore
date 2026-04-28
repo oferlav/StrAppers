@@ -404,6 +404,7 @@ appsettings.Development.json
 !package-lock.json
 !tsconfig.json
 !**/Migrations/*.json
+!strAppersBackend/Courses/*.json
 
 # Exclude publish and build artifacts
 **/publish-azure/
