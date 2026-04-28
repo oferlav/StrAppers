@@ -1,0 +1,43 @@
+"Id","InstituteId","Name","Description","Category","Type","IsActive","CreatedAt","UpdatedAt","TemplateId","SkillId","CustomerEngagement","Competencies"
+1,1,"Frontend Developer","Develops user interface and user experience","Technical",2,True,"2025-08-04 17:54:12.981445+00","2026-04-20 11:47:23.832003+00",10,1,False,NULL
+2,1,"Backend Developer","Develops server-side logic and database integration","Technical",2,True,"2025-08-04 17:54:12.981445+00","2026-04-20 11:47:23.832003+00",10,1,False,"A backend developer is expected to demonstrate strong competencies in designing and implementing scalable, service-oriented systems, with a focus on RESTful API development, clear interface contracts, and efficient data flow between services. This includes building robust integrations with external APIs and working with large language models (LLMs) using modern patterns such as retrieval-augmented generation (RAG), agent-based architectures, and modular context pipelines (e.g., MCP). The student should be proficient in data modeling and database management (e.g., PostgreSQL), including schema design, indexing strategies, and query optimization, as well as handling unstructured and semi-structured data for LLM workflows. A solid understanding of system architecture is required, including stateless design, concurrency control, caching strategies, and performance tuning. Additionally, the developer must implement secure authentication and authorization mechanisms, manage secrets, and ensure data privacy. Practical experience with testing, observability (logging, tracing, monitoring), and debugging is essential to maintain reliability in distributed environments. Familiarity with containerization, deployment pipelines, and cloud infrastructure further supports the ability to deliver production-ready systems. Overall, the student should be capable of orchestrating traditional backend components with AI-driven services into cohesive, maintainable, and efficient applications."
+3,1,"UI/UX Designer","Designs user interface and user experience","Technical",3,True,"2025-08-04 17:54:12.981446+00","2026-04-20 11:47:23.832003+00",10,3,True,NULL
+4,1,"Full Stack Developer","Develop backend + UI","Leadership",1,True,"2025-08-04 17:54:12.981446+00","2026-04-20 11:47:23.832003+00",10,1,False,NULL
+5,1,"Product Manager","Leads product planning and execution","Leadership",4,True,"2025-08-04 17:54:12.981445+00","2026-04-20 11:47:23.832003+00",10,2,True,NULL
+6,1,"Marketing/BizDev","Conducts research and Market analysis. Responsible for Media","Academic",0,True,"2025-08-04 17:54:12.981446+00","2026-04-20 11:47:23.832003+00",10,4,True,NULL
+7,1,"Data Analyst/Scientist","Data exploration, modeling, and analytics support for student projects.","Technical",0,True,"2026-04-19 06:55:42.042917+00","2026-04-20 11:47:23.832003+00",10,NULL,False,NULL
+8,1,"QA Engineer","Testing, quality gates, and defect tracking for delivery teams.","Technical",0,False,"2026-04-19 06:55:42.042917+00","2026-04-20 11:47:23.832003+00",10,NULL,False,NULL
+9,1,"Project Manager","Plans, coordinates timelines, and keeps squads aligned with goals.","Management",0,False,"2026-04-19 06:55:42.042917+00","2026-04-20 11:47:23.832003+00",10,2,True,NULL
+10,1,"AI Engineer","Builds and integrates ML/AI features with the rest of the stack.","Technical",0,False,"2026-04-19 06:55:42.042917+00","2026-04-20 11:47:23.832003+00",10,1,False,NULL
+11,1,"DevOps Engineer","CI/CD, environments, observability, and release automation.","Technical",0,False,"2026-04-19 06:55:42.042917+00","2026-04-20 11:47:23.832003+00",10,1,False,NULL
+12,1,"Product Owner","Owns backlog priorities and bridges stakeholders with the delivery team.","Management",0,False,"2026-04-19 06:55:42.042917+00","2026-04-20 11:47:23.832003+00",10,2,True,NULL
+19,1,"AI Engineer","Builds and integrates ML/AI features with the rest of the stack.","Technical",0,False,"2026-04-21 07:43:39.713162+00",NULL,13,1,False,NULL
+20,1,"Backend Developer","Develops server-side logic and database integration","Technical",2,False,"2026-04-21 07:43:39.713162+00",NULL,13,1,False,NULL
+21,1,"Data Analyst/Scientist","Data exploration, modeling, and analytics support for student projects.","Technical",0,False,"2026-04-21 07:43:39.713162+00",NULL,13,NULL,False,NULL
+22,1,"DevOps Engineer","CI/CD, environments, observability, and release automation.","Technical",0,False,"2026-04-21 07:43:39.713162+00",NULL,13,NULL,False,NULL
+23,1,"Frontend Developer","Develops user interface and user experience","Technical",2,False,"2026-04-21 07:43:39.713162+00",NULL,13,1,False,NULL
+24,1,"Full Stack Developer","Develop backend + UI","Leadership",1,False,"2026-04-21 07:43:39.713162+00",NULL,13,1,False,NULL
+25,1,"Marketing/BizDev","Conducts research and Market analysis. Responsible for Media","Academic",0,False,"2026-04-21 07:43:39.713162+00",NULL,13,4,True,NULL
+26,1,"Product Manager","Leads product planning and execution","Leadership",4,False,"2026-04-21 07:43:39.713162+00",NULL,13,2,True,NULL
+27,1,"Product Owner","Owns backlog priorities and bridges stakeholders with the delivery team.","Management",0,False,"2026-04-21 07:43:39.713162+00",NULL,13,2,True,NULL
+28,1,"Project Manager","Plans, coordinates timelines, and keeps squads aligned with goals.","Management",0,False,"2026-04-21 07:43:39.713162+00",NULL,13,2,True,NULL
+29,1,"QA Engineer","Testing, quality gates, and defect tracking for delivery teams.","Technical",0,False,"2026-04-21 07:43:39.713162+00",NULL,13,NULL,False,NULL
+30,1,"SDR",NULL,NULL,0,False,"2026-04-21 07:43:39.713162+00",NULL,13,4,True,NULL
+31,1,"UI/UX Designer","Designs user interface and user experience","Technical",3,False,"2026-04-21 07:43:39.713162+00",NULL,13,3,True,NULL
+32,1,"Backend Developer","Develops server-side logic and database integration","Technical",2,True,"2026-04-21 07:43:39.713162+00",NULL,13,1,False,NULL
+33,1,"Frontend Developer","Develops user interface and user experience","Technical",2,True,"2026-04-21 07:43:39.713162+00",NULL,13,1,False,NULL
+34,1,"Full Stack Developer","Develop backend + UI","Leadership",1,True,"2026-04-21 07:43:39.713162+00",NULL,13,1,False,NULL
+35,1,"Marketing/BizDev","Conducts research and Market analysis. Responsible for Media","Academic",0,True,"2026-04-21 07:43:39.713162+00",NULL,13,4,True,NULL
+36,1,"Product Manager","Leads product planning and execution","Leadership",4,True,"2026-04-21 07:43:39.713162+00",NULL,13,2,True,NULL
+37,1,"SDR",NULL,NULL,0,True,"2026-04-21 07:43:39.713162+00",NULL,13,4,True,NULL
+38,1,"UI/UX Designer","Designs user interface and user experience","Technical",3,True,"2026-04-21 07:43:39.713162+00",NULL,13,3,True,NULL
+39,1,"Backend Developer","Develops server-side logic and database integration","Technical",2,True,"2026-04-26 11:21:31.424804+00",NULL,NULL,1,False,NULL
+40,1,"Frontend Developer","Develops user interface and user experience","Technical",2,True,"2026-04-26 11:21:31.424804+00",NULL,NULL,1,False,NULL
+41,1,"Marketing/BizDev","Conducts research and Market analysis. Responsible for Media","Academic",0,True,"2026-04-26 11:21:31.424804+00",NULL,NULL,4,True,NULL
+42,1,"Product Manager","Leads product planning and execution","Leadership",4,True,"2026-04-26 11:21:31.424804+00",NULL,NULL,2,True,NULL
+43,1,"UI/UX Designer","Designs user interface and user experience","Technical",3,True,"2026-04-26 11:21:31.424804+00",NULL,NULL,3,True,NULL
+44,1,"Backend Developer","Develops server-side logic and database integration","Technical",2,True,"2026-04-26 13:54:46.722944+00",NULL,21,1,False,NULL
+45,1,"Frontend Developer","Develops user interface and user experience","Technical",2,True,"2026-04-26 13:54:46.722944+00",NULL,21,1,False,NULL
+46,1,"Marketing/BizDev","Conducts research and Market analysis. Responsible for Media","Academic",0,True,"2026-04-26 13:54:46.722944+00",NULL,21,4,True,NULL
+47,1,"Product Manager","Leads product planning and execution","Leadership",4,True,"2026-04-26 13:54:46.722944+00",NULL,21,2,True,NULL
+48,1,"UI/UX Designer","Designs user interface and user experience","Technical",3,True,"2026-04-26 13:54:46.722944+00",NULL,21,3,True,NULL

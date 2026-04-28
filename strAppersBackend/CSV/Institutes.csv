@@ -1,0 +1,2 @@
+"Id","Name","Description","Website","ContactEmail","Phone","Type","Address","State","Country","IsActive","Logo","CreatedAt","UpdatedAt","TermsUse","TermsAccepted","TermsAcceptedAt","PasswordHash"
+1,"StrAppers Academy of Technology","Technology-focused institute and applied learning campus.","https://academy.strappers.example.org",NULL,"555-2100","Institute","42 Innovation Way, Suite 100","Tel Aviv District","Israel",True,NULL,"2026-04-14 10:56:09.225831+00",NULL,NULL,False,NULL,"AQAAAAIAAYagAAAAEGUy8rOQBEZQ8sS9o4wvXDnpUUOJ7qhGFFCCogMHLg8afhuHOA/HJrRSqrgpZ4JICw=="

@@ -1,0 +1,13 @@
+"Id","Name","Description","Category","IsActive","CreatedAt","UpdatedAt","Type","SkillId","CustomerEngagement"
+1,"Product Manager","Leads product planning and execution","Leadership",True,"2025-08-04 17:54:12.981445+00",NULL,4,2,True
+2,"Frontend Developer","Develops user interface and user experience","Technical",True,"2025-08-04 17:54:12.981445+00",NULL,2,1,False
+3,"Backend Developer","Develops server-side logic and database integration","Technical",True,"2025-08-04 17:54:12.981445+00",NULL,2,1,False
+4,"UI/UX Designer","Designs user interface and user experience","Technical",True,"2025-08-04 17:54:12.981446+00",NULL,3,3,True
+6,"Full Stack Developer","Develop backend + UI","Leadership",True,"2025-08-04 17:54:12.981446+00",NULL,1,1,False
+7,"Marketing/BizDev","Conducts research and Market analysis. Responsible for Media","Academic",True,"2025-08-04 17:54:12.981446+00",NULL,0,4,True
+10,"Data Analyst/Scientist","Data exploration, modeling, and analytics support for student projects.","Technical",False,"2026-04-19 06:55:42.042917+00",NULL,0,1,False
+11,"QA Engineer","Testing, quality gates, and defect tracking for delivery teams.","Technical",False,"2026-04-19 06:55:42.042917+00",NULL,0,1,False
+12,"Project Manager","Plans, coordinates timelines, and keeps squads aligned with goals.","Management",False,"2026-04-19 06:55:42.042917+00",NULL,0,2,True
+13,"AI Engineer","Builds and integrates ML/AI features with the rest of the stack.","Technical",False,"2026-04-19 06:55:42.042917+00",NULL,0,1,False
+14,"DevOps Engineer","CI/CD, environments, observability, and release automation.","Technical",False,"2026-04-19 06:55:42.042917+00",NULL,0,NULL,False
+15,"Product Owner","Owns backlog priorities and bridges stakeholders with the delivery team.","Management",False,"2026-04-19 06:55:42.042917+00",NULL,0,2,True
