@@ -10,17 +10,34 @@ public class CourseBoardBuildRequest
     [Range(1, 30)]
     public int SprintLengthInDays { get; set; } = 7;
 
-    [Required]
-    public int InstituteRoleId { get; set; }
+    /// <summary>
+    /// Single-role mode (legacy / backward compat). Ignored when <see cref="InstituteRoleIds"/> is provided.
+    /// </summary>
+    public int? InstituteRoleId { get; set; }
+
+    /// <summary>
+    /// Squad mode — list of InstituteSquadRole IDs (or InstituteRole IDs for legacy templates)
+    /// to generate cards for. Takes precedence over <see cref="InstituteRoleId"/>.
+    /// At least one of InstituteRoleId or InstituteRoleIds must be provided.
+    /// </summary>
+    public List<int>? InstituteRoleIds { get; set; }
 
     [Required]
     public int TemplateId { get; set; }
 
     /// <summary>
-    /// When true, the response includes the number of prompt and completion tokens consumed by the AI generation.
+    /// When true, the response includes the number of prompt and completion tokens consumed.
     /// Defaults to false to keep the response lightweight.
     /// </summary>
     public bool IncludeTokenUsage { get; set; } = false;
+
+    /// <summary>Resolved effective role IDs — InstituteRoleIds if provided, else InstituteRoleId as a single-item list.</summary>
+    public List<int> EffectiveRoleIds =>
+        InstituteRoleIds is { Count: > 0 }
+            ? InstituteRoleIds
+            : InstituteRoleId is > 0
+                ? new List<int> { InstituteRoleId.Value }
+                : new List<int>();
 }
 
 public class CourseBoardBuildResponse
@@ -30,7 +47,8 @@ public class CourseBoardBuildResponse
     public TrelloProjectCreationRequest? BoardTemplate { get; set; }
 
     /// <summary>
-    /// Token usage for the AI generation call. Only populated when <see cref="CourseBoardBuildRequest.IncludeTokenUsage"/> is true.
+    /// Token usage across all AI generation calls (summed). Only populated when
+    /// <see cref="CourseBoardBuildRequest.IncludeTokenUsage"/> is true.
     /// </summary>
     public CourseBuildTokenUsage? TokenUsage { get; set; }
 }

@@ -15,8 +15,6 @@ public class CourseBoardBuilderService : ICourseBoardBuilderService
 {
     private const int SprintCount = 8;
     private const int ModuleCount = 5;
-
-    // Leadership role type id
     private const int LeadershipTypeId = 4;
 
     private readonly ApplicationDbContext _context;
@@ -38,7 +36,11 @@ public class CourseBoardBuilderService : ICourseBoardBuilderService
 
     public async Task<CourseBoardBuildResponse> BuildAsync(CourseBoardBuildRequest request)
     {
-        // ── 1. Load entities ──────────────────────────────────────────────────
+        var effectiveRoleIds = request.EffectiveRoleIds;
+        if (effectiveRoleIds.Count == 0)
+            return Fail("At least one role ID must be provided via InstituteRoleId or InstituteRoleIds.");
+
+        // ── 1. Load project & template ────────────────────────────────────────
         var project = await _context.Projects
             .AsNoTracking()
             .FirstOrDefaultAsync(p => p.Id == request.ProjectId);
@@ -46,56 +48,63 @@ public class CourseBoardBuilderService : ICourseBoardBuilderService
             return Fail($"Project {request.ProjectId} was not found.");
 
         var instituteTemplate = await _context.InstituteTemplates
-            .FirstOrDefaultAsync(t =>
-                t.Id == request.TemplateId &&
-                t.ProjectId == request.ProjectId);
+            .FirstOrDefaultAsync(t => t.Id == request.TemplateId && t.ProjectId == request.ProjectId);
         if (instituteTemplate == null)
             return Fail($"InstituteTemplate {request.TemplateId} was not found for project {request.ProjectId}.");
 
-        InstituteRole role;
+        // ── 2. Load all requested roles ───────────────────────────────────────
+        List<InstituteRole> roles;
         if (instituteTemplate.SquadId is > 0)
         {
-            var squadRole = await _context.InstituteSquadRoles
+            var squadRoles = await _context.InstituteSquadRoles
                 .AsNoTracking()
                 .Include(r => r.Skill)
-                .FirstOrDefaultAsync(r =>
-                    r.Id == request.InstituteRoleId &&
-                    r.SquadId == instituteTemplate.SquadId.Value);
-            if (squadRole == null)
-                return Fail($"Squad role {request.InstituteRoleId} for template {request.TemplateId} was not found.");
+                .Include(r => r.BaseInstituteRole) // for competencies fallback
+                .Where(r => effectiveRoleIds.Contains(r.Id) && r.SquadId == instituteTemplate.SquadId.Value)
+                .ToListAsync();
 
-            role = new InstituteRole
+            var missingIds = effectiveRoleIds.Except(squadRoles.Select(r => r.Id)).ToList();
+            if (missingIds.Count > 0)
+                return Fail($"Squad role(s) {string.Join(", ", missingIds)} were not found in squad {instituteTemplate.SquadId}.");
+
+            roles = squadRoles.Select(sr => new InstituteRole
             {
-                Id = squadRole.Id,
+                Id = sr.Id,
                 InstituteId = instituteTemplate.InstituteId,
-                Name = squadRole.Name,
-                Description = squadRole.Description,
-                Competencies = squadRole.Competencies,
-                Category = squadRole.Category,
-                Type = squadRole.Type,
-                SkillId = squadRole.SkillId,
-                Skill = squadRole.Skill,
-                CustomerEngagement = squadRole.CustomerEngagement,
-                IsTechnical = squadRole.IsTechnical,
-                IsActive = squadRole.IsActive,
-                CreatedAt = squadRole.CreatedAt,
-                UpdatedAt = squadRole.UpdatedAt,
-            };
+                Name = sr.Name,
+                Description = sr.Description,
+                // Fallback to base institute role competencies when squad role has none
+                Competencies = !string.IsNullOrWhiteSpace(sr.Competencies)
+                    ? sr.Competencies
+                    : sr.BaseInstituteRole?.Competencies,
+                Category = sr.Category,
+                Type = sr.Type,
+                SkillId = sr.SkillId,
+                Skill = sr.Skill,
+                CustomerEngagement = sr.CustomerEngagement,
+                IsTechnical = sr.IsTechnical,
+                IsActive = sr.IsActive,
+                CreatedAt = sr.CreatedAt,
+                UpdatedAt = sr.UpdatedAt,
+            }).ToList();
         }
         else
         {
-            var legacyRole = await _context.InstituteRoles
+            roles = await _context.InstituteRoles
                 .AsNoTracking()
                 .Include(r => r.Skill)
-                .FirstOrDefaultAsync(r => r.Id == request.InstituteRoleId && r.TemplateId == request.TemplateId);
-            if (legacyRole == null)
-                return Fail($"InstituteRole {request.InstituteRoleId} for template {request.TemplateId} was not found.");
-            role = legacyRole;
+                .Where(r => effectiveRoleIds.Contains(r.Id) && r.TemplateId == request.TemplateId)
+                .ToListAsync();
+
+            var missingIds = effectiveRoleIds.Except(roles.Select(r => r.Id)).ToList();
+            if (missingIds.Count > 0)
+                return Fail($"InstituteRole(s) {string.Join(", ", missingIds)} were not found for template {request.TemplateId}.");
         }
 
-        if (project.InstituteId.HasValue && role.InstituteId != project.InstituteId.Value)
-            return Fail($"Squad role {request.InstituteRoleId} does not belong to institute {project.InstituteId.Value}.");
+        if (project.InstituteId.HasValue && roles.Any(r => r.InstituteId != project.InstituteId.Value))
+            return Fail("One or more roles do not belong to the project's institute.");
 
+        // ── 3. Load modules & system prompt ───────────────────────────────────
         var modules = await _context.ProjectModules
             .AsNoTracking()
             .Where(m => m.ProjectId == request.ProjectId)
@@ -104,32 +113,19 @@ public class CourseBoardBuilderService : ICourseBoardBuilderService
             .Take(ModuleCount)
             .ToListAsync();
 
-        // ── 2. Compute sprint→module assignments ──────────────────────────────
-        var sprintModules = ComputeSprintModules(modules, role);
-
-        // ── 3. Load system prompt from file ───────────────────────────────────
         var systemPrompt = await LoadSystemPromptAsync();
         if (string.IsNullOrWhiteSpace(systemPrompt))
             return Fail("Course builder system prompt could not be loaded.");
 
-        // ── 4. Build user prompt ───────────────────────────────────────────────
-        var userPrompt = BuildUserPrompt(project, role, sprintModules);
+        // ── 4. Generate cards for all roles in parallel ───────────────────────
+        _logger.LogInformation("Generating course for {RoleCount} role(s) on project {ProjectId}", roles.Count, project.Id);
 
-        // ── 5. Single AI call ─────────────────────────────────────────────────
-        _logger.LogInformation("Generating course board for role {RoleName}, project {ProjectId}", role.Name, project.Id);
-        var aiResult = await _aiService.GenerateCourseAsync(systemPrompt, userPrompt);
-        if (!aiResult.Success)
-            return Fail($"AI generation failed: {aiResult.ErrorMessage}");
+        var generationTasks = roles.Select(role =>
+            GenerateRoleCardsAsync(project, role, modules, systemPrompt, roles));
 
-        // ── 6. Parse AI response into sprint cards ────────────────────────────
-        var aiCards = ParseAiSprintCards(aiResult.Content ?? string.Empty);
-        if (aiCards == null || aiCards.Count != SprintCount)
-        {
-            _logger.LogWarning("AI returned {Count} cards instead of {Expected}; falling back to defaults", aiCards?.Count ?? 0, SprintCount);
-            aiCards = BuildFallbackCards(role, sprintModules);
-        }
+        var generationResults = await Task.WhenAll(generationTasks);
 
-        // ── 7. Assemble the full board ─────────────────────────────────────────
+        // ── 5. Assemble the board ─────────────────────────────────────────────
         var board = new TrelloProjectCreationRequest
         {
             ProjectId = project.Id,
@@ -151,15 +147,18 @@ public class CourseBoardBuilderService : ICourseBoardBuilderService
             }
         };
 
-        for (var s = 1; s <= SprintCount; s++)
+        // Add sprint cards — grouped by sprint number so all Sprint-1 cards come first, then Sprint-2, etc.
+        foreach (var sprintNumber in Enumerable.Range(1, SprintCount))
         {
-            var aiCard = aiCards.FirstOrDefault(c => c.SprintNumber == s)
-                         ?? aiCards.ElementAtOrDefault(s - 1);
-            var module = sprintModules[s - 1];
-            board.SprintPlan.Cards.Add(MapToTrelloCard(aiCard, role, s, module));
+            foreach (var result in generationResults)
+            {
+                var card = result.Cards.FirstOrDefault(c => c.ListName == $"Sprint {sprintNumber}");
+                if (card != null)
+                    board.SprintPlan.Cards.Add(card);
+            }
         }
 
-        // ── 8. Add User Story cards (one per module, empty) ───────────────────
+        // User Story cards — one per module, added once regardless of role count
         foreach (var module in modules)
         {
             board.SprintPlan.Cards.Add(new TrelloCard
@@ -188,24 +187,81 @@ public class CourseBoardBuilderService : ICourseBoardBuilderService
 
         board.SprintPlan.TotalTasks = board.SprintPlan.Cards.Count;
 
-        // ── 9. Persist to InstituteTemplate ───────────────────────────────────
+        // ── 6. Persist ────────────────────────────────────────────────────────
         instituteTemplate.TrelloBoardJson = JsonSerializer.Serialize(board, new JsonSerializerOptions { WriteIndented = true });
         instituteTemplate.ProjectId = request.ProjectId;
-        instituteTemplate.InstituteId = role.InstituteId;
+        instituteTemplate.InstituteId = roles.First().InstituteId;
         await _context.SaveChangesAsync();
+
+        var roleNames = string.Join(", ", roles.Select(r => r.Name));
+        var totalPromptTokens = generationResults.Sum(r => r.PromptTokens);
+        var totalCompletionTokens = generationResults.Sum(r => r.CompletionTokens);
 
         return new CourseBoardBuildResponse
         {
             Success = true,
-            Message = $"Course board generated for role '{role.Name}', project '{project.Title}'. InstituteTemplate.Id={instituteTemplate.Id}.",
+            Message = $"Course board generated for [{roleNames}] on project '{project.Title}'. InstituteTemplate.Id={instituteTemplate.Id}.",
             BoardTemplate = board,
             TokenUsage = request.IncludeTokenUsage
                 ? new CourseBuildTokenUsage
                 {
-                    PromptTokens = aiResult.PromptTokens,
-                    CompletionTokens = aiResult.CompletionTokens
+                    PromptTokens = totalPromptTokens,
+                    CompletionTokens = totalCompletionTokens
                 }
                 : null
+        };
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Per-role generation
+    // ─────────────────────────────────────────────────────────────────────────
+
+    private async Task<RoleGenerationResult> GenerateRoleCardsAsync(
+        Project project,
+        InstituteRole role,
+        List<ProjectModule> modules,
+        string systemPrompt,
+        IReadOnlyList<InstituteRole> allRoles)
+    {
+        var sprintModules = ComputeSprintModules(modules, role);
+        var otherRoles = allRoles.Where(r => r.Id != role.Id).ToList();
+        var userPrompt = BuildUserPrompt(project, role, sprintModules, otherRoles);
+
+        _logger.LogInformation("Generating cards for role {RoleName}", role.Name);
+        var aiResult = await _aiService.GenerateCourseAsync(systemPrompt, userPrompt);
+
+        List<AiSprintCard> aiCards;
+        if (!aiResult.Success || string.IsNullOrWhiteSpace(aiResult.Content))
+        {
+            _logger.LogWarning("AI generation failed for role {RoleName}: {Error}", role.Name, aiResult.ErrorMessage);
+            aiCards = BuildFallbackCards(role, sprintModules);
+        }
+        else
+        {
+            var parsed = ParseAiSprintCards(aiResult.Content);
+            if (parsed == null || parsed.Count != SprintCount)
+            {
+                _logger.LogWarning("AI returned {Count} cards for role {RoleName}; using fallback", parsed?.Count ?? 0, role.Name);
+                aiCards = BuildFallbackCards(role, sprintModules);
+            }
+            else
+            {
+                aiCards = parsed;
+            }
+        }
+
+        var trelloCards = new List<TrelloCard>();
+        for (var s = 1; s <= SprintCount; s++)
+        {
+            var aiCard = aiCards.FirstOrDefault(c => c.SprintNumber == s) ?? aiCards.ElementAtOrDefault(s - 1);
+            trelloCards.Add(MapToTrelloCard(aiCard, role, s, sprintModules[s - 1]));
+        }
+
+        return new RoleGenerationResult
+        {
+            Cards = trelloCards,
+            PromptTokens = aiResult.PromptTokens,
+            CompletionTokens = aiResult.CompletionTokens
         };
     }
 
@@ -213,31 +269,26 @@ public class CourseBoardBuilderService : ICourseBoardBuilderService
     // Sprint→module assignment
     // ─────────────────────────────────────────────────────────────────────────
 
-    /// <summary>
-    /// Returns an array of 8 entries (index 0 = Sprint 1), each entry is the module assigned to that sprint or null.
-    /// </summary>
     private static ProjectModule?[] ComputeSprintModules(List<ProjectModule> modules, InstituteRole role)
     {
         var result = new ProjectModule?[SprintCount];
-
-        if (modules.Count == 0)
-            return result;
+        if (modules.Count == 0) return result;
 
         if (role.IsTechnical)
         {
             // Sprints 3-7 → Modules 0-4
             for (var i = 0; i < ModuleCount && i < modules.Count; i++)
-                result[2 + i] = modules[i]; // sprint index 2 = sprint 3
+                result[2 + i] = modules[i];
         }
         else if (role.Type == LeadershipTypeId)
         {
             // Sprints 2-6 → Modules 0-4
             for (var i = 0; i < ModuleCount && i < modules.Count; i++)
-                result[1 + i] = modules[i]; // sprint index 1 = sprint 2
+                result[1 + i] = modules[i];
         }
         else
         {
-            // Customer-facing non-technical: Sprints 2-5 → Modules 0-3 only (sprint 6 = special, no module 5)
+            // Customer-facing non-technical: Sprints 2-5 → Modules 0-3 (sprint 6 = special)
             for (var i = 0; i < ModuleCount - 1 && i < modules.Count; i++)
                 result[1 + i] = modules[i];
         }
@@ -260,7 +311,11 @@ public class CourseBoardBuilderService : ICourseBoardBuilderService
         return await File.ReadAllTextAsync(path);
     }
 
-    private static string BuildUserPrompt(Project project, InstituteRole role, ProjectModule?[] sprintModules)
+    private static string BuildUserPrompt(
+        Project project,
+        InstituteRole role,
+        ProjectModule?[] sprintModules,
+        IReadOnlyList<InstituteRole> otherSquadMembers)
     {
         var sb = new StringBuilder();
 
@@ -271,7 +326,7 @@ public class CourseBoardBuilderService : ICourseBoardBuilderService
             sb.AppendLine($"ShortBrief: {project.ShortBrief}");
         sb.AppendLine();
 
-        sb.AppendLine("## Role");
+        sb.AppendLine("## Role (generate cards for THIS role only)");
         sb.AppendLine($"Name: {role.Name}");
         sb.AppendLine($"IsTechnical: {role.IsTechnical}");
         sb.AppendLine($"IsLeadership: {role.Type == LeadershipTypeId}");
@@ -281,8 +336,21 @@ public class CourseBoardBuilderService : ICourseBoardBuilderService
             sb.AppendLine($"Competencies: {role.Competencies}");
         sb.AppendLine();
 
+        if (otherSquadMembers.Count > 0)
+        {
+            sb.AppendLine("## Squad (other roles in this course — reference them by name in cross-role tasks)");
+            foreach (var m in otherSquadMembers)
+            {
+                var tags = new List<string>();
+                if (m.IsTechnical) tags.Add("Technical");
+                if (m.Type == LeadershipTypeId) tags.Add("Leadership");
+                if (m.CustomerEngagement) tags.Add("CustomerEngagement");
+                sb.AppendLine($"- {m.Name}" + (tags.Count > 0 ? $" ({string.Join(", ", tags)})" : string.Empty));
+            }
+            sb.AppendLine();
+        }
+
         sb.AppendLine("## Project Modules (ordered by sequence)");
-        // Collect distinct modules in assignment order
         var distinctModules = sprintModules
             .Where(m => m != null)
             .GroupBy(m => m!.Id)
@@ -301,14 +369,9 @@ public class CourseBoardBuilderService : ICourseBoardBuilderService
         {
             var module = sprintModules[s - 1];
             if (module == null)
-            {
-                var specialLabel = GetSpecialSprintLabel(s, role);
-                sb.AppendLine($"Sprint {s}: NO MODULE — {specialLabel}");
-            }
+                sb.AppendLine($"Sprint {s}: NO MODULE — {GetSpecialSprintLabel(s, role)}");
             else
-            {
                 sb.AppendLine($"Sprint {s}: Module [Id={module.Id}] \"{module.Title}\"");
-            }
         }
         sb.AppendLine();
         sb.AppendLine("Generate the 8 sprint cards following all system instructions. Return only the JSON array.");
@@ -340,7 +403,6 @@ public class CourseBoardBuilderService : ICourseBoardBuilderService
         try
         {
             var trimmed = raw.Trim();
-            // Strip markdown code fences if present
             if (trimmed.StartsWith("```", StringComparison.Ordinal))
             {
                 trimmed = trimmed
@@ -351,8 +413,7 @@ public class CourseBoardBuilderService : ICourseBoardBuilderService
 
             var start = trimmed.IndexOf('[');
             var end = trimmed.LastIndexOf(']');
-            if (start < 0 || end <= start)
-                return null;
+            if (start < 0 || end <= start) return null;
 
             var json = trimmed[start..(end + 1)];
             var cards = JsonSerializer.Deserialize<List<AiSprintCard>>(json, new JsonSerializerOptions
@@ -376,6 +437,7 @@ public class CourseBoardBuilderService : ICourseBoardBuilderService
     private static TrelloCard MapToTrelloCard(AiSprintCard? ai, InstituteRole role, int sprintNumber, ProjectModule? module)
     {
         var (requiredSkill, requiredResource) = TrelloRequiredDataFieldRules.ValuesForListName($"Sprint {sprintNumber}");
+        var roleTag = role.Name.Replace(" ", string.Empty);
 
         return new TrelloCard
         {
@@ -392,7 +454,7 @@ public class CourseBoardBuilderService : ICourseBoardBuilderService
             Status = "To Do",
             Risk = sprintNumber >= 7 ? "High" : "Medium",
             ModuleId = module?.Id.ToString() ?? string.Empty,
-            CardId = $"{sprintNumber}-{role.Name.Replace(" ", string.Empty)[..Math.Min(2, role.Name.Replace(" ", string.Empty).Length)]}",
+            CardId = $"{sprintNumber}-{roleTag[..Math.Min(2, roleTag.Length)]}",
             Dependencies = new List<string>(),
             Branched = false,
             ChecklistItems = ai?.ChecklistItems ?? new List<string>(),
@@ -423,7 +485,7 @@ public class CourseBoardBuilderService : ICourseBoardBuilderService
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // Fallback cards (used when AI fails to return a valid response)
+    // Fallback cards
     // ─────────────────────────────────────────────────────────────────────────
 
     private static List<AiSprintCard> BuildFallbackCards(InstituteRole role, ProjectModule?[] sprintModules)
@@ -440,7 +502,7 @@ public class CourseBoardBuilderService : ICourseBoardBuilderService
                     1 => "Infrastructure Audit & Technical Setup",
                     2 => "Technical Architecture & Readiness",
                     SprintCount => "Stabilization & Final Polish",
-                    _ => module != null ? module.Title ?? $"Sprint {s} Feature" : $"Sprint {s} — Cross-Cutting Work"
+                    _ => module?.Title ?? $"Sprint {s} — Cross-Cutting Work"
                 },
                 Description = $"Sprint {s} work for {role.Name}. Focus on {(module != null ? module.Title : "cross-cutting deliverables")}.",
                 ChecklistItems = new List<string>
@@ -463,15 +525,18 @@ public class CourseBoardBuilderService : ICourseBoardBuilderService
     private static CourseBoardBuildResponse Fail(string message) =>
         new() { Success = false, Message = message };
 
-    // ─────────────────────────────────────────────────────────────────────────
-    // Internal DTOs for AI response
-    // ─────────────────────────────────────────────────────────────────────────
-
     private sealed class AiSprintCard
     {
         public int SprintNumber { get; set; }
         public string Name { get; set; } = string.Empty;
         public string Description { get; set; } = string.Empty;
         public List<string> ChecklistItems { get; set; } = new();
+    }
+
+    private sealed class RoleGenerationResult
+    {
+        public List<TrelloCard> Cards { get; set; } = new();
+        public int PromptTokens { get; set; }
+        public int CompletionTokens { get; set; }
     }
 }
