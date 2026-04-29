@@ -212,6 +212,12 @@ namespace strAppersBackend.Controllers
                     .ToListAsync())
                     .ToHashSet();
 
+                var baseInstituteRoleIdSet = (await _context.InstituteRoles.AsNoTracking()
+                    .Where(ir => ir.InstituteId == request.InstituteId && ir.TemplateId == null)
+                    .Select(ir => ir.Id)
+                    .ToListAsync())
+                    .ToHashSet();
+
                 int? forceTemplateId = null;
                 if (request.TemplateScopeId is > 0)
                 {
@@ -227,6 +233,12 @@ namespace strAppersBackend.Controllers
                         return BadRequest($"Invalid Role Type {dto.Type}: not found in RoleTypes.");
                     if (dto.SkillId is > 0 && !skillIds.Contains(dto.SkillId.Value))
                         return BadRequest($"Invalid SkillId {dto.SkillId}: not found in Skills.");
+                    if (dto.BaseInstituteRoleId is > 0 && !baseInstituteRoleIdSet.Contains(dto.BaseInstituteRoleId.Value))
+                    {
+                        return BadRequest(
+                            $"Invalid BaseInstituteRoleId {dto.BaseInstituteRoleId}: not an institute base role for this institute.");
+                    }
+
                     var effectiveTid = forceTemplateId ?? (dto.TemplateId is > 0 ? dto.TemplateId : null);
                     if (effectiveTid is > 0 && !templateIds.Contains(effectiveTid.Value))
                         return BadRequest($"Invalid TemplateId {effectiveTid}: not found in InstituteTemplates for this institute.");
@@ -249,12 +261,6 @@ namespace strAppersBackend.Controllers
                         await tx.RollbackAsync();
                         return BadRequest($"InstituteTemplate {templateScopeId} not found for this institute.");
                     }
-
-                    var baseRoleIds = await _context.InstituteRoles.AsNoTracking()
-                        .Where(ir => ir.InstituteId == request.InstituteId && ir.TemplateId == null)
-                        .Select(ir => ir.Id)
-                        .ToListAsync();
-                    var baseRoleIdSet = baseRoleIds.ToHashSet();
 
                     InstituteSquad squad;
                     if (template.SquadId is > 0)
@@ -290,8 +296,9 @@ namespace strAppersBackend.Controllers
                     var existingSquadRoles = await _context.InstituteSquadRoles
                         .Where(sr => sr.SquadId == squad.Id)
                         .ToListAsync();
+                    var existingSquadIds = existingSquadRoles.Select(er => er.Id).ToHashSet();
                     var payloadSquadIds = request.Roles
-                        .Where(r => r.Id.HasValue && r.Id.Value > 0)
+                        .Where(r => r.Id.HasValue && r.Id.Value > 0 && existingSquadIds.Contains(r.Id.Value))
                         .Select(r => r.Id!.Value)
                         .ToHashSet();
 
@@ -302,7 +309,7 @@ namespace strAppersBackend.Controllers
                             continue;
 
                         InstituteSquadRole? row = null;
-                        if (dto.Id.HasValue && dto.Id.Value > 0)
+                        if (dto.Id.HasValue && dto.Id.Value > 0 && existingSquadIds.Contains(dto.Id.Value))
                         {
                             row = existingSquadRoles.FirstOrDefault(er => er.Id == dto.Id.Value);
                             if (row == null)
@@ -312,9 +319,12 @@ namespace strAppersBackend.Controllers
                             }
                         }
 
-                        var baseRoleId = dto.Id.HasValue && dto.Id.Value > 0 && baseRoleIdSet.Contains(dto.Id.Value)
-                            ? dto.Id.Value
-                            : (int?)null;
+                        int? baseRoleId = null;
+                        if (dto.BaseInstituteRoleId is > 0 && baseInstituteRoleIdSet.Contains(dto.BaseInstituteRoleId.Value))
+                            baseRoleId = dto.BaseInstituteRoleId.Value;
+                        else if (row == null && dto.Id.HasValue && dto.Id.Value > 0 &&
+                                 baseInstituteRoleIdSet.Contains(dto.Id.Value))
+                            baseRoleId = dto.Id.Value;
 
                         if (row != null)
                         {

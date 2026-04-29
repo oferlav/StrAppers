@@ -29,6 +29,12 @@ public class InstituteRoleSaveDto
     /// <summary><see cref="InstituteRole.Id"/> when updating; omit, null, or ≤ 0 for new institute-created roles.</summary>
     public int? Id { get; set; }
 
+    /// <summary>
+    /// When saving <see cref="InstituteSquadRole"/> rows (template scope), optional FK to the institute base
+    /// <see cref="InstituteRole"/> row (<c>TemplateId</c> null). Lets the server set <see cref="InstituteSquadRole.BaseInstituteRoleId"/> without overloading <see cref="Id"/>.
+    /// </summary>
+    public int? BaseInstituteRoleId { get; set; }
+
     [Required]
     [MaxLength(100)]
     public string Name { get; set; } = string.Empty;
