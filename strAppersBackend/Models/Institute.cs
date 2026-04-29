@@ -60,4 +60,6 @@ public class Institute
     public ICollection<InstituteTemplate> InstituteTemplates { get; set; } = new List<InstituteTemplate>();
 
     public ICollection<InstituteRole> InstituteRoles { get; set; } = new List<InstituteRole>();
+
+    public ICollection<InstituteSquad> InstituteSquads { get; set; } = new List<InstituteSquad>();
 }

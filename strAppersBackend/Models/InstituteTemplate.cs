@@ -3,10 +3,10 @@ using System.ComponentModel.DataAnnotations.Schema;
 
 namespace strAppersBackend.Models;
 
-/// <summary>POST body for <c>/api/Projects/use/add-template</c>.</summary>
+/// <summary>POST body for <c>/api/Projects/use/by-institute/add-template</c>.</summary>
 public class AddInstituteTemplateRequest
 {
-    [Required]
+    /// <summary>Board JSON; may be empty when the course is created without a Trello template yet.</summary>
     public string TrelloBoardJson { get; set; } = string.Empty;
 
     /// <summary>Required for new rows; for updates, send the template display name (or omit to keep the existing name).</summary>
@@ -15,6 +15,18 @@ public class AddInstituteTemplateRequest
 
     /// <summary>When set, updates this <c>InstituteTemplates</c> row (must belong to query project + institute). When omitted, inserts a new row.</summary>
     public int? InstituteTemplateId { get; set; }
+}
+
+public class DeleteInstituteTemplateRequest
+{
+    [Required]
+    public int InstituteTemplateId { get; set; }
+
+    [Required]
+    public int ProjectId { get; set; }
+
+    [Required]
+    public int InstituteId { get; set; }
 }
 
 /// <summary>
@@ -35,6 +47,13 @@ public class InstituteTemplate
     public int ProjectId { get; set; }
 
     public Project? Project { get; set; }
+
+    /// <summary>
+    /// Optional squad linked to this template.
+    /// </summary>
+    public int? SquadId { get; set; }
+
+    public InstituteSquad? Squad { get; set; }
 
     public ICollection<InstituteRole> InstituteRoles { get; set; } = new List<InstituteRole>();
 

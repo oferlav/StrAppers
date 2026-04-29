@@ -90,7 +90,7 @@ public class KickoffConfig
     public bool RequireAdmin { get; set; } = true;
     public bool RequireUIUXDesigner { get; set; } = true;
     public bool RequireProductManager { get; set; } = false;
-    public bool RequireDeveloperRule { get; set; } = true;
+    public bool RequireDeveloperRule { get; set; } = false;
     public int MaxPendingTime { get; set; } = 96;
 }
 

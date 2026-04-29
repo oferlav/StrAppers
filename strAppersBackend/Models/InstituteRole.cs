@@ -63,4 +63,6 @@ public class InstituteRole
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
 
     public DateTime? UpdatedAt { get; set; }
+
+    public ICollection<InstituteSquadRole> SquadRoleSnapshots { get; set; } = new List<InstituteSquadRole>();
 }

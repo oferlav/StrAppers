@@ -52,5 +52,29 @@ public class InstituteRoleSaveDto
 
     public bool CustomerEngagement { get; set; } = false;
 
+    public bool IsTechnical { get; set; } = false;
+
     public bool IsActive { get; set; } = true;
+}
+
+public class RoleCompetenciesAssistanceRequest
+{
+    [Required]
+    [MaxLength(100)]
+    public string RoleName { get; set; } = string.Empty;
+
+    [MaxLength(8000)]
+    public string? Competencies { get; set; }
+
+    [MaxLength(2000)]
+    public string? AiInstruction { get; set; }
+
+    public bool IsTechnical { get; set; } = false;
+}
+
+public class RoleCompetenciesAssistanceResponse
+{
+    public bool Success { get; set; }
+    public string Message { get; set; } = string.Empty;
+    public string Competencies { get; set; } = string.Empty;
 }

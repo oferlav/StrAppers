@@ -3,6 +3,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using strAppersBackend.Data;
 using strAppersBackend.Models;
+using strAppersBackend.Services;
 
 namespace strAppersBackend.Controllers
 {
@@ -13,15 +14,18 @@ namespace strAppersBackend.Controllers
         private readonly ApplicationDbContext _context;
         private readonly ILogger<RolesController> _logger;
         private readonly KickoffConfig _kickoffConfig;
+        private readonly IAIService _aiService;
 
         public RolesController(
             ApplicationDbContext context,
             ILogger<RolesController> logger,
-            IOptions<KickoffConfig> kickoffConfig)
+            IOptions<KickoffConfig> kickoffConfig,
+            IAIService aiService)
         {
             _context = context;
             _logger = logger;
             _kickoffConfig = kickoffConfig.Value;
+            _aiService = aiService;
         }
 
         /// <summary>
@@ -69,19 +73,115 @@ namespace strAppersBackend.Controllers
                 if (!exists)
                     return NotFound($"Institute with ID {instituteId} not found");
 
-                var query = _context.InstituteRoles.AsNoTracking()
-                    .Where(ir => ir.InstituteId == instituteId);
                 if (templateId is > 0)
-                    query = query.Where(ir => ir.TemplateId == templateId.Value);
+                {
+                    var template = await _context.InstituteTemplates
+                        .AsNoTracking()
+                        .FirstOrDefaultAsync(t => t.Id == templateId.Value && t.InstituteId == instituteId);
+                    if (template == null)
+                        return NotFound($"InstituteTemplate {templateId.Value} not found for institute {instituteId}.");
 
-                var list = await query.OrderBy(ir => ir.Name).ToListAsync();
+                    if (template.SquadId is > 0)
+                    {
+                        var squadRoles = await _context.InstituteSquadRoles
+                            .AsNoTracking()
+                            .Where(sr => sr.SquadId == template.SquadId.Value)
+                            .OrderBy(sr => sr.Name)
+                            .ToListAsync();
 
+                        // Keep API shape backward-compatible for existing frontend code.
+                        var mapped = squadRoles.Select(sr => new InstituteRole
+                        {
+                            Id = sr.Id,
+                            InstituteId = instituteId,
+                            TemplateId = templateId.Value,
+                            Name = sr.Name,
+                            Description = sr.Description,
+                            Competencies = sr.Competencies,
+                            Category = sr.Category,
+                            Type = sr.Type,
+                            SkillId = sr.SkillId,
+                            CustomerEngagement = sr.CustomerEngagement,
+                            IsTechnical = sr.IsTechnical,
+                            IsActive = sr.IsActive,
+                            CreatedAt = sr.CreatedAt,
+                            UpdatedAt = sr.UpdatedAt,
+                        }).ToList();
+
+                        return Ok(mapped);
+                    }
+
+                    // Legacy fallback while data is being migrated.
+                    var legacyTemplateRoles = await _context.InstituteRoles.AsNoTracking()
+                        .Where(ir => ir.InstituteId == instituteId && ir.TemplateId == templateId.Value)
+                        .OrderBy(ir => ir.Name)
+                        .ToListAsync();
+                    return Ok(legacyTemplateRoles);
+                }
+
+                var list = await _context.InstituteRoles.AsNoTracking()
+                    .Where(ir => ir.InstituteId == instituteId && ir.TemplateId == null)
+                    .OrderBy(ir => ir.Name)
+                    .ToListAsync();
                 return Ok(list);
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Error retrieving institute roles for institute {InstituteId}", instituteId);
                 return StatusCode(500, "An error occurred while retrieving institute roles.");
+            }
+        }
+
+        /// <summary>
+        /// Distinct base role names currently assigned to at least one template squad for this institute.
+        /// Used by UI to block deleting base roles that are already used in templates.
+        /// </summary>
+        [HttpGet("use/institute/{instituteId:int}/assigned-role-names")]
+        public async Task<ActionResult<IEnumerable<string>>> GetAssignedRoleNames(int instituteId)
+        {
+            try
+            {
+                var exists = await _context.Institutes.AsNoTracking().AnyAsync(i => i.Id == instituteId);
+                if (!exists)
+                    return NotFound($"Institute with ID {instituteId} not found");
+
+                var fromSquadTemplates = await _context.InstituteSquadRoles
+                    .AsNoTracking()
+                    .Join(
+                        _context.InstituteSquads.AsNoTracking(),
+                        sr => sr.SquadId,
+                        s => s.Id,
+                        (sr, s) => new { sr.Name, s.InstituteId, s.Id })
+                    .Join(
+                        _context.InstituteTemplates.AsNoTracking().Where(t => t.SquadId != null),
+                        x => x.Id,
+                        t => t.SquadId!.Value,
+                        (x, t) => new { x.Name, x.InstituteId })
+                    .Where(x => x.InstituteId == instituteId)
+                    .Select(x => x.Name)
+                    .ToListAsync();
+
+                // Legacy fallback during migration period.
+                var fromLegacyTemplateRoles = await _context.InstituteRoles
+                    .AsNoTracking()
+                    .Where(r => r.InstituteId == instituteId && r.TemplateId != null)
+                    .Select(r => r.Name)
+                    .ToListAsync();
+
+                var names = fromSquadTemplates
+                    .Concat(fromLegacyTemplateRoles)
+                    .Where(n => !string.IsNullOrWhiteSpace(n))
+                    .Select(n => n.Trim())
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .OrderBy(n => n)
+                    .ToList();
+
+                return Ok(names);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error retrieving assigned role names for institute {InstituteId}", instituteId);
+                return StatusCode(500, "An error occurred while retrieving assigned role names.");
             }
         }
 
@@ -140,10 +240,162 @@ namespace strAppersBackend.Controllers
 
                 await using var tx = await _context.Database.BeginTransactionAsync();
 
+                if (forceTemplateId is int templateScopeId)
+                {
+                    var template = await _context.InstituteTemplates
+                        .FirstOrDefaultAsync(t => t.Id == templateScopeId && t.InstituteId == request.InstituteId);
+                    if (template == null)
+                    {
+                        await tx.RollbackAsync();
+                        return BadRequest($"InstituteTemplate {templateScopeId} not found for this institute.");
+                    }
+
+                    var baseRoleIds = await _context.InstituteRoles.AsNoTracking()
+                        .Where(ir => ir.InstituteId == request.InstituteId && ir.TemplateId == null)
+                        .Select(ir => ir.Id)
+                        .ToListAsync();
+                    var baseRoleIdSet = baseRoleIds.ToHashSet();
+
+                    InstituteSquad squad;
+                    if (template.SquadId is > 0)
+                    {
+                        squad = await _context.InstituteSquads
+                            .FirstOrDefaultAsync(s => s.Id == template.SquadId.Value && s.InstituteId == request.InstituteId)
+                            ?? new InstituteSquad
+                            {
+                                InstituteId = request.InstituteId,
+                                Name = $"{template.Name} Squad",
+                                IsActive = true,
+                                CreatedAt = now,
+                            };
+                        if (squad.Id == 0)
+                            await _context.InstituteSquads.AddAsync(squad);
+                    }
+                    else
+                    {
+                        squad = new InstituteSquad
+                        {
+                            InstituteId = request.InstituteId,
+                            Name = $"{template.Name} Squad",
+                            IsActive = true,
+                            CreatedAt = now,
+                        };
+                        await _context.InstituteSquads.AddAsync(squad);
+                    }
+
+                    await _context.SaveChangesAsync();
+
+                    template.SquadId = squad.Id;
+
+                    var existingSquadRoles = await _context.InstituteSquadRoles
+                        .Where(sr => sr.SquadId == squad.Id)
+                        .ToListAsync();
+                    var payloadSquadIds = request.Roles
+                        .Where(r => r.Id.HasValue && r.Id.Value > 0)
+                        .Select(r => r.Id!.Value)
+                        .ToHashSet();
+
+                    foreach (var dto in request.Roles)
+                    {
+                        var name = dto.Name.Trim();
+                        if (name.Length == 0)
+                            continue;
+
+                        InstituteSquadRole? row = null;
+                        if (dto.Id.HasValue && dto.Id.Value > 0)
+                        {
+                            row = existingSquadRoles.FirstOrDefault(er => er.Id == dto.Id.Value);
+                            if (row == null)
+                            {
+                                await tx.RollbackAsync();
+                                return BadRequest($"InstituteSquadRole Id {dto.Id} not found for this squad scope.");
+                            }
+                        }
+
+                        var baseRoleId = dto.Id.HasValue && dto.Id.Value > 0 && baseRoleIdSet.Contains(dto.Id.Value)
+                            ? dto.Id.Value
+                            : (int?)null;
+
+                        if (row != null)
+                        {
+                            row.Name = name;
+                            row.Description = dto.Description;
+                            row.Competencies = dto.Competencies;
+                            row.Category = dto.Category;
+                            row.Type = dto.Type;
+                            row.SkillId = dto.SkillId is > 0 ? dto.SkillId : null;
+                            row.CustomerEngagement = dto.CustomerEngagement;
+                            row.IsTechnical = dto.IsTechnical;
+                            row.IsActive = dto.IsActive;
+                            row.UpdatedAt = now;
+                            if (row.BaseInstituteRoleId == null && baseRoleId.HasValue)
+                                row.BaseInstituteRoleId = baseRoleId;
+                        }
+                        else
+                        {
+                            await _context.InstituteSquadRoles.AddAsync(new InstituteSquadRole
+                            {
+                                SquadId = squad.Id,
+                                BaseInstituteRoleId = baseRoleId,
+                                Name = name,
+                                Description = dto.Description,
+                                Competencies = dto.Competencies,
+                                Category = dto.Category,
+                                Type = dto.Type,
+                                SkillId = dto.SkillId is > 0 ? dto.SkillId : null,
+                                CustomerEngagement = dto.CustomerEngagement,
+                                IsTechnical = dto.IsTechnical,
+                                IsActive = dto.IsActive,
+                                CreatedAt = now,
+                                UpdatedAt = null,
+                            });
+                        }
+                    }
+
+                    var toRemoveSquad = existingSquadRoles.Where(er => !payloadSquadIds.Contains(er.Id)).ToList();
+                    if (toRemoveSquad.Count > 0)
+                        _context.InstituteSquadRoles.RemoveRange(toRemoveSquad);
+
+                    await _context.SaveChangesAsync();
+                    await tx.CommitAsync();
+
+                    var savedSquadRoles = await _context.InstituteSquadRoles.AsNoTracking()
+                        .Where(sr => sr.SquadId == squad.Id)
+                        .OrderBy(sr => sr.Name)
+                        .Select(sr => new InstituteRole
+                        {
+                            Id = sr.Id,
+                            InstituteId = request.InstituteId,
+                            TemplateId = templateScopeId,
+                            Name = sr.Name,
+                            Description = sr.Description,
+                            Competencies = sr.Competencies,
+                            Category = sr.Category,
+                            Type = sr.Type,
+                            SkillId = sr.SkillId,
+                            CustomerEngagement = sr.CustomerEngagement,
+                            IsTechnical = sr.IsTechnical,
+                            IsActive = sr.IsActive,
+                            CreatedAt = sr.CreatedAt,
+                            UpdatedAt = sr.UpdatedAt,
+                        })
+                        .ToListAsync();
+
+                    return Ok(new
+                    {
+                        instituteId = request.InstituteId,
+                        requireDeveloperRuleEcho = request.RequireDeveloperRule,
+                        templateScopeId = request.TemplateScopeId,
+                        squadId = squad.Id,
+                        instituteRoles = savedSquadRoles,
+                    });
+                }
+
                 IQueryable<InstituteRole> existingQuery = _context.InstituteRoles
                     .Where(ir => ir.InstituteId == request.InstituteId);
-                if (forceTemplateId is int scopeTid)
-                    existingQuery = existingQuery.Where(ir => ir.TemplateId == scopeTid);
+                // Base Roles Config save should only affect institute-level rows.
+                // Template-scoped rows are now represented by squads.
+                existingQuery = existingQuery.Where(ir => ir.TemplateId == null);
 
                 var existingForInstitute = await existingQuery.ToListAsync();
 
@@ -176,6 +428,7 @@ namespace strAppersBackend.Controllers
                         row.Type = dto.Type;
                         row.SkillId = dto.SkillId is > 0 ? dto.SkillId : null;
                         row.CustomerEngagement = dto.CustomerEngagement;
+                        row.IsTechnical = dto.IsTechnical;
                         row.IsActive = dto.IsActive;
                         row.UpdatedAt = now;
                     }
@@ -192,6 +445,7 @@ namespace strAppersBackend.Controllers
                             Type = dto.Type,
                             SkillId = dto.SkillId is > 0 ? dto.SkillId : null,
                             CustomerEngagement = dto.CustomerEngagement,
+                            IsTechnical = dto.IsTechnical,
                             IsActive = dto.IsActive,
                             CreatedAt = now,
                             UpdatedAt = null,
@@ -228,6 +482,83 @@ namespace strAppersBackend.Controllers
             {
                 _logger.LogError(ex, "Error saving institute roles for institute {InstituteId}", request.InstituteId);
                 return StatusCode(500, "An error occurred while saving institute roles.");
+            }
+        }
+
+        /// <summary>
+        /// AI assistance for improving role competencies text (spelling, grammar, clarity, and structure).
+        /// </summary>
+        [HttpPost("use/ai-competencies-assistance")]
+        public async Task<ActionResult<RoleCompetenciesAssistanceResponse>> AssistCompetencies(
+            [FromBody] RoleCompetenciesAssistanceRequest request)
+        {
+            if (!ModelState.IsValid)
+                return ValidationProblem(ModelState);
+
+            var roleName = request.RoleName.Trim();
+            if (roleName.Length == 0)
+            {
+                return BadRequest(new RoleCompetenciesAssistanceResponse
+                {
+                    Success = false,
+                    Message = "RoleName is required.",
+                    Competencies = string.Empty,
+                });
+            }
+
+            try
+            {
+                var source = (request.Competencies ?? string.Empty).Trim();
+                var instruction = (request.AiInstruction ?? string.Empty).Trim();
+                var prompt = $"""
+You are an education product assistant helping teachers define role competencies.
+
+Rewrite and improve the competencies text for this role:
+- Role: {roleName}
+- Technical role: {request.IsTechnical}
+{(instruction.Length > 0 ? $"- Teacher instruction: {instruction}" : string.Empty)}
+
+Requirements:
+1) Fix English grammar and spelling.
+2) Keep the original intent; do not invent unrelated skills.
+3) Make the text clear, concise, and practical for students.
+4) Use a clean bullet list format.
+5) If the input is very short or empty, propose a strong baseline competencies list for this role.
+6) For technical roles, emphasize technical capabilities. For non-technical roles, emphasize communication, planning, and domain competencies.
+
+Teacher draft:
+{source}
+
+Return only the final competencies text.
+""";
+
+                var assisted = (await _aiService.GenerateTextResponseAsync(prompt))?.Trim() ?? string.Empty;
+                if (assisted.Length == 0)
+                {
+                    return StatusCode(502, new RoleCompetenciesAssistanceResponse
+                    {
+                        Success = false,
+                        Message = "AI service returned an empty response.",
+                        Competencies = string.Empty,
+                    });
+                }
+
+                return Ok(new RoleCompetenciesAssistanceResponse
+                {
+                    Success = true,
+                    Message = "Competencies text improved successfully.",
+                    Competencies = assisted,
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error assisting competencies text for role {RoleName}", roleName);
+                return StatusCode(500, new RoleCompetenciesAssistanceResponse
+                {
+                    Success = false,
+                    Message = "An error occurred while generating competencies assistance.",
+                    Competencies = string.Empty,
+                });
             }
         }
 

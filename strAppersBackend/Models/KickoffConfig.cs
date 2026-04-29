@@ -28,7 +28,7 @@ namespace strAppersBackend.Models
         /// <summary>
         /// Whether developer rule is required
         /// </summary>
-        public bool RequireDeveloperRule { get; set; } = true;
+        public bool RequireDeveloperRule { get; set; } = false;
 
         /// <summary>
         /// Max time in hours a student can remain in pending state

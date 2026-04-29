@@ -45,15 +45,56 @@ public class CourseBoardBuilderService : ICourseBoardBuilderService
         if (project == null)
             return Fail($"Project {request.ProjectId} was not found.");
 
-        var role = await _context.InstituteRoles
-            .AsNoTracking()
-            .Include(r => r.Skill)
-            .FirstOrDefaultAsync(r => r.Id == request.InstituteRoleId && r.TemplateId == request.TemplateId);
-        if (role == null)
-            return Fail($"InstituteRole {request.InstituteRoleId} for template {request.TemplateId} was not found.");
+        var instituteTemplate = await _context.InstituteTemplates
+            .FirstOrDefaultAsync(t =>
+                t.Id == request.TemplateId &&
+                t.ProjectId == request.ProjectId);
+        if (instituteTemplate == null)
+            return Fail($"InstituteTemplate {request.TemplateId} was not found for project {request.ProjectId}.");
+
+        InstituteRole role;
+        if (instituteTemplate.SquadId is > 0)
+        {
+            var squadRole = await _context.InstituteSquadRoles
+                .AsNoTracking()
+                .Include(r => r.Skill)
+                .FirstOrDefaultAsync(r =>
+                    r.Id == request.InstituteRoleId &&
+                    r.SquadId == instituteTemplate.SquadId.Value);
+            if (squadRole == null)
+                return Fail($"Squad role {request.InstituteRoleId} for template {request.TemplateId} was not found.");
+
+            role = new InstituteRole
+            {
+                Id = squadRole.Id,
+                InstituteId = instituteTemplate.InstituteId,
+                Name = squadRole.Name,
+                Description = squadRole.Description,
+                Competencies = squadRole.Competencies,
+                Category = squadRole.Category,
+                Type = squadRole.Type,
+                SkillId = squadRole.SkillId,
+                Skill = squadRole.Skill,
+                CustomerEngagement = squadRole.CustomerEngagement,
+                IsTechnical = squadRole.IsTechnical,
+                IsActive = squadRole.IsActive,
+                CreatedAt = squadRole.CreatedAt,
+                UpdatedAt = squadRole.UpdatedAt,
+            };
+        }
+        else
+        {
+            var legacyRole = await _context.InstituteRoles
+                .AsNoTracking()
+                .Include(r => r.Skill)
+                .FirstOrDefaultAsync(r => r.Id == request.InstituteRoleId && r.TemplateId == request.TemplateId);
+            if (legacyRole == null)
+                return Fail($"InstituteRole {request.InstituteRoleId} for template {request.TemplateId} was not found.");
+            role = legacyRole;
+        }
 
         if (project.InstituteId.HasValue && role.InstituteId != project.InstituteId.Value)
-            return Fail($"InstituteRole {request.InstituteRoleId} does not belong to institute {project.InstituteId.Value}.");
+            return Fail($"Squad role {request.InstituteRoleId} does not belong to institute {project.InstituteId.Value}.");
 
         var modules = await _context.ProjectModules
             .AsNoTracking()
@@ -62,14 +103,6 @@ public class CourseBoardBuilderService : ICourseBoardBuilderService
             .ThenBy(m => m.Id)
             .Take(ModuleCount)
             .ToListAsync();
-
-        var instituteTemplate = await _context.InstituteTemplates
-            .FirstOrDefaultAsync(t =>
-                t.Id == request.TemplateId &&
-                t.ProjectId == request.ProjectId &&
-                t.InstituteId == role.InstituteId);
-        if (instituteTemplate == null)
-            return Fail($"InstituteTemplate {request.TemplateId} was not found for project {request.ProjectId}.");
 
         // ── 2. Compute sprint→module assignments ──────────────────────────────
         var sprintModules = ComputeSprintModules(modules, role);

@@ -193,6 +193,23 @@ public partial class ProjectsController : ControllerBase
         public string Name { get; set; } = string.Empty;
     }
 
+    public sealed class CourseCatalogItemDto
+    {
+        public string Kind { get; set; } = "institute"; // "builtIn" | "institute"
+        public int ProjectId { get; set; }
+        public int? InstituteTemplateId { get; set; }
+        public string Name { get; set; } = string.Empty;
+    }
+
+    /// <summary>Project row for Courses &quot;Create Course&quot; project combo (institute-owned and optional global built-ins).</summary>
+    public sealed class CourseCreateProjectOptionDto
+    {
+        public int Id { get; set; }
+        public string Title { get; set; } = string.Empty;
+        public int? InstituteId { get; set; }
+        public bool IsBuiltIn { get; set; }
+    }
+
     public sealed class DuplicateProjectRequest
     {
         public int? InstituteId { get; set; }
@@ -2521,7 +2538,7 @@ Staff request:
     /// <summary>
     /// List saved institute templates for a project (names + ids for Task Builder picker).
     /// </summary>
-    [HttpGet("use/templates/list")]
+    [HttpGet("use/by-institute/templates/list")]
     public async Task<ActionResult<IEnumerable<InstituteTemplateListItemDto>>> GetInstituteTemplatesListForProject(
         [FromQuery] int projectId,
         [FromQuery] int instituteId)
@@ -2550,11 +2567,204 @@ Staff request:
     }
 
     /// <summary>
+    /// Catalog rows for Courses screen.
+    /// Returns institute templates (same institute), and optionally built-in project templates (Projects table).
+    /// </summary>
+    [HttpGet("use/by-institute/templates/catalog")]
+    public async Task<ActionResult<IEnumerable<CourseCatalogItemDto>>> GetCoursesCatalog(
+        [FromQuery] int instituteId,
+        [FromQuery] bool includeBuiltIn = false)
+    {
+        if (instituteId <= 0)
+            return BadRequest("instituteId must be a positive integer.");
+
+        try
+        {
+            var instituteExists = await _context.Institutes.AsNoTracking().AnyAsync(i => i.Id == instituteId);
+            if (!instituteExists)
+                return NotFound($"Institute with ID {instituteId} not found.");
+
+            var instituteRows = await _context.InstituteTemplates
+                .AsNoTracking()
+                .Where(t => t.InstituteId == instituteId)
+                .Select(t => new CourseCatalogItemDto
+                {
+                    Kind = "institute",
+                    ProjectId = t.ProjectId,
+                    InstituteTemplateId = t.Id,
+                    Name = string.IsNullOrWhiteSpace(t.Name) ? $"Course {t.Id}" : t.Name
+                })
+                .OrderByDescending(x => x.InstituteTemplateId)
+                .ToListAsync();
+
+            if (!includeBuiltIn)
+                return Ok(instituteRows);
+
+            var builtInRows = await _context.Projects
+                .AsNoTracking()
+                .Where(p =>
+                    p.IsAvailable &&
+                    !string.IsNullOrWhiteSpace(p.TrelloBoardJson) &&
+                    (p.InstituteId == null || p.InstituteId == instituteId))
+                .OrderBy(p => p.Title)
+                .Select(p => new CourseCatalogItemDto
+                {
+                    Kind = "builtIn",
+                    ProjectId = p.Id,
+                    InstituteTemplateId = null,
+                    Name = p.Title
+                })
+                .ToListAsync();
+
+            return Ok(builtInRows.Concat(instituteRows).ToList());
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error building courses catalog for institute {InstituteId}", instituteId);
+            return StatusCode(500, "An error occurred while loading courses catalog.");
+        }
+    }
+
+    /// <summary>
+    /// Project picker for Courses &quot;Create Course&quot;: all projects owned by <paramref name="instituteId"/>;
+    /// when <paramref name="includeBuiltIn"/> is true, also includes global catalog projects (<c>InstituteId</c> is null)
+    /// with <see cref="Project.IsAvailable"/> and a saved Trello template JSON (same notion as catalog built-ins).
+    /// </summary>
+    /// <remarks>
+    /// Exposed twice so proxies or older clients can call either route:
+    /// <c>GET /api/Projects/use/for-course-create</c> or
+    /// <c>GET /api/Projects/use/by-institute/for-course-create</c> (same query params).
+    /// </remarks>
+    [HttpGet("use/for-course-create")]
+    public Task<ActionResult<IEnumerable<CourseCreateProjectOptionDto>>> GetProjectsForCourseCreateLegacy(
+        [FromQuery] int instituteId,
+        [FromQuery] bool includeBuiltIn = false)
+        => GetProjectsForCourseCreateImplAsync(instituteId, includeBuiltIn);
+
+    /// <inheritdoc cref="GetProjectsForCourseCreateLegacy"/>
+    [HttpGet("use/by-institute/for-course-create")]
+    public Task<ActionResult<IEnumerable<CourseCreateProjectOptionDto>>> GetProjectsForCourseCreateByInstitute(
+        [FromQuery] int instituteId,
+        [FromQuery] bool includeBuiltIn = false)
+        => GetProjectsForCourseCreateImplAsync(instituteId, includeBuiltIn);
+
+    private async Task<ActionResult<IEnumerable<CourseCreateProjectOptionDto>>> GetProjectsForCourseCreateImplAsync(
+        int instituteId,
+        bool includeBuiltIn)
+    {
+        if (instituteId <= 0)
+            return BadRequest("instituteId must be a positive integer.");
+
+        try
+        {
+            var instituteExists = await _context.Institutes.AsNoTracking().AnyAsync(i => i.Id == instituteId);
+            if (!instituteExists)
+                return NotFound($"Institute with ID {instituteId} was not found.");
+
+            var instituteOwned = await _context.Projects
+                .AsNoTracking()
+                .Where(p => p.InstituteId == instituteId)
+                .OrderBy(p => p.Title)
+                .Select(p => new CourseCreateProjectOptionDto
+                {
+                    Id = p.Id,
+                    Title = p.Title ?? string.Empty,
+                    InstituteId = p.InstituteId,
+                    IsBuiltIn = false
+                })
+                .ToListAsync();
+
+            if (!includeBuiltIn)
+                return Ok(instituteOwned);
+
+            var builtInGlobals = await _context.Projects
+                .AsNoTracking()
+                .Where(p =>
+                    p.InstituteId == null &&
+                    p.IsAvailable &&
+                    !string.IsNullOrWhiteSpace(p.TrelloBoardJson))
+                .OrderBy(p => p.Title)
+                .Select(p => new CourseCreateProjectOptionDto
+                {
+                    Id = p.Id,
+                    Title = p.Title ?? string.Empty,
+                    InstituteId = p.InstituteId,
+                    IsBuiltIn = true
+                })
+                .ToListAsync();
+
+            var merged = new List<CourseCreateProjectOptionDto>(instituteOwned.Count + builtInGlobals.Count);
+            merged.AddRange(instituteOwned);
+            merged.AddRange(builtInGlobals);
+            return Ok(merged);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error loading projects for course create (InstituteId={InstituteId})", instituteId);
+            return StatusCode(500, "An error occurred while loading projects.");
+        }
+    }
+
+    /// <summary>
+    /// Delete a saved institute template for a specific institute + project.
+    /// Route: DELETE /api/Projects/use/by-institute/templates/{instituteTemplateId}?projectId=&instituteId=
+    /// </summary>
+    [HttpDelete("use/by-institute/templates/{instituteTemplateId:int}")]
+    public async Task<ActionResult<object>> DeleteInstituteTemplate(
+        int instituteTemplateId,
+        [FromQuery] int projectId,
+        [FromQuery] int instituteId)
+    {
+        if (instituteTemplateId <= 0 || projectId <= 0 || instituteId <= 0)
+            return BadRequest("instituteTemplateId, projectId and instituteId must be positive integers.");
+
+        try
+        {
+            var row = await _context.InstituteTemplates
+                .FirstOrDefaultAsync(t =>
+                    t.Id == instituteTemplateId &&
+                    t.ProjectId == projectId &&
+                    t.InstituteId == instituteId);
+            if (row == null)
+                return NotFound($"Institute template {instituteTemplateId} was not found for this institute and project.");
+
+            _context.InstituteTemplates.Remove(row);
+            await _context.SaveChangesAsync();
+
+            return Ok(new
+            {
+                Success = true,
+                DeletedId = instituteTemplateId,
+                ProjectId = projectId,
+                InstituteId = instituteId
+            });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error deleting institute template {TemplateId} for institute {InstituteId}, project {ProjectId}", instituteTemplateId, instituteId, projectId);
+            return StatusCode(500, "An error occurred while deleting the template.");
+        }
+    }
+
+    /// <summary>
+    /// Delete a saved institute template using institute-scoped POST route convention.
+    /// Route: POST /api/Projects/use/by-institute/delete-template
+    /// </summary>
+    [HttpPost("use/by-institute/delete-template")]
+    public Task<ActionResult<object>> DeleteInstituteTemplateByInstitute([FromBody] DeleteInstituteTemplateRequest request)
+    {
+        if (request == null)
+            return Task.FromResult<ActionResult<object>>(BadRequest("Request body is required."));
+
+        return DeleteInstituteTemplate(request.InstituteTemplateId, request.ProjectId, request.InstituteId);
+    }
+
+    /// <summary>
     /// Get the saved Trello template JSON for a project.
     /// Uses <see cref="Project.TrelloBoardJson"/> unless <paramref name="instituteTemplateId"/> targets a row in
     /// <c>InstituteTemplates</c>, or unless <paramref name="instituteId"/> is set without <paramref name="instituteTemplateId"/> — then the latest institute row for that project + institute is returned.
     /// </summary>
-    [HttpGet("use/templates")]
+    [HttpGet("use/by-institute/templates")]
     public async Task<ActionResult<ProjectTemplateDto>> GetProjectTemplateByProjectId(
         [FromQuery] int projectId,
         [FromQuery] int? instituteId = null,
@@ -2668,7 +2878,7 @@ Staff request:
     /// Insert: omit <see cref="AddInstituteTemplateRequest.InstituteTemplateId"/> and send a unique <see cref="AddInstituteTemplateRequest.Name"/> (per institute + project, case-insensitive).
     /// Update: set <see cref="AddInstituteTemplateRequest.InstituteTemplateId"/> to an existing row id for this institute + project; optional <see cref="AddInstituteTemplateRequest.Name"/> renames if unique.
     /// </summary>
-    [HttpPost("use/add-template")]
+    [HttpPost("use/by-institute/add-template")]
     public async Task<ActionResult<object>> AddInstituteTemplate(
         [FromQuery] int projectId,
         [FromQuery] int instituteId,
@@ -2679,9 +2889,9 @@ Staff request:
             return BadRequest("projectId and instituteId must be positive integers.");
         }
 
-        if (request == null || string.IsNullOrWhiteSpace(request.TrelloBoardJson))
+        if (request == null)
         {
-            return BadRequest("Request body must include a non-empty trelloBoardJson string.");
+            return BadRequest("Request body is required.");
         }
 
         try
@@ -2701,7 +2911,7 @@ Staff request:
                 return NotFound($"Project with ID {projectId} not found.");
             }
 
-            var json = request.TrelloBoardJson.Trim();
+            var json = request.TrelloBoardJson?.Trim() ?? string.Empty;
 
             static string ClampName(string s)
             {
@@ -2779,7 +2989,8 @@ Staff request:
                 InstituteId = instituteId,
                 ProjectId = projectId,
                 Name = insertName,
-                TrelloBoardJson = json
+                TrelloBoardJson = json,
+                IsActive = true
             };
             _context.InstituteTemplates.Add(newRow);
             await _context.SaveChangesAsync();

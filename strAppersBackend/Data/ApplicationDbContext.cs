@@ -21,6 +21,8 @@ public class ApplicationDbContext : DbContext
     public DbSet<Skill> Skills { get; set; }
     public DbSet<Role> Roles { get; set; }
     public DbSet<InstituteRole> InstituteRoles { get; set; }
+    public DbSet<InstituteSquad> InstituteSquads { get; set; }
+    public DbSet<InstituteSquadRole> InstituteSquadRoles { get; set; }
     public DbSet<StudentRole> StudentRoles { get; set; }
     public DbSet<Major> Majors { get; set; }
     public DbSet<Year> Years { get; set; }
@@ -179,6 +181,7 @@ public class ApplicationDbContext : DbContext
             entity.Property(e => e.IsActive).HasDefaultValue(false);
             entity.HasIndex(e => e.InstituteId);
             entity.HasIndex(e => e.ProjectId);
+            entity.HasIndex(e => e.SquadId);
             entity.HasIndex(e => new { e.InstituteId, e.ProjectId });
 
             entity.HasOne(e => e.Institute)
@@ -190,6 +193,11 @@ public class ApplicationDbContext : DbContext
                 .WithMany(p => p.InstituteTemplates)
                 .HasForeignKey(e => e.ProjectId)
                 .OnDelete(DeleteBehavior.Cascade);
+
+            entity.HasOne(e => e.Squad)
+                .WithMany(s => s.InstituteTemplates)
+                .HasForeignKey(e => e.SquadId)
+                .OnDelete(DeleteBehavior.SetNull);
         });
 
         // Configure Year entity
@@ -500,6 +508,7 @@ public class ApplicationDbContext : DbContext
             entity.Property(e => e.Category).HasMaxLength(50);
             entity.Property(e => e.Type).IsRequired().HasDefaultValue(0);
             entity.Property(e => e.CustomerEngagement).HasDefaultValue(false);
+            entity.Property(e => e.IsTechnical).HasDefaultValue(false);
             entity.Property(e => e.CreatedAt).HasDefaultValueSql("CURRENT_TIMESTAMP");
 
             entity.HasOne(e => e.Institute)
@@ -528,6 +537,66 @@ public class ApplicationDbContext : DbContext
             entity.HasIndex(e => e.Type);
             entity.HasIndex(e => e.TemplateId);
             entity.HasIndex(e => e.SkillId);
+        });
+
+        modelBuilder.Entity<InstituteSquad>(entity =>
+        {
+            entity.ToTable("InstituteSquads");
+            entity.HasKey(e => e.Id);
+            entity.Property(e => e.Name).IsRequired().HasMaxLength(100);
+            entity.Property(e => e.IsActive).HasDefaultValue(true);
+            entity.Property(e => e.CreatedAt).HasDefaultValueSql("CURRENT_TIMESTAMP");
+
+            entity.HasOne(e => e.Institute)
+                .WithMany(i => i.InstituteSquads)
+                .HasForeignKey(e => e.InstituteId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            entity.HasIndex(e => e.InstituteId);
+            entity.HasIndex(e => new { e.InstituteId, e.Name });
+        });
+
+        modelBuilder.Entity<InstituteSquadRole>(entity =>
+        {
+            entity.ToTable("InstituteSquadRoles");
+            entity.HasKey(e => e.Id);
+            entity.Property(e => e.Name).IsRequired().HasMaxLength(100);
+            entity.Property(e => e.Description).HasMaxLength(500);
+            entity.Property(e => e.Competencies).HasColumnType("text");
+            entity.Property(e => e.Category).HasMaxLength(50);
+            entity.Property(e => e.Type).IsRequired().HasDefaultValue(0);
+            entity.Property(e => e.CustomerEngagement).HasDefaultValue(false);
+            entity.Property(e => e.IsTechnical).HasDefaultValue(false);
+            entity.Property(e => e.IsActive).HasDefaultValue(true);
+            entity.Property(e => e.CreatedAt).HasDefaultValueSql("CURRENT_TIMESTAMP");
+
+            entity.HasOne(e => e.Squad)
+                .WithMany(s => s.Roles)
+                .HasForeignKey(e => e.SquadId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            entity.HasOne(e => e.BaseInstituteRole)
+                .WithMany(r => r.SquadRoleSnapshots)
+                .HasForeignKey(e => e.BaseInstituteRoleId)
+                .OnDelete(DeleteBehavior.SetNull);
+
+            entity.HasOne(e => e.RoleType)
+                .WithMany()
+                .HasForeignKey(e => e.Type)
+                .HasPrincipalKey(rt => rt.Id)
+                .OnDelete(DeleteBehavior.Restrict);
+
+            entity.HasOne(e => e.Skill)
+                .WithMany()
+                .HasForeignKey(e => e.SkillId)
+                .HasPrincipalKey(s => s.Id)
+                .OnDelete(DeleteBehavior.SetNull);
+
+            entity.HasIndex(e => e.SquadId);
+            entity.HasIndex(e => e.BaseInstituteRoleId);
+            entity.HasIndex(e => e.Type);
+            entity.HasIndex(e => e.SkillId);
+            entity.HasIndex(e => new { e.SquadId, e.Name });
         });
 
         // Configure StudentRole entity (many-to-many relationship)
