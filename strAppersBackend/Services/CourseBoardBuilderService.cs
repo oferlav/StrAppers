@@ -13,8 +13,7 @@ public interface ICourseBoardBuilderService
 
 public class CourseBoardBuilderService : ICourseBoardBuilderService
 {
-    private const int SprintCount = 8;
-    private const int ModuleCount = 5;
+    private const int DefaultSprintCount = 8;
     private const int LeadershipTypeId = 4;
 
     private readonly ApplicationDbContext _context;
@@ -22,6 +21,9 @@ public class CourseBoardBuilderService : ICourseBoardBuilderService
     private readonly ITrelloService _trelloService;
     private readonly ILogger<CourseBoardBuilderService> _logger;
     private readonly IWebHostEnvironment _env;
+
+    /// <summary>Immutable configuration resolved at the start of each BuildAsync call.</summary>
+    private record CourseConfig(int SprintCount, int ModuleCount, int SprintLengthInDays);
 
     public CourseBoardBuilderService(
         ApplicationDbContext context,
@@ -121,24 +123,42 @@ public class CourseBoardBuilderService : ICourseBoardBuilderService
         if (project.InstituteId.HasValue && roles.Any(r => r.InstituteId != project.InstituteId.Value))
             return Fail("One or more roles do not belong to the project's institute.");
 
-        // ── 3. Load modules & system prompt ───────────────────────────────────
-        var modules = await _context.ProjectModules
+        // ── 3. Load modules & derive course config ────────────────────────────
+        var allModules = await _context.ProjectModules
             .AsNoTracking()
             .Where(m => m.ProjectId == request.ProjectId)
             .OrderBy(m => m.Sequence ?? int.MaxValue)
             .ThenBy(m => m.Id)
-            .Take(ModuleCount)
             .ToListAsync();
+
+        // Derive module count: request param → actual DB count → absolute fallback
+        var moduleCount = request.NumberOfModules.HasValue
+            ? Math.Min(request.NumberOfModules.Value, allModules.Count)
+            : allModules.Count > 0 ? allModules.Count : 5;
+
+        var sprintCount = request.NumberOfSprints ?? DefaultSprintCount;
+
+        // Minimum: setup sprints (2 for technical, 1 for others) + moduleCount + stabilization (1)
+        // The binding constraint is the technical track: needs 2 setup + moduleCount + 1 stab = moduleCount + 3
+        if (sprintCount < moduleCount + 3)
+            return Fail($"NumberOfSprints ({sprintCount}) must be at least NumberOfModules + 3 ({moduleCount + 3}) " +
+                        $"to fit all modules with setup and stabilization sprints.");
+
+        var config = new CourseConfig(sprintCount, moduleCount, request.SprintLengthInDays);
+        var modules = allModules.Take(moduleCount).ToList();
 
         var systemPrompt = await LoadSystemPromptAsync();
         if (string.IsNullOrWhiteSpace(systemPrompt))
             return Fail("Course builder system prompt could not be loaded.");
 
         // ── 4. Generate cards for all roles in parallel ───────────────────────
-        _logger.LogInformation("Generating course for {RoleCount} role(s) on project {ProjectId}", roles.Count, project.Id);
+        _logger.LogInformation(
+            "Generating course for {RoleCount} role(s) on project {ProjectId} " +
+            "({SprintCount} sprints, {ModuleCount} modules, {SprintLengthInDays} days/sprint)",
+            roles.Count, project.Id, config.SprintCount, config.ModuleCount, config.SprintLengthInDays);
 
         var generationTasks = roles.Select(role =>
-            GenerateRoleCardsAsync(project, role, modules, systemPrompt, roles));
+            GenerateRoleCardsAsync(project, role, modules, systemPrompt, roles, config));
 
         var generationResults = await Task.WhenAll(generationTasks);
 
@@ -148,7 +168,7 @@ public class CourseBoardBuilderService : ICourseBoardBuilderService
             ProjectId = project.Id,
             ProjectTitle = project.Title,
             ProjectDescription = project.Description,
-            ProjectLengthWeeks = SprintCount,
+            ProjectLengthWeeks = config.SprintCount,
             SprintLengthWeeks = 1,
             DueDate = null,
             TeamMembers = new List<TrelloTeamMember>(),
@@ -156,16 +176,16 @@ public class CourseBoardBuilderService : ICourseBoardBuilderService
             SprintPlan = new TrelloSprintPlan
             {
                 Boards = new List<TrelloBoard>(),
-                Lists = BuildLists(),
+                Lists = BuildLists(config.SprintCount),
                 Cards = new List<TrelloCard>(),
-                TotalSprints = SprintCount,
-                EstimatedWeeks = SprintCount,
+                TotalSprints = config.SprintCount,
+                EstimatedWeeks = config.SprintCount,
                 TotalTasks = 0
             }
         };
 
         // Add sprint cards — grouped by sprint number so all Sprint-1 cards come first, then Sprint-2, etc.
-        foreach (var sprintNumber in Enumerable.Range(1, SprintCount))
+        foreach (var sprintNumber in Enumerable.Range(1, config.SprintCount))
         {
             foreach (var result in generationResults)
             {
@@ -238,7 +258,8 @@ public class CourseBoardBuilderService : ICourseBoardBuilderService
         return new CourseBoardBuildResponse
         {
             Success = true,
-            Message = $"Course board generated for [{roleNames}] on project '{project.Title}'. InstituteTemplate.Id={instituteTemplate.Id}.",
+            Message = $"Course board generated for [{roleNames}] on project '{project.Title}'. " +
+                      $"InstituteTemplate.Id={instituteTemplate.Id}.",
             BoardTemplate = board,
             BoardUrl = createdBoardUrl,
             TokenUsage = request.IncludeTokenUsage
@@ -260,11 +281,12 @@ public class CourseBoardBuilderService : ICourseBoardBuilderService
         InstituteRole role,
         List<ProjectModule> modules,
         string systemPrompt,
-        IReadOnlyList<InstituteRole> allRoles)
+        IReadOnlyList<InstituteRole> allRoles,
+        CourseConfig config)
     {
-        var sprintModules = ComputeSprintModules(modules, role);
+        var sprintModules = ComputeSprintModules(modules, role, config);
         var otherRoles = allRoles.Where(r => r.Id != role.Id).ToList();
-        var userPrompt = BuildUserPrompt(project, role, sprintModules, otherRoles);
+        var userPrompt = BuildUserPrompt(project, role, sprintModules, otherRoles, config);
 
         _logger.LogInformation("Generating cards for role {RoleName}", role.Name);
         var aiResult = await _aiService.GenerateCourseAsync(systemPrompt, userPrompt);
@@ -273,15 +295,15 @@ public class CourseBoardBuilderService : ICourseBoardBuilderService
         if (!aiResult.Success || string.IsNullOrWhiteSpace(aiResult.Content))
         {
             _logger.LogWarning("AI generation failed for role {RoleName}: {Error}", role.Name, aiResult.ErrorMessage);
-            aiCards = BuildFallbackCards(role, sprintModules);
+            aiCards = BuildFallbackCards(role, sprintModules, config.SprintCount);
         }
         else
         {
-            var parsed = ParseAiSprintCards(aiResult.Content);
-            if (parsed == null || parsed.Count != SprintCount)
+            var parsed = ParseAiSprintCards(aiResult.Content, config.SprintCount);
+            if (parsed == null)
             {
-                _logger.LogWarning("AI returned {Count} cards for role {RoleName}; using fallback", parsed?.Count ?? 0, role.Name);
-                aiCards = BuildFallbackCards(role, sprintModules);
+                _logger.LogWarning("AI returned unexpected card count for role {RoleName}; using fallback", role.Name);
+                aiCards = BuildFallbackCards(role, sprintModules, config.SprintCount);
             }
             else
             {
@@ -290,7 +312,7 @@ public class CourseBoardBuilderService : ICourseBoardBuilderService
         }
 
         var trelloCards = new List<TrelloCard>();
-        for (var s = 1; s <= SprintCount; s++)
+        for (var s = 1; s <= config.SprintCount; s++)
         {
             var aiCard = aiCards.FirstOrDefault(c => c.SprintNumber == s) ?? aiCards.ElementAtOrDefault(s - 1);
             trelloCards.Add(MapToTrelloCard(aiCard, role, s, sprintModules[s - 1]));
@@ -308,27 +330,30 @@ public class CourseBoardBuilderService : ICourseBoardBuilderService
     // Sprint→module assignment
     // ─────────────────────────────────────────────────────────────────────────
 
-    private static ProjectModule?[] ComputeSprintModules(List<ProjectModule> modules, InstituteRole role)
+    private static ProjectModule?[] ComputeSprintModules(List<ProjectModule> modules, InstituteRole role, CourseConfig config)
     {
-        var result = new ProjectModule?[SprintCount];
+        var result = new ProjectModule?[config.SprintCount];
         if (modules.Count == 0) return result;
 
         if (role.IsTechnical)
         {
-            // Sprints 3-7 → Modules 0-4
-            for (var i = 0; i < ModuleCount && i < modules.Count; i++)
+            // Sprints 3..(2+moduleCount): Modules 0..(moduleCount-1)
+            // Sprint 1-2: setup. Sprint sprintCount: stabilization.
+            for (var i = 0; i < config.ModuleCount && i < modules.Count; i++)
                 result[2 + i] = modules[i];
         }
         else if (role.Type == LeadershipTypeId)
         {
-            // Sprints 2-6 → Modules 0-4
-            for (var i = 0; i < ModuleCount && i < modules.Count; i++)
+            // Sprints 2..(1+moduleCount): Modules 0..(moduleCount-1)
+            // Sprint 1: vision/PRD. Sprint sprintCount-1: GTM. Sprint sprintCount: QA.
+            for (var i = 0; i < config.ModuleCount && i < modules.Count; i++)
                 result[1 + i] = modules[i];
         }
         else
         {
-            // Customer-facing non-technical: Sprints 2-5 → Modules 0-3 (sprint 6 = special)
-            for (var i = 0; i < ModuleCount - 1 && i < modules.Count; i++)
+            // Customer-facing non-technical: Sprints 2..moduleCount → Modules 0..(moduleCount-2)
+            // Sprint (moduleCount+1): special cross-cutting work. Sprint sprintCount-1: GTM. Sprint sprintCount: stab.
+            for (var i = 0; i < config.ModuleCount - 1 && i < modules.Count; i++)
                 result[1 + i] = modules[i];
         }
 
@@ -354,9 +379,16 @@ public class CourseBoardBuilderService : ICourseBoardBuilderService
         Project project,
         InstituteRole role,
         ProjectModule?[] sprintModules,
-        IReadOnlyList<InstituteRole> otherSquadMembers)
+        IReadOnlyList<InstituteRole> otherSquadMembers,
+        CourseConfig config)
     {
         var sb = new StringBuilder();
+
+        sb.AppendLine("## Course Configuration");
+        sb.AppendLine($"Total sprints: {config.SprintCount}");
+        sb.AppendLine($"Total modules: {config.ModuleCount}");
+        sb.AppendLine($"Sprint length: {config.SprintLengthInDays} day(s)");
+        sb.AppendLine();
 
         sb.AppendLine("## Project");
         sb.AppendLine($"Title: {project.Title}");
@@ -403,33 +435,54 @@ public class CourseBoardBuilderService : ICourseBoardBuilderService
         }
         sb.AppendLine();
 
-        sb.AppendLine("## Sprint Plan (pre-computed module assignments)");
-        for (var s = 1; s <= SprintCount; s++)
+        sb.AppendLine("## Sprint Plan (pre-computed module assignments — this is authoritative)");
+        for (var s = 1; s <= config.SprintCount; s++)
         {
             var module = sprintModules[s - 1];
             if (module == null)
-                sb.AppendLine($"Sprint {s}: NO MODULE — {GetSpecialSprintLabel(s, role)}");
+                sb.AppendLine($"Sprint {s}: NO MODULE — {GetSpecialSprintLabel(s, role, config.SprintCount, config.ModuleCount)}");
             else
                 sb.AppendLine($"Sprint {s}: Module [Id={module.Id}] \"{module.Title}\"");
         }
         sb.AppendLine();
-        sb.AppendLine("Generate the 8 sprint cards following all system instructions. Return only the JSON array.");
+        sb.AppendLine($"Generate exactly {config.SprintCount} sprint cards following all system instructions. Return only the JSON array.");
 
         return sb.ToString();
     }
 
-    private static string GetSpecialSprintLabel(int sprint, InstituteRole role)
+    private static string GetSpecialSprintLabel(int sprint, InstituteRole role, int sprintCount, int moduleCount)
     {
+        // Sprint 1 — always setup for all tracks
         if (sprint == 1)
         {
             if (role.IsTechnical) return "Environment setup, architecture, and technical foundation";
             if (role.Type == LeadershipTypeId) return "Vision, PRD foundation, discovery, user personas";
             return "Ecosystem discovery, tool foundation, market research";
         }
+
+        // Sprint 2 — technical track: architecture readiness
         if (sprint == 2 && role.IsTechnical) return "Data/UI architecture and technical readiness";
-        if (sprint == 6 && !role.IsTechnical && role.Type != LeadershipTypeId) return "Special cross-cutting work (ROI modeling / Landing Page Design)";
-        if (sprint == 7 && !role.IsTechnical) return "Go-to-Market launch campaign";
-        if (sprint == 8) return "Stabilization, bug fixing, and final QA";
+
+        // Last sprint — always stabilization
+        if (sprint == sprintCount) return "Stabilization, bug fixing, and final QA";
+
+        // Second-to-last sprint — GTM for all non-technical roles
+        if (sprint == sprintCount - 1 && !role.IsTechnical) return "Go-to-Market launch campaign";
+
+        // Track C: special cross-cutting sprint at moduleCount+1 (only when not overlapping with GTM/stab)
+        if (!role.IsTechnical && role.Type != LeadershipTypeId
+            && sprint == moduleCount + 1
+            && sprint != sprintCount && sprint != sprintCount - 1)
+            return "Special cross-cutting work (ROI modeling / Landing Page Design)";
+
+        // Leadership gap sprints between last module sprint and GTM
+        if (role.Type == LeadershipTypeId && sprint > moduleCount + 1 && sprint < sprintCount - 1)
+            return "Risk monitoring, backlog grooming, stakeholder alignment";
+
+        // Technical gap sprints between last module sprint and stabilization
+        if (role.IsTechnical && sprint > moduleCount + 2 && sprint < sprintCount)
+            return "Technical integration and pre-stabilization hardening";
+
         return "No module assigned";
     }
 
@@ -437,7 +490,7 @@ public class CourseBoardBuilderService : ICourseBoardBuilderService
     // AI response parsing
     // ─────────────────────────────────────────────────────────────────────────
 
-    private List<AiSprintCard>? ParseAiSprintCards(string raw)
+    private List<AiSprintCard>? ParseAiSprintCards(string raw, int sprintCount)
     {
         try
         {
@@ -460,7 +513,7 @@ public class CourseBoardBuilderService : ICourseBoardBuilderService
                 PropertyNameCaseInsensitive = true
             });
 
-            return cards is { Count: SprintCount } ? cards : null;
+            return cards?.Count == sprintCount ? cards : null;
         }
         catch (Exception ex)
         {
@@ -502,10 +555,10 @@ public class CourseBoardBuilderService : ICourseBoardBuilderService
         };
     }
 
-    private static List<TrelloList> BuildLists()
+    private static List<TrelloList> BuildLists(int sprintCount)
     {
         var lists = new List<TrelloList>();
-        for (var i = 1; i <= SprintCount; i++)
+        for (var i = 1; i <= sprintCount; i++)
         {
             lists.Add(new TrelloList
             {
@@ -514,12 +567,12 @@ public class CourseBoardBuilderService : ICourseBoardBuilderService
                 Position = i - 1,
                 StartDate = null,
                 EndDate = null,
-                Description = i == SprintCount ? "Final stabilization sprint — QA and bug fixing." : null,
+                Description = i == sprintCount ? "Final stabilization sprint — QA and bug fixing." : null,
                 ChecklistItems = new List<string>()
             });
         }
-        lists.Add(new TrelloList { Name = "Bugs", BoardName = string.Empty, Position = SprintCount, ChecklistItems = new List<string>() });
-        lists.Add(new TrelloList { Name = "User Stories", BoardName = string.Empty, Position = SprintCount + 1, ChecklistItems = new List<string>() });
+        lists.Add(new TrelloList { Name = "Bugs", BoardName = string.Empty, Position = sprintCount, ChecklistItems = new List<string>() });
+        lists.Add(new TrelloList { Name = "User Stories", BoardName = string.Empty, Position = sprintCount + 1, ChecklistItems = new List<string>() });
         return lists;
     }
 
@@ -527,10 +580,10 @@ public class CourseBoardBuilderService : ICourseBoardBuilderService
     // Fallback cards
     // ─────────────────────────────────────────────────────────────────────────
 
-    private static List<AiSprintCard> BuildFallbackCards(InstituteRole role, ProjectModule?[] sprintModules)
+    private static List<AiSprintCard> BuildFallbackCards(InstituteRole role, ProjectModule?[] sprintModules, int sprintCount)
     {
         var cards = new List<AiSprintCard>();
-        for (var s = 1; s <= SprintCount; s++)
+        for (var s = 1; s <= sprintCount; s++)
         {
             var module = sprintModules[s - 1];
             cards.Add(new AiSprintCard
@@ -540,7 +593,7 @@ public class CourseBoardBuilderService : ICourseBoardBuilderService
                 {
                     1 => "Infrastructure Audit & Technical Setup",
                     2 => "Technical Architecture & Readiness",
-                    SprintCount => "Stabilization & Final Polish",
+                    _ when s == sprintCount => "Stabilization & Final Polish",
                     _ => module?.Title ?? $"Sprint {s} — Cross-Cutting Work"
                 },
                 Description = $"Sprint {s} work for {role.Name}. Focus on {(module != null ? module.Title : "cross-cutting deliverables")}.",

@@ -14,6 +14,14 @@ public class CourseBoardBuildRequest
     public int? NumberOfSprints { get; set; }
 
     /// <summary>
+    /// Number of project modules to include in the course. Defaults to all modules found on the project.
+    /// Cannot exceed the actual number of modules in the project.
+    /// Must satisfy: NumberOfSprints >= NumberOfModules + 3.
+    /// </summary>
+    [Range(2, 20)]
+    public int? NumberOfModules { get; set; }
+
+    /// <summary>
     /// Single-role mode (legacy / backward compat). Ignored when <see cref="InstituteRoleIds"/> is provided.
     /// </summary>
     public int? InstituteRoleId { get; set; }
