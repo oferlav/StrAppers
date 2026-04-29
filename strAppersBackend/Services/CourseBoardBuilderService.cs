@@ -52,8 +52,8 @@ public class CourseBoardBuilderService : ICourseBoardBuilderService
         List<InstituteRole> roles;
         if (instituteTemplate.SquadId is > 0)
         {
-            // Squad mode: if no role IDs specified, auto-load all active roles from the squad
-            var effectiveRoleIds = request.EffectiveRoleIds;
+            // Squad mode: InstituteRoleId is ignored — use InstituteRoleIds to filter, or load all active roles
+            var filterIds = request.InstituteRoleIds is { Count: > 0 } ? request.InstituteRoleIds : null;
 
             var squadQuery = _context.InstituteSquadRoles
                 .AsNoTracking()
@@ -61,17 +61,17 @@ public class CourseBoardBuilderService : ICourseBoardBuilderService
                 .Include(r => r.BaseInstituteRole)
                 .Where(r => r.SquadId == instituteTemplate.SquadId.Value && r.IsActive);
 
-            if (effectiveRoleIds.Count > 0)
-                squadQuery = squadQuery.Where(r => effectiveRoleIds.Contains(r.Id));
+            if (filterIds != null)
+                squadQuery = squadQuery.Where(r => filterIds.Contains(r.Id));
 
             var squadRoles = await squadQuery.ToListAsync();
 
             if (squadRoles.Count == 0)
                 return Fail($"No active roles found in squad {instituteTemplate.SquadId}.");
 
-            if (effectiveRoleIds.Count > 0)
+            if (filterIds != null)
             {
-                var missingIds = effectiveRoleIds.Except(squadRoles.Select(r => r.Id)).ToList();
+                var missingIds = filterIds.Except(squadRoles.Select(r => r.Id)).ToList();
                 if (missingIds.Count > 0)
                     return Fail($"Squad role(s) {string.Join(", ", missingIds)} were not found in squad {instituteTemplate.SquadId}.");
             }
