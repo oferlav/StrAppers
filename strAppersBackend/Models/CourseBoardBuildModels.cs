@@ -16,10 +16,31 @@ public class CourseBoardBuildRequest
     /// <summary>
     /// Number of project modules to include in the course. Defaults to all modules found on the project.
     /// Cannot exceed the actual number of modules in the project.
-    /// Must satisfy: NumberOfSprints >= NumberOfModules + 3.
+    /// Must satisfy: NumberOfSprints >= sum(ModuleLengths) + 3.
     /// </summary>
     [Range(2, 20)]
     public int? NumberOfModules { get; set; }
+
+    /// <summary>
+    /// Tier 1 — uniform module length: how many sprints each module spans (default 1).
+    /// Ignored when <see cref="ModuleLengths"/> is provided.
+    /// </summary>
+    [Range(1, 10)]
+    public int ModuleLengthInSprints { get; set; } = 1;
+
+    /// <summary>
+    /// Tier 2 — per-module sprint lengths. When provided, takes precedence over
+    /// <see cref="ModuleLengthInSprints"/>. The list length must equal the resolved module count.
+    /// Example: [1, 2, 2, 3, 1] means module 1 spans 1 sprint, module 2 spans 2 sprints, etc.
+    /// </summary>
+    public List<int>? ModuleLengths { get; set; }
+
+    /// <summary>
+    /// When true, returns the computed sprint plan per role without making any AI calls,
+    /// creating Trello boards, or writing to the database. Use this to validate the course
+    /// structure and module distribution before running the full generation.
+    /// </summary>
+    public bool DryRun { get; set; } = false;
 
     /// <summary>
     /// Single-role mode (legacy / backward compat). Ignored when <see cref="InstituteRoleIds"/> is provided.
@@ -64,6 +85,12 @@ public class CourseBoardBuildResponse
     public string? BoardUrl { get; set; }
 
     /// <summary>
+    /// Populated when <see cref="CourseBoardBuildRequest.DryRun"/> is true.
+    /// Contains the computed sprint plan per role — no AI calls made.
+    /// </summary>
+    public List<DryRunRolePlan>? DryRunPlans { get; set; }
+
+    /// <summary>
     /// Token usage across all AI generation calls (summed). Only populated when
     /// <see cref="CourseBoardBuildRequest.IncludeTokenUsage"/> is true.
     /// </summary>
@@ -75,4 +102,27 @@ public class CourseBuildTokenUsage
     public int PromptTokens { get; set; }
     public int CompletionTokens { get; set; }
     public int TotalTokens => PromptTokens + CompletionTokens;
+}
+
+public class DryRunRolePlan
+{
+    public string RoleName { get; set; } = string.Empty;
+    public string Track { get; set; } = string.Empty;
+    public List<DryRunSprintSlot> SprintPlan { get; set; } = new();
+}
+
+public class DryRunSprintSlot
+{
+    public int SprintNumber { get; set; }
+
+    /// <summary>Null when the sprint has no module (setup / gap / GTM / stabilization sprint).</summary>
+    public int? ModuleId { get; set; }
+
+    public string? ModuleTitle { get; set; }
+
+    /// <summary>"1 of 2" style string when the module spans multiple sprints. Null for single-sprint modules.</summary>
+    public string? Part { get; set; }
+
+    /// <summary>Human-readable label: module title (with part) or special sprint description.</summary>
+    public string Label { get; set; } = string.Empty;
 }

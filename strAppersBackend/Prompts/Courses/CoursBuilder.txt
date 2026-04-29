@@ -69,7 +69,12 @@ Sprint 1 card name style: "Infrastructure Audit & [Role-specific Foundation]" (e
 Sprint 2 card name style: "[Role]-specific Architecture & Technical Readiness" (e.g., "Data Architecture & Technical Readiness" for BE, "UI Architecture & Component Scaffolding" for FE)
 Sprint 3–6 card name: driven by the module title + role (e.g., "Feature Logic & API Execution" for BE, "UI Logic & API Integration" for FE)
 Sprint 7 card name: "Final Feature Integration"
-Sprint 8 card name: "Stabilization & Final Polish"
+Last sprint card name: "Stabilization & Final Polish"
+
+**Multi-sprint modules:** When the Sprint Plan shows "Module X (Part N of M)", name the card to reflect the phase:
+- Part 1 of M: "[Module Title] — Foundation & Core Build" (setup, scaffolding, first implementation pass)
+- Middle parts: "[Module Title] — Depth & Iteration" (extend, refine, test)
+- Last part: "[Module Title] — Integration & Handoff" (finalize, integrate with squad, PR + merge)
 
 ### TRACK B — LEADERSHIP (isTechnical = false, Type = 4, e.g., Product Manager)
 Leadership roles plan and define each module one sprint AHEAD of the technical team. They always have CustomerEngagement = true.
@@ -88,9 +93,14 @@ Leadership roles plan and define each module one sprint AHEAD of the technical t
 Sprint 1 card name: "Vision, Discovery & The PRD Foundation"
 Sprint 2 card name: "Tactical Planning & Design Alignment"
 Sprint 3–5 card name: "Tactical Blueprint and User Story" (with module-specific content)
-Sprint 6 card name: "Tactical Blueprint and Risk-Aware Planning"
-Sprint 7 card name: The "Go-to-Market" Launch Campaign
-Sprint 8 card name: "Project Summary & Quality Assurance"
+Last module sprint card name: "Tactical Blueprint and Risk-Aware Planning"
+Second-to-last sprint card name: The "Go-to-Market" Launch Campaign
+Last sprint card name: "Project Summary & Quality Assurance"
+
+**Multi-sprint modules:** When the Sprint Plan shows "Module X (Part N of M)", name cards to reflect the planning phase:
+- Part 1: "[Module Title] — Discovery & User Story Draft"
+- Middle parts: "[Module Title] — Refinement & Stakeholder Validation"
+- Last part: "[Module Title] — Tactical Blueprint & Sprint Kickoff"
 
 ### TRACK C — CUSTOMER-FACING NON-TECHNICAL (isTechnical = false, Type ≠ 4, e.g., Marketing/BizDev, UI/UX Designer)
 These roles design, validate, and market modules 2–5 in sync with the leadership track. Module 5 is NOT assigned to this track — Sprint 6 switches to cross-cutting work.
@@ -112,11 +122,13 @@ Sprint 2 card name (Marketing): "Market Intelligence & [Module Title] Validation
 Sprint 2 card name (UX): "[Module Title] Flow Visualization & Interactive Prototyping"
 Sprint 3–5 card name (Marketing): "Strategic Pulse and [Module Title] Validation"
 Sprint 3–5 card name (UX): "Detailed Design and [Module Title] Experience"
-Sprint 6 card name (Marketing): "Strategic Logic and Impact-ROI Modeling"
-Sprint 6 card name (UX): "The Public Face - Landing Page Design"
-Sprint 7 card name: The "Go-to-Market" Launch Campaign
-Sprint 8 card name (Marketing): "Stabilization & Project Summary"
-Sprint 8 card name (UX): "Stabilization & Project Summary"
+Special cross-cutting sprint card name (Marketing): "Strategic Logic and Impact-ROI Modeling"
+Special cross-cutting sprint card name (UX): "The Public Face - Landing Page Design"
+Second-to-last sprint card name: The "Go-to-Market" Launch Campaign
+Last sprint card name (Marketing): "Stabilization & Project Summary"
+Last sprint card name (UX): "Stabilization & Project Summary"
+
+**Multi-sprint modules:** When the Sprint Plan shows "Module X (Part N of M)", apply the same Part naming convention as Track A above (Foundation & Core Build → Depth & Iteration → Integration & Handoff), adapted to the role's domain (design/market validation instead of code implementation).
 
 ---
 
