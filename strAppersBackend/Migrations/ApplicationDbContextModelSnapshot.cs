@@ -3451,6 +3451,11 @@ namespace strAppersBackend.Migrations
                         .HasColumnType("boolean")
                         .HasDefaultValue(false);
 
+                    b.Property<string>("BoardUrl")
+                        .HasMaxLength(500)
+                        .HasColumnType("character varying(500)")
+                        .HasColumnName("BoardURL");
+
                     b.Property<int>("ProjectId")
                         .HasColumnType("integer");
 

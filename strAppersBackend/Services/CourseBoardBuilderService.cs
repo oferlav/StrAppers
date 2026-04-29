@@ -19,17 +19,20 @@ public class CourseBoardBuilderService : ICourseBoardBuilderService
 
     private readonly ApplicationDbContext _context;
     private readonly IAIService _aiService;
+    private readonly ITrelloService _trelloService;
     private readonly ILogger<CourseBoardBuilderService> _logger;
     private readonly IWebHostEnvironment _env;
 
     public CourseBoardBuilderService(
         ApplicationDbContext context,
         IAIService aiService,
+        ITrelloService trelloService,
         ILogger<CourseBoardBuilderService> logger,
         IWebHostEnvironment env)
     {
         _context = context;
         _aiService = aiService;
+        _trelloService = trelloService;
         _logger = logger;
         _env = env;
     }
@@ -201,10 +204,31 @@ public class CourseBoardBuilderService : ICourseBoardBuilderService
 
         board.SprintPlan.TotalTasks = board.SprintPlan.Cards.Count;
 
+        string? createdBoardUrl = null;
+        if (request.GenerateTrelloBoard)
+        {
+            _logger.LogInformation(
+                "Creating Trello board for course template {TemplateId} (ProjectId={ProjectId})",
+                request.TemplateId,
+                request.ProjectId);
+            var trelloResult = await _trelloService.CreateProjectWithSprintsAsync(board, project.Title);
+            if (!trelloResult.Success || string.IsNullOrWhiteSpace(trelloResult.BoardUrl))
+            {
+                var errors = trelloResult.Errors is { Count: > 0 }
+                    ? string.Join("; ", trelloResult.Errors)
+                    : "Unknown Trello creation error.";
+                return Fail($"Course template generated, but Trello board creation failed: {errors}");
+            }
+
+            createdBoardUrl = trelloResult.BoardUrl;
+        }
+
         // ── 6. Persist ────────────────────────────────────────────────────────
         instituteTemplate.TrelloBoardJson = JsonSerializer.Serialize(board, new JsonSerializerOptions { WriteIndented = true });
         instituteTemplate.ProjectId = request.ProjectId;
         instituteTemplate.InstituteId = roles.First().InstituteId;
+        if (request.GenerateTrelloBoard)
+            instituteTemplate.BoardUrl = createdBoardUrl;
         await _context.SaveChangesAsync();
 
         var roleNames = string.Join(", ", roles.Select(r => r.Name));
@@ -216,6 +240,7 @@ public class CourseBoardBuilderService : ICourseBoardBuilderService
             Success = true,
             Message = $"Course board generated for [{roleNames}] on project '{project.Title}'. InstituteTemplate.Id={instituteTemplate.Id}.",
             BoardTemplate = board,
+            BoardUrl = createdBoardUrl,
             TokenUsage = request.IncludeTokenUsage
                 ? new CourseBuildTokenUsage
                 {

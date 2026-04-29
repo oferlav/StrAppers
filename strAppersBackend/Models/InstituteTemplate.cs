@@ -60,5 +60,9 @@ public class InstituteTemplate
     [Column(TypeName = "TEXT")]
     public string TrelloBoardJson { get; set; } = string.Empty;
 
+    [MaxLength(500)]
+    [Column("BoardURL")]
+    public string? BoardUrl { get; set; }
+
     public bool IsActive { get; set; } = false;
 }

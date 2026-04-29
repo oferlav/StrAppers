@@ -10,6 +10,9 @@ public class CourseBoardBuildRequest
     [Range(1, 30)]
     public int SprintLengthInDays { get; set; } = 7;
 
+    [Range(1, 200)]
+    public int? NumberOfSprints { get; set; }
+
     /// <summary>
     /// Single-role mode (legacy / backward compat). Ignored when <see cref="InstituteRoleIds"/> is provided.
     /// </summary>
@@ -31,6 +34,11 @@ public class CourseBoardBuildRequest
     /// </summary>
     public bool IncludeTokenUsage { get; set; } = false;
 
+    /// <summary>
+    /// When true, creates a real Trello board from the generated course template and stores the URL on the institute template row.
+    /// </summary>
+    public bool GenerateTrelloBoard { get; set; } = false;
+
     /// <summary>Resolved effective role IDs — InstituteRoleIds if provided, else InstituteRoleId as a single-item list.</summary>
     public List<int> EffectiveRoleIds =>
         InstituteRoleIds is { Count: > 0 }
@@ -45,6 +53,7 @@ public class CourseBoardBuildResponse
     public bool Success { get; set; }
     public string Message { get; set; } = string.Empty;
     public TrelloProjectCreationRequest? BoardTemplate { get; set; }
+    public string? BoardUrl { get; set; }
 
     /// <summary>
     /// Token usage across all AI generation calls (summed). Only populated when
