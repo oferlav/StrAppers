@@ -46,7 +46,7 @@ public class CourseBoardBuilderService : ICourseBoardBuilderService
     }
 
     /// <summary>Represents a single sprint's module assignment.</summary>
-    private sealed record SprintSlot(ProjectModule Module, int Part, int TotalParts);
+    private sealed record SprintSlot(IProjectModuleRow Module, int Part, int TotalParts);
 
     private sealed class RoleGenerationResult
     {
@@ -82,16 +82,46 @@ public class CourseBoardBuilderService : ICourseBoardBuilderService
     public async Task<CourseBoardBuildResponse> BuildAsync(CourseBoardBuildRequest request)
     {
         // ── 1. Load project & template ────────────────────────────────────────
-        var project = await _context.Projects
-            .AsNoTracking()
-            .FirstOrDefaultAsync(p => p.Id == request.ProjectId);
-        if (project == null)
-            return Fail($"Project {request.ProjectId} was not found.");
+        Project project;
+        InstituteTemplate instituteTemplate;
 
-        var instituteTemplate = await _context.InstituteTemplates
-            .FirstOrDefaultAsync(t => t.Id == request.TemplateId && t.ProjectId == request.ProjectId);
-        if (instituteTemplate == null)
-            return Fail($"InstituteTemplate {request.TemplateId} was not found for project {request.ProjectId}.");
+        if (request.InstituteProject)
+        {
+            var ip = await _context.InstituteProjects
+                .AsNoTracking()
+                .FirstOrDefaultAsync(p => p.Id == request.ProjectId);
+            if (ip == null)
+                return Fail($"Institute project {request.ProjectId} was not found.");
+
+            project = new Project
+            {
+                Id = ip.Id,
+                Title = ip.Title,
+                Description = ip.Description,
+                ShortBrief = ip.ShortBrief,
+                InstituteId = ip.InstituteId,
+            };
+
+            instituteTemplate = await _context.InstituteTemplates
+                .FirstOrDefaultAsync(t =>
+                    t.Id == request.TemplateId && t.InstituteProjectId == request.ProjectId);
+            if (instituteTemplate == null)
+                return Fail(
+                    $"InstituteTemplate {request.TemplateId} was not found for institute project {request.ProjectId}.");
+        }
+        else
+        {
+            project = await _context.Projects
+                .AsNoTracking()
+                .FirstOrDefaultAsync(p => p.Id == request.ProjectId);
+            if (project == null)
+                return Fail($"Project {request.ProjectId} was not found.");
+
+            instituteTemplate = await _context.InstituteTemplates
+                .FirstOrDefaultAsync(t => t.Id == request.TemplateId && t.ProjectId == request.ProjectId);
+            if (instituteTemplate == null)
+                return Fail($"InstituteTemplate {request.TemplateId} was not found for project {request.ProjectId}.");
+        }
 
         // ── 2. Load roles ─────────────────────────────────────────────────────
         List<InstituteRole> roles;
@@ -161,12 +191,25 @@ public class CourseBoardBuilderService : ICourseBoardBuilderService
             return Fail("One or more roles do not belong to the project's institute.");
 
         // ── 3. Load modules & resolve course config ───────────────────────────
-        var allModules = await _context.ProjectModules
-            .AsNoTracking()
-            .Where(m => m.ProjectId == request.ProjectId)
-            .OrderBy(m => m.Sequence ?? int.MaxValue)
-            .ThenBy(m => m.Id)
-            .ToListAsync();
+        List<IProjectModuleRow> allModules;
+        if (request.InstituteProject)
+        {
+            allModules = (await _context.InstituteProjectModules
+                .AsNoTracking()
+                .Where(m => m.InstituteProjectId == request.ProjectId)
+                .OrderBy(m => m.Sequence ?? int.MaxValue)
+                .ThenBy(m => m.Id)
+                .ToListAsync()).Cast<IProjectModuleRow>().ToList();
+        }
+        else
+        {
+            allModules = (await _context.ProjectModules
+                .AsNoTracking()
+                .Where(m => m.ProjectId == request.ProjectId)
+                .OrderBy(m => m.Sequence ?? int.MaxValue)
+                .ThenBy(m => m.Id)
+                .ToListAsync()).Cast<IProjectModuleRow>().ToList();
+        }
 
         var moduleCount = request.NumberOfModules.HasValue
             ? Math.Min(request.NumberOfModules.Value, allModules.Count)
@@ -354,7 +397,17 @@ public class CourseBoardBuilderService : ICourseBoardBuilderService
 
         // ── 9. Persist ────────────────────────────────────────────────────────
         instituteTemplate.TrelloBoardJson = JsonSerializer.Serialize(board, new JsonSerializerOptions { WriteIndented = true });
-        instituteTemplate.ProjectId = request.ProjectId;
+        if (request.InstituteProject)
+        {
+            instituteTemplate.InstituteProjectId = request.ProjectId;
+            instituteTemplate.ProjectId = null;
+        }
+        else
+        {
+            instituteTemplate.ProjectId = request.ProjectId;
+            instituteTemplate.InstituteProjectId = null;
+        }
+
         instituteTemplate.InstituteId = roles.First().InstituteId;
         if (request.GenerateTrelloBoard)
             instituteTemplate.BoardUrl = createdBoardUrl;
@@ -388,7 +441,7 @@ public class CourseBoardBuilderService : ICourseBoardBuilderService
     private async Task<RoleGenerationResult> GenerateRoleCardsAsync(
         Project project,
         InstituteRole role,
-        List<ProjectModule> modules,
+        List<IProjectModuleRow> modules,
         string systemPrompt,
         IReadOnlyList<InstituteRole> allRoles,
         CourseConfig config)
@@ -439,7 +492,7 @@ public class CourseBoardBuilderService : ICourseBoardBuilderService
     // Sprint→module assignment
     // ─────────────────────────────────────────────────────────────────────────
 
-    private static SprintSlot?[] ComputeSprintModules(List<ProjectModule> modules, InstituteRole role, CourseConfig config)
+    private static SprintSlot?[] ComputeSprintModules(List<IProjectModuleRow> modules, InstituteRole role, CourseConfig config)
     {
         var result = new SprintSlot?[config.SprintCount];
         if (modules.Count == 0) return result;

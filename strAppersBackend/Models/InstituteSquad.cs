@@ -19,6 +19,11 @@ public class InstituteSquad
 
     public bool IsActive { get; set; } = true;
 
+    /// <summary>
+    /// When true, the Task Builder / student experience enforces the developer (bundle) role rule for this template's squad.
+    /// </summary>
+    public bool RequireDeveloperRule { get; set; }
+
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
 
     public DateTime? UpdatedAt { get; set; }

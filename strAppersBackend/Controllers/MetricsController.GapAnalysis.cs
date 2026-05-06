@@ -342,8 +342,11 @@ public partial class MetricsController
         string sectionHeading,
         CancellationToken cancellationToken)
     {
-        var pm = await _context.ProjectModules.AsNoTracking()
-            .FirstOrDefaultAsync(m => m.Id == moduleId && m.ProjectId == board.ProjectId, cancellationToken);
+        var pm = await strAppersBackend.Utilities.ProjectModuleLookup.FindByBoardScopeAsync(
+            _context,
+            moduleId,
+            board.ProjectId,
+            cancellationToken);
         if (pm == null)
             return;
         sb.AppendLine(sectionHeading);

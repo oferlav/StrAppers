@@ -28,6 +28,7 @@ public partial class ProjectsController
     public async Task<IActionResult> PostInstituteProjectAssistant(
         string source,
         int id,
+        [FromQuery] bool instituteProject = false,
         CancellationToken cancellationToken = default)
     {
         Request.EnableBuffering();
@@ -79,6 +80,7 @@ public partial class ProjectsController
                 id,
                 canonical,
                 request,
+                instituteProject,
                 cancellationToken);
         }
 
@@ -107,6 +109,7 @@ public partial class ProjectsController
             return await PostInstituteProjectAssistantTemplatesCoreAsync(
                 id,
                 request,
+                instituteProject,
                 cancellationToken);
         }
 
@@ -136,6 +139,7 @@ public partial class ProjectsController
                 id,
                 canonical,
                 request,
+                instituteProject,
                 cancellationToken);
         }
 
@@ -165,6 +169,7 @@ public partial class ProjectsController
                 id,
                 canonical,
                 request,
+                instituteProject,
                 cancellationToken);
         }
 
@@ -194,6 +199,7 @@ public partial class ProjectsController
                 id,
                 canonical,
                 request,
+                instituteProject,
                 cancellationToken);
         }
 
@@ -206,8 +212,12 @@ public partial class ProjectsController
         int id,
         string canonicalSource,
         ProjectInstituteModulesAssistantRequest request,
+        bool instituteProject,
         CancellationToken cancellationToken)
     {
+        var chatProjectId = instituteProject ? (int?)null : id;
+        var chatInstituteProjectId = instituteProject ? id : (int?)null;
+
         const int maxUserRequestLength = 12_000;
         if (string.IsNullOrWhiteSpace(request.UserRequest))
         {
@@ -242,38 +252,75 @@ public partial class ProjectsController
                 return Unauthorized("Institute staff context is missing or invalid.");
             }
 
-            var project = await _context.Projects
-                .AsNoTracking()
-                .Where(p => p.Id == id && (p.InstituteId == null || p.InstituteId == instituteId.Value))
-                .Select(p => new
-                {
-                    p.Mission,
-                    p.ShortBrief,
-                    p.Description,
-                    p.SystemDesign,
-                    p.SystemDesignFormatted,
-                    HasSystemDesignDoc = p.SystemDesignDoc != null && p.SystemDesignDoc.Length > 0,
-                })
-                .FirstOrDefaultAsync(cancellationToken);
+            var project = instituteProject
+                ? await _context.InstituteProjects
+                    .AsNoTracking()
+                    .Where(ip => ip.Id == id && ip.InstituteId == instituteId.Value)
+                    .Select(ip => new
+                    {
+                        ip.Mission,
+                        ip.ShortBrief,
+                        ip.Description,
+                        ip.SystemDesign,
+                        ip.SystemDesignFormatted,
+                        HasSystemDesignDoc = ip.SystemDesignDoc != null && ip.SystemDesignDoc.Length > 0,
+                    })
+                    .FirstOrDefaultAsync(cancellationToken)
+                : await _context.Projects
+                    .AsNoTracking()
+                    .Where(p => p.Id == id && (p.InstituteId == null || p.InstituteId == instituteId.Value))
+                    .Select(p => new
+                    {
+                        p.Mission,
+                        p.ShortBrief,
+                        p.Description,
+                        p.SystemDesign,
+                        p.SystemDesignFormatted,
+                        HasSystemDesignDoc = p.SystemDesignDoc != null && p.SystemDesignDoc.Length > 0,
+                    })
+                    .FirstOrDefaultAsync(cancellationToken);
 
             if (project == null)
             {
-                return NotFound($"Project with ID {id} not found for this institute context.");
+                return NotFound(
+                    instituteProject
+                        ? $"Institute project with ID {id} not found for this institute context."
+                        : $"Project with ID {id} not found for this institute context.");
             }
 
-            var modulesFromDb = await _context.ProjectModules
-                .AsNoTracking()
-                .Where(pm => pm.ProjectId == id && pm.ModuleType == 2)
-                .OrderBy(pm => pm.Sequence ?? int.MaxValue)
-                .ThenBy(pm => pm.Id)
-                .Select((pm) => new ProjectModuleAssistantItem
-                {
-                    ModuleId = pm.Id,
-                    Sequence = pm.Sequence,
-                    Title = pm.Title,
-                    Body = pm.Description,
-                })
-                .ToListAsync(cancellationToken);
+            List<ProjectModuleAssistantItem> modulesFromDb;
+            if (instituteProject)
+            {
+                modulesFromDb = await _context.InstituteProjectModules
+                    .AsNoTracking()
+                    .Where(pm => pm.InstituteProjectId == id && pm.ModuleType == 2)
+                    .OrderBy(pm => pm.Sequence ?? int.MaxValue)
+                    .ThenBy(pm => pm.Id)
+                    .Select(pm => new ProjectModuleAssistantItem
+                    {
+                        ModuleId = pm.Id,
+                        Sequence = pm.Sequence,
+                        Title = pm.Title,
+                        Body = pm.Description,
+                    })
+                    .ToListAsync(cancellationToken);
+            }
+            else
+            {
+                modulesFromDb = await _context.ProjectModules
+                    .AsNoTracking()
+                    .Where(pm => pm.ProjectId == id && pm.ModuleType == 2)
+                    .OrderBy(pm => pm.Sequence ?? int.MaxValue)
+                    .ThenBy(pm => pm.Id)
+                    .Select(pm => new ProjectModuleAssistantItem
+                    {
+                        ModuleId = pm.Id,
+                        Sequence = pm.Sequence,
+                        Title = pm.Title,
+                        Body = pm.Description,
+                    })
+                    .ToListAsync(cancellationToken);
+            }
 
             static List<ProjectModuleAssistantItem> NormalizeModules(List<ProjectModuleAssistantItem>? items)
             {
@@ -332,7 +379,8 @@ public partial class ProjectsController
                 _context,
                 teacher.InstituteId,
                 teacher.Id,
-                id,
+                chatProjectId,
+                chatInstituteProjectId,
                 canonicalSource,
                 _logger,
                 cancellationToken);
@@ -382,7 +430,8 @@ public partial class ProjectsController
                     _context,
                     teacher.InstituteId,
                     teacher.Id,
-                    id,
+                    chatProjectId,
+                    chatInstituteProjectId,
                     canonicalSource,
                     trimmedRequest,
                     assistantToStore,
@@ -400,7 +449,8 @@ public partial class ProjectsController
                 _context,
                 teacher.InstituteId,
                 teacher.Id,
-                id,
+                chatProjectId,
+                chatInstituteProjectId,
                 canonicalSource,
                 trimmedRequest,
                 fallback,
@@ -426,8 +476,12 @@ public partial class ProjectsController
         int id,
         string canonicalSource,
         ProjectInstituteBriefAssistantRequest request,
+        bool instituteProject,
         CancellationToken cancellationToken)
     {
+        var chatProjectId = instituteProject ? (int?)null : id;
+        var chatInstituteProjectId = instituteProject ? id : (int?)null;
+
         const int maxUserRequestLength = 12_000;
         if (string.IsNullOrWhiteSpace(request.UserRequest))
         {
@@ -456,18 +510,27 @@ public partial class ProjectsController
                 return Unauthorized("Institute staff context is missing or invalid.");
             }
 
-            var project = await _context.Projects
-                .AsNoTracking()
-                .Where(p => p.Id == id && (p.InstituteId == null || p.InstituteId == instituteId.Value))
-                .Select(p => new
-                {
-                    p.Description,
-                })
-                .FirstOrDefaultAsync(cancellationToken);
+            var project = instituteProject
+                ? await _context.InstituteProjects
+                    .AsNoTracking()
+                    .Where(ip => ip.Id == id && ip.InstituteId == instituteId.Value)
+                    .Select(ip => new { ip.Description })
+                    .FirstOrDefaultAsync(cancellationToken)
+                : await _context.Projects
+                    .AsNoTracking()
+                    .Where(p => p.Id == id && (p.InstituteId == null || p.InstituteId == instituteId.Value))
+                    .Select(p => new
+                    {
+                        p.Description,
+                    })
+                    .FirstOrDefaultAsync(cancellationToken);
 
             if (project == null)
             {
-                return NotFound($"Project with ID {id} not found for this institute context.");
+                return NotFound(
+                    instituteProject
+                        ? $"Institute project with ID {id} not found for this institute context."
+                        : $"Project with ID {id} not found for this institute context.");
             }
 
             var descriptionForPrompt = !string.IsNullOrWhiteSpace(request.CurrentDescription)
@@ -488,7 +551,8 @@ public partial class ProjectsController
                     _context,
                     teacher.InstituteId,
                     teacher.Id,
-                    id,
+                    chatProjectId,
+                    chatInstituteProjectId,
                     canonicalSource,
                     trimmedRequest,
                     directReply,
@@ -506,7 +570,8 @@ public partial class ProjectsController
                 _context,
                 teacher.InstituteId,
                 teacher.Id,
-                id,
+                chatProjectId,
+                chatInstituteProjectId,
                 canonicalSource,
                 _logger,
                 cancellationToken);
@@ -540,7 +605,8 @@ public partial class ProjectsController
                     _context,
                     teacher.InstituteId,
                     teacher.Id,
-                    id,
+                    chatProjectId,
+                    chatInstituteProjectId,
                     canonicalSource,
                     trimmedRequest,
                     assistantToStore,
@@ -554,7 +620,8 @@ public partial class ProjectsController
                 _context,
                 teacher.InstituteId,
                 teacher.Id,
-                id,
+                chatProjectId,
+                chatInstituteProjectId,
                 canonicalSource,
                 trimmedRequest,
                 fallback,
@@ -592,8 +659,12 @@ public partial class ProjectsController
         int id,
         string canonicalSource,
         ProjectInstituteCustomerAssistantRequest request,
+        bool instituteProject,
         CancellationToken cancellationToken)
     {
+        var chatProjectId = instituteProject ? (int?)null : id;
+        var chatInstituteProjectId = instituteProject ? id : (int?)null;
+
         const int maxUserRequestLength = 12_000;
         if (string.IsNullOrWhiteSpace(request.UserRequest))
         {
@@ -622,36 +693,71 @@ public partial class ProjectsController
                 return Unauthorized("Institute staff context is missing or invalid.");
             }
 
-            var project = await _context.Projects
-                .AsNoTracking()
-                .Where(p => p.Id == id && (p.InstituteId == null || p.InstituteId == instituteId.Value))
-                .Select(p => new
-                {
-                    p.CustomerPastStory,
-                    p.Mission,
-                    p.ShortBrief,
-                    p.Description,
-                })
-                .FirstOrDefaultAsync(cancellationToken);
+            var project = instituteProject
+                ? await _context.InstituteProjects
+                    .AsNoTracking()
+                    .Where(ip => ip.Id == id && ip.InstituteId == instituteId.Value)
+                    .Select(ip => new
+                    {
+                        ip.CustomerPastStory,
+                        ip.Mission,
+                        ip.ShortBrief,
+                        ip.Description,
+                    })
+                    .FirstOrDefaultAsync(cancellationToken)
+                : await _context.Projects
+                    .AsNoTracking()
+                    .Where(p => p.Id == id && (p.InstituteId == null || p.InstituteId == instituteId.Value))
+                    .Select(p => new
+                    {
+                        p.CustomerPastStory,
+                        p.Mission,
+                        p.ShortBrief,
+                        p.Description,
+                    })
+                    .FirstOrDefaultAsync(cancellationToken);
 
             if (project == null)
             {
-                return NotFound($"Project with ID {id} not found for this institute context.");
+                return NotFound(
+                    instituteProject
+                        ? $"Institute project with ID {id} not found for this institute context."
+                        : $"Project with ID {id} not found for this institute context.");
             }
 
-            var modulesFromDb = await _context.ProjectModules
-                .AsNoTracking()
-                .Where(pm => pm.ProjectId == id && pm.ModuleType == 2)
-                .OrderBy(pm => pm.Sequence ?? int.MaxValue)
-                .ThenBy(pm => pm.Id)
-                .Select(pm => new ProjectModuleAssistantItem
-                {
-                    ModuleId = pm.Id,
-                    Sequence = pm.Sequence,
-                    Title = pm.Title,
-                    Body = pm.Description,
-                })
-                .ToListAsync(cancellationToken);
+            List<ProjectModuleAssistantItem> modulesFromDbCustomer;
+            if (instituteProject)
+            {
+                modulesFromDbCustomer = await _context.InstituteProjectModules
+                    .AsNoTracking()
+                    .Where(pm => pm.InstituteProjectId == id && pm.ModuleType == 2)
+                    .OrderBy(pm => pm.Sequence ?? int.MaxValue)
+                    .ThenBy(pm => pm.Id)
+                    .Select(pm => new ProjectModuleAssistantItem
+                    {
+                        ModuleId = pm.Id,
+                        Sequence = pm.Sequence,
+                        Title = pm.Title,
+                        Body = pm.Description,
+                    })
+                    .ToListAsync(cancellationToken);
+            }
+            else
+            {
+                modulesFromDbCustomer = await _context.ProjectModules
+                    .AsNoTracking()
+                    .Where(pm => pm.ProjectId == id && pm.ModuleType == 2)
+                    .OrderBy(pm => pm.Sequence ?? int.MaxValue)
+                    .ThenBy(pm => pm.Id)
+                    .Select(pm => new ProjectModuleAssistantItem
+                    {
+                        ModuleId = pm.Id,
+                        Sequence = pm.Sequence,
+                        Title = pm.Title,
+                        Body = pm.Description,
+                    })
+                    .ToListAsync(cancellationToken);
+            }
 
             static List<ProjectModuleAssistantItem> NormalizeModules(List<ProjectModuleAssistantItem>? items)
             {
@@ -674,10 +780,10 @@ public partial class ProjectsController
 
             var currentModules = request.CurrentModules != null && request.CurrentModules.Count > 0
                 ? NormalizeModules(request.CurrentModules)
-                : NormalizeModules(modulesFromDb);
+                : NormalizeModules(modulesFromDbCustomer);
             var originalModules = request.OriginalModules != null && request.OriginalModules.Count > 0
                 ? NormalizeModules(request.OriginalModules)
-                : NormalizeModules(modulesFromDb);
+                : NormalizeModules(modulesFromDbCustomer);
 
             var missionForPrompt = !string.IsNullOrWhiteSpace(request.CurrentMission)
                 ? request.CurrentMission!.Trim()
@@ -699,7 +805,8 @@ public partial class ProjectsController
                 _context,
                 teacher.InstituteId,
                 teacher.Id,
-                id,
+                chatProjectId,
+                chatInstituteProjectId,
                 canonicalSource,
                 _logger,
                 cancellationToken);
@@ -739,7 +846,8 @@ public partial class ProjectsController
                     _context,
                     teacher.InstituteId,
                     teacher.Id,
-                    id,
+                    chatProjectId,
+                    chatInstituteProjectId,
                     canonicalSource,
                     trimmedRequest,
                     assistantToStore,
@@ -763,7 +871,8 @@ public partial class ProjectsController
                     _context,
                     teacher.InstituteId,
                     teacher.Id,
-                    id,
+                    chatProjectId,
+                    chatInstituteProjectId,
                     canonicalSource,
                     trimmedRequest,
                     plainAck,
@@ -777,7 +886,8 @@ public partial class ProjectsController
                 _context,
                 teacher.InstituteId,
                 teacher.Id,
-                id,
+                chatProjectId,
+                chatInstituteProjectId,
                 canonicalSource,
                 trimmedRequest,
                 fallback,
@@ -856,8 +966,12 @@ public partial class ProjectsController
         int id,
         string canonicalSource,
         ProjectInstituteAssistantRequest request,
+        bool instituteProject,
         CancellationToken cancellationToken)
     {
+        var chatProjectId = instituteProject ? (int?)null : id;
+        var chatInstituteProjectId = instituteProject ? id : (int?)null;
+
         const int maxUserRequestLength = 12_000;
         if (string.IsNullOrWhiteSpace(request.UserRequest))
         {
@@ -886,21 +1000,36 @@ public partial class ProjectsController
                 return Unauthorized("Institute staff context is missing or invalid.");
             }
 
-            var project = await _context.Projects
-                .AsNoTracking()
-                .Where(p => p.Id == id && (p.InstituteId == null || p.InstituteId == instituteId.Value))
-                .Select(p => new
-                {
-                    p.Title,
-                    p.Mission,
-                    p.OneLiner,
-                    p.ShortBrief,
-                })
-                .FirstOrDefaultAsync(cancellationToken);
+            var project = instituteProject
+                ? await _context.InstituteProjects
+                    .AsNoTracking()
+                    .Where(ip => ip.Id == id && ip.InstituteId == instituteId.Value)
+                    .Select(ip => new
+                    {
+                        ip.Title,
+                        ip.Mission,
+                        ip.OneLiner,
+                        ip.ShortBrief,
+                    })
+                    .FirstOrDefaultAsync(cancellationToken)
+                : await _context.Projects
+                    .AsNoTracking()
+                    .Where(p => p.Id == id && (p.InstituteId == null || p.InstituteId == instituteId.Value))
+                    .Select(p => new
+                    {
+                        p.Title,
+                        p.Mission,
+                        p.OneLiner,
+                        p.ShortBrief,
+                    })
+                    .FirstOrDefaultAsync(cancellationToken);
 
             if (project == null)
             {
-                return NotFound($"Project with ID {id} not found for this institute context.");
+                return NotFound(
+                    instituteProject
+                        ? $"Institute project with ID {id} not found for this institute context."
+                        : $"Project with ID {id} not found for this institute context.");
             }
 
             static string? CoalesceField(string? fromBody, string? fromDb) =>
@@ -915,7 +1044,8 @@ public partial class ProjectsController
                 _context,
                 teacher.InstituteId,
                 teacher.Id,
-                id,
+                chatProjectId,
+                chatInstituteProjectId,
                 canonicalSource,
                 _logger,
                 cancellationToken);
@@ -955,7 +1085,8 @@ public partial class ProjectsController
                     _context,
                     teacher.InstituteId,
                     teacher.Id,
-                    id,
+                    chatProjectId,
+                    chatInstituteProjectId,
                     canonicalSource,
                     trimmedRequest,
                     assistantToStore,
@@ -969,7 +1100,8 @@ public partial class ProjectsController
                 _context,
                 teacher.InstituteId,
                 teacher.Id,
-                id,
+                chatProjectId,
+                chatInstituteProjectId,
                 canonicalSource,
                 trimmedRequest,
                 fallback,
@@ -990,8 +1122,12 @@ public partial class ProjectsController
     private async Task<IActionResult> PostInstituteProjectAssistantTemplatesCoreAsync(
         int id,
         ProjectInstituteTemplatesAssistantRequest request,
+        bool instituteProject,
         CancellationToken cancellationToken)
     {
+        var chatProjectId = instituteProject ? (int?)null : id;
+        var chatInstituteProjectId = instituteProject ? id : (int?)null;
+
         if (string.IsNullOrWhiteSpace(request.UserMessage))
         {
             return BadRequest(new { success = false, message = "userMessage in body is required (non-empty)." });
@@ -1010,14 +1146,35 @@ public partial class ProjectsController
             return Unauthorized(new { success = false, message = "Institute staff context is missing or invalid." });
         }
 
-        var project = await _context.Projects
-            .AsNoTracking()
-            .FirstOrDefaultAsync(
-                p => p.Id == id && (p.InstituteId == null || p.InstituteId == instituteId.Value),
-                cancellationToken);
-        if (project == null)
+        InstituteProject? ipRow = null;
+        Project? project = null;
+        if (instituteProject)
         {
-            return NotFound(new { success = false, message = $"Project {id} not found for this institute context." });
+            ipRow = await _context.InstituteProjects
+                .AsNoTracking()
+                .FirstOrDefaultAsync(
+                    ip => ip.Id == id && ip.InstituteId == instituteId.Value,
+                    cancellationToken);
+            if (ipRow == null)
+            {
+                return NotFound(new
+                {
+                    success = false,
+                    message = $"Institute project {id} not found for this institute context.",
+                });
+            }
+        }
+        else
+        {
+            project = await _context.Projects
+                .AsNoTracking()
+                .FirstOrDefaultAsync(
+                    p => p.Id == id && (p.InstituteId == null || p.InstituteId == instituteId.Value),
+                    cancellationToken);
+            if (project == null)
+            {
+                return NotFound(new { success = false, message = $"Project {id} not found for this institute context." });
+            }
         }
 
         string trelloResolved;
@@ -1027,8 +1184,8 @@ public partial class ProjectsController
                 .AsNoTracking()
                 .FirstOrDefaultAsync(
                     t => t.Id == itid
-                         && t.ProjectId == id
-                         && t.InstituteId == teacher.InstituteId,
+                         && t.InstituteId == teacher.InstituteId
+                         && (instituteProject ? t.InstituteProjectId == id : t.ProjectId == id),
                     cancellationToken);
             if (row == null)
             {
@@ -1067,14 +1224,25 @@ public partial class ProjectsController
             Test = request.Test,
         };
 
-        ProjectModule? module = null;
+        IProjectModuleRow? module = null;
         if (requestForPrompt.ModuleId > 0)
         {
-            module = await _context.ProjectModules
-                .AsNoTracking()
-                .FirstOrDefaultAsync(
-                    m => m.Id == requestForPrompt.ModuleId && m.ProjectId == id,
-                    cancellationToken);
+            if (instituteProject)
+            {
+                module = await _context.InstituteProjectModules
+                    .AsNoTracking()
+                    .FirstOrDefaultAsync(
+                        m => m.Id == requestForPrompt.ModuleId && m.InstituteProjectId == id,
+                        cancellationToken);
+            }
+            else
+            {
+                module = await _context.ProjectModules
+                    .AsNoTracking()
+                    .FirstOrDefaultAsync(
+                        m => m.Id == requestForPrompt.ModuleId && m.ProjectId == id,
+                        cancellationToken);
+            }
         }
 
         string? historyBlock = null;
@@ -1082,7 +1250,8 @@ public partial class ProjectsController
             _context,
             teacher.InstituteId,
             teacher.Id,
-            id,
+            chatProjectId,
+            chatInstituteProjectId,
             InstituteAssistantChatHelper.SourceTemplates,
             _logger,
             cancellationToken);
@@ -1094,8 +1263,9 @@ public partial class ProjectsController
         var systemPrompt = InstituteTaskBuilderAssistantHelper.LoadTaskBuilderSystemPrompt()
             ?? "You are a helpful mentor for task templates. Output JSON only with keys aiReply, description, checklistItems.";
 
-        var userPrompt = InstituteTaskBuilderAssistantHelper.BuildUserPrompt(
-            project, module, requestForPrompt, historyBlock);
+        var userPrompt = instituteProject
+            ? InstituteTaskBuilderAssistantHelper.BuildUserPrompt(ipRow!, module, requestForPrompt, historyBlock)
+            : InstituteTaskBuilderAssistantHelper.BuildUserPrompt(project!, module, requestForPrompt, historyBlock);
 
         if (request.Test)
         {
@@ -1162,7 +1332,8 @@ public partial class ProjectsController
                 _context,
                 teacher.InstituteId,
                 teacher.Id,
-                id,
+                chatProjectId,
+                chatInstituteProjectId,
                 InstituteAssistantChatHelper.SourceTemplates,
                 request.UserMessage.Trim(),
                 aiReply,

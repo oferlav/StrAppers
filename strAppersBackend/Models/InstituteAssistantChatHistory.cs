@@ -22,11 +22,15 @@ public class InstituteAssistantChatHistory
 
     public Teacher Teacher { get; set; } = null!;
 
-    /// <summary>Project the assistant is scoped to (from route id).</summary>
-    [Required]
-    public int ProjectId { get; set; }
+    /// <summary>Built-in / legacy <see cref="Project"/> id when the assistant is scoped to <c>Projects</c>.</summary>
+    public int? ProjectId { get; set; }
 
-    public Project Project { get; set; } = null!;
+    public Project? Project { get; set; }
+
+    /// <summary><see cref="InstituteProject"/> id when the assistant is scoped to institute project designs.</summary>
+    public int? InstituteProjectId { get; set; }
+
+    public InstituteProject? InstituteProject { get; set; }
 
     /// <summary>General, Templates, Brief, Modules, Customer.</summary>
     [Required]

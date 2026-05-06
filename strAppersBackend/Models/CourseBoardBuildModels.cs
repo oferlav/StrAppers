@@ -7,6 +7,9 @@ public class CourseBoardBuildRequest
     [Required]
     public int ProjectId { get; set; }
 
+    /// <summary>When true, <see cref="ProjectId"/> refers to <see cref="InstituteProject"/> (not <see cref="Project"/>).</summary>
+    public bool InstituteProject { get; set; }
+
     [Range(1, 30)]
     public int SprintLengthInDays { get; set; } = 7;
 

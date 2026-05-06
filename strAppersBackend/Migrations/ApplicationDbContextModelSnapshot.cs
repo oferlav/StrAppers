@@ -91,7 +91,7 @@ namespace strAppersBackend.Migrations
                         {
                             Id = 1,
                             BaseUrl = "https://api.openai.com/v1",
-                            CreatedAt = new DateTime(2026, 4, 16, 14, 15, 26, 461, DateTimeKind.Utc).AddTicks(5741),
+                            CreatedAt = new DateTime(2026, 5, 6, 14, 25, 28, 155, DateTimeKind.Utc).AddTicks(9626),
                             DefaultTemperature = 0.20000000000000001,
                             Description = "OpenAI GPT-4o Mini model - fast and cost-effective",
                             IsActive = true,
@@ -104,7 +104,7 @@ namespace strAppersBackend.Migrations
                             Id = 2,
                             ApiVersion = "2023-06-01",
                             BaseUrl = "https://api.anthropic.com/v1",
-                            CreatedAt = new DateTime(2026, 4, 16, 14, 15, 26, 461, DateTimeKind.Utc).AddTicks(5746),
+                            CreatedAt = new DateTime(2026, 5, 6, 14, 25, 28, 155, DateTimeKind.Utc).AddTicks(9631),
                             DefaultTemperature = 0.29999999999999999,
                             Description = "Anthropic Claude Sonnet 4.5 model - powerful for complex tasks",
                             IsActive = true,
@@ -943,7 +943,7 @@ namespace strAppersBackend.Migrations
                             Address = "42 Innovation Way, Suite 100",
                             ContactEmail = "contact@strappers-academy.example.org",
                             Country = "Israel",
-                            CreatedAt = new DateTime(2026, 3, 17, 14, 15, 26, 424, DateTimeKind.Utc).AddTicks(9818),
+                            CreatedAt = new DateTime(2026, 4, 6, 14, 25, 28, 112, DateTimeKind.Utc).AddTicks(909),
                             Description = "Technology-focused institute and applied learning campus.",
                             IsActive = true,
                             Name = "StrAppers Academy of Technology",
@@ -969,38 +969,234 @@ namespace strAppersBackend.Migrations
                         .HasColumnName("CreatedAt");
 
                     b.Property<int>("InstituteId")
-                        .HasColumnType("integer")
-                        .HasColumnName("InstituteId");
+                        .HasColumnType("integer");
+
+                    b.Property<int?>("InstituteProjectId")
+                        .HasColumnType("integer");
 
                     b.Property<bool>("IsAssistant")
-                        .HasColumnType("boolean")
-                        .HasColumnName("IsAssistant");
+                        .HasColumnType("boolean");
 
                     b.Property<string>("Message")
                         .IsRequired()
-                        .HasColumnType("text")
-                        .HasColumnName("Message");
+                        .HasColumnType("text");
 
-                    b.Property<int>("ProjectId")
-                        .HasColumnType("integer")
-                        .HasColumnName("ProjectId");
+                    b.Property<int?>("ProjectId")
+                        .HasColumnType("integer");
 
                     b.Property<string>("Source")
                         .IsRequired()
                         .HasMaxLength(32)
-                        .HasColumnType("character varying(32)")
-                        .HasColumnName("Source");
+                        .HasColumnType("character varying(32)");
 
                     b.Property<int>("TeacherId")
-                        .HasColumnType("integer")
-                        .HasColumnName("TeacherId");
+                        .HasColumnType("integer");
 
                     b.HasKey("Id");
 
-                    b.HasIndex("InstituteId", "TeacherId", "ProjectId", "Source", "CreatedAt")
-                        .HasDatabaseName("IX_IACH_InstituteId_TeacherId_ProjectId_Source_CreatedAt");
+                    b.HasIndex("InstituteProjectId");
+
+                    b.HasIndex("ProjectId");
+
+                    b.HasIndex("TeacherId");
+
+                    b.HasIndex("InstituteId", "TeacherId", "ProjectId", "InstituteProjectId", "Source", "CreatedAt")
+                        .HasDatabaseName("IX_IACH_InstituteId_TeacherId_Scope_Source_CreatedAt");
 
                     b.ToTable("InstituteAssistantChatHistory", (string)null);
+                });
+
+            modelBuilder.Entity("strAppersBackend.Models.InstituteProject", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
+
+                    b.Property<int?>("BaseProjectId")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("BuiltInCourseName")
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)");
+
+                    b.Property<int>("CompletedChunks")
+                        .HasColumnType("integer")
+                        .HasColumnName("completed_chunks");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("timestamp with time zone")
+                        .HasDefaultValueSql("CURRENT_TIMESTAMP");
+
+                    b.Property<string>("CriteriaIds")
+                        .HasMaxLength(500)
+                        .HasColumnType("character varying(500)")
+                        .HasColumnName("CriteriaIds");
+
+                    b.Property<string>("CustomerPastStory")
+                        .HasColumnType("TEXT")
+                        .HasColumnName("CustomerPastStory");
+
+                    b.Property<string>("DataSchema")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("DeploymentManifest")
+                        .HasColumnType("TEXT")
+                        .HasColumnName("deployment_manifest");
+
+                    b.Property<string>("Description")
+                        .HasMaxLength(1000)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("ExtendedDescription")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("IdeGenerationStatus")
+                        .IsRequired()
+                        .HasMaxLength(50)
+                        .HasColumnType("character varying(50)")
+                        .HasColumnName("ide_generation_status");
+
+                    b.Property<bool>("InUse")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("boolean")
+                        .HasDefaultValue(true)
+                        .HasColumnName("InUse");
+
+                    b.Property<int>("InstituteId")
+                        .HasColumnType("integer");
+
+                    b.Property<bool>("IsAvailable")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("boolean")
+                        .HasDefaultValue(true)
+                        .HasColumnName("isAvailable");
+
+                    b.Property<bool>("IsBuiltIn")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("boolean")
+                        .HasDefaultValue(false)
+                        .HasColumnName("IsBuiltIn");
+
+                    b.Property<bool?>("Kickoff")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("boolean")
+                        .HasDefaultValue(false)
+                        .HasColumnName("Kickoff");
+
+                    b.Property<string>("Logo")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Mission")
+                        .HasMaxLength(2000)
+                        .HasColumnType("TEXT");
+
+                    b.Property<int>("MockRecordsCount")
+                        .HasColumnType("integer")
+                        .HasColumnName("mock_records_count");
+
+                    b.Property<string>("OneLiner")
+                        .HasMaxLength(250)
+                        .HasColumnType("character varying(250)");
+
+                    b.Property<int?>("OrganizationId")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("Priority")
+                        .IsRequired()
+                        .HasMaxLength(50)
+                        .HasColumnType("character varying(50)");
+
+                    b.Property<string>("ShortBrief")
+                        .HasMaxLength(2000)
+                        .HasColumnType("TEXT")
+                        .HasColumnName("ShortBrief");
+
+                    b.Property<string>("SystemDesign")
+                        .HasColumnType("TEXT");
+
+                    b.Property<byte[]>("SystemDesignDoc")
+                        .HasColumnType("bytea");
+
+                    b.Property<string>("SystemDesignFormatted")
+                        .HasMaxLength(2000)
+                        .HasColumnType("TEXT")
+                        .HasColumnName("SystemDesignFormatted");
+
+                    b.Property<string>("Title")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)");
+
+                    b.Property<int>("TotalChunks")
+                        .HasColumnType("integer")
+                        .HasColumnName("total_chunks");
+
+                    b.Property<string>("TrelloBoardJson")
+                        .HasColumnType("TEXT")
+                        .HasColumnName("TrelloBoardJson");
+
+                    b.Property<DateTime?>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("BaseProjectId");
+
+                    b.HasIndex("InstituteId");
+
+                    b.HasIndex("OrganizationId");
+
+                    b.ToTable("InstituteProjects", (string)null);
+                });
+
+            modelBuilder.Entity("strAppersBackend.Models.InstituteProjectModule", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer")
+                        .HasColumnName("Id");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
+
+                    b.Property<string>("Description")
+                        .HasColumnType("text")
+                        .HasColumnName("Description");
+
+                    b.Property<int>("InstituteProjectId")
+                        .HasColumnType("integer")
+                        .HasColumnName("InstituteProjectId");
+
+                    b.Property<int?>("ModuleType")
+                        .HasColumnType("integer")
+                        .HasColumnName("ModuleType");
+
+                    b.Property<int?>("OriginalModuleId")
+                        .HasColumnType("integer")
+                        .HasColumnName("OriginalModuleId");
+
+                    b.Property<int?>("Sequence")
+                        .HasColumnType("integer")
+                        .HasColumnName("Sequence");
+
+                    b.Property<string>("Title")
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)")
+                        .HasColumnName("Title");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("InstituteProjectId");
+
+                    b.HasIndex("ModuleType");
+
+                    b.HasIndex("Sequence");
+
+                    b.HasIndex("InstituteProjectId", "OriginalModuleId");
+
+                    b.ToTable("InstituteProjectModules", (string)null);
                 });
 
             modelBuilder.Entity("strAppersBackend.Models.InstituteRole", b =>
@@ -1015,25 +1211,33 @@ namespace strAppersBackend.Migrations
                         .HasMaxLength(50)
                         .HasColumnType("character varying(50)");
 
+                    b.Property<string>("Competencies")
+                        .HasColumnType("text");
+
                     b.Property<DateTime>("CreatedAt")
                         .ValueGeneratedOnAdd()
                         .HasColumnType("timestamp with time zone")
                         .HasDefaultValueSql("CURRENT_TIMESTAMP");
-
-                    b.Property<string>("Description")
-                        .HasMaxLength(500)
-                        .HasColumnType("character varying(500)");
 
                     b.Property<bool>("CustomerEngagement")
                         .ValueGeneratedOnAdd()
                         .HasColumnType("boolean")
                         .HasDefaultValue(false);
 
+                    b.Property<string>("Description")
+                        .HasMaxLength(500)
+                        .HasColumnType("character varying(500)");
+
                     b.Property<int>("InstituteId")
                         .HasColumnType("integer");
 
                     b.Property<bool>("IsActive")
                         .HasColumnType("boolean");
+
+                    b.Property<bool>("IsTechnical")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("boolean")
+                        .HasDefaultValue(false);
 
                     b.Property<string>("Name")
                         .IsRequired()
@@ -1047,6 +1251,7 @@ namespace strAppersBackend.Migrations
                         .HasColumnType("integer");
 
                     b.Property<int>("Type")
+                        .ValueGeneratedOnAdd()
                         .HasColumnType("integer")
                         .HasDefaultValue(0);
 
@@ -1063,7 +1268,180 @@ namespace strAppersBackend.Migrations
 
                     b.HasIndex("Type");
 
-                    b.ToTable("InstituteRoles");
+                    b.ToTable("InstituteRoles", (string)null);
+                });
+
+            modelBuilder.Entity("strAppersBackend.Models.InstituteSquad", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
+
+                    b.Property<DateTime>("CreatedAt")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("timestamp with time zone")
+                        .HasDefaultValueSql("CURRENT_TIMESTAMP");
+
+                    b.Property<int>("InstituteId")
+                        .HasColumnType("integer");
+
+                    b.Property<bool>("IsActive")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("boolean")
+                        .HasDefaultValue(true);
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)");
+
+                    b.Property<bool>("RequireDeveloperRule")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("boolean")
+                        .HasDefaultValue(false);
+
+                    b.Property<DateTime?>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("InstituteId");
+
+                    b.HasIndex("InstituteId", "Name");
+
+                    b.ToTable("InstituteSquads", (string)null);
+                });
+
+            modelBuilder.Entity("strAppersBackend.Models.InstituteSquadRole", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
+
+                    b.Property<int?>("BaseInstituteRoleId")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("Category")
+                        .HasMaxLength(50)
+                        .HasColumnType("character varying(50)");
+
+                    b.Property<string>("Competencies")
+                        .HasColumnType("text");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("timestamp with time zone")
+                        .HasDefaultValueSql("CURRENT_TIMESTAMP");
+
+                    b.Property<bool>("CustomerEngagement")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("boolean")
+                        .HasDefaultValue(false);
+
+                    b.Property<string>("Description")
+                        .HasMaxLength(500)
+                        .HasColumnType("character varying(500)");
+
+                    b.Property<bool>("IsActive")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("boolean")
+                        .HasDefaultValue(true);
+
+                    b.Property<bool>("IsTechnical")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("boolean")
+                        .HasDefaultValue(false);
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)");
+
+                    b.Property<int?>("SkillId")
+                        .HasColumnType("integer");
+
+                    b.Property<int>("SquadId")
+                        .HasColumnType("integer");
+
+                    b.Property<int>("Type")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer")
+                        .HasDefaultValue(0);
+
+                    b.Property<DateTime?>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("BaseInstituteRoleId");
+
+                    b.HasIndex("SkillId");
+
+                    b.HasIndex("SquadId");
+
+                    b.HasIndex("Type");
+
+                    b.HasIndex("SquadId", "Name");
+
+                    b.ToTable("InstituteSquadRoles", (string)null);
+                });
+
+            modelBuilder.Entity("strAppersBackend.Models.InstituteTemplate", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
+
+                    b.Property<string>("BoardUrl")
+                        .HasMaxLength(500)
+                        .HasColumnType("character varying(500)")
+                        .HasColumnName("BoardURL");
+
+                    b.Property<string>("CourseName")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)");
+
+                    b.Property<int>("InstituteId")
+                        .HasColumnType("integer");
+
+                    b.Property<int?>("InstituteProjectId")
+                        .HasColumnType("integer");
+
+                    b.Property<bool>("IsActive")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("boolean")
+                        .HasDefaultValue(false);
+
+                    b.Property<int?>("ProjectId")
+                        .HasColumnType("integer");
+
+                    b.Property<int?>("SquadId")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("TrelloBoardJson")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("InstituteId");
+
+                    b.HasIndex("InstituteProjectId");
+
+                    b.HasIndex("ProjectId");
+
+                    b.HasIndex("SquadId");
+
+                    b.HasIndex("InstituteId", "ProjectId");
+
+                    b.ToTable("InstituteTemplates", (string)null);
                 });
 
             modelBuilder.Entity("strAppersBackend.Models.JoinRequest", b =>
@@ -1183,7 +1561,7 @@ namespace strAppersBackend.Migrations
                         new
                         {
                             Id = 1,
-                            CreatedAt = new DateTime(2026, 2, 15, 14, 15, 26, 424, DateTimeKind.Utc).AddTicks(5880),
+                            CreatedAt = new DateTime(2026, 3, 7, 14, 25, 28, 111, DateTimeKind.Utc).AddTicks(6496),
                             Department = "Computer Science",
                             Description = "Study of computational systems and design",
                             IsActive = true,
@@ -1192,7 +1570,7 @@ namespace strAppersBackend.Migrations
                         new
                         {
                             Id = 2,
-                            CreatedAt = new DateTime(2026, 2, 15, 14, 15, 26, 424, DateTimeKind.Utc).AddTicks(5894),
+                            CreatedAt = new DateTime(2026, 3, 7, 14, 25, 28, 111, DateTimeKind.Utc).AddTicks(6513),
                             Department = "Computer Science",
                             Description = "Engineering approach to software development",
                             IsActive = true,
@@ -1201,7 +1579,7 @@ namespace strAppersBackend.Migrations
                         new
                         {
                             Id = 3,
-                            CreatedAt = new DateTime(2026, 2, 15, 14, 15, 26, 424, DateTimeKind.Utc).AddTicks(5897),
+                            CreatedAt = new DateTime(2026, 3, 7, 14, 25, 28, 111, DateTimeKind.Utc).AddTicks(6516),
                             Department = "Computer Science",
                             Description = "Extracting insights from data",
                             IsActive = true,
@@ -1210,7 +1588,7 @@ namespace strAppersBackend.Migrations
                         new
                         {
                             Id = 4,
-                            CreatedAt = new DateTime(2026, 2, 15, 14, 15, 26, 424, DateTimeKind.Utc).AddTicks(5900),
+                            CreatedAt = new DateTime(2026, 3, 7, 14, 25, 28, 111, DateTimeKind.Utc).AddTicks(6519),
                             Department = "Computer Science",
                             Description = "Protecting digital systems and data",
                             IsActive = true,
@@ -1219,7 +1597,7 @@ namespace strAppersBackend.Migrations
                         new
                         {
                             Id = 5,
-                            CreatedAt = new DateTime(2026, 2, 15, 14, 15, 26, 424, DateTimeKind.Utc).AddTicks(5902),
+                            CreatedAt = new DateTime(2026, 3, 7, 14, 25, 28, 111, DateTimeKind.Utc).AddTicks(6521),
                             Department = "Information Systems",
                             Description = "Management and use of technology",
                             IsActive = true,
@@ -1228,7 +1606,7 @@ namespace strAppersBackend.Migrations
                         new
                         {
                             Id = 6,
-                            CreatedAt = new DateTime(2026, 2, 15, 14, 15, 26, 424, DateTimeKind.Utc).AddTicks(5904),
+                            CreatedAt = new DateTime(2026, 3, 7, 14, 25, 28, 111, DateTimeKind.Utc).AddTicks(6523),
                             Department = "Business",
                             Description = "General business management",
                             IsActive = true,
@@ -1548,7 +1926,7 @@ namespace strAppersBackend.Migrations
                             Id = 1,
                             Address = "123 Tech Street, Tech City",
                             ContactEmail = "info@techuniversity.edu",
-                            CreatedAt = new DateTime(2026, 2, 15, 14, 15, 26, 426, DateTimeKind.Utc).AddTicks(5862),
+                            CreatedAt = new DateTime(2026, 3, 7, 14, 25, 28, 115, DateTimeKind.Utc).AddTicks(3406),
                             Description = "Leading technology university",
                             IsActive = true,
                             Name = "Tech University",
@@ -1562,7 +1940,7 @@ namespace strAppersBackend.Migrations
                             Id = 2,
                             Address = "456 Innovation Ave, Tech City",
                             ContactEmail = "contact@innovationlabs.com",
-                            CreatedAt = new DateTime(2026, 2, 20, 14, 15, 26, 426, DateTimeKind.Utc).AddTicks(5870),
+                            CreatedAt = new DateTime(2026, 3, 12, 14, 25, 28, 115, DateTimeKind.Utc).AddTicks(3416),
                             Description = "Research and development company",
                             IsActive = true,
                             Name = "Innovation Labs",
@@ -1576,7 +1954,7 @@ namespace strAppersBackend.Migrations
                             Id = 3,
                             Address = "789 Good Street, Tech City",
                             ContactEmail = "hello@codeforgood.org",
-                            CreatedAt = new DateTime(2026, 2, 25, 14, 15, 26, 426, DateTimeKind.Utc).AddTicks(5884),
+                            CreatedAt = new DateTime(2026, 3, 17, 14, 25, 28, 115, DateTimeKind.Utc).AddTicks(3426),
                             Description = "Non-profit organization promoting tech for social good",
                             IsActive = true,
                             Name = "Code for Good",
@@ -1688,6 +2066,10 @@ namespace strAppersBackend.Migrations
                         .HasColumnType("integer")
                         .HasColumnName("completed_chunks");
 
+                    b.Property<string>("CourseName")
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)");
+
                     b.Property<DateTime>("CreatedAt")
                         .ValueGeneratedOnAdd()
                         .HasColumnType("timestamp with time zone")
@@ -1716,14 +2098,20 @@ namespace strAppersBackend.Migrations
                     b.Property<string>("ExtendedDescription")
                         .HasColumnType("TEXT");
 
-                    b.Property<string>("Logo")
-                        .HasColumnType("TEXT");
-
                     b.Property<string>("IdeGenerationStatus")
                         .IsRequired()
                         .HasMaxLength(50)
                         .HasColumnType("character varying(50)")
                         .HasColumnName("ide_generation_status");
+
+                    b.Property<bool>("InUse")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("boolean")
+                        .HasDefaultValue(true)
+                        .HasColumnName("InUse");
+
+                    b.Property<int?>("InstituteId")
+                        .HasColumnType("integer");
 
                     b.Property<bool>("IsAvailable")
                         .ValueGeneratedOnAdd()
@@ -1737,9 +2125,12 @@ namespace strAppersBackend.Migrations
                         .HasDefaultValue(false)
                         .HasColumnName("Kickoff");
 
+                    b.Property<string>("Logo")
+                        .HasColumnType("TEXT");
+
                     b.Property<string>("Mission")
                         .HasMaxLength(2000)
-                        .HasColumnType("character varying(2000)");
+                        .HasColumnType("TEXT");
 
                     b.Property<int>("MockRecordsCount")
                         .HasColumnType("integer")
@@ -1748,9 +2139,6 @@ namespace strAppersBackend.Migrations
                     b.Property<string>("OneLiner")
                         .HasMaxLength(250)
                         .HasColumnType("character varying(250)");
-
-                    b.Property<int?>("InstituteId")
-                        .HasColumnType("integer");
 
                     b.Property<int?>("OrganizationId")
                         .HasColumnType("integer");
@@ -1762,7 +2150,7 @@ namespace strAppersBackend.Migrations
 
                     b.Property<string>("ShortBrief")
                         .HasMaxLength(2000)
-                        .HasColumnType("character varying(2000)")
+                        .HasColumnType("TEXT")
                         .HasColumnName("ShortBrief");
 
                     b.Property<string>("SystemDesign")
@@ -1773,7 +2161,7 @@ namespace strAppersBackend.Migrations
 
                     b.Property<string>("SystemDesignFormatted")
                         .HasMaxLength(2000)
-                        .HasColumnType("character varying(2000)")
+                        .HasColumnType("TEXT")
                         .HasColumnName("SystemDesignFormatted");
 
                     b.Property<string>("Title")
@@ -1794,9 +2182,9 @@ namespace strAppersBackend.Migrations
 
                     b.HasKey("Id");
 
-                    b.HasIndex("OrganizationId");
-
                     b.HasIndex("InstituteId");
+
+                    b.HasIndex("OrganizationId");
 
                     b.ToTable("Projects");
 
@@ -1805,9 +2193,10 @@ namespace strAppersBackend.Migrations
                         {
                             Id = 1,
                             CompletedChunks = 0,
-                            CreatedAt = new DateTime(2026, 3, 17, 14, 15, 26, 441, DateTimeKind.Utc).AddTicks(3571),
+                            CreatedAt = new DateTime(2026, 4, 6, 14, 25, 28, 128, DateTimeKind.Utc).AddTicks(9888),
                             Description = "Web application for managing student records and academic progress",
                             IdeGenerationStatus = "not_started",
+                            InUse = true,
                             IsAvailable = true,
                             Kickoff = false,
                             MockRecordsCount = 10,
@@ -1820,9 +2209,10 @@ namespace strAppersBackend.Migrations
                         {
                             Id = 2,
                             CompletedChunks = 0,
-                            CreatedAt = new DateTime(2026, 3, 27, 14, 15, 26, 441, DateTimeKind.Utc).AddTicks(3583),
+                            CreatedAt = new DateTime(2026, 4, 16, 14, 25, 28, 128, DateTimeKind.Utc).AddTicks(9897),
                             Description = "Machine learning platform for academic research",
                             IdeGenerationStatus = "not_started",
+                            InUse = true,
                             IsAvailable = true,
                             Kickoff = false,
                             MockRecordsCount = 10,
@@ -1835,9 +2225,10 @@ namespace strAppersBackend.Migrations
                         {
                             Id = 3,
                             CompletedChunks = 0,
-                            CreatedAt = new DateTime(2026, 1, 16, 14, 15, 26, 441, DateTimeKind.Utc).AddTicks(3588),
+                            CreatedAt = new DateTime(2026, 2, 5, 14, 25, 28, 128, DateTimeKind.Utc).AddTicks(9901),
                             Description = "Mobile app connecting volunteers with local community needs",
                             IdeGenerationStatus = "not_started",
+                            InUse = true,
                             IsAvailable = true,
                             Kickoff = false,
                             MockRecordsCount = 10,
@@ -1850,9 +2241,10 @@ namespace strAppersBackend.Migrations
                         {
                             Id = 4,
                             CompletedChunks = 0,
-                            CreatedAt = new DateTime(2026, 4, 1, 14, 15, 26, 441, DateTimeKind.Utc).AddTicks(3592),
+                            CreatedAt = new DateTime(2026, 4, 21, 14, 25, 28, 128, DateTimeKind.Utc).AddTicks(9905),
                             Description = "E-learning platform with video streaming and assessments",
                             IdeGenerationStatus = "not_started",
+                            InUse = true,
                             IsAvailable = true,
                             Kickoff = false,
                             MockRecordsCount = 10,
@@ -1865,9 +2257,10 @@ namespace strAppersBackend.Migrations
                         {
                             Id = 5,
                             CompletedChunks = 0,
-                            CreatedAt = new DateTime(2026, 4, 6, 14, 15, 26, 441, DateTimeKind.Utc).AddTicks(3614),
+                            CreatedAt = new DateTime(2026, 4, 26, 14, 25, 28, 128, DateTimeKind.Utc).AddTicks(9925),
                             Description = "Real-time dashboard for analyzing student performance metrics",
                             IdeGenerationStatus = "not_started",
+                            InUse = true,
                             IsAvailable = true,
                             Kickoff = false,
                             MockRecordsCount = 10,
@@ -1880,9 +2273,10 @@ namespace strAppersBackend.Migrations
                         {
                             Id = 6,
                             CompletedChunks = 0,
-                            CreatedAt = new DateTime(2026, 4, 11, 14, 15, 26, 441, DateTimeKind.Utc).AddTicks(3618),
+                            CreatedAt = new DateTime(2026, 5, 1, 14, 25, 28, 128, DateTimeKind.Utc).AddTicks(9978),
                             Description = "Mobile application for students to discover and register for campus events",
                             IdeGenerationStatus = "not_started",
+                            InUse = true,
                             IsAvailable = true,
                             Kickoff = false,
                             MockRecordsCount = 10,
@@ -1895,9 +2289,10 @@ namespace strAppersBackend.Migrations
                         {
                             Id = 7,
                             CompletedChunks = 0,
-                            CreatedAt = new DateTime(2026, 4, 13, 14, 15, 26, 441, DateTimeKind.Utc).AddTicks(3621),
+                            CreatedAt = new DateTime(2026, 5, 3, 14, 25, 28, 128, DateTimeKind.Utc).AddTicks(9982),
                             Description = "VR environment for immersive learning experiences",
                             IdeGenerationStatus = "not_started",
+                            InUse = true,
                             IsAvailable = true,
                             Kickoff = false,
                             MockRecordsCount = 10,
@@ -1910,9 +2305,10 @@ namespace strAppersBackend.Migrations
                         {
                             Id = 8,
                             CompletedChunks = 0,
-                            CreatedAt = new DateTime(2026, 4, 15, 14, 15, 26, 441, DateTimeKind.Utc).AddTicks(3624),
+                            CreatedAt = new DateTime(2026, 5, 5, 14, 25, 28, 128, DateTimeKind.Utc).AddTicks(9986),
                             Description = "Secure voting system using blockchain technology",
                             IdeGenerationStatus = "not_started",
+                            InUse = true,
                             IsAvailable = true,
                             Kickoff = false,
                             MockRecordsCount = 10,
@@ -1925,9 +2321,10 @@ namespace strAppersBackend.Migrations
                         {
                             Id = 9,
                             CompletedChunks = 0,
-                            CreatedAt = new DateTime(2026, 4, 14, 14, 15, 26, 441, DateTimeKind.Utc).AddTicks(3627),
+                            CreatedAt = new DateTime(2026, 5, 4, 14, 25, 28, 128, DateTimeKind.Utc).AddTicks(9989),
                             Description = "Internet of Things system for campus management",
                             IdeGenerationStatus = "not_started",
+                            InUse = true,
                             IsAvailable = true,
                             Kickoff = false,
                             MockRecordsCount = 10,
@@ -2306,6 +2703,10 @@ namespace strAppersBackend.Migrations
                         .HasColumnType("integer")
                         .HasColumnName("ModuleType");
 
+                    b.Property<int?>("OriginalModuleId")
+                        .HasColumnType("integer")
+                        .HasColumnName("OriginalModuleId");
+
                     b.Property<int?>("ProjectId")
                         .HasColumnType("integer")
                         .HasColumnName("ProjectId");
@@ -2313,10 +2714,6 @@ namespace strAppersBackend.Migrations
                     b.Property<int?>("Sequence")
                         .HasColumnType("integer")
                         .HasColumnName("Sequence");
-
-                    b.Property<int?>("OriginalModuleId")
-                        .HasColumnType("integer")
-                        .HasColumnName("OriginalModuleId");
 
                     b.Property<string>("Title")
                         .HasMaxLength(100)
@@ -2333,7 +2730,7 @@ namespace strAppersBackend.Migrations
 
                     b.HasIndex("ProjectId", "OriginalModuleId");
 
-                    b.ToTable("ProjectModules");
+                    b.ToTable("ProjectModules", (string)null);
                 });
 
             modelBuilder.Entity("strAppersBackend.Models.ProjectStatus", b =>
@@ -2380,7 +2777,7 @@ namespace strAppersBackend.Migrations
                         {
                             Id = 1,
                             Color = "#10B981",
-                            CreatedAt = new DateTime(2026, 3, 7, 14, 15, 26, 426, DateTimeKind.Utc).AddTicks(7057),
+                            CreatedAt = new DateTime(2026, 3, 27, 14, 25, 28, 115, DateTimeKind.Utc).AddTicks(4552),
                             Description = "Newly created project",
                             IsActive = true,
                             Name = "New",
@@ -2390,7 +2787,7 @@ namespace strAppersBackend.Migrations
                         {
                             Id = 2,
                             Color = "#3B82F6",
-                            CreatedAt = new DateTime(2026, 3, 7, 14, 15, 26, 426, DateTimeKind.Utc).AddTicks(7064),
+                            CreatedAt = new DateTime(2026, 3, 27, 14, 25, 28, 115, DateTimeKind.Utc).AddTicks(4557),
                             Description = "Project in planning phase",
                             IsActive = true,
                             Name = "Planning",
@@ -2400,7 +2797,7 @@ namespace strAppersBackend.Migrations
                         {
                             Id = 3,
                             Color = "#F59E0B",
-                            CreatedAt = new DateTime(2026, 3, 7, 14, 15, 26, 426, DateTimeKind.Utc).AddTicks(7067),
+                            CreatedAt = new DateTime(2026, 3, 27, 14, 25, 28, 115, DateTimeKind.Utc).AddTicks(4560),
                             Description = "Project currently being worked on",
                             IsActive = true,
                             Name = "In Progress",
@@ -2410,7 +2807,7 @@ namespace strAppersBackend.Migrations
                         {
                             Id = 4,
                             Color = "#EF4444",
-                            CreatedAt = new DateTime(2026, 3, 7, 14, 15, 26, 426, DateTimeKind.Utc).AddTicks(7069),
+                            CreatedAt = new DateTime(2026, 3, 27, 14, 25, 28, 115, DateTimeKind.Utc).AddTicks(4563),
                             Description = "Project temporarily paused",
                             IsActive = true,
                             Name = "On Hold",
@@ -2420,7 +2817,7 @@ namespace strAppersBackend.Migrations
                         {
                             Id = 5,
                             Color = "#059669",
-                            CreatedAt = new DateTime(2026, 3, 7, 14, 15, 26, 426, DateTimeKind.Utc).AddTicks(7072),
+                            CreatedAt = new DateTime(2026, 3, 27, 14, 25, 28, 115, DateTimeKind.Utc).AddTicks(4565),
                             Description = "Project successfully completed",
                             IsActive = true,
                             Name = "Completed",
@@ -2430,7 +2827,7 @@ namespace strAppersBackend.Migrations
                         {
                             Id = 6,
                             Color = "#6B7280",
-                            CreatedAt = new DateTime(2026, 3, 7, 14, 15, 26, 426, DateTimeKind.Utc).AddTicks(7074),
+                            CreatedAt = new DateTime(2026, 3, 27, 14, 25, 28, 115, DateTimeKind.Utc).AddTicks(4568),
                             Description = "Project cancelled or abandoned",
                             IsActive = true,
                             Name = "Cancelled",
@@ -2609,19 +3006,73 @@ namespace strAppersBackend.Migrations
                     b.ToTable("Resources", (string)null);
                 });
 
+            modelBuilder.Entity("strAppersBackend.Models.Role", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
+
+                    b.Property<string>("Category")
+                        .HasMaxLength(50)
+                        .HasColumnType("character varying(50)");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("timestamp with time zone")
+                        .HasDefaultValueSql("CURRENT_TIMESTAMP");
+
+                    b.Property<bool>("CustomerEngagement")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("boolean")
+                        .HasDefaultValue(false);
+
+                    b.Property<string>("Description")
+                        .HasMaxLength(500)
+                        .HasColumnType("character varying(500)");
+
+                    b.Property<bool>("IsActive")
+                        .HasColumnType("boolean");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)");
+
+                    b.Property<int?>("SkillId")
+                        .HasColumnType("integer");
+
+                    b.Property<int>("Type")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer")
+                        .HasDefaultValue(0);
+
+                    b.Property<DateTime?>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("SkillId");
+
+                    b.HasIndex("Type");
+
+                    b.ToTable("Roles");
+                });
+
             modelBuilder.Entity("strAppersBackend.Models.RoleType", b =>
                 {
+                    b.Property<int>("Id")
+                        .HasColumnType("integer");
+
                     b.Property<string>("Description")
                         .IsRequired()
                         .HasMaxLength(200)
                         .HasColumnType("character varying(200)");
 
-                    b.Property<int>("Id")
-                        .HasColumnType("integer");
-
                     b.HasKey("Id");
 
-                    b.ToTable("RoleTypes");
+                    b.ToTable("RoleTypes", (string)null);
 
                     b.HasData(
                         new
@@ -2669,60 +3120,7 @@ namespace strAppersBackend.Migrations
                     b.HasIndex("Name")
                         .IsUnique();
 
-                    b.ToTable("Skills");
-                });
-
-            modelBuilder.Entity("strAppersBackend.Models.Role", b =>
-                {
-                    b.Property<int>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("integer");
-
-                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
-
-                    b.Property<string>("Category")
-                        .HasMaxLength(50)
-                        .HasColumnType("character varying(50)");
-
-                    b.Property<DateTime>("CreatedAt")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("timestamp with time zone")
-                        .HasDefaultValueSql("CURRENT_TIMESTAMP");
-
-                    b.Property<bool>("CustomerEngagement")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("boolean")
-                        .HasDefaultValue(false);
-
-                    b.Property<string>("Description")
-                        .HasMaxLength(500)
-                        .HasColumnType("character varying(500)");
-
-                    b.Property<bool>("IsActive")
-                        .HasColumnType("boolean");
-
-                    b.Property<string>("Name")
-                        .IsRequired()
-                        .HasMaxLength(100)
-                        .HasColumnType("character varying(100)");
-
-                    b.Property<int?>("SkillId")
-                        .HasColumnType("integer");
-
-                    b.Property<int>("Type")
-                        .HasColumnType("integer")
-                        .HasDefaultValue(0);
-
-                    b.Property<DateTime?>("UpdatedAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("SkillId");
-
-                    b.HasIndex("Type");
-
-                    b.ToTable("Roles");
+                    b.ToTable("Skills", (string)null);
                 });
 
             modelBuilder.Entity("strAppersBackend.Models.Stakeholder", b =>
@@ -3038,7 +3436,7 @@ namespace strAppersBackend.Migrations
                             Id = 1,
                             AssistMe = false,
                             B2c = true,
-                            CreatedAt = new DateTime(2026, 3, 2, 14, 15, 26, 440, DateTimeKind.Utc).AddTicks(7063),
+                            CreatedAt = new DateTime(2026, 3, 22, 14, 25, 28, 128, DateTimeKind.Utc).AddTicks(964),
                             Email = "alex.johnson@techuniversity.edu",
                             EmployerExposure = true,
                             FirstName = "Alex",
@@ -3067,7 +3465,7 @@ namespace strAppersBackend.Migrations
                             Id = 2,
                             AssistMe = false,
                             B2c = true,
-                            CreatedAt = new DateTime(2026, 3, 7, 14, 15, 26, 440, DateTimeKind.Utc).AddTicks(7077),
+                            CreatedAt = new DateTime(2026, 3, 27, 14, 25, 28, 128, DateTimeKind.Utc).AddTicks(975),
                             Email = "sarah.williams@techuniversity.edu",
                             EmployerExposure = true,
                             FirstName = "Sarah",
@@ -3096,7 +3494,7 @@ namespace strAppersBackend.Migrations
                             Id = 3,
                             AssistMe = false,
                             B2c = true,
-                            CreatedAt = new DateTime(2026, 3, 12, 14, 15, 26, 440, DateTimeKind.Utc).AddTicks(7082),
+                            CreatedAt = new DateTime(2026, 4, 1, 14, 25, 28, 128, DateTimeKind.Utc).AddTicks(980),
                             Email = "michael.brown@techuniversity.edu",
                             EmployerExposure = true,
                             FirstName = "Michael",
@@ -3125,7 +3523,7 @@ namespace strAppersBackend.Migrations
                             Id = 4,
                             AssistMe = false,
                             B2c = true,
-                            CreatedAt = new DateTime(2026, 3, 17, 14, 15, 26, 440, DateTimeKind.Utc).AddTicks(7085),
+                            CreatedAt = new DateTime(2026, 4, 6, 14, 25, 28, 128, DateTimeKind.Utc).AddTicks(983),
                             Email = "emily.davis@techuniversity.edu",
                             EmployerExposure = true,
                             FirstName = "Emily",
@@ -3154,7 +3552,7 @@ namespace strAppersBackend.Migrations
                             Id = 5,
                             AssistMe = false,
                             B2c = true,
-                            CreatedAt = new DateTime(2026, 3, 22, 14, 15, 26, 440, DateTimeKind.Utc).AddTicks(7089),
+                            CreatedAt = new DateTime(2026, 4, 11, 14, 25, 28, 128, DateTimeKind.Utc).AddTicks(987),
                             Email = "david.miller@techuniversity.edu",
                             EmployerExposure = true,
                             FirstName = "David",
@@ -3218,7 +3616,7 @@ namespace strAppersBackend.Migrations
                         new
                         {
                             Id = 1,
-                            AssignedDate = new DateTime(2026, 3, 17, 14, 15, 26, 442, DateTimeKind.Utc).AddTicks(3794),
+                            AssignedDate = new DateTime(2026, 4, 6, 14, 25, 28, 136, DateTimeKind.Utc).AddTicks(2274),
                             IsActive = true,
                             Notes = "Leading the Student Management System project",
                             RoleId = 1,
@@ -3227,7 +3625,7 @@ namespace strAppersBackend.Migrations
                         new
                         {
                             Id = 2,
-                            AssignedDate = new DateTime(2026, 3, 22, 14, 15, 26, 442, DateTimeKind.Utc).AddTicks(3805),
+                            AssignedDate = new DateTime(2026, 4, 11, 14, 25, 28, 136, DateTimeKind.Utc).AddTicks(2283),
                             IsActive = true,
                             Notes = "Frontend development for multiple projects",
                             RoleId = 2,
@@ -3236,7 +3634,7 @@ namespace strAppersBackend.Migrations
                         new
                         {
                             Id = 3,
-                            AssignedDate = new DateTime(2026, 3, 27, 14, 15, 26, 442, DateTimeKind.Utc).AddTicks(3808),
+                            AssignedDate = new DateTime(2026, 4, 16, 14, 25, 28, 136, DateTimeKind.Utc).AddTicks(2285),
                             IsActive = true,
                             Notes = "Backend development and database design",
                             RoleId = 3,
@@ -3245,7 +3643,7 @@ namespace strAppersBackend.Migrations
                         new
                         {
                             Id = 4,
-                            AssignedDate = new DateTime(2026, 4, 1, 14, 15, 26, 442, DateTimeKind.Utc).AddTicks(3810),
+                            AssignedDate = new DateTime(2026, 4, 21, 14, 25, 28, 136, DateTimeKind.Utc).AddTicks(2288),
                             IsActive = true,
                             Notes = "UI/UX design for community outreach app",
                             RoleId = 4,
@@ -3254,7 +3652,7 @@ namespace strAppersBackend.Migrations
                         new
                         {
                             Id = 5,
-                            AssignedDate = new DateTime(2026, 4, 6, 14, 15, 26, 442, DateTimeKind.Utc).AddTicks(3813),
+                            AssignedDate = new DateTime(2026, 4, 26, 14, 25, 28, 136, DateTimeKind.Utc).AddTicks(2290),
                             IsActive = true,
                             Notes = "QA testing for online learning platform",
                             RoleId = 5,
@@ -3263,7 +3661,7 @@ namespace strAppersBackend.Migrations
                         new
                         {
                             Id = 6,
-                            AssignedDate = new DateTime(2026, 3, 12, 14, 15, 26, 442, DateTimeKind.Utc).AddTicks(3815),
+                            AssignedDate = new DateTime(2026, 4, 1, 14, 25, 28, 136, DateTimeKind.Utc).AddTicks(2293),
                             IsActive = true,
                             Notes = "Team lead for junior developers",
                             RoleId = 6,
@@ -3272,7 +3670,7 @@ namespace strAppersBackend.Migrations
                         new
                         {
                             Id = 7,
-                            AssignedDate = new DateTime(2026, 3, 29, 14, 15, 26, 442, DateTimeKind.Utc).AddTicks(3817),
+                            AssignedDate = new DateTime(2026, 4, 18, 14, 25, 28, 136, DateTimeKind.Utc).AddTicks(2295),
                             IsActive = true,
                             Notes = "Research on AI and machine learning",
                             RoleId = 7,
@@ -3281,7 +3679,7 @@ namespace strAppersBackend.Migrations
                         new
                         {
                             Id = 8,
-                            AssignedDate = new DateTime(2026, 4, 4, 14, 15, 26, 442, DateTimeKind.Utc).AddTicks(3819),
+                            AssignedDate = new DateTime(2026, 4, 24, 14, 25, 28, 136, DateTimeKind.Utc).AddTicks(2297),
                             IsActive = true,
                             Notes = "Documentation for frontend components",
                             RoleId = 8,
@@ -3321,28 +3719,28 @@ namespace strAppersBackend.Migrations
                         new
                         {
                             Id = 1,
-                            CreatedAt = new DateTime(2026, 4, 16, 14, 15, 26, 455, DateTimeKind.Utc).AddTicks(1471),
+                            CreatedAt = new DateTime(2026, 5, 6, 14, 25, 28, 148, DateTimeKind.Utc).AddTicks(8546),
                             Description = "Junior",
                             Price = 0m
                         },
                         new
                         {
                             Id = 2,
-                            CreatedAt = new DateTime(2026, 4, 16, 14, 15, 26, 455, DateTimeKind.Utc).AddTicks(1475),
+                            CreatedAt = new DateTime(2026, 5, 6, 14, 25, 28, 148, DateTimeKind.Utc).AddTicks(8550),
                             Description = "Product",
                             Price = 0m
                         },
                         new
                         {
                             Id = 3,
-                            CreatedAt = new DateTime(2026, 4, 16, 14, 15, 26, 455, DateTimeKind.Utc).AddTicks(1477),
+                            CreatedAt = new DateTime(2026, 5, 6, 14, 25, 28, 148, DateTimeKind.Utc).AddTicks(8553),
                             Description = "Enterprise A",
                             Price = 0m
                         },
                         new
                         {
                             Id = 4,
-                            CreatedAt = new DateTime(2026, 4, 16, 14, 15, 26, 455, DateTimeKind.Utc).AddTicks(1479),
+                            CreatedAt = new DateTime(2026, 5, 6, 14, 25, 28, 148, DateTimeKind.Utc).AddTicks(8555),
                             Description = "Enterprise B",
                             Price = 0m
                         });
@@ -3435,50 +3833,6 @@ namespace strAppersBackend.Migrations
                     b.ToTable("Teachers", (string)null);
                 });
 
-            modelBuilder.Entity("strAppersBackend.Models.InstituteTemplate", b =>
-                {
-                    b.Property<int>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("integer");
-
-                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
-
-                    b.Property<int>("InstituteId")
-                        .HasColumnType("integer");
-
-                    b.Property<bool>("IsActive")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("boolean")
-                        .HasDefaultValue(false);
-
-                    b.Property<string>("BoardUrl")
-                        .HasMaxLength(500)
-                        .HasColumnType("character varying(500)")
-                        .HasColumnName("BoardURL");
-
-                    b.Property<int>("ProjectId")
-                        .HasColumnType("integer");
-
-                    b.Property<string>("Name")
-                        .IsRequired()
-                        .HasMaxLength(100)
-                        .HasColumnType("character varying(100)");
-
-                    b.Property<string>("TrelloBoardJson")
-                        .IsRequired()
-                        .HasColumnType("text");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("InstituteId");
-
-                    b.HasIndex("ProjectId");
-
-                    b.HasIndex("InstituteId", "ProjectId");
-
-                    b.ToTable("InstituteTemplates", (string)null);
-                });
-
             modelBuilder.Entity("strAppersBackend.Models.Year", b =>
                 {
                     b.Property<int>("Id")
@@ -3518,7 +3872,7 @@ namespace strAppersBackend.Migrations
                         new
                         {
                             Id = 1,
-                            CreatedAt = new DateTime(2026, 2, 15, 14, 15, 26, 426, DateTimeKind.Utc).AddTicks(3154),
+                            CreatedAt = new DateTime(2026, 3, 7, 14, 25, 28, 115, DateTimeKind.Utc).AddTicks(694),
                             Description = "First year of study",
                             IsActive = true,
                             Name = "Freshman",
@@ -3527,7 +3881,7 @@ namespace strAppersBackend.Migrations
                         new
                         {
                             Id = 2,
-                            CreatedAt = new DateTime(2026, 2, 15, 14, 15, 26, 426, DateTimeKind.Utc).AddTicks(3163),
+                            CreatedAt = new DateTime(2026, 3, 7, 14, 25, 28, 115, DateTimeKind.Utc).AddTicks(702),
                             Description = "Second year of study",
                             IsActive = true,
                             Name = "Sophomore",
@@ -3536,7 +3890,7 @@ namespace strAppersBackend.Migrations
                         new
                         {
                             Id = 3,
-                            CreatedAt = new DateTime(2026, 2, 15, 14, 15, 26, 426, DateTimeKind.Utc).AddTicks(3166),
+                            CreatedAt = new DateTime(2026, 3, 7, 14, 25, 28, 115, DateTimeKind.Utc).AddTicks(704),
                             Description = "Third year of study",
                             IsActive = true,
                             Name = "Junior",
@@ -3545,7 +3899,7 @@ namespace strAppersBackend.Migrations
                         new
                         {
                             Id = 4,
-                            CreatedAt = new DateTime(2026, 2, 15, 14, 15, 26, 426, DateTimeKind.Utc).AddTicks(3168),
+                            CreatedAt = new DateTime(2026, 3, 7, 14, 25, 28, 115, DateTimeKind.Utc).AddTicks(707),
                             Description = "Fourth year of study",
                             IsActive = true,
                             Name = "Senior",
@@ -3554,7 +3908,7 @@ namespace strAppersBackend.Migrations
                         new
                         {
                             Id = 5,
-                            CreatedAt = new DateTime(2026, 2, 15, 14, 15, 26, 426, DateTimeKind.Utc).AddTicks(3170),
+                            CreatedAt = new DateTime(2026, 3, 7, 14, 25, 28, 115, DateTimeKind.Utc).AddTicks(709),
                             Description = "Graduate level study",
                             IsActive = true,
                             Name = "Graduate",
@@ -3718,6 +4072,191 @@ namespace strAppersBackend.Migrations
                         .IsRequired();
 
                     b.Navigation("ProjectBoard");
+                });
+
+            modelBuilder.Entity("strAppersBackend.Models.InstituteAssistantChatHistory", b =>
+                {
+                    b.HasOne("strAppersBackend.Models.Institute", "Institute")
+                        .WithMany()
+                        .HasForeignKey("InstituteId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("strAppersBackend.Models.InstituteProject", "InstituteProject")
+                        .WithMany()
+                        .HasForeignKey("InstituteProjectId")
+                        .OnDelete(DeleteBehavior.Cascade);
+
+                    b.HasOne("strAppersBackend.Models.Project", "Project")
+                        .WithMany()
+                        .HasForeignKey("ProjectId")
+                        .OnDelete(DeleteBehavior.Cascade);
+
+                    b.HasOne("strAppersBackend.Models.Teacher", "Teacher")
+                        .WithMany()
+                        .HasForeignKey("TeacherId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.Navigation("Institute");
+
+                    b.Navigation("InstituteProject");
+
+                    b.Navigation("Project");
+
+                    b.Navigation("Teacher");
+                });
+
+            modelBuilder.Entity("strAppersBackend.Models.InstituteProject", b =>
+                {
+                    b.HasOne("strAppersBackend.Models.Project", "BaseProject")
+                        .WithMany("InstituteProjectCopies")
+                        .HasForeignKey("BaseProjectId")
+                        .OnDelete(DeleteBehavior.Restrict);
+
+                    b.HasOne("strAppersBackend.Models.Institute", "Institute")
+                        .WithMany("InstituteProjects")
+                        .HasForeignKey("InstituteId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("strAppersBackend.Models.Organization", "Organization")
+                        .WithMany()
+                        .HasForeignKey("OrganizationId")
+                        .OnDelete(DeleteBehavior.SetNull);
+
+                    b.Navigation("BaseProject");
+
+                    b.Navigation("Institute");
+
+                    b.Navigation("Organization");
+                });
+
+            modelBuilder.Entity("strAppersBackend.Models.InstituteProjectModule", b =>
+                {
+                    b.HasOne("strAppersBackend.Models.InstituteProject", "InstituteProject")
+                        .WithMany("InstituteProjectModules")
+                        .HasForeignKey("InstituteProjectId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("strAppersBackend.Models.ModuleType", "ModuleTypeNavigation")
+                        .WithMany("InstituteProjectModules")
+                        .HasForeignKey("ModuleType")
+                        .OnDelete(DeleteBehavior.Cascade);
+
+                    b.Navigation("InstituteProject");
+
+                    b.Navigation("ModuleTypeNavigation");
+                });
+
+            modelBuilder.Entity("strAppersBackend.Models.InstituteRole", b =>
+                {
+                    b.HasOne("strAppersBackend.Models.Institute", "Institute")
+                        .WithMany("InstituteRoles")
+                        .HasForeignKey("InstituteId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("strAppersBackend.Models.Skill", "Skill")
+                        .WithMany("InstituteRoles")
+                        .HasForeignKey("SkillId")
+                        .OnDelete(DeleteBehavior.SetNull);
+
+                    b.HasOne("strAppersBackend.Models.InstituteTemplate", "Template")
+                        .WithMany("InstituteRoles")
+                        .HasForeignKey("TemplateId")
+                        .OnDelete(DeleteBehavior.SetNull);
+
+                    b.HasOne("strAppersBackend.Models.RoleType", "RoleType")
+                        .WithMany("InstituteRoles")
+                        .HasForeignKey("Type")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.Navigation("Institute");
+
+                    b.Navigation("RoleType");
+
+                    b.Navigation("Skill");
+
+                    b.Navigation("Template");
+                });
+
+            modelBuilder.Entity("strAppersBackend.Models.InstituteSquad", b =>
+                {
+                    b.HasOne("strAppersBackend.Models.Institute", "Institute")
+                        .WithMany("InstituteSquads")
+                        .HasForeignKey("InstituteId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Institute");
+                });
+
+            modelBuilder.Entity("strAppersBackend.Models.InstituteSquadRole", b =>
+                {
+                    b.HasOne("strAppersBackend.Models.InstituteRole", "BaseInstituteRole")
+                        .WithMany("SquadRoleSnapshots")
+                        .HasForeignKey("BaseInstituteRoleId")
+                        .OnDelete(DeleteBehavior.SetNull);
+
+                    b.HasOne("strAppersBackend.Models.Skill", "Skill")
+                        .WithMany()
+                        .HasForeignKey("SkillId")
+                        .OnDelete(DeleteBehavior.SetNull);
+
+                    b.HasOne("strAppersBackend.Models.InstituteSquad", "Squad")
+                        .WithMany("Roles")
+                        .HasForeignKey("SquadId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("strAppersBackend.Models.RoleType", "RoleType")
+                        .WithMany()
+                        .HasForeignKey("Type")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.Navigation("BaseInstituteRole");
+
+                    b.Navigation("RoleType");
+
+                    b.Navigation("Skill");
+
+                    b.Navigation("Squad");
+                });
+
+            modelBuilder.Entity("strAppersBackend.Models.InstituteTemplate", b =>
+                {
+                    b.HasOne("strAppersBackend.Models.Institute", "Institute")
+                        .WithMany("InstituteTemplates")
+                        .HasForeignKey("InstituteId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("strAppersBackend.Models.InstituteProject", "InstituteProject")
+                        .WithMany("InstituteTemplates")
+                        .HasForeignKey("InstituteProjectId")
+                        .OnDelete(DeleteBehavior.Cascade);
+
+                    b.HasOne("strAppersBackend.Models.Project", "Project")
+                        .WithMany("InstituteTemplates")
+                        .HasForeignKey("ProjectId")
+                        .OnDelete(DeleteBehavior.Cascade);
+
+                    b.HasOne("strAppersBackend.Models.InstituteSquad", "Squad")
+                        .WithMany("InstituteTemplates")
+                        .HasForeignKey("SquadId")
+                        .OnDelete(DeleteBehavior.SetNull);
+
+                    b.Navigation("Institute");
+
+                    b.Navigation("InstituteProject");
+
+                    b.Navigation("Project");
+
+                    b.Navigation("Squad");
                 });
 
             modelBuilder.Entity("strAppersBackend.Models.JoinRequest", b =>
@@ -3895,6 +4434,24 @@ namespace strAppersBackend.Migrations
                     b.Navigation("Student");
                 });
 
+            modelBuilder.Entity("strAppersBackend.Models.Role", b =>
+                {
+                    b.HasOne("strAppersBackend.Models.Skill", "Skill")
+                        .WithMany("Roles")
+                        .HasForeignKey("SkillId")
+                        .OnDelete(DeleteBehavior.SetNull);
+
+                    b.HasOne("strAppersBackend.Models.RoleType", "RoleType")
+                        .WithMany("Roles")
+                        .HasForeignKey("Type")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.Navigation("RoleType");
+
+                    b.Navigation("Skill");
+                });
+
             modelBuilder.Entity("strAppersBackend.Models.Stakeholder", b =>
                 {
                     b.HasOne("strAppersBackend.Models.ProjectBoard", "ProjectBoard")
@@ -4030,86 +4587,6 @@ namespace strAppersBackend.Migrations
                     b.Navigation("Student");
                 });
 
-            modelBuilder.Entity("strAppersBackend.Models.Role", b =>
-                {
-                    b.HasOne("strAppersBackend.Models.Skill", "Skill")
-                        .WithMany("Roles")
-                        .HasForeignKey("SkillId")
-                        .OnDelete(DeleteBehavior.SetNull);
-
-                    b.HasOne("strAppersBackend.Models.RoleType", "RoleType")
-                        .WithMany("Roles")
-                        .HasForeignKey("Type")
-                        .OnDelete(DeleteBehavior.Restrict)
-                        .IsRequired();
-
-                    b.Navigation("RoleType");
-
-                    b.Navigation("Skill");
-
-                    b.Navigation("StudentRoles");
-                });
-
-            modelBuilder.Entity("strAppersBackend.Models.InstituteAssistantChatHistory", b =>
-                {
-                    b.HasOne("strAppersBackend.Models.Institute", "Institute")
-                        .WithMany()
-                        .HasForeignKey("InstituteId")
-                        .OnDelete(DeleteBehavior.Restrict)
-                        .IsRequired();
-
-                    b.HasOne("strAppersBackend.Models.Project", "Project")
-                        .WithMany()
-                        .HasForeignKey("ProjectId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
-
-                    b.HasOne("strAppersBackend.Models.Teacher", "Teacher")
-                        .WithMany()
-                        .HasForeignKey("TeacherId")
-                        .OnDelete(DeleteBehavior.Restrict)
-                        .IsRequired();
-
-                    b.Navigation("Institute");
-
-                    b.Navigation("Project");
-
-                    b.Navigation("Teacher");
-                });
-
-            modelBuilder.Entity("strAppersBackend.Models.InstituteRole", b =>
-                {
-                    b.HasOne("strAppersBackend.Models.Institute", "Institute")
-                        .WithMany("InstituteRoles")
-                        .HasForeignKey("InstituteId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
-
-                    b.HasOne("strAppersBackend.Models.RoleType", "RoleType")
-                        .WithMany("InstituteRoles")
-                        .HasForeignKey("Type")
-                        .OnDelete(DeleteBehavior.Restrict)
-                        .IsRequired();
-
-                    b.HasOne("strAppersBackend.Models.Skill", "Skill")
-                        .WithMany("InstituteRoles")
-                        .HasForeignKey("SkillId")
-                        .OnDelete(DeleteBehavior.SetNull);
-
-                    b.HasOne("strAppersBackend.Models.InstituteTemplate", "Template")
-                        .WithMany("InstituteRoles")
-                        .HasForeignKey("TemplateId")
-                        .OnDelete(DeleteBehavior.SetNull);
-
-                    b.Navigation("Institute");
-
-                    b.Navigation("RoleType");
-
-                    b.Navigation("Skill");
-
-                    b.Navigation("Template");
-                });
-
             modelBuilder.Entity("strAppersBackend.Models.Teacher", b =>
                 {
                     b.HasOne("strAppersBackend.Models.Institute", "Institute")
@@ -4119,27 +4596,6 @@ namespace strAppersBackend.Migrations
                         .IsRequired();
 
                     b.Navigation("Institute");
-                });
-
-            modelBuilder.Entity("strAppersBackend.Models.InstituteTemplate", b =>
-                {
-                    b.HasOne("strAppersBackend.Models.Institute", "Institute")
-                        .WithMany("InstituteTemplates")
-                        .HasForeignKey("InstituteId")
-                        .OnDelete(DeleteBehavior.Restrict)
-                        .IsRequired();
-
-                    b.HasOne("strAppersBackend.Models.Project", "Project")
-                        .WithMany("InstituteTemplates")
-                        .HasForeignKey("ProjectId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
-
-                    b.Navigation("Institute");
-
-                    b.Navigation("InstituteRoles");
-
-                    b.Navigation("Project");
                 });
 
             modelBuilder.Entity("strAppersBackend.Models.Employer", b =>
@@ -4153,15 +4609,43 @@ namespace strAppersBackend.Migrations
 
             modelBuilder.Entity("strAppersBackend.Models.Institute", b =>
                 {
+                    b.Navigation("InstituteProjects");
+
                     b.Navigation("InstituteRoles");
+
+                    b.Navigation("InstituteSquads");
+
+                    b.Navigation("InstituteTemplates");
 
                     b.Navigation("Projects");
 
                     b.Navigation("Students");
 
                     b.Navigation("Teachers");
+                });
+
+            modelBuilder.Entity("strAppersBackend.Models.InstituteProject", b =>
+                {
+                    b.Navigation("InstituteProjectModules");
 
                     b.Navigation("InstituteTemplates");
+                });
+
+            modelBuilder.Entity("strAppersBackend.Models.InstituteRole", b =>
+                {
+                    b.Navigation("SquadRoleSnapshots");
+                });
+
+            modelBuilder.Entity("strAppersBackend.Models.InstituteSquad", b =>
+                {
+                    b.Navigation("InstituteTemplates");
+
+                    b.Navigation("Roles");
+                });
+
+            modelBuilder.Entity("strAppersBackend.Models.InstituteTemplate", b =>
+                {
+                    b.Navigation("InstituteRoles");
                 });
 
             modelBuilder.Entity("strAppersBackend.Models.Major", b =>
@@ -4171,6 +4655,8 @@ namespace strAppersBackend.Migrations
 
             modelBuilder.Entity("strAppersBackend.Models.ModuleType", b =>
                 {
+                    b.Navigation("InstituteProjectModules");
+
                     b.Navigation("ProjectModules");
                 });
 
@@ -4190,6 +4676,8 @@ namespace strAppersBackend.Migrations
 
                     b.Navigation("IDEChunks");
 
+                    b.Navigation("InstituteProjectCopies");
+
                     b.Navigation("InstituteTemplates");
                 });
 
@@ -4206,6 +4694,11 @@ namespace strAppersBackend.Migrations
             modelBuilder.Entity("strAppersBackend.Models.PromptCategory", b =>
                 {
                     b.Navigation("MentorPrompts");
+                });
+
+            modelBuilder.Entity("strAppersBackend.Models.Role", b =>
+                {
+                    b.Navigation("StudentRoles");
                 });
 
             modelBuilder.Entity("strAppersBackend.Models.RoleType", b =>

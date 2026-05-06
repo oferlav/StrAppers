@@ -19,6 +19,8 @@ namespace strAppersBackend.Models
 
         // Navigation properties
         public virtual ICollection<ProjectModule> ProjectModules { get; set; } = new List<ProjectModule>();
+
+        public virtual ICollection<InstituteProjectModule> InstituteProjectModules { get; set; } = new List<InstituteProjectModule>();
     }
 
     /// <summary>

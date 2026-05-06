@@ -6,7 +6,7 @@ namespace strAppersBackend.Models
     /// <summary>
     /// Represents a project module (e.g., User Authentication, Payment System, etc.)
     /// </summary>
-    public class ProjectModule
+    public class ProjectModule : IProjectModuleRow
     {
         [Key]
         [Column("Id")]
@@ -37,6 +37,7 @@ namespace strAppersBackend.Models
 
         // Navigation properties
         public virtual Project? Project { get; set; }
+
         public virtual ModuleType? ModuleTypeNavigation { get; set; }
     }
 
@@ -45,7 +46,9 @@ namespace strAppersBackend.Models
     /// </summary>
     public class CreateProjectModuleRequest
     {
-        public int ProjectId { get; set; }
+        public int? ProjectId { get; set; }
+
+        public int? InstituteProjectId { get; set; }
         public int ModuleType { get; set; }
         public string Title { get; set; } = string.Empty;
         public string? Description { get; set; }
@@ -58,6 +61,8 @@ namespace strAppersBackend.Models
     public class UpdateProjectModuleRequest
     {
         public int? ProjectId { get; set; }
+
+        public int? InstituteProjectId { get; set; }
         public int? ModuleType { get; set; }
         public string? Title { get; set; }
         public string? Description { get; set; }

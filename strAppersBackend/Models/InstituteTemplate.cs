@@ -9,7 +9,11 @@ public class AddInstituteTemplateRequest
     /// <summary>Board JSON; may be empty when the course is created without a Trello template yet.</summary>
     public string TrelloBoardJson { get; set; } = string.Empty;
 
-    /// <summary>Required for new rows; for updates, send the template display name (or omit to keep the existing name).</summary>
+    /// <summary>Required for new rows; for updates, send the course/template display name (or omit to keep the existing).</summary>
+    [MaxLength(100)]
+    public string? CourseName { get; set; }
+
+    /// <summary>Legacy JSON property; prefer <see cref="CourseName"/>.</summary>
     [MaxLength(100)]
     public string? Name { get; set; }
 
@@ -27,6 +31,9 @@ public class DeleteInstituteTemplateRequest
 
     [Required]
     public int InstituteId { get; set; }
+
+    /// <summary>When true, <see cref="ProjectId"/> is an <see cref="InstituteProject"/> id (not <see cref="Project"/>).</summary>
+    public bool InstituteProject { get; set; }
 }
 
 /// <summary>
@@ -38,15 +45,21 @@ public class InstituteTemplate
 
     [Required]
     [MaxLength(100)]
-    public string Name { get; set; } = string.Empty;
+    public string CourseName { get; set; } = string.Empty;
 
     public int InstituteId { get; set; }
 
     public Institute? Institute { get; set; }
 
-    public int ProjectId { get; set; }
+    /// <summary>Built-in / legacy catalog link to <see cref="Project"/>. Null when <see cref="InstituteProjectId"/> is set.</summary>
+    public int? ProjectId { get; set; }
 
     public Project? Project { get; set; }
+
+    /// <summary>Institute project row (custom or activated built-in). Null when <see cref="ProjectId"/> is set.</summary>
+    public int? InstituteProjectId { get; set; }
+
+    public InstituteProject? InstituteProject { get; set; }
 
     /// <summary>
     /// Optional squad linked to this template.

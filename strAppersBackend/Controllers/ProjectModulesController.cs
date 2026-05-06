@@ -47,7 +47,7 @@ namespace strAppersBackend.Controllers
         /// Get a specific project module by ID
         /// </summary>
         [HttpGet("{id}")]
-        public async Task<ActionResult<ProjectModule>> GetProjectModule(int id)
+        public async Task<ActionResult<object>> GetProjectModule(int id)
         {
             try
             {
@@ -57,14 +57,24 @@ namespace strAppersBackend.Controllers
                     .Include(pm => pm.ModuleTypeNavigation)
                     .FirstOrDefaultAsync(pm => pm.Id == id);
 
-                if (projectModule == null)
+                if (projectModule != null)
+                {
+                    _logger.LogInformation($"Retrieved project module: {projectModule.Title}");
+                    return Ok(projectModule);
+                }
+
+                var instituteModule = await _context.InstituteProjectModules
+                    .Include(m => m.InstituteProject)
+                    .Include(m => m.ModuleTypeNavigation)
+                    .FirstOrDefaultAsync(pm => pm.Id == id);
+                if (instituteModule == null)
                 {
                     _logger.LogWarning($"Project module with ID {id} not found");
                     return NotFound(new { error = "Project module not found" });
                 }
 
-                _logger.LogInformation($"Retrieved project module: {projectModule.Title}");
-                return Ok(projectModule);
+                _logger.LogInformation($"Retrieved institute project module: {instituteModule.Title}");
+                return Ok(instituteModule);
             }
             catch (Exception ex)
             {
@@ -77,11 +87,28 @@ namespace strAppersBackend.Controllers
         /// Get all modules for a specific project (only ModuleType = 2).
         /// </summary>
         [HttpGet("by-project/{projectId}")]
-        public async Task<ActionResult<IEnumerable<ProjectModule>>> GetProjectModulesByProject(int projectId)
+        public async Task<ActionResult<object>> GetProjectModulesByProject(
+            int projectId,
+            [FromQuery] bool instituteProject = false)
         {
             try
             {
-                _logger.LogInformation($"Retrieving modules for project ID: {projectId}");
+                _logger.LogInformation(
+                    "Retrieving modules for project ID: {ProjectId} instituteProject={InstituteProject}",
+                    projectId,
+                    instituteProject);
+                if (instituteProject)
+                {
+                    var instituteModules = await _context.InstituteProjectModules
+                        .Include(pm => pm.ModuleTypeNavigation)
+                        .Where(pm => pm.InstituteProjectId == projectId && pm.ModuleType == 2)
+                        .OrderBy(pm => pm.Sequence ?? int.MaxValue)
+                        .ThenBy(pm => pm.Id)
+                        .ToListAsync();
+                    _logger.LogInformation($"Retrieved {instituteModules.Count} institute modules for project {projectId}");
+                    return Ok(instituteModules);
+                }
+
                 var projectModules = await _context.ProjectModules
                     .Include(pm => pm.ModuleTypeNavigation)
                     .Where(pm => pm.ProjectId == projectId && pm.ModuleType == 2)
@@ -102,10 +129,64 @@ namespace strAppersBackend.Controllers
         /// Create a new project module
         /// </summary>
         [HttpPost]
-        public async Task<ActionResult<ProjectModule>> CreateProjectModule([FromBody] CreateProjectModuleRequest request)
+        public async Task<ActionResult<object>> CreateProjectModule([FromBody] CreateProjectModuleRequest request)
         {
             try
             {
+                if (request.InstituteProjectId is int ipId && ipId > 0)
+                {
+                    _logger.LogInformation($"Creating new project module: {request.Title} for InstituteProjectId {ipId}");
+
+                    var ip = await _context.InstituteProjects.FindAsync(ipId);
+                    if (ip == null)
+                    {
+                        _logger.LogWarning($"InstituteProject with ID {ipId} not found");
+                        return BadRequest(new { error = "Institute project not found" });
+                    }
+                    if (ip.IsAvailable)
+                    {
+                        return StatusCode(403, new { error = "Activated projects are read-only." });
+                    }
+
+                    var moduleTypeIp = await _context.ModuleTypes.FindAsync(request.ModuleType);
+                    if (moduleTypeIp == null)
+                    {
+                        _logger.LogWarning($"Module type with ID {request.ModuleType} not found");
+                        return BadRequest(new { error = "Module type not found" });
+                    }
+
+                    int? nextSequenceIp = request.Sequence;
+                    if (!nextSequenceIp.HasValue)
+                    {
+                        var maxSeq = await _context.InstituteProjectModules
+                            .Where(pm => pm.InstituteProjectId == ipId)
+                            .Select(pm => (int?)(pm.Sequence ?? 0))
+                            .MaxAsync() ?? 0;
+                        nextSequenceIp = maxSeq + 1;
+                    }
+
+                    var projectModuleIp = new InstituteProjectModule
+                    {
+                        InstituteProjectId = ipId,
+                        ModuleType = request.ModuleType,
+                        Title = request.Title,
+                        Description = request.Description,
+                        Sequence = nextSequenceIp,
+                    };
+
+                    _context.InstituteProjectModules.Add(projectModuleIp);
+                    await _context.SaveChangesAsync();
+                    await SanitizeInstituteScopeTrelloBoardModuleIdsAsync(ipId);
+
+                    var createdModuleIp = await _context.InstituteProjectModules
+                        .Include(pm => pm.InstituteProject)
+                        .Include(pm => pm.ModuleTypeNavigation)
+                        .FirstOrDefaultAsync(pm => pm.Id == projectModuleIp.Id);
+
+                    _logger.LogInformation($"Created project module with ID: {projectModuleIp.Id}");
+                    return CreatedAtAction(nameof(GetProjectModule), new { id = projectModuleIp.Id }, createdModuleIp);
+                }
+
                 _logger.LogInformation($"Creating new project module: {request.Title} for project {request.ProjectId}");
 
                 // Verify project exists
@@ -174,47 +255,86 @@ namespace strAppersBackend.Controllers
                 _logger.LogInformation($"Updating project module with ID: {id}");
 
                 var projectModule = await _context.ProjectModules.FindAsync(id);
-                if (projectModule == null)
+                var instituteModule = projectModule == null
+                    ? await _context.InstituteProjectModules.FindAsync(id)
+                    : null;
+                if (projectModule == null && instituteModule == null)
                 {
                     _logger.LogWarning($"Project module with ID {id} not found");
                     return NotFound(new { error = "Project module not found" });
                 }
 
-                // Verify project exists if provided
-                if (request.ProjectId.HasValue)
+                if (instituteModule != null)
                 {
-                    var project = await _context.Projects.FindAsync(request.ProjectId.Value);
-                    if (project == null)
+                    var ip = await _context.InstituteProjects
+                        .AsNoTracking()
+                        .FirstOrDefaultAsync(p => p.Id == instituteModule.InstituteProjectId);
+                    if (ip?.IsAvailable == true)
                     {
-                        _logger.LogWarning($"Project with ID {request.ProjectId} not found");
-                        return BadRequest(new { error = "Project not found" });
+                        return StatusCode(403, new { error = "Activated projects are read-only." });
                     }
-                    projectModule.ProjectId = request.ProjectId.Value;
-                }
 
-                // Verify module type exists if provided
-                if (request.ModuleType.HasValue)
+                    if (request.ModuleType.HasValue)
+                    {
+                        var moduleType = await _context.ModuleTypes.FindAsync(request.ModuleType.Value);
+                        if (moduleType == null)
+                        {
+                            _logger.LogWarning($"Module type with ID {request.ModuleType} not found");
+                            return BadRequest(new { error = "Module type not found" });
+                        }
+                        instituteModule.ModuleType = request.ModuleType.Value;
+                    }
+
+                    if (!string.IsNullOrEmpty(request.Title))
+                        instituteModule.Title = request.Title;
+
+                    if (request.Description != null)
+                        instituteModule.Description = request.Description;
+
+                    if (request.Sequence.HasValue)
+                        instituteModule.Sequence = request.Sequence;
+
+                    await _context.SaveChangesAsync();
+                    await SanitizeInstituteScopeTrelloBoardModuleIdsAsync(instituteModule.InstituteProjectId);
+                }
+                else
                 {
-                    var moduleType = await _context.ModuleTypes.FindAsync(request.ModuleType.Value);
-                    if (moduleType == null)
+                    // Verify project exists if provided
+                    if (request.ProjectId.HasValue)
                     {
-                        _logger.LogWarning($"Module type with ID {request.ModuleType} not found");
-                        return BadRequest(new { error = "Module type not found" });
+                        var project = await _context.Projects.FindAsync(request.ProjectId.Value);
+                        if (project == null)
+                        {
+                            _logger.LogWarning($"Project with ID {request.ProjectId} not found");
+                            return BadRequest(new { error = "Project not found" });
+                        }
+                        projectModule!.ProjectId = request.ProjectId.Value;
                     }
-                    projectModule.ModuleType = request.ModuleType.Value;
+
+                    // Verify module type exists if provided
+                    if (request.ModuleType.HasValue)
+                    {
+                        var moduleType = await _context.ModuleTypes.FindAsync(request.ModuleType.Value);
+                        if (moduleType == null)
+                        {
+                            _logger.LogWarning($"Module type with ID {request.ModuleType} not found");
+                            return BadRequest(new { error = "Module type not found" });
+                        }
+                        projectModule!.ModuleType = request.ModuleType.Value;
+                    }
+
+                    if (!string.IsNullOrEmpty(request.Title))
+                        projectModule!.Title = request.Title;
+
+                    if (request.Description != null)
+                        projectModule!.Description = request.Description;
+
+                    if (request.Sequence.HasValue)
+                        projectModule!.Sequence = request.Sequence;
+
+                    await _context.SaveChangesAsync();
+                    await SanitizeProjectTrelloBoardModuleIdsAsync(projectModule!.ProjectId);
                 }
-
-                if (!string.IsNullOrEmpty(request.Title))
-                    projectModule.Title = request.Title;
-
-                if (request.Description != null)
-                    projectModule.Description = request.Description;
-
-                if (request.Sequence.HasValue)
-                    projectModule.Sequence = request.Sequence;
-
-                await _context.SaveChangesAsync();
-                await SanitizeProjectTrelloBoardModuleIdsAsync(projectModule.ProjectId);
 
                 _logger.LogInformation($"Updated project module with ID: {id}");
                 return NoContent();
@@ -242,15 +362,37 @@ namespace strAppersBackend.Controllers
                 _logger.LogInformation($"Deleting project module with ID: {id}");
 
                 var projectModule = await _context.ProjectModules.FindAsync(id);
-                if (projectModule == null)
+                var instituteModule = projectModule == null
+                    ? await _context.InstituteProjectModules.FindAsync(id)
+                    : null;
+                if (projectModule == null && instituteModule == null)
                 {
                     _logger.LogWarning($"Project module with ID {id} not found");
                     return NotFound(new { error = "Project module not found" });
                 }
 
-                _context.ProjectModules.Remove(projectModule);
-                await _context.SaveChangesAsync();
-                await SanitizeProjectTrelloBoardModuleIdsAsync(projectModule.ProjectId);
+                if (instituteModule != null)
+                {
+                    var ip = await _context.InstituteProjects
+                        .AsNoTracking()
+                        .FirstOrDefaultAsync(p => p.Id == instituteModule.InstituteProjectId);
+                    if (ip?.IsAvailable == true)
+                    {
+                        return StatusCode(403, new { error = "Activated projects are read-only." });
+                    }
+
+                    var ipid = instituteModule.InstituteProjectId;
+                    _context.InstituteProjectModules.Remove(instituteModule);
+                    await _context.SaveChangesAsync();
+                    await SanitizeInstituteScopeTrelloBoardModuleIdsAsync(ipid);
+                }
+                else
+                {
+                    var pid = projectModule!.ProjectId;
+                    _context.ProjectModules.Remove(projectModule);
+                    await _context.SaveChangesAsync();
+                    await SanitizeProjectTrelloBoardModuleIdsAsync(pid);
+                }
 
                 _logger.LogInformation($"Deleted project module with ID: {id}");
                 return NoContent();
@@ -357,6 +499,122 @@ namespace strAppersBackend.Controllers
             project.TrelloBoardJson = root.ToJsonString(new JsonSerializerOptions { WriteIndented = false });
             project.UpdatedAt = DateTime.UtcNow;
             await _context.SaveChangesAsync();
+        }
+
+        /// <summary>
+        /// Clears stale ModuleId values in <see cref="InstituteProject.TrelloBoardJson"/> and linked <see cref="InstituteTemplate.TrelloBoardJson"/> rows.
+        /// </summary>
+        private async Task SanitizeInstituteScopeTrelloBoardModuleIdsAsync(int instituteProjectId)
+        {
+            if (instituteProjectId <= 0)
+            {
+                return;
+            }
+
+            var validModuleIds = await _context.InstituteProjectModules
+                .AsNoTracking()
+                .Where(pm => pm.InstituteProjectId == instituteProjectId)
+                .Select(pm => pm.Id)
+                .ToListAsync();
+            var validSet = validModuleIds.ToHashSet();
+
+            var project = await _context.InstituteProjects.FirstOrDefaultAsync(p => p.Id == instituteProjectId);
+            if (project != null && !string.IsNullOrWhiteSpace(project.TrelloBoardJson))
+            {
+                if (TrySanitizeModuleIdsInJson(project.TrelloBoardJson, validSet, out var updatedIpJson))
+                {
+                    project.TrelloBoardJson = updatedIpJson;
+                    project.UpdatedAt = DateTime.UtcNow;
+                }
+            }
+
+            var templates = await _context.InstituteTemplates
+                .Where(t => t.InstituteProjectId == instituteProjectId)
+                .ToListAsync();
+            foreach (var t in templates)
+            {
+                if (string.IsNullOrWhiteSpace(t.TrelloBoardJson))
+                {
+                    continue;
+                }
+
+                if (TrySanitizeModuleIdsInJson(t.TrelloBoardJson, validSet, out var updatedTpl))
+                {
+                    t.TrelloBoardJson = updatedTpl;
+                }
+            }
+
+            await _context.SaveChangesAsync();
+        }
+
+        private static bool TrySanitizeModuleIdsInJson(string json, HashSet<int> validSet, out string updatedJson)
+        {
+            updatedJson = json;
+            JsonNode? root;
+            try
+            {
+                root = JsonNode.Parse(json);
+            }
+            catch (JsonException)
+            {
+                return false;
+            }
+
+            if (root == null)
+            {
+                return false;
+            }
+
+            var changed = false;
+
+            void Walk(JsonNode? node)
+            {
+                if (node is JsonObject obj)
+                {
+                    foreach (var key in obj.Select(kv => kv.Key).ToList())
+                    {
+                        var child = obj[key];
+                        if (string.Equals(key, "ModuleId", StringComparison.OrdinalIgnoreCase)
+                            && child is JsonValue jv)
+                        {
+                            int? idVal = null;
+                            if (jv.TryGetValue<int>(out var i))
+                            {
+                                idVal = i;
+                            }
+                            else if (jv.TryGetValue<string>(out var s) && int.TryParse(s?.Trim(), out var parsed))
+                            {
+                                idVal = parsed;
+                            }
+
+                            if (idVal.HasValue && !validSet.Contains(idVal.Value))
+                            {
+                                obj[key] = JsonValue.Create(string.Empty);
+                                changed = true;
+                                continue;
+                            }
+                        }
+
+                        Walk(child);
+                    }
+                }
+                else if (node is JsonArray arr)
+                {
+                    for (var i = 0; i < arr.Count; i++)
+                    {
+                        Walk(arr[i]);
+                    }
+                }
+            }
+
+            Walk(root);
+            if (!changed)
+            {
+                return false;
+            }
+
+            updatedJson = root.ToJsonString(new JsonSerializerOptions { WriteIndented = false });
+            return true;
         }
     }
 }

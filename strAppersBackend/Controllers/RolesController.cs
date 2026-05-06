@@ -111,12 +111,8 @@ namespace strAppersBackend.Controllers
                         return Ok(mapped);
                     }
 
-                    // Legacy fallback while data is being migrated.
-                    var legacyTemplateRoles = await _context.InstituteRoles.AsNoTracking()
-                        .Where(ir => ir.InstituteId == instituteId && ir.TemplateId == templateId.Value)
-                        .OrderBy(ir => ir.Name)
-                        .ToListAsync();
-                    return Ok(legacyTemplateRoles);
+                    // Squad-based source of truth: template-scoped role rows are represented by InstituteSquadRoles.
+                    return Ok(new List<InstituteRole>());
                 }
 
                 var list = await _context.InstituteRoles.AsNoTracking()
@@ -161,15 +157,7 @@ namespace strAppersBackend.Controllers
                     .Select(x => x.Name)
                     .ToListAsync();
 
-                // Legacy fallback during migration period.
-                var fromLegacyTemplateRoles = await _context.InstituteRoles
-                    .AsNoTracking()
-                    .Where(r => r.InstituteId == instituteId && r.TemplateId != null)
-                    .Select(r => r.Name)
-                    .ToListAsync();
-
                 var names = fromSquadTemplates
-                    .Concat(fromLegacyTemplateRoles)
                     .Where(n => !string.IsNullOrWhiteSpace(n))
                     .Select(n => n.Trim())
                     .Distinct(StringComparer.OrdinalIgnoreCase)
@@ -270,7 +258,7 @@ namespace strAppersBackend.Controllers
                             ?? new InstituteSquad
                             {
                                 InstituteId = request.InstituteId,
-                                Name = $"{template.Name} Squad",
+                                Name = $"{template.CourseName} Squad",
                                 IsActive = true,
                                 CreatedAt = now,
                             };
@@ -282,12 +270,17 @@ namespace strAppersBackend.Controllers
                         squad = new InstituteSquad
                         {
                             InstituteId = request.InstituteId,
-                            Name = $"{template.Name} Squad",
+                            Name = $"{template.CourseName} Squad",
                             IsActive = true,
                             CreatedAt = now,
                         };
                         await _context.InstituteSquads.AddAsync(squad);
                     }
+
+                    if (request.RequireDeveloperRule.HasValue)
+                        squad.RequireDeveloperRule = request.RequireDeveloperRule.Value;
+                    else if (squad.Id == 0)
+                        squad.RequireDeveloperRule = false;
 
                     await _context.SaveChangesAsync();
 
@@ -394,6 +387,7 @@ namespace strAppersBackend.Controllers
                     return Ok(new
                     {
                         instituteId = request.InstituteId,
+                        requireDeveloperRule = squad.RequireDeveloperRule,
                         requireDeveloperRuleEcho = request.RequireDeveloperRule,
                         templateScopeId = request.TemplateScopeId,
                         squadId = squad.Id,
@@ -426,7 +420,8 @@ namespace strAppersBackend.Controllers
                         }
                     }
 
-                    var assignedTemplate = forceTemplateId ?? (dto.TemplateId is > 0 ? dto.TemplateId : null);
+                    // Base Roles Config save should never write template-scoped rows.
+                    int? assignedTemplate = null;
 
                     if (row != null)
                     {
@@ -492,6 +487,70 @@ namespace strAppersBackend.Controllers
             {
                 _logger.LogError(ex, "Error saving institute roles for institute {InstituteId}", request.InstituteId);
                 return StatusCode(500, "An error occurred while saving institute roles.");
+            }
+        }
+
+        /// <summary>
+        /// Deletes one institute-only custom role (<see cref="InstituteRole"/> with <c>TemplateId == null</c>).
+        /// Refuses if the role name exists in the global <see cref="Role"/> catalog, or if any squad references it.
+        /// </summary>
+        [HttpDelete("use/institute/{instituteId:int}/role/{roleId:int}")]
+        public async Task<ActionResult<object>> DeleteInstituteRole(int instituteId, int roleId)
+        {
+            try
+            {
+                var row = await _context.InstituteRoles
+                    .FirstOrDefaultAsync(r => r.Id == roleId && r.InstituteId == instituteId && r.TemplateId == null);
+                if (row == null)
+                    return NotFound($"Institute base role {roleId} was not found for institute {instituteId}.");
+
+                var roleName = (row.Name ?? string.Empty).Trim();
+                if (!string.IsNullOrWhiteSpace(roleName))
+                {
+                    var isGlobalCatalogRole = await _context.Roles
+                        .AsNoTracking()
+                        .AnyAsync(r => r.Name.ToLower() == roleName.ToLower());
+                    if (isGlobalCatalogRole)
+                    {
+                        return BadRequest(
+                            $"Role \"{row.Name}\" is part of the global role catalog and cannot be deleted. You can turn it off for this institute or remove it from squads, but the system role itself stays in the catalog.");
+                    }
+                }
+
+                var usedByBaseLink = await _context.InstituteSquadRoles
+                    .AsNoTracking()
+                    .Join(
+                        _context.InstituteSquads.AsNoTracking().Where(s => s.InstituteId == instituteId),
+                        sr => sr.SquadId,
+                        s => s.Id,
+                        (sr, s) => sr)
+                    .AnyAsync(sr => sr.BaseInstituteRoleId == roleId);
+
+                var usedByNameFallback =
+                    !string.IsNullOrWhiteSpace(roleName) &&
+                    await _context.InstituteSquadRoles
+                        .AsNoTracking()
+                        .Join(
+                            _context.InstituteSquads.AsNoTracking().Where(s => s.InstituteId == instituteId),
+                            sr => sr.SquadId,
+                            s => s.Id,
+                            (sr, s) => sr)
+                        .AnyAsync(sr => sr.Name != null && sr.Name.Trim().ToLower() == roleName.ToLower());
+
+                if (usedByBaseLink || usedByNameFallback)
+                {
+                    return BadRequest(
+                        $"Role \"{row.Name}\" is used in one or more squads. Remove it from those squad(s) first, then delete it.");
+                }
+
+                _context.InstituteRoles.Remove(row);
+                await _context.SaveChangesAsync();
+                return Ok(new { success = true, message = $"Role \"{row.Name}\" deleted." });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error deleting institute role {RoleId} for institute {InstituteId}", roleId, instituteId);
+                return StatusCode(500, "An error occurred while deleting the role.");
             }
         }
 

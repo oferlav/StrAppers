@@ -185,12 +185,19 @@ public partial class ProjectsController : ControllerBase
         public string? ProjectBrief { get; set; }
         public string? Name { get; set; }
         public string? TrelloBoardJson { get; set; }
+        /// <summary>Trello board URL from <c>InstituteTemplates.BoardURL</c> when this payload comes from an institute template row.</summary>
+        public string? BoardUrl { get; set; }
     }
 
     public sealed class InstituteTemplateListItemDto
     {
         public int Id { get; set; }
         public string Name { get; set; } = string.Empty;
+        /// <summary>Trello board URL when generated for this institute template (same as <c>InstituteTemplates.BoardURL</c>).</summary>
+        public string? BoardUrl { get; set; }
+
+        /// <summary><see cref="InstituteTemplates.IsActive"/> — assigned course for Project Designs.</summary>
+        public bool IsActive { get; set; }
     }
 
     public sealed class CourseCatalogItemDto
@@ -199,6 +206,25 @@ public partial class ProjectsController : ControllerBase
         public int ProjectId { get; set; }
         public int? InstituteTemplateId { get; set; }
         public string Name { get; set; } = string.Empty;
+        /// <summary>Underlying project design title (for pickers that should show project name, e.g. Create Course).</summary>
+        public string? ProjectTitle { get; set; }
+        /// <summary>Set for <see cref="Kind"/> institute rows when a board URL was saved.</summary>
+        public string? BoardUrl { get; set; }
+
+        /// <summary>For <see cref="Kind"/> institute: true when <see cref="ProjectId"/> is an <see cref="InstituteProject"/> id.</summary>
+        public bool InstituteProjectDesign { get; set; }
+
+        /// <summary>Whether the underlying project is marked in use (Create Course / catalog filtering).</summary>
+        public bool InUse { get; set; } = true;
+
+        /// <summary>
+        /// Same readiness as <c>GET .../project-ready-validation</c> (not pending): required header fields + at least one ModuleType 2 module.
+        /// Catalog built-ins use catalog validation (typically ready).
+        /// </summary>
+        public bool IsReady { get; set; } = true;
+
+        /// <summary>Institute rows: <see cref="InstituteTemplates.IsActive"/> (active course in Project Designs). Built-in rows: false.</summary>
+        public bool IsActive { get; set; }
     }
 
     /// <summary>Project row for Courses &quot;Create Course&quot; project combo (institute-owned and optional global built-ins).</summary>
@@ -208,6 +234,36 @@ public partial class ProjectsController : ControllerBase
         public string Title { get; set; } = string.Empty;
         public int? InstituteId { get; set; }
         public bool IsBuiltIn { get; set; }
+        /// <summary>True when <see cref="Id"/> refers to <c>InstituteProjects</c> (custom or activated built-in copy).</summary>
+        public bool IsInstituteProject { get; set; }
+    }
+
+    /// <summary>Unified list item for Project Designs and institute project pickers (JSON matches <see cref="Project"/> fields used by the SPA plus flags).</summary>
+    public sealed class ProjectDesignsListItemDto
+    {
+        public int Id { get; set; }
+        public string Title { get; set; } = string.Empty;
+        /// <summary>Built-in catalog: student-facing course label (from <c>Projects.CourseName</c>).</summary>
+        public string? CourseName { get; set; }
+        /// <summary><see cref="InstituteProject"/> only: mirrored <c>Projects.CourseName</c> from catalog activate/copy.</summary>
+        public string? BuiltInCourseName { get; set; }
+        public string? Mission { get; set; }
+        public string? OneLiner { get; set; }
+        public string? Description { get; set; }
+        public string? ExtendedDescription { get; set; }
+        public string? ShortBrief { get; set; }
+        public string Priority { get; set; } = "Medium";
+        public int? OrganizationId { get; set; }
+        public int? InstituteId { get; set; }
+        public bool IsAvailable { get; set; }
+        public bool InUse { get; set; }
+        public bool? Kickoff { get; set; }
+        public string? CriteriaIds { get; set; }
+        public DateTime CreatedAt { get; set; }
+        public DateTime? UpdatedAt { get; set; }
+        /// <summary>True when the row is stored in <c>InstituteProjects</c>.</summary>
+        public bool InstituteProject { get; set; }
+        public int? BaseProjectId { get; set; }
     }
 
     public sealed class DuplicateProjectRequest
@@ -377,12 +433,40 @@ public partial class ProjectsController : ControllerBase
         public bool IsActive { get; set; }
     }
 
+    private sealed class CourseSourceForAssignment
+    {
+        public int TemplateId { get; set; } // 0 = built-in
+        public string Name { get; set; } = string.Empty;
+        public bool IsBuiltIn { get; set; }
+        public string TrelloBoardJson { get; set; } = string.Empty;
+        public List<(int Id, string Title, int Sequence)> SourceModules { get; set; } = new();
+        public InstituteTemplate? TemplateRow { get; set; }
+    }
+
+    private static string NormalizeProjectTitleKey(string? title)
+    {
+        return string.Join(
+            " ",
+            (title ?? string.Empty)
+                .Trim()
+                .Split(' ', StringSplitOptions.RemoveEmptyEntries))
+            .ToLowerInvariant();
+    }
+
+    private static string BuildCopyLikeTitle(string baseTitle, int suffixNumber, int limit)
+    {
+        var suffix = suffixNumber <= 1 ? "-Copy" : $"-Copy{suffixNumber}";
+        var maxBaseLen = Math.Max(1, limit - suffix.Length);
+        var trimmedBase = baseTitle.Length > maxBaseLen ? baseTitle[..maxBaseLen] : baseTitle;
+        return $"{trimmedBase}{suffix}";
+    }
+
     /// <summary>
     /// Create a new institute project design from scratch (minimal defaults).
     /// Route: POST /api/Projects/use/by-institute/create-empty
     /// </summary>
     [HttpPost("use/by-institute/create-empty")]
-    public async Task<ActionResult<Project>> CreateEmptyProjectDesignForInstitute()
+    public async Task<ActionResult<ProjectDesignsListItemDto>> CreateEmptyProjectDesignForInstitute()
     {
         try
         {
@@ -412,21 +496,49 @@ public partial class ProjectsController : ControllerBase
             }
 
             _logger.LogInformation(
-                "CreateEmptyProjectDesign: saving new project InstituteId={InstituteId}, OrganizationId={OrganizationId}",
+                "CreateEmptyProjectDesign: saving new InstituteProject InstituteId={InstituteId}, OrganizationId={OrganizationId}",
                 instituteId.Value,
                 organizationId);
 
-            var project = new Project
+            const int titleLimit = 200;
+            const string defaultBaseTitle = "New Project Design";
+            var builtInTitles = await _context.Projects.AsNoTracking()
+                .Where(p => p.InstituteId == null && p.IsAvailable && p.Title != null)
+                .Select(p => p.Title!)
+                .ToListAsync();
+            var instituteTitles = await _context.InstituteProjects.AsNoTracking()
+                .Where(ip => ip.InstituteId == instituteId.Value && ip.Title != null)
+                .Select(ip => ip.Title!)
+                .ToListAsync();
+            var builtInTitleKeys = new HashSet<string>(
+                builtInTitles.Select(NormalizeProjectTitleKey),
+                StringComparer.Ordinal);
+            var instituteTitleKeys = new HashSet<string>(
+                instituteTitles.Select(NormalizeProjectTitleKey),
+                StringComparer.Ordinal);
+            var mergedTakenKeys = new HashSet<string>(instituteTitleKeys, StringComparer.Ordinal);
+            foreach (var k in builtInTitleKeys) mergedTakenKeys.Add(k);
+
+            var resolvedTitle = defaultBaseTitle;
+            var n = 1;
+            while (mergedTakenKeys.Contains(NormalizeProjectTitleKey(resolvedTitle)))
             {
-                Title = "New Project Design",
+                n++;
+                resolvedTitle = BuildCopyLikeTitle(defaultBaseTitle, n, titleLimit);
+            }
+
+            var project = new InstituteProject
+            {
+                Title = resolvedTitle,
                 OrganizationId = organizationId,
                 InstituteId = instituteId.Value,
                 IsAvailable = false,
+                InUse = true,
                 Priority = "Medium",
-                CreatedAt = DateTime.UtcNow
+                CreatedAt = DateTime.UtcNow,
             };
 
-            _context.Projects.Add(project);
+            _context.InstituteProjects.Add(project);
             await _context.SaveChangesAsync();
 
             var hasModuleType2 = await _context.ModuleTypes
@@ -434,9 +546,9 @@ public partial class ProjectsController : ControllerBase
                 .AnyAsync(mt => mt.Id == 2);
             if (hasModuleType2)
             {
-                _context.ProjectModules.Add(new ProjectModule
+                _context.InstituteProjectModules.Add(new InstituteProjectModule
                 {
-                    ProjectId = project.Id,
+                    InstituteProjectId = project.Id,
                     ModuleType = 2,
                     Title = "Module 1",
                     Description = string.Empty,
@@ -444,25 +556,27 @@ public partial class ProjectsController : ControllerBase
                 });
                 await _context.SaveChangesAsync();
                 _logger.LogInformation(
-                    "CreateEmptyProjectDesign: created default module for ProjectId={ProjectId}",
+                    "CreateEmptyProjectDesign: created default module for InstituteProjectId={InstituteProjectId}",
                     project.Id);
             }
             else
             {
                 _logger.LogWarning(
-                    "CreateEmptyProjectDesign: ModuleType=2 not found; skipped default ProjectModule row for ProjectId={ProjectId}",
+                    "CreateEmptyProjectDesign: ModuleType=2 not found; skipped default ProjectModule row for InstituteProjectId={InstituteProjectId}",
                     project.Id);
             }
 
             _logger.LogInformation(
-                "CreateEmptyProjectDesign: saved ProjectId={ProjectId}, Title={Title}",
+                "CreateEmptyProjectDesign: saved InstituteProjectId={ProjectId}, Title={Title}",
                 project.Id,
                 project.Title);
 
-            return Ok(new Project
+            return Ok(new ProjectDesignsListItemDto
             {
                 Id = project.Id,
                 Title = project.Title,
+                CourseName = project.Title,
+                BuiltInCourseName = project.BuiltInCourseName,
                 Mission = project.Mission,
                 OneLiner = project.OneLiner,
                 Description = project.Description,
@@ -472,10 +586,13 @@ public partial class ProjectsController : ControllerBase
                 OrganizationId = project.OrganizationId,
                 InstituteId = project.InstituteId,
                 IsAvailable = project.IsAvailable,
+                InUse = project.InUse,
                 Kickoff = project.Kickoff,
                 CriteriaIds = project.CriteriaIds,
                 CreatedAt = project.CreatedAt,
-                UpdatedAt = project.UpdatedAt
+                UpdatedAt = project.UpdatedAt,
+                InstituteProject = true,
+                BaseProjectId = project.BaseProjectId,
             });
         }
         catch (DbUpdateException dbEx)
@@ -533,6 +650,38 @@ public partial class ProjectsController : ControllerBase
                 return Unauthorized("Institute authentication context is missing or invalid.");
             }
 
+            var ip = await _context.InstituteProjects.FirstOrDefaultAsync(p => p.Id == id);
+            if (ip != null)
+            {
+                if (ip.InstituteId != authInstituteId.Value)
+                {
+                    return Forbid();
+                }
+
+                // Copies from catalog share BaseProjectId with the global Project row. Student.Project* FK targets Projects.Id,
+                // so selections may store the catalog id. Only block delete when *this institute's* students still reference
+                // that catalog id — not global ProjectInstances or other institutes (those must not block removing the copy).
+                if (ip.BaseProjectId is int catalogPid)
+                {
+                    if (await _context.Students.AsNoTracking().AnyAsync(s =>
+                            s.InstituteId == authInstituteId.Value
+                            && (s.ProjectId == catalogPid
+                                || s.ProjectPriority1 == catalogPid
+                                || s.ProjectPriority2 == catalogPid
+                                || s.ProjectPriority3 == catalogPid
+                                || s.ProjectPriority4 == catalogPid)))
+                    {
+                        return Conflict("This project is still used in student project selections and cannot be deleted yet.");
+                    }
+                }
+
+                _context.InstituteProjects.Remove(ip);
+                await _context.SaveChangesAsync();
+
+                _logger.LogInformation("Institute {InstituteId} deleted InstituteProject {ProjectId}", authInstituteId.Value, id);
+                return Ok(new { success = true, id, instituteProject = true });
+            }
+
             var project = await _context.Projects.FirstOrDefaultAsync(p => p.Id == id);
             if (project == null)
             {
@@ -568,7 +717,7 @@ public partial class ProjectsController : ControllerBase
             await _context.SaveChangesAsync();
 
             _logger.LogInformation("Institute {InstituteId} deleted project {ProjectId}", authInstituteId.Value, id);
-            return Ok(new { success = true, id });
+            return Ok(new { success = true, id, instituteProject = false });
         }
         catch (DbUpdateException ex)
         {
@@ -1120,11 +1269,11 @@ public partial class ProjectsController : ControllerBase
 
     /// <summary>
     /// Get all available projects for the given institute.
-    /// Includes global projects (InstituteId is null) and institute-owned projects.
+    /// Built-in catalog rows are always included (even when activated/copied into <c>InstituteProjects</c>).
     /// Route: GET /api/Projects/use/by-institute
     /// </summary>
     [HttpGet("use/by-institute")]
-    public async Task<ActionResult<IEnumerable<Project>>> GetAvailableProjectsForInstitute()
+    public async Task<ActionResult<IEnumerable<ProjectDesignsListItemDto>>> GetAvailableProjectsForInstitute()
     {
         try
         {
@@ -1134,13 +1283,43 @@ public partial class ProjectsController : ControllerBase
                 return Unauthorized("Institute authentication context is missing or invalid.");
             }
 
-            var projects = await _context.Projects
+            var iid = instituteId.Value;
+
+            var builtIns = await _context.Projects
                 .AsNoTracking()
                 .Where(p =>
-                    p.InstituteId == instituteId.Value ||
-                    (p.InstituteId == null && p.IsAvailable))
+                    p.InstituteId == null &&
+                    p.IsAvailable)
+                .OrderBy(p => p.CourseName ?? p.Title)
+                .Select(p => new ProjectDesignsListItemDto
+                {
+                    Id = p.Id,
+                    Title = p.Title,
+                    CourseName = p.CourseName ?? p.Title,
+                    Mission = p.Mission,
+                    OneLiner = p.OneLiner,
+                    Description = p.Description,
+                    ExtendedDescription = p.ExtendedDescription,
+                    ShortBrief = p.ShortBrief,
+                    Priority = p.Priority,
+                    OrganizationId = p.OrganizationId,
+                    InstituteId = p.InstituteId,
+                    IsAvailable = p.IsAvailable,
+                    InUse = p.InUse,
+                    Kickoff = p.Kickoff,
+                    CriteriaIds = p.CriteriaIds,
+                    CreatedAt = p.CreatedAt,
+                    UpdatedAt = p.UpdatedAt,
+                    InstituteProject = false,
+                    BaseProjectId = null,
+                })
+                .ToListAsync();
+
+            var legacyInstitute = await _context.Projects
+                .AsNoTracking()
+                .Where(p => p.InstituteId == iid)
                 .OrderBy(p => p.Title)
-                .Select(p => new Project
+                .Select(p => new ProjectDesignsListItemDto
                 {
                     Id = p.Id,
                     Title = p.Title,
@@ -1157,11 +1336,52 @@ public partial class ProjectsController : ControllerBase
                     Kickoff = p.Kickoff,
                     CriteriaIds = p.CriteriaIds,
                     CreatedAt = p.CreatedAt,
-                    UpdatedAt = p.UpdatedAt
+                    UpdatedAt = p.UpdatedAt,
+                    InstituteProject = false,
+                    BaseProjectId = null,
                 })
                 .ToListAsync();
 
-            return Ok(projects);
+            var fromInstituteTable = await _context.InstituteProjects
+                .AsNoTracking()
+                .Where(ip => ip.InstituteId == iid)
+                .OrderBy(p => p.Title)
+                .Select(p => new ProjectDesignsListItemDto
+                {
+                    Id = p.Id,
+                    Title = p.Title,
+                    BuiltInCourseName = p.BuiltInCourseName,
+                    CourseName = p.BuiltInCourseName ?? p.Title,
+                    Mission = p.Mission,
+                    OneLiner = p.OneLiner,
+                    Description = p.Description,
+                    ExtendedDescription = p.ExtendedDescription,
+                    ShortBrief = p.ShortBrief,
+                    Priority = p.Priority,
+                    OrganizationId = p.OrganizationId,
+                    InstituteId = p.InstituteId,
+                    IsAvailable = p.IsAvailable,
+                    InUse = p.InUse,
+                    Kickoff = p.Kickoff,
+                    CriteriaIds = p.CriteriaIds,
+                    CreatedAt = p.CreatedAt,
+                    UpdatedAt = p.UpdatedAt,
+                    InstituteProject = true,
+                    BaseProjectId = p.BaseProjectId,
+                })
+                .ToListAsync();
+
+            var merged = new List<ProjectDesignsListItemDto>(builtIns.Count + legacyInstitute.Count + fromInstituteTable.Count);
+            merged.AddRange(builtIns);
+            merged.AddRange(legacyInstitute);
+            merged.AddRange(fromInstituteTable);
+            merged.Sort((a, b) =>
+                string.Compare(
+                    a.CourseName ?? a.Title,
+                    b.CourseName ?? b.Title,
+                    StringComparison.OrdinalIgnoreCase));
+
+            return Ok(merged);
         }
         catch (Exception ex)
         {
@@ -1171,11 +1391,15 @@ public partial class ProjectsController : ControllerBase
     }
 
     /// <summary>
-    /// Set project InUse flag for the current institute context.
+    /// Set project <c>InUse</c> flag for the current institute context. Does not delete <see cref="InstituteProjects"/> rows;
+    /// when <c>InUse</c> becomes false, institute projects also get <see cref="InstituteProject.IsAvailable"/> set to false (same as institute-owned <see cref="Project"/> rows).
     /// Route: POST /api/Projects/use/by-institute/set-use/{id}
     /// </summary>
     [HttpPost("use/by-institute/set-use/{id:int}")]
-    public async Task<ActionResult> SetProjectInUseByInstitute(int id, [FromBody] SetProjectInUseRequest? request)
+    public async Task<ActionResult> SetProjectInUseByInstitute(
+        int id,
+        [FromBody] SetProjectInUseRequest? request,
+        [FromQuery] bool instituteProject = false)
     {
         if (id <= 0)
         {
@@ -1188,6 +1412,39 @@ public partial class ProjectsController : ControllerBase
             if (!instituteId.HasValue || instituteId.Value <= 0)
             {
                 return Unauthorized("Institute authentication context is missing or invalid.");
+            }
+
+            if (instituteProject)
+            {
+                var ip = await _context.InstituteProjects.FirstOrDefaultAsync(p => p.Id == id);
+                if (ip == null)
+                {
+                    return NotFound($"Institute project with ID {id} not found.");
+                }
+
+                if (ip.InstituteId != instituteId.Value)
+                {
+                    return Forbid();
+                }
+
+                var nextInUseIp = request?.InUse ?? true;
+                ip.InUse = nextInUseIp;
+                if (!ip.InUse)
+                {
+                    ip.IsAvailable = false;
+                }
+
+                ip.UpdatedAt = DateTime.UtcNow;
+                await _context.SaveChangesAsync();
+
+                return Ok(new
+                {
+                    success = true,
+                    id = ip.Id,
+                    inUse = ip.InUse,
+                    isAvailable = ip.IsAvailable,
+                    instituteProject = true,
+                });
             }
 
             var project = await _context.Projects.FirstOrDefaultAsync(p => p.Id == id);
@@ -1216,6 +1473,7 @@ public partial class ProjectsController : ControllerBase
                 id = project.Id,
                 inUse = project.InUse,
                 isAvailable = project.IsAvailable,
+                instituteProject = false,
             });
         }
         catch (Exception ex)
@@ -1230,7 +1488,9 @@ public partial class ProjectsController : ControllerBase
     /// Route: GET /api/Projects/use/by-institute/project-ready-validation?projectId=
     /// </summary>
     [HttpGet("use/by-institute/project-ready-validation")]
-    public async Task<ActionResult<ProjectReadyValidationDto>> GetProjectReadyValidation([FromQuery] int projectId)
+    public async Task<ActionResult<ProjectReadyValidationDto>> GetProjectReadyValidation(
+        [FromQuery] int projectId,
+        [FromQuery] bool instituteProject = false)
     {
         if (projectId <= 0)
         {
@@ -1243,6 +1503,18 @@ public partial class ProjectsController : ControllerBase
             if (!instituteId.HasValue || instituteId.Value <= 0)
             {
                 return Unauthorized("Institute authentication context is missing or invalid.");
+            }
+
+            if (instituteProject)
+            {
+                var ipOk = await _context.InstituteProjects.AsNoTracking()
+                    .AnyAsync(ip => ip.Id == projectId && ip.InstituteId == instituteId.Value);
+                if (!ipOk)
+                {
+                    return NotFound($"Institute project with ID {projectId} was not found for this institute.");
+                }
+
+                return Ok(await BuildProjectReadyValidationForInstituteProjectRowAsync(projectId, instituteId.Value));
             }
 
             var scoped = await _context.Projects
@@ -1258,11 +1530,7 @@ public partial class ProjectsController : ControllerBase
 
             if (scoped.InstituteId == null)
             {
-                return Ok(new ProjectReadyValidationDto
-                {
-                    IsReady = true,
-                    MissingRequirements = new List<string>()
-                });
+                return Ok(await BuildProjectReadyValidationForCatalogProjectAsync(projectId));
             }
 
             if (scoped.InstituteId != instituteId.Value)
@@ -1284,7 +1552,7 @@ public partial class ProjectsController : ControllerBase
     /// Route: GET /api/Projects/use/by-institute/header/{id}
     /// </summary>
     [HttpGet("use/by-institute/header/{id:int}")]
-    public async Task<ActionResult<ProjectHeaderDto>> GetProjectDesignHeader(int id)
+    public async Task<ActionResult<ProjectHeaderDto>> GetProjectDesignHeader(int id, [FromQuery] bool instituteProject = false)
     {
         try
         {
@@ -1292,6 +1560,32 @@ public partial class ProjectsController : ControllerBase
             if (!instituteId.HasValue || instituteId.Value <= 0)
             {
                 return Unauthorized("Institute authentication context is missing or invalid.");
+            }
+
+            if (instituteProject)
+            {
+                var headerIp = await _context.InstituteProjects
+                    .AsNoTracking()
+                    .Where(p => p.Id == id && p.InstituteId == instituteId.Value)
+                    .Select(p => new ProjectHeaderDto
+                    {
+                        Id = p.Id,
+                        Title = p.Title,
+                        Logo = p.Logo,
+                        Mission = p.Mission,
+                        ShortBrief = p.ShortBrief,
+                        OneLiner = p.OneLiner,
+                        Description = p.Description,
+                        CustomerPastStory = p.CustomerPastStory,
+                    })
+                    .FirstOrDefaultAsync();
+
+                if (headerIp == null)
+                {
+                    return NotFound($"Institute project with ID {id} not found for institute {instituteId.Value}.");
+                }
+
+                return Ok(headerIp);
             }
 
             var project = await _context.Projects
@@ -2010,7 +2304,8 @@ Staff request:
     [HttpPost("use/by-institute/header/update/{id:int}")]
     public async Task<ActionResult<ProjectHeaderDto>> UpdateProjectDesignHeader(
         int id,
-        [FromBody] UpdateProjectHeaderRequest request)
+        [FromBody] UpdateProjectHeaderRequest request,
+        [FromQuery] bool instituteProject = false)
     {
         try
         {
@@ -2023,6 +2318,68 @@ Staff request:
             if (request == null)
             {
                 return BadRequest("Request body is required.");
+            }
+
+            if (instituteProject)
+            {
+                var ip = await _context.InstituteProjects
+                    .FirstOrDefaultAsync(p => p.Id == id && p.InstituteId == instituteId.Value);
+
+                if (ip == null)
+                {
+                    return NotFound($"Institute project with ID {id} not found for institute {instituteId.Value}.");
+                }
+
+                const int titleMaxIp = 200;
+                var titleIp = ClampStringToMaxLength(ClampToMaxWordsString(request.Title, EffectiveHeaderProjectNameWords) ?? string.Empty, titleMaxIp);
+                if (string.IsNullOrWhiteSpace(titleIp))
+                {
+                    return BadRequest("Title is required.");
+                }
+
+                if (ip.IsAvailable)
+                {
+                    return StatusCode(StatusCodes.Status403Forbidden, "Activated projects are read-only.");
+                }
+
+                var normalizedTitleIp = NormalizeProjectTitleKey(titleIp);
+                var builtInTitlesForValidation = await _context.Projects
+                    .AsNoTracking()
+                    .Where(p => p.InstituteId == null && p.IsAvailable && p.Title != null)
+                    .Select(p => new { p.Id, p.Title })
+                    .ToListAsync();
+                var hasBuiltInTitleConflict = builtInTitlesForValidation.Any(p =>
+                    NormalizeProjectTitleKey(p.Title) == normalizedTitleIp &&
+                    !(ip.BaseProjectId.HasValue && p.Id == ip.BaseProjectId.Value));
+                if (hasBuiltInTitleConflict)
+                {
+                    return Conflict("This title is reserved by a built-in catalog project. Please choose a different project name.");
+                }
+
+                ip.Title = titleIp;
+                ip.Logo = string.IsNullOrWhiteSpace(request.Logo) ? null : request.Logo.Trim();
+                ip.Mission = string.IsNullOrWhiteSpace(request.Mission) ? null : ClampStringToMaxLength(ClampToMaxWordsString(request.Mission, EffectiveHeaderMissionWords), 2000);
+                ip.ShortBrief = string.IsNullOrWhiteSpace(request.ShortBrief) ? null : ClampStringToMaxLength(ClampToMaxWordsString(request.ShortBrief, EffectiveHeaderShortBriefWords), 2000);
+                ip.OneLiner = string.IsNullOrWhiteSpace(request.OneLiner) ? null : ClampStringToMaxLength(ClampToMaxWordsString(request.OneLiner, EffectiveHeaderOneLinerWords), 250);
+                ip.Description = string.IsNullOrWhiteSpace(request.Description) ? null : request.Description.Trim();
+                ip.CustomerPastStory = string.IsNullOrWhiteSpace(request.CustomerPastStory)
+                    ? null
+                    : request.CustomerPastStory.Trim();
+                ip.UpdatedAt = DateTime.UtcNow;
+
+                await _context.SaveChangesAsync();
+
+                return Ok(new ProjectHeaderDto
+                {
+                    Id = ip.Id,
+                    Title = ip.Title,
+                    Logo = ip.Logo,
+                    Mission = ip.Mission,
+                    ShortBrief = ip.ShortBrief,
+                    OneLiner = ip.OneLiner,
+                    Description = ip.Description,
+                    CustomerPastStory = ip.CustomerPastStory,
+                });
             }
 
             var project = await _context.Projects
@@ -2087,6 +2444,7 @@ Staff request:
     public async Task<ActionResult> UploadDesignDocumentByInstitute(
         int id,
         [FromForm] IFormFile? file,
+        [FromQuery] bool instituteProject = false,
         CancellationToken cancellationToken = default)
     {
         if (id <= 0)
@@ -2112,11 +2470,25 @@ Staff request:
                 return Unauthorized("Institute authentication context is missing or invalid.");
             }
 
-            var project = await _context.Projects
-                .FirstOrDefaultAsync(p => p.Id == id && (p.InstituteId == null || p.InstituteId == instituteId.Value), cancellationToken);
-            if (project == null)
+            InstituteProject? ip = null;
+            Project? project = null;
+            if (instituteProject)
             {
-                return NotFound($"Project with ID {id} not found for this institute context.");
+                ip = await _context.InstituteProjects
+                    .FirstOrDefaultAsync(p => p.Id == id && p.InstituteId == instituteId.Value, cancellationToken);
+                if (ip == null)
+                {
+                    return NotFound($"Institute project with ID {id} not found for this institute context.");
+                }
+            }
+            else
+            {
+                project = await _context.Projects
+                    .FirstOrDefaultAsync(p => p.Id == id && (p.InstituteId == null || p.InstituteId == instituteId.Value), cancellationToken);
+                if (project == null)
+                {
+                    return NotFound($"Project with ID {id} not found for this institute context.");
+                }
             }
 
             await using var memory = new MemoryStream();
@@ -2150,17 +2522,30 @@ Staff request:
                     await _azureBlobStorage.DeleteBlobIfExistsAsync(blobUri, cancellationToken);
                 }
                 _logger.LogWarning(
-                    "UPLOAD_DESIGN_MARKER_v1 parse-failed: ProjectId={ProjectId}, FileName={FileName}, Ext={Ext}",
+                    "UPLOAD_DESIGN_MARKER_v1 parse-failed: ProjectId={ProjectId}, InstituteProject={Ip}, FileName={FileName}, Ext={Ext}",
                     id,
+                    instituteProject,
                     file.FileName,
                     ext);
                 return BadRequest("The file uploaded successfully, but we could not extract readable text. Please upload a text-based PDF, DOCX, or PPTX.");
             }
 
-            project.SystemDesign = extractedText.Trim();
-            project.SystemDesignDoc = bytes;
-            project.SystemDesignFormatted = $"{UploadedDesignMarker}\nBlobUrl: {blobUrl}\nFileName: {file.FileName}\nUploadedAtUtc: {DateTime.UtcNow:O}";
-            project.UpdatedAt = DateTime.UtcNow;
+            var textOut = extractedText.Trim();
+            if (instituteProject && ip != null)
+            {
+                ip.SystemDesign = textOut;
+                ip.SystemDesignDoc = bytes;
+                ip.SystemDesignFormatted = $"{UploadedDesignMarker}\nBlobUrl: {blobUrl}\nFileName: {file.FileName}\nUploadedAtUtc: {DateTime.UtcNow:O}";
+                ip.UpdatedAt = DateTime.UtcNow;
+            }
+            else if (project != null)
+            {
+                project.SystemDesign = textOut;
+                project.SystemDesignDoc = bytes;
+                project.SystemDesignFormatted = $"{UploadedDesignMarker}\nBlobUrl: {blobUrl}\nFileName: {file.FileName}\nUploadedAtUtc: {DateTime.UtcNow:O}";
+                project.UpdatedAt = DateTime.UtcNow;
+            }
+
             await _context.SaveChangesAsync(cancellationToken);
 
             if (blobUri != null)
@@ -2169,10 +2554,11 @@ Staff request:
             }
 
             _logger.LogInformation(
-                "UPLOAD_DESIGN_MARKER_v1 success: ProjectId={ProjectId}, FileName={FileName}, TextChars={Chars}, BlobUrl={BlobUrl}",
+                "UPLOAD_DESIGN_MARKER_v1 success: ProjectId={ProjectId}, InstituteProject={Ip}, FileName={FileName}, TextChars={Chars}, BlobUrl={BlobUrl}",
                 id,
+                instituteProject,
                 file.FileName,
-                project.SystemDesign.Length,
+                textOut.Length,
                 blobUrl);
 
             return Ok(new
@@ -2180,7 +2566,7 @@ Staff request:
                 success = true,
                 message = "Design document uploaded, parsed, and saved successfully.\nUse the AI assistant to build your modules—tell it how many modules you want, and it will generate professional titles and module content based on this design.",
                 blobUrl,
-                parsedChars = project.SystemDesign.Length,
+                parsedChars = textOut.Length,
             });
         }
         catch (Exception ex)
@@ -2200,6 +2586,7 @@ Staff request:
     public async Task<ActionResult> UploadCustomerStoryDocumentByInstitute(
         int id,
         [FromForm] IFormFile? file,
+        [FromQuery] bool instituteProject = false,
         CancellationToken cancellationToken = default)
     {
         if (id <= 0)
@@ -2225,11 +2612,25 @@ Staff request:
                 return Unauthorized("Institute authentication context is missing or invalid.");
             }
 
-            var project = await _context.Projects
-                .FirstOrDefaultAsync(p => p.Id == id && (p.InstituteId == null || p.InstituteId == instituteId.Value), cancellationToken);
-            if (project == null)
+            InstituteProject? ip = null;
+            Project? project = null;
+            if (instituteProject)
             {
-                return NotFound($"Project with ID {id} not found for this institute context.");
+                ip = await _context.InstituteProjects
+                    .FirstOrDefaultAsync(p => p.Id == id && p.InstituteId == instituteId.Value, cancellationToken);
+                if (ip == null)
+                {
+                    return NotFound($"Institute project with ID {id} not found for this institute context.");
+                }
+            }
+            else
+            {
+                project = await _context.Projects
+                    .FirstOrDefaultAsync(p => p.Id == id && (p.InstituteId == null || p.InstituteId == instituteId.Value), cancellationToken);
+                if (project == null)
+                {
+                    return NotFound($"Project with ID {id} not found for this institute context.");
+                }
             }
 
             await using var memory = new MemoryStream();
@@ -2263,15 +2664,26 @@ Staff request:
                     await _azureBlobStorage.DeleteBlobIfExistsAsync(blobUri, cancellationToken);
                 }
                 _logger.LogWarning(
-                    "UPLOAD_CUSTOMER_STORY_MARKER_v1 parse-failed: ProjectId={ProjectId}, FileName={FileName}, Ext={Ext}",
+                    "UPLOAD_CUSTOMER_STORY_MARKER_v1 parse-failed: ProjectId={ProjectId}, InstituteProject={Ip}, FileName={FileName}, Ext={Ext}",
                     id,
+                    instituteProject,
                     file.FileName,
                     ext);
                 return BadRequest("The file uploaded successfully, but we could not extract readable text. Please upload a text-based PDF, DOCX, or PPTX.");
             }
 
-            project.CustomerPastStory = extractedText.Trim();
-            project.UpdatedAt = DateTime.UtcNow;
+            var storyText = extractedText.Trim();
+            if (instituteProject && ip != null)
+            {
+                ip.CustomerPastStory = storyText;
+                ip.UpdatedAt = DateTime.UtcNow;
+            }
+            else if (project != null)
+            {
+                project.CustomerPastStory = storyText;
+                project.UpdatedAt = DateTime.UtcNow;
+            }
+
             await _context.SaveChangesAsync(cancellationToken);
 
             if (blobUri != null)
@@ -2280,17 +2692,18 @@ Staff request:
             }
 
             _logger.LogInformation(
-                "UPLOAD_CUSTOMER_STORY_MARKER_v1 success: ProjectId={ProjectId}, FileName={FileName}, TextChars={Chars}, BlobUrl={BlobUrl}",
+                "UPLOAD_CUSTOMER_STORY_MARKER_v1 success: ProjectId={ProjectId}, InstituteProject={Ip}, FileName={FileName}, TextChars={Chars}, BlobUrl={BlobUrl}",
                 id,
+                instituteProject,
                 file.FileName,
-                project.CustomerPastStory.Length,
+                storyText.Length,
                 blobUrl);
 
             return Ok(new
             {
                 success = true,
                 message = "Customer context document uploaded and parsed successfully.",
-                parsedChars = project.CustomerPastStory.Length,
+                parsedChars = storyText.Length,
             });
         }
         catch (Exception ex)
@@ -2334,13 +2747,122 @@ Staff request:
         return null;
     }
 
+    private static string NormalizeModuleTitle(string? value)
+    {
+        return string.Join(
+            " ",
+            (value ?? string.Empty)
+                .Trim()
+                .Split(' ', StringSplitOptions.RemoveEmptyEntries))
+            .ToLowerInvariant();
+    }
+
+    private static List<int> ExtractModuleIdsFromTrelloJson(string? json)
+    {
+        if (string.IsNullOrWhiteSpace(json))
+        {
+            return new List<int>();
+        }
+
+        var ids = new List<int>();
+        var seen = new HashSet<int>();
+        foreach (Match m in Regex.Matches(
+                     json,
+                     @"""(?:Trello)?ModuleId""\s*:\s*(""(?<id>\d+)""|(?<id>\d+))",
+                     RegexOptions.IgnoreCase | RegexOptions.CultureInvariant))
+        {
+            if (!m.Success)
+            {
+                continue;
+            }
+
+            if (int.TryParse(m.Groups["id"].Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var id) &&
+                id > 0 &&
+                seen.Add(id))
+            {
+                ids.Add(id);
+            }
+        }
+
+        return ids;
+    }
+
+    private async Task<List<InstituteTemplate>> BuildCandidateTemplateRowsForInstituteProjectAsync(
+        int instituteId,
+        int instituteProjectId,
+        int? baseProjectId)
+    {
+        var candidates = await _context.InstituteTemplates
+            .Where(t => t.InstituteId == instituteId &&
+                        (
+                            t.InstituteProjectId == instituteProjectId ||
+                            t.ProjectId == instituteProjectId ||
+                            (baseProjectId.HasValue && t.ProjectId == baseProjectId.Value)
+                        ))
+            .OrderByDescending(t => t.Id)
+            .ToListAsync();
+
+        return candidates
+            .GroupBy(t => t.Id)
+            .Select(g => g.First())
+            .ToList();
+    }
+
+    private async Task<List<(int Id, string Title, int Sequence)>> ResolveTemplateSourceModulesAsync(InstituteTemplate template)
+    {
+        if (template.InstituteProjectId is > 0)
+        {
+            var rows = await _context.InstituteProjectModules
+                .AsNoTracking()
+                .Where(m => m.InstituteProjectId == template.InstituteProjectId.Value)
+                .OrderBy(m => m.Sequence ?? int.MaxValue)
+                .ThenBy(m => m.Id)
+                .ToListAsync();
+            return rows
+                .Select(m => (m.Id, m.Title ?? string.Empty, m.Sequence ?? int.MaxValue))
+                .ToList();
+        }
+
+        if (template.ProjectId is > 0)
+        {
+            var fromProjectRows = await _context.ProjectModules
+                .AsNoTracking()
+                .Where(m => m.ProjectId == template.ProjectId.Value)
+                .OrderBy(m => m.Sequence ?? int.MaxValue)
+                .ThenBy(m => m.Id)
+                .ToListAsync();
+            var fromProject = fromProjectRows
+                .Select(m => (m.Id, m.Title ?? string.Empty, m.Sequence ?? int.MaxValue))
+                .ToList();
+            if (fromProject.Count > 0)
+            {
+                return fromProject;
+            }
+
+            // Backward-compatibility: some legacy rows stored InstituteProject id in ProjectId.
+            var fallbackRows = await _context.InstituteProjectModules
+                .AsNoTracking()
+                .Where(m => m.InstituteProjectId == template.ProjectId.Value)
+                .OrderBy(m => m.Sequence ?? int.MaxValue)
+                .ThenBy(m => m.Id)
+                .ToListAsync();
+            return fallbackRows
+                .Select(m => (m.Id, m.Title ?? string.Empty, m.Sequence ?? int.MaxValue))
+                .ToList();
+        }
+
+        return new List<(int Id, string Title, int Sequence)>();
+    }
+
     /// <summary>
     /// Get template options for the selected project in Project Designs header.
     /// Includes the built-in "System" option plus institute templates for this project.
     /// Route: GET /api/Projects/use/by-institute/templates/{id}
     /// </summary>
     [HttpGet("use/by-institute/templates/{id:int}")]
-    public async Task<ActionResult<ProjectHeaderTemplatesResponseDto>> GetProjectDesignTemplates(int id)
+    public async Task<ActionResult<ProjectHeaderTemplatesResponseDto>> GetProjectDesignTemplates(
+        int id,
+        [FromQuery] bool instituteProject = false)
     {
         try
         {
@@ -2350,10 +2872,86 @@ Staff request:
                 return Unauthorized("Institute authentication context is missing or invalid.");
             }
 
+            if (instituteProject)
+            {
+                var ipRow = await _context.InstituteProjects
+                    .AsNoTracking()
+                    .Where(p => p.Id == id && p.InstituteId == instituteId.Value)
+                    .Select(p => new { p.Id, p.BaseProjectId, p.BuiltInCourseName, p.TrelloBoardJson })
+                    .FirstOrDefaultAsync();
+
+                if (ipRow == null)
+                {
+                    return NotFound($"Institute project with ID {id} not found for institute {instituteId.Value}.");
+                }
+
+                var candidateRows = await BuildCandidateTemplateRowsForInstituteProjectAsync(
+                    instituteId.Value,
+                    id,
+                    ipRow.BaseProjectId);
+
+                var templatesForIp = candidateRows
+                    .OrderByDescending(t => t.Id)
+                    .Select(t => new TemplateOptionDto
+                    {
+                        Id = t.Id,
+                        Name = t.CourseName,
+                        IsActive = t.IsActive,
+                    })
+                    .ToList();
+
+                var builtInName = string.IsNullOrWhiteSpace(ipRow.BuiltInCourseName)
+                    ? "System"
+                    : ipRow.BuiltInCourseName.Trim();
+                if (!templatesForIp.Any(t => t.Id == 0))
+                {
+                    templatesForIp.Insert(0, new TemplateOptionDto
+                    {
+                        Id = 0,
+                        Name = builtInName,
+                        IsActive = false,
+                    });
+                }
+
+                var firstExplicitActiveIp = templatesForIp.FirstOrDefault(t => t.Id > 0 && t.IsActive);
+                var hasAssignedCourseJson = !string.IsNullOrWhiteSpace(ipRow.TrelloBoardJson);
+                int activeIdIp;
+                string activeNameIp;
+                if (hasAssignedCourseJson && firstExplicitActiveIp != null)
+                {
+                    activeIdIp = firstExplicitActiveIp.Id;
+                    activeNameIp = firstExplicitActiveIp.Name ?? builtInName;
+                }
+                else if (hasAssignedCourseJson)
+                {
+                    activeIdIp = 0;
+                    activeNameIp = builtInName;
+                }
+                else
+                {
+                    activeIdIp = 0;
+                    activeNameIp = "No course selected";
+                }
+
+                for (var i = 0; i < templatesForIp.Count; i++)
+                {
+                    templatesForIp[i].IsActive = templatesForIp[i].Id > 0
+                        ? (hasAssignedCourseJson && templatesForIp[i].Id == activeIdIp)
+                        : (activeIdIp == 0 && hasAssignedCourseJson);
+                }
+
+                return Ok(new ProjectHeaderTemplatesResponseDto
+                {
+                    Templates = templatesForIp,
+                    ActiveTemplateId = activeIdIp,
+                    ActiveTemplateName = activeNameIp,
+                });
+            }
+
             var project = await _context.Projects
                 .AsNoTracking()
                 .Where(p => p.Id == id && (p.InstituteId == null || p.InstituteId == instituteId.Value))
-                .Select(p => new { p.Id, p.InstituteId, p.TrelloBoardJson })
+                .Select(p => new { p.Id, p.InstituteId, p.TrelloBoardJson, p.Title, p.CourseName, p.OrganizationId })
                 .FirstOrDefaultAsync();
 
             if (project == null)
@@ -2361,29 +2959,67 @@ Staff request:
                 return NotFound($"Project with ID {id} not found for institute {instituteId.Value}.");
             }
 
-            var instituteTemplates = await _context.InstituteTemplates
-                .AsNoTracking()
-                .Where(t => t.InstituteId == instituteId.Value && t.ProjectId == id)
-                .OrderBy(t => t.Id)
-                .Select(t => new TemplateOptionDto
-                {
-                    Id = t.Id,
-                    Name = t.Name,
-                    IsActive = t.IsActive,
-                })
-                .ToListAsync();
-
             var isSystemProject = project.InstituteId == null;
+
+            List<TemplateOptionDto> instituteTemplates;
+            if (isSystemProject)
+            {
+                var instituteProjectIdsForBase = await _context.InstituteProjects
+                    .AsNoTracking()
+                    .Where(ip => ip.InstituteId == instituteId.Value && ip.BaseProjectId == id)
+                    .Select(ip => ip.Id)
+                    .ToListAsync();
+
+                var templateEntities = await _context.InstituteTemplates
+                    .AsNoTracking()
+                    .Where(t =>
+                        t.InstituteId == instituteId.Value
+                        && (
+                            t.ProjectId == id
+                            || (t.InstituteProjectId != null && instituteProjectIdsForBase.Contains(t.InstituteProjectId.Value))))
+                    .OrderBy(t => t.Id)
+                    .ToListAsync();
+
+                instituteTemplates = templateEntities
+                    .GroupBy(t => t.Id)
+                    .Select(g => g.First())
+                    .OrderBy(t => t.Id)
+                    .Select(t => new TemplateOptionDto
+                    {
+                        Id = t.Id,
+                        Name = t.CourseName,
+                        IsActive = t.IsActive,
+                    })
+                    .ToList();
+            }
+            else
+            {
+                instituteTemplates = await _context.InstituteTemplates
+                    .AsNoTracking()
+                    .Where(t => t.InstituteId == instituteId.Value && t.ProjectId == id)
+                    .OrderBy(t => t.Id)
+                    .Select(t => new TemplateOptionDto
+                    {
+                        Id = t.Id,
+                        Name = t.CourseName,
+                        IsActive = t.IsActive,
+                    })
+                    .ToListAsync();
+            }
+
             var hasSystemTemplate = !string.IsNullOrWhiteSpace(project.TrelloBoardJson);
             if (isSystemProject)
             {
                 var firstActiveSystem = instituteTemplates.FirstOrDefault(t => t.IsActive);
+                var courseNameSystem = string.IsNullOrWhiteSpace(project.CourseName)
+                    ? "System"
+                    : project.CourseName.Trim();
                 var templates = new List<TemplateOptionDto>
                 {
                     new()
                     {
                         Id = 0,
-                        Name = "System",
+                        Name = courseNameSystem,
                         IsActive = firstActiveSystem == null,
                     },
                 };
@@ -2393,7 +3029,7 @@ Staff request:
                 {
                     Templates = templates,
                     ActiveTemplateId = firstActiveSystem?.Id ?? 0,
-                    ActiveTemplateName = firstActiveSystem?.Name ?? "System",
+                    ActiveTemplateName = firstActiveSystem?.Name ?? courseNameSystem,
                 });
             }
 
@@ -2472,7 +3108,10 @@ Staff request:
     /// Route: POST /api/Projects/use/by-institute/set-active/{id}/{templateId}
     /// </summary>
     [HttpPost("use/by-institute/set-active/{id:int}/{templateId:int}")]
-    public async Task<ActionResult<object>> SetProjectDesignActiveTemplate(int id, int templateId)
+    public async Task<ActionResult<object>> SetProjectDesignActiveTemplate(
+        int id,
+        int templateId,
+        [FromQuery] bool instituteProject = false)
     {
         try
         {
@@ -2482,10 +3121,272 @@ Staff request:
                 return Unauthorized("Institute authentication context is missing or invalid.");
             }
 
+            if (instituteProject)
+            {
+                var ipMeta = await _context.InstituteProjects
+                    .AsTracking()
+                    .Where(p => p.Id == id && p.InstituteId == instituteId.Value)
+                    .FirstOrDefaultAsync();
+
+                if (ipMeta == null)
+                {
+                    return NotFound($"Institute project with ID {id} not found for institute {instituteId.Value}.");
+                }
+
+                var targetModules = await _context.InstituteProjectModules
+                    .AsNoTracking()
+                    .Where(m => m.InstituteProjectId == id && m.ModuleType != 1)
+                    .OrderBy(m => m.Sequence ?? int.MaxValue)
+                    .ThenBy(m => m.Id)
+                    .Select(m => new { m.Id, m.Title, m.OriginalModuleId })
+                    .ToListAsync();
+
+                var candidateRows = await BuildCandidateTemplateRowsForInstituteProjectAsync(
+                    instituteId.Value,
+                    id,
+                    ipMeta.BaseProjectId);
+                var selectedTemplateIp = templateId == 0
+                    ? null
+                    : candidateRows.FirstOrDefault(t => t.Id == templateId);
+                async Task<ActionResult<object>> UnassignCourseWithValidationResult(
+                    string message,
+                    string? diagnosticDetail = null)
+                {
+                    _logger.LogWarning(
+                        "SetActiveTemplate: course assignment NOT applied (returning CourseAssignmentRemoved). InstituteProjectId={InstituteProjectId}, TemplateId={TemplateId}, BaseProjectId={BaseProjectId}, InstituteId={InstituteId}. UserMessage={UserMessage}. Diagnostic={Diagnostic}",
+                        ipMeta.Id,
+                        templateId,
+                        ipMeta.BaseProjectId,
+                        instituteId.Value,
+                        message,
+                        diagnosticDetail ?? string.Empty);
+
+                    ipMeta.TrelloBoardJson = null;
+                    ipMeta.UpdatedAt = DateTime.UtcNow;
+                    foreach (var template in candidateRows)
+                    {
+                        template.IsActive = false;
+                    }
+
+                    await _context.SaveChangesAsync();
+
+                    return Ok(new
+                    {
+                        Success = false,
+                        CourseAssignmentRemoved = true,
+                        ValidationMessage = message,
+                        ActiveTemplateId = 0,
+                        ActiveTemplateName = "No course selected",
+                    });
+                }
+                if (templateId < 0)
+                {
+                    ipMeta.TrelloBoardJson = null;
+                    ipMeta.UpdatedAt = DateTime.UtcNow;
+                    foreach (var template in candidateRows)
+                    {
+                        template.IsActive = false;
+                    }
+
+                    await _context.SaveChangesAsync();
+
+                    return Ok(new
+                    {
+                        Success = true,
+                        ActiveTemplateId = 0,
+                        ActiveTemplateName = "No course selected",
+                    });
+                }
+
+                if (templateId != 0 && selectedTemplateIp == null)
+                {
+                    _logger.LogWarning(
+                        "SetActiveTemplate: template id not found in candidate rows. InstituteProjectId={InstituteProjectId}, TemplateId={TemplateId}, CandidateCount={CandidateCount}",
+                        ipMeta.Id,
+                        templateId,
+                        candidateRows.Count);
+                    return NotFound($"Template with ID {templateId} not found for this project and institute.");
+                }
+
+                string sourceJson;
+                List<(int Id, string Title, int Sequence)> sourceModules;
+                string activeCourseName;
+                if (templateId == 0)
+                {
+                    if (!ipMeta.BaseProjectId.HasValue || ipMeta.BaseProjectId.Value <= 0)
+                    {
+                        _logger.LogWarning(
+                            "SetActiveTemplate: institute row has no BaseProjectId for built-in course source. InstituteProjectId={InstituteProjectId}",
+                            ipMeta.Id);
+                        return BadRequest("This project does not have a built-in course source.");
+                    }
+
+                    var baseProject = await _context.Projects
+                        .AsNoTracking()
+                        .Where(p => p.Id == ipMeta.BaseProjectId.Value)
+                        .Select(p => new { p.TrelloBoardJson, p.CourseName })
+                        .FirstOrDefaultAsync();
+                    if (baseProject == null || string.IsNullOrWhiteSpace(baseProject.TrelloBoardJson))
+                    {
+                        _logger.LogWarning(
+                            "SetActiveTemplate: catalog project has no TrelloBoardJson for built-in source. InstituteProjectId={InstituteProjectId}, BaseProjectId={BaseProjectId}",
+                            ipMeta.Id,
+                            ipMeta.BaseProjectId.Value);
+                        return BadRequest("Built-in course is not available for this project.");
+                    }
+
+                    sourceJson = baseProject.TrelloBoardJson!;
+                    activeCourseName = string.IsNullOrWhiteSpace(ipMeta.BuiltInCourseName)
+                        ? (string.IsNullOrWhiteSpace(baseProject.CourseName) ? "System" : baseProject.CourseName!.Trim())
+                        : ipMeta.BuiltInCourseName.Trim();
+                    var sourceModuleRows = await _context.ProjectModules
+                        .AsNoTracking()
+                        .Where(m => m.ProjectId == ipMeta.BaseProjectId.Value && m.ModuleType != 1)
+                        .OrderBy(m => m.Sequence ?? int.MaxValue)
+                        .ThenBy(m => m.Id)
+                        .ToListAsync();
+                    sourceModules = sourceModuleRows
+                        .Select(m => (m.Id, m.Title ?? string.Empty, m.Sequence ?? int.MaxValue))
+                        .ToList();
+                }
+                else
+                {
+                    sourceJson = selectedTemplateIp!.TrelloBoardJson ?? string.Empty;
+                    if (string.IsNullOrWhiteSpace(sourceJson))
+                    {
+                        _logger.LogWarning(
+                            "SetActiveTemplate: InstituteTemplates row has empty TrelloBoardJson. InstituteProjectId={InstituteProjectId}, InstituteTemplateId={InstituteTemplateId}",
+                            ipMeta.Id,
+                            selectedTemplateIp.Id);
+                        return BadRequest("Selected course does not contain a valid board definition.");
+                    }
+
+                    activeCourseName = selectedTemplateIp.CourseName;
+                    sourceModules = await ResolveTemplateSourceModulesAsync(selectedTemplateIp);
+                }
+
+                var sourceModuleIds = ExtractModuleIdsFromTrelloJson(sourceJson);
+                _logger.LogInformation(
+                    "SetActiveTemplate validation start: InstituteProjectId={InstituteProjectId}, TemplateId={TemplateId}, BaseProjectId={BaseProjectId}, SourceModuleIdsCount={SourceCount}, SourceModuleIds=[{SourceIds}]",
+                    ipMeta.Id,
+                    templateId,
+                    ipMeta.BaseProjectId,
+                    sourceModuleIds.Count,
+                    string.Join(", ", sourceModuleIds));
+                if (sourceModuleIds.Count == 0)
+                {
+                    var jsonLen = sourceJson?.Length ?? 0;
+                    return await UnassignCourseWithValidationResult(
+                        "The selected course could not be applied because its modules do not match this project.",
+                        $"No module ids extracted from course Trello JSON (jsonLength={jsonLen}, courseSource={(templateId == 0 ? "built-in Project.TrelloBoardJson" : $"InstituteTemplates.Id={templateId}")}).");
+                }
+
+                var sourceById = sourceModules.ToDictionary(m => m.Id, m => m);
+                var sourceStructure = new List<(int Id, string NormTitle)>();
+                foreach (var moduleId in sourceModuleIds)
+                {
+                    if (!sourceById.TryGetValue(moduleId, out var sourceModule))
+                    {
+                        return await UnassignCourseWithValidationResult(
+                            "The selected course could not be applied because its modules do not match this project.",
+                            $"Course JSON references module id {moduleId} but that id is not in the source module list for this course. AvailableSourceIds=[{string.Join(", ", sourceModules.Select(m => m.Id))}], courseSource={(templateId == 0 ? $"ProjectModules for BaseProjectId={ipMeta.BaseProjectId}" : $"ResolveTemplateSourceModules for InstituteTemplates.Id={templateId}")}.");
+                    }
+
+                    sourceStructure.Add((moduleId, NormalizeModuleTitle(sourceModule.Title)));
+                }
+
+                // Validation rule: module-name set compatibility only (ignore order and duplicates).
+                var selectedProjectNameSet = targetModules
+                    .Select(m => NormalizeModuleTitle(m.Title))
+                    .ToHashSet(StringComparer.Ordinal);
+                var selectedCourseNameSet = sourceStructure
+                    .Select(s => s.NormTitle)
+                    .ToHashSet(StringComparer.Ordinal);
+
+                var nameMismatch = !selectedProjectNameSet.SetEquals(selectedCourseNameSet);
+                _logger.LogInformation(
+                    "SetActiveTemplate validation compare: InstituteProjectId={InstituteProjectId}, TemplateId={TemplateId}, NameMismatch={NameMismatch}, ProjectNames=[{ProjectNames}], CourseNames=[{CourseNames}], ProjectModules=[{ProjectModules}], CourseModules=[{CourseModules}]",
+                    ipMeta.Id,
+                    templateId,
+                    nameMismatch,
+                    string.Join(", ", selectedProjectNameSet.OrderBy(x => x)),
+                    string.Join(", ", selectedCourseNameSet.OrderBy(x => x)),
+                    string.Join(" | ", targetModules.Select(m => $"{m.Id}:{NormalizeModuleTitle(m.Title)}")),
+                    string.Join(" | ", sourceStructure.Select(s => $"{s.Id}:{s.NormTitle}")));
+                if (nameMismatch)
+                {
+                    var onlyInProject = selectedProjectNameSet.Except(selectedCourseNameSet, StringComparer.Ordinal).OrderBy(x => x).ToList();
+                    var onlyInCourse = selectedCourseNameSet.Except(selectedProjectNameSet, StringComparer.Ordinal).OrderBy(x => x).ToList();
+                    var projectRawTitles = string.Join(" | ", targetModules.Select(m => $"{m.Id}:\"{m.Title ?? ""}\""));
+                    var courseRawTitles = string.Join(
+                        " | ",
+                        sourceStructure.Select(s =>
+                        {
+                            var title = sourceById.TryGetValue(s.Id, out var sm) ? (sm.Title ?? string.Empty) : "?";
+                            return $"{s.Id}:\"{title}\"->{s.NormTitle}";
+                        }));
+                    return await UnassignCourseWithValidationResult(
+                        "The selected course could not be applied because its modules do not match this project.",
+                        $"Module title set mismatch. Project modules use ModuleType!=1; course module list comes from ResolveTemplateSourceModulesAsync (may include all types). Normalized onlyInProject=[{string.Join(", ", onlyInProject)}], onlyInCourse=[{string.Join(", ", onlyInCourse)}]. Raw project modules: {projectRawTitles}. Raw course modules (id->title->norm): {courseRawTitles}. courseSource={(templateId == 0 ? $"built-in ProjectModules BaseProjectId={ipMeta.BaseProjectId}" : $"InstituteTemplates.Id={templateId}")}.");
+                }
+
+                // Build remap by matched normalized names (counts already validated above).
+                var targetIdsByName = targetModules
+                    .GroupBy(m => NormalizeModuleTitle(m.Title), StringComparer.Ordinal)
+                    .ToDictionary(
+                        g => g.Key,
+                        g => new Queue<int>(g.Select(x => x.Id)),
+                        StringComparer.Ordinal);
+                var moduleMap = new Dictionary<int, int>();
+                foreach (var source in sourceStructure)
+                {
+                    if (!targetIdsByName.TryGetValue(source.NormTitle, out var q) || q.Count == 0)
+                    {
+                        return await UnassignCourseWithValidationResult(
+                            "The selected course could not be applied because its modules do not match this project.",
+                            $"Remap dequeue failed: no InstituteProjectModule available for normalized title \"{source.NormTitle}\" (source module id {source.Id}).");
+                    }
+                    moduleMap[source.Id] = q.Dequeue();
+                }
+                _logger.LogInformation(
+                    "SetActiveTemplate module remap ready: InstituteProjectId={InstituteProjectId}, TemplateId={TemplateId}, ModuleMap={ModuleMap}",
+                    ipMeta.Id,
+                    templateId,
+                    FormatModuleIdMapForLog(moduleMap));
+
+                var remappedJson = TryRemapTrelloJsonAfterProjectDuplicate(
+                    sourceJson,
+                    moduleMap,
+                    sourceProjectId: templateId == 0 ? ipMeta.BaseProjectId!.Value : id,
+                    newProjectId: ipMeta.Id);
+                if (string.IsNullOrWhiteSpace(remappedJson))
+                {
+                    return await UnassignCourseWithValidationResult(
+                        "The selected course could not be applied because its board definition is invalid.",
+                        $"TryRemapTrelloJsonAfterProjectDuplicate returned empty. sourceProjectId={(templateId == 0 ? ipMeta.BaseProjectId!.Value : id)}, newProjectId={ipMeta.Id}, moduleMap={FormatModuleIdMapForLog(moduleMap)}.");
+                }
+
+                ipMeta.TrelloBoardJson = remappedJson;
+                ipMeta.UpdatedAt = DateTime.UtcNow;
+                foreach (var template in candidateRows)
+                {
+                    template.IsActive = selectedTemplateIp != null && template.Id == selectedTemplateIp.Id;
+                }
+
+                await _context.SaveChangesAsync();
+
+                return Ok(new
+                {
+                    Success = true,
+                    ActiveTemplateId = selectedTemplateIp?.Id ?? 0,
+                    ActiveTemplateName = string.IsNullOrWhiteSpace(activeCourseName) ? "System" : activeCourseName,
+                });
+            }
+
             var project = await _context.Projects
                 .AsNoTracking()
                 .Where(p => p.Id == id && (p.InstituteId == null || p.InstituteId == instituteId.Value))
-                .Select(p => new { p.Id, p.InstituteId, p.TrelloBoardJson })
+                .Select(p => new { p.Id, p.InstituteId, p.TrelloBoardJson, p.Title })
                 .FirstOrDefaultAsync();
 
             if (project == null)
@@ -2494,6 +3395,71 @@ Staff request:
             }
 
             var isSystemProject = project.InstituteId == null;
+            if (isSystemProject)
+            {
+                if (templateId < 0)
+                {
+                    return BadRequest("Built-in projects must keep a course assigned.");
+                }
+
+                var builtInTitleKey = NormalizeProjectTitleKey(project.Title);
+                var existingBuiltInCandidates = await _context.InstituteProjects
+                    .AsTracking()
+                    .Where(ip =>
+                        ip.InstituteId == instituteId.Value &&
+                        ip.BaseProjectId == id &&
+                        ip.IsBuiltIn)
+                    .ToListAsync();
+                var existingIp = existingBuiltInCandidates
+                    .FirstOrDefault(ip => NormalizeProjectTitleKey(ip.Title) == builtInTitleKey);
+
+                if (existingIp == null)
+                {
+                    var sourceProject = await _context.Projects
+                        .AsNoTracking()
+                        .Include(p => p.Organization)
+                        .FirstOrDefaultAsync(p => p.Id == id && p.InstituteId == null && p.IsAvailable);
+                    if (sourceProject == null)
+                    {
+                        return NotFound($"Catalog project with ID {id} was not found or is not available.");
+                    }
+
+                    existingIp = InstituteProjectMapper.CopyFromProject(sourceProject, instituteId.Value, id);
+                    existingIp.IsAvailable = false;
+                    existingIp.InUse = true;
+                    existingIp.IsBuiltIn = true;
+                    _context.InstituteProjects.Add(existingIp);
+                    await _context.SaveChangesAsync();
+
+                    var sourceModules = await _context.ProjectModules
+                        .AsNoTracking()
+                        .Where(pm => pm.ProjectId == id)
+                        .OrderBy(pm => pm.Sequence ?? int.MaxValue)
+                        .ThenBy(pm => pm.Id)
+                        .ToListAsync();
+                    if (sourceModules.Count > 0)
+                    {
+                        _context.InstituteProjectModules.AddRange(sourceModules.Select(pm => new InstituteProjectModule
+                        {
+                            InstituteProjectId = existingIp.Id,
+                            ModuleType = pm.ModuleType,
+                            Title = pm.Title,
+                            Description = pm.Description,
+                            Sequence = pm.Sequence,
+                            OriginalModuleId = pm.Id,
+                        }));
+                        await _context.SaveChangesAsync();
+                    }
+                }
+
+                _logger.LogInformation(
+                    "SetActiveTemplate catalog built-in: validating via institute mirror row CatalogProjectId={CatalogProjectId}, InstituteProjectId={InstituteProjectId}, TemplateId={TemplateId}",
+                    id,
+                    existingIp.Id,
+                    templateId);
+                return await SetProjectDesignActiveTemplate(existingIp.Id, templateId, true);
+            }
+
             var hasSystemTemplate = !string.IsNullOrWhiteSpace(project.TrelloBoardJson);
             if (templateId == 0 && !isSystemProject && !hasSystemTemplate)
             {
@@ -2525,7 +3491,7 @@ Staff request:
             {
                 Success = true,
                 ActiveTemplateId = selectedTemplate?.Id ?? 0,
-                ActiveTemplateName = selectedTemplate?.Name ?? "System",
+                ActiveTemplateName = selectedTemplate?.CourseName ?? "System",
             });
         }
         catch (Exception ex)
@@ -2541,7 +3507,8 @@ Staff request:
     [HttpGet("use/by-institute/templates/list")]
     public async Task<ActionResult<IEnumerable<InstituteTemplateListItemDto>>> GetInstituteTemplatesListForProject(
         [FromQuery] int projectId,
-        [FromQuery] int instituteId)
+        [FromQuery] int instituteId,
+        [FromQuery] bool instituteProject = false)
     {
         if (projectId <= 0 || instituteId <= 0)
         {
@@ -2552,9 +3519,17 @@ Staff request:
         {
             var items = await _context.InstituteTemplates
                 .AsNoTracking()
-                .Where(t => t.ProjectId == projectId && t.InstituteId == instituteId)
+                .Where(t =>
+                    t.InstituteId == instituteId &&
+                    (instituteProject ? t.InstituteProjectId == projectId : t.ProjectId == projectId))
                 .OrderByDescending(t => t.Id)
-                .Select(t => new InstituteTemplateListItemDto { Id = t.Id, Name = t.Name })
+                .Select(t => new InstituteTemplateListItemDto
+                {
+                    Id = t.Id,
+                    Name = t.CourseName,
+                    BoardUrl = t.BoardUrl,
+                    IsActive = t.IsActive,
+                })
                 .ToListAsync();
 
             return Ok(items);
@@ -2586,16 +3561,33 @@ Staff request:
 
             var instituteRows = await _context.InstituteTemplates
                 .AsNoTracking()
-                .Where(t => t.InstituteId == instituteId)
+                .Where(t =>
+                    t.InstituteId == instituteId
+                    && (t.ProjectId != null || t.InstituteProjectId != null))
                 .Select(t => new CourseCatalogItemDto
                 {
                     Kind = "institute",
-                    ProjectId = t.ProjectId,
+                    ProjectId = t.ProjectId ?? t.InstituteProjectId ?? 0,
                     InstituteTemplateId = t.Id,
-                    Name = string.IsNullOrWhiteSpace(t.Name) ? $"Course {t.Id}" : t.Name
+                    Name = string.IsNullOrWhiteSpace(t.CourseName) ? $"Course {t.Id}" : t.CourseName,
+                    ProjectTitle = t.InstituteProjectId != null
+                        ? t.InstituteProject!.Title
+                        : t.Project!.Title,
+                    BoardUrl = t.BoardUrl,
+                    InstituteProjectDesign = t.InstituteProjectId != null,
+                    InUse = t.InstituteProjectId != null ? t.InstituteProject!.InUse : t.Project!.InUse,
+                    IsActive = t.IsActive,
                 })
                 .OrderByDescending(x => x.InstituteTemplateId)
                 .ToListAsync();
+
+            foreach (var row in instituteRows)
+            {
+                var v = row.InstituteProjectDesign
+                    ? await BuildProjectReadyValidationForInstituteProjectRowAsync(row.ProjectId, instituteId)
+                    : await BuildProjectReadyValidationForInstituteProjectAsync(row.ProjectId, instituteId);
+                row.IsReady = v.IsReady;
+            }
 
             if (!includeBuiltIn)
                 return Ok(instituteRows);
@@ -2606,15 +3598,23 @@ Staff request:
                     p.IsAvailable &&
                     !string.IsNullOrWhiteSpace(p.TrelloBoardJson) &&
                     (p.InstituteId == null || p.InstituteId == instituteId))
-                .OrderBy(p => p.Title)
+                .OrderBy(p => p.CourseName ?? p.Title)
                 .Select(p => new CourseCatalogItemDto
                 {
                     Kind = "builtIn",
                     ProjectId = p.Id,
                     InstituteTemplateId = null,
-                    Name = p.Title
+                    Name = p.CourseName ?? p.Title,
+                    ProjectTitle = p.Title,
+                    InUse = p.InUse,
                 })
                 .ToListAsync();
+
+            foreach (var row in builtInRows)
+            {
+                var v = await BuildProjectReadyValidationForCatalogProjectAsync(row.ProjectId);
+                row.IsReady = v.IsReady;
+            }
 
             return Ok(builtInRows.Concat(instituteRows).ToList());
         }
@@ -2626,9 +3626,11 @@ Staff request:
     }
 
     /// <summary>
-    /// Project picker for Courses &quot;Create Course&quot;: all projects owned by <paramref name="instituteId"/>;
+    /// Project picker for Courses &quot;Create Course&quot;: institute-owned projects with <see cref="Project.InUse"/> /
+    /// <see cref="InstituteProject.InUse"/> that pass project-ready validation (not in &quot;Pending&quot;);
     /// when <paramref name="includeBuiltIn"/> is true, also includes global catalog projects (<c>InstituteId</c> is null)
-    /// with <see cref="Project.IsAvailable"/> and a saved Trello template JSON (same notion as catalog built-ins).
+    /// that are <see cref="Project.InUse"/>, <see cref="Project.IsAvailable"/>, have a saved Trello template JSON, and pass
+    /// catalog readiness (same notion as catalog built-ins).
     /// </summary>
     /// <remarks>
     /// Exposed twice so proxies or older clients can call either route:
@@ -2661,18 +3663,56 @@ Staff request:
             if (!instituteExists)
                 return NotFound($"Institute with ID {instituteId} was not found.");
 
-            var instituteOwned = await _context.Projects
+            var fromInstituteProjectsTable = await _context.InstituteProjects
                 .AsNoTracking()
-                .Where(p => p.InstituteId == instituteId)
+                .Where(ip => ip.InstituteId == instituteId && ip.InUse)
+                .OrderBy(ip => ip.Title)
+                .Select(ip => new CourseCreateProjectOptionDto
+                {
+                    Id = ip.Id,
+                    Title = ip.Title ?? string.Empty,
+                    InstituteId = instituteId,
+                    IsBuiltIn = false,
+                    IsInstituteProject = true,
+                })
+                .ToListAsync();
+
+            var legacyInstituteProjects = await _context.Projects
+                .AsNoTracking()
+                .Where(p => p.InstituteId == instituteId && p.InUse)
                 .OrderBy(p => p.Title)
                 .Select(p => new CourseCreateProjectOptionDto
                 {
                     Id = p.Id,
                     Title = p.Title ?? string.Empty,
                     InstituteId = p.InstituteId,
-                    IsBuiltIn = false
+                    IsBuiltIn = false,
+                    IsInstituteProject = false,
                 })
                 .ToListAsync();
+
+            var readyInstituteProjectsTable = new List<CourseCreateProjectOptionDto>(fromInstituteProjectsTable.Count);
+            foreach (var opt in fromInstituteProjectsTable)
+            {
+                var v = await BuildProjectReadyValidationForInstituteProjectRowAsync(opt.Id, instituteId);
+                if (v.IsReady)
+                    readyInstituteProjectsTable.Add(opt);
+            }
+
+            var readyLegacyInstitute = new List<CourseCreateProjectOptionDto>(legacyInstituteProjects.Count);
+            foreach (var opt in legacyInstituteProjects)
+            {
+                var v = await BuildProjectReadyValidationForInstituteProjectAsync(opt.Id, instituteId);
+                if (v.IsReady)
+                    readyLegacyInstitute.Add(opt);
+            }
+
+            var instituteOwned = new List<CourseCreateProjectOptionDto>(
+                readyInstituteProjectsTable.Count + readyLegacyInstitute.Count);
+            instituteOwned.AddRange(readyInstituteProjectsTable);
+            instituteOwned.AddRange(readyLegacyInstitute);
+            instituteOwned.Sort((a, b) =>
+                string.Compare(a.Title, b.Title, StringComparison.OrdinalIgnoreCase));
 
             if (!includeBuiltIn)
                 return Ok(instituteOwned);
@@ -2681,6 +3721,7 @@ Staff request:
                 .AsNoTracking()
                 .Where(p =>
                     p.InstituteId == null &&
+                    p.InUse &&
                     p.IsAvailable &&
                     !string.IsNullOrWhiteSpace(p.TrelloBoardJson))
                 .OrderBy(p => p.Title)
@@ -2689,13 +3730,22 @@ Staff request:
                     Id = p.Id,
                     Title = p.Title ?? string.Empty,
                     InstituteId = p.InstituteId,
-                    IsBuiltIn = true
+                    IsBuiltIn = true,
+                    IsInstituteProject = false,
                 })
                 .ToListAsync();
 
-            var merged = new List<CourseCreateProjectOptionDto>(instituteOwned.Count + builtInGlobals.Count);
+            var readyBuiltIns = new List<CourseCreateProjectOptionDto>(builtInGlobals.Count);
+            foreach (var opt in builtInGlobals)
+            {
+                var v = await BuildProjectReadyValidationForCatalogProjectAsync(opt.Id);
+                if (v.IsReady)
+                    readyBuiltIns.Add(opt);
+            }
+
+            var merged = new List<CourseCreateProjectOptionDto>(instituteOwned.Count + readyBuiltIns.Count);
             merged.AddRange(instituteOwned);
-            merged.AddRange(builtInGlobals);
+            merged.AddRange(readyBuiltIns);
             return Ok(merged);
         }
         catch (Exception ex)
@@ -2713,7 +3763,8 @@ Staff request:
     public async Task<ActionResult<object>> DeleteInstituteTemplate(
         int instituteTemplateId,
         [FromQuery] int projectId,
-        [FromQuery] int instituteId)
+        [FromQuery] int instituteId,
+        [FromQuery] bool instituteProject = false)
     {
         if (instituteTemplateId <= 0 || projectId <= 0 || instituteId <= 0)
             return BadRequest("instituteTemplateId, projectId and instituteId must be positive integers.");
@@ -2723,13 +3774,48 @@ Staff request:
             var row = await _context.InstituteTemplates
                 .FirstOrDefaultAsync(t =>
                     t.Id == instituteTemplateId &&
-                    t.ProjectId == projectId &&
-                    t.InstituteId == instituteId);
+                    t.InstituteId == instituteId &&
+                    (instituteProject ? t.InstituteProjectId == projectId : t.ProjectId == projectId));
             if (row == null)
                 return NotFound($"Institute template {instituteTemplateId} was not found for this institute and project.");
 
-            _context.InstituteTemplates.Remove(row);
-            await _context.SaveChangesAsync();
+            if (row.IsActive)
+            {
+                return Conflict(
+                    "This course is currently assigned as the active syllabus for its project in Project Designs. "
+                    + "Choose another course there or clear the assignment before deleting this template.");
+            }
+
+            // Orphan prevention: removing the squad when no other template references it cascades to InstituteSquadRoles.
+            var squadId = row.SquadId;
+            var squadSharedElsewhere = squadId is > 0 &&
+                await _context.InstituteTemplates.AsNoTracking()
+                    .AnyAsync(t => t.SquadId == squadId && t.Id != instituteTemplateId);
+
+            await using var transaction = await _context.Database.BeginTransactionAsync();
+            try
+            {
+                _context.InstituteTemplates.Remove(row);
+                await _context.SaveChangesAsync();
+
+                if (squadId is > 0 && !squadSharedElsewhere)
+                {
+                    var squad = await _context.InstituteSquads
+                        .FirstOrDefaultAsync(s => s.Id == squadId && s.InstituteId == instituteId);
+                    if (squad != null)
+                    {
+                        _context.InstituteSquads.Remove(squad);
+                        await _context.SaveChangesAsync();
+                    }
+                }
+
+                await transaction.CommitAsync();
+            }
+            catch
+            {
+                await transaction.RollbackAsync();
+                throw;
+            }
 
             return Ok(new
             {
@@ -2756,7 +3842,11 @@ Staff request:
         if (request == null)
             return Task.FromResult<ActionResult<object>>(BadRequest("Request body is required."));
 
-        return DeleteInstituteTemplate(request.InstituteTemplateId, request.ProjectId, request.InstituteId);
+        return DeleteInstituteTemplate(
+            request.InstituteTemplateId,
+            request.ProjectId,
+            request.InstituteId,
+            request.InstituteProject);
     }
 
     /// <summary>
@@ -2768,7 +3858,8 @@ Staff request:
     public async Task<ActionResult<ProjectTemplateDto>> GetProjectTemplateByProjectId(
         [FromQuery] int projectId,
         [FromQuery] int? instituteId = null,
-        [FromQuery] int? instituteTemplateId = null)
+        [FromQuery] int? instituteTemplateId = null,
+        [FromQuery] bool instituteProject = false)
     {
         if (projectId <= 0)
         {
@@ -2782,20 +3873,52 @@ Staff request:
 
         try
         {
-            var project = await _context.Projects
-                .Where(p => p.Id == projectId)
-                .Select(p => new ProjectTemplateDto
-                {
-                    ProjectId = p.Id,
-                    ProjectName = p.Title,
-                    ProjectBrief = p.Description,
-                    TrelloBoardJson = p.TrelloBoardJson
-                })
-                .FirstOrDefaultAsync();
-
-            if (project == null)
+            ProjectTemplateDto? project;
+            if (instituteProject)
             {
-                return NotFound($"Project with ID {projectId} not found.");
+                var ipQuery = _context.InstituteProjects.AsNoTracking().Where(ip => ip.Id == projectId);
+                if (instituteId is > 0)
+                {
+                    ipQuery = ipQuery.Where(ip => ip.InstituteId == instituteId);
+                }
+
+                project = await ipQuery
+                    .Select(ip => new ProjectTemplateDto
+                    {
+                        ProjectId = ip.Id,
+                        ProjectName = ip.Title,
+                        ProjectBrief = ip.Description,
+                        TrelloBoardJson = ip.TrelloBoardJson,
+                    })
+                    .FirstOrDefaultAsync();
+
+                if (project == null)
+                {
+                    return NotFound($"Institute project with ID {projectId} was not found.");
+                }
+            }
+            else
+            {
+                project = await _context.Projects
+                    .Where(p => p.Id == projectId)
+                    .Select(p => new ProjectTemplateDto
+                    {
+                        ProjectId = p.Id,
+                        ProjectName = p.Title,
+                        ProjectBrief = p.Description,
+                        TrelloBoardJson = p.TrelloBoardJson,
+                    })
+                    .FirstOrDefaultAsync();
+
+                if (project == null)
+                {
+                    return NotFound($"Project with ID {projectId} not found.");
+                }
+            }
+
+            if (string.IsNullOrEmpty(project.TrelloBoardJson))
+            {
+                project.TrelloBoardJson = string.Empty;
             }
 
             if (instituteTemplateId is > 0)
@@ -2804,9 +3927,9 @@ Staff request:
                     .AsNoTracking()
                     .Where(t =>
                         t.Id == instituteTemplateId.Value &&
-                        t.ProjectId == projectId &&
-                        t.InstituteId == instituteId!.Value)
-                    .Select(t => new { t.TrelloBoardJson, t.Name })
+                        t.InstituteId == instituteId!.Value &&
+                        (instituteProject ? t.InstituteProjectId == projectId : t.ProjectId == projectId))
+                    .Select(t => new { t.TrelloBoardJson, t.CourseName, t.BoardUrl })
                     .FirstOrDefaultAsync();
 
                 if (byId == null)
@@ -2816,21 +3939,25 @@ Staff request:
                 }
 
                 project.TrelloBoardJson = byId.TrelloBoardJson;
-                project.Name = byId.Name;
+                project.Name = byId.CourseName;
+                project.BoardUrl = byId.BoardUrl;
             }
             else if (instituteId is > 0)
             {
                 var instituteRow = await _context.InstituteTemplates
                     .AsNoTracking()
-                    .Where(t => t.ProjectId == projectId && t.InstituteId == instituteId.Value)
+                    .Where(t =>
+                        t.InstituteId == instituteId.Value &&
+                        (instituteProject ? t.InstituteProjectId == projectId : t.ProjectId == projectId))
                     .OrderByDescending(t => t.Id)
-                    .Select(t => new { t.TrelloBoardJson, t.Name })
+                    .Select(t => new { t.TrelloBoardJson, t.CourseName, t.BoardUrl })
                     .FirstOrDefaultAsync();
 
                 if (instituteRow != null)
                 {
                     project.TrelloBoardJson = instituteRow.TrelloBoardJson;
-                    project.Name = instituteRow.Name;
+                    project.Name = instituteRow.CourseName;
+                    project.BoardUrl = instituteRow.BoardUrl;
                 }
             }
 
@@ -2875,14 +4002,15 @@ Staff request:
     /// <summary>
     /// Save Task Builder template JSON for an institute and project.
     /// Query: <c>?projectId=</c> and <c>?instituteId=</c>.
-    /// Insert: omit <see cref="AddInstituteTemplateRequest.InstituteTemplateId"/> and send a unique <see cref="AddInstituteTemplateRequest.Name"/> (per institute + project, case-insensitive).
-    /// Update: set <see cref="AddInstituteTemplateRequest.InstituteTemplateId"/> to an existing row id for this institute + project; optional <see cref="AddInstituteTemplateRequest.Name"/> renames if unique.
+    /// Insert: omit <see cref="AddInstituteTemplateRequest.InstituteTemplateId"/> and send a unique <see cref="AddInstituteTemplateRequest.CourseName"/> (per institute + project, case-insensitive). Legacy clients may send <c>name</c> instead.
+    /// Update: set <see cref="AddInstituteTemplateRequest.InstituteTemplateId"/> to an existing row id for this institute + project; optional <see cref="AddInstituteTemplateRequest.CourseName"/> renames if unique.
     /// </summary>
     [HttpPost("use/by-institute/add-template")]
     public async Task<ActionResult<object>> AddInstituteTemplate(
         [FromQuery] int projectId,
         [FromQuery] int instituteId,
-        [FromBody] AddInstituteTemplateRequest request)
+        [FromBody] AddInstituteTemplateRequest request,
+        [FromQuery] bool instituteProject = false)
     {
         if (projectId <= 0 || instituteId <= 0)
         {
@@ -2902,16 +4030,33 @@ Staff request:
                 return NotFound($"Institute with ID {instituteId} not found.");
             }
 
-            var project = await _context.Projects.AsNoTracking()
-                .Where(p => p.Id == projectId)
-                .Select(p => new { p.Id, p.Title })
-                .FirstOrDefaultAsync();
-            if (project == null)
+            if (instituteProject)
             {
-                return NotFound($"Project with ID {projectId} not found.");
+                var ipRow = await _context.InstituteProjects.AsNoTracking()
+                    .Where(ip => ip.Id == projectId && ip.InstituteId == instituteId)
+                    .Select(ip => new { ip.Id, ip.Title })
+                    .FirstOrDefaultAsync();
+                if (ipRow == null)
+                {
+                    return NotFound($"Institute project with ID {projectId} was not found for this institute.");
+                }
+            }
+            else
+            {
+                var project = await _context.Projects.AsNoTracking()
+                    .Where(p => p.Id == projectId)
+                    .Select(p => new { p.Id, p.Title })
+                    .FirstOrDefaultAsync();
+                if (project == null)
+                {
+                    return NotFound($"Project with ID {projectId} not found.");
+                }
             }
 
             var json = request.TrelloBoardJson?.Trim() ?? string.Empty;
+            var effectiveCourseName = !string.IsNullOrWhiteSpace(request.CourseName)
+                ? request.CourseName
+                : request.Name;
 
             static string ClampName(string s)
             {
@@ -2925,7 +4070,9 @@ Staff request:
                     .FirstOrDefaultAsync(t =>
                         t.Id == request.InstituteTemplateId.Value &&
                         t.InstituteId == instituteId &&
-                        t.ProjectId == projectId);
+                        (instituteProject
+                            ? t.InstituteProjectId == projectId && t.ProjectId == null
+                            : t.ProjectId == projectId && t.InstituteProjectId == null));
 
                 if (row == null)
                 {
@@ -2933,29 +4080,37 @@ Staff request:
                         $"Institute template {request.InstituteTemplateId.Value} not found for this institute and project.");
                 }
 
-                if (!string.IsNullOrWhiteSpace(request.Name))
+                if (row.IsActive)
                 {
-                    var newName = ClampName(request.Name);
+                    return Conflict(
+                        "This course is currently assigned as the active syllabus in Project Designs. The existing template cannot be overwritten. Save your changes as a new course instead.");
+                }
+
+                if (!string.IsNullOrWhiteSpace(effectiveCourseName))
+                {
+                    var newName = ClampName(effectiveCourseName!);
                     var taken = await _context.InstituteTemplates.AsNoTracking()
                         .AnyAsync(t =>
                             t.InstituteId == instituteId &&
-                            t.ProjectId == projectId &&
                             t.Id != row.Id &&
-                            t.Name.ToLower() == newName.ToLower());
+                            t.CourseName.ToLower() == newName.ToLower() &&
+                            (instituteProject
+                                ? t.InstituteProjectId == projectId && t.ProjectId == null
+                                : t.ProjectId == projectId && t.InstituteProjectId == null));
                     if (taken)
                     {
                         return Conflict($"A template named \"{newName}\" already exists for this project.");
                     }
 
-                    row.Name = newName;
+                    row.CourseName = newName;
                 }
 
                 row.TrelloBoardJson = json;
                 await _context.SaveChangesAsync();
 
                 _logger.LogInformation(
-                    "Updated InstituteTemplates row {Id} for InstituteId={InstituteId}, ProjectId={ProjectId}",
-                    row.Id, instituteId, projectId);
+                    "Updated InstituteTemplates row {Id} for InstituteId={InstituteId}, ProjectId={ProjectId}, InstituteProject={InstituteProject}",
+                    row.Id, instituteId, projectId, instituteProject);
 
                 return Ok(new
                 {
@@ -2963,22 +4118,25 @@ Staff request:
                     Id = row.Id,
                     InstituteId = instituteId,
                     ProjectId = projectId,
-                    Name = row.Name,
+                    Name = row.CourseName,
+                    CourseName = row.CourseName,
                     Updated = true,
                 });
             }
 
-            if (string.IsNullOrWhiteSpace(request.Name))
+            if (string.IsNullOrWhiteSpace(effectiveCourseName))
             {
-                return BadRequest("Name is required when creating a new institute template.");
+                return BadRequest("CourseName is required when creating a new institute template.");
             }
 
-            var insertName = ClampName(request.Name!);
+            var insertName = ClampName(effectiveCourseName!);
             var insertNameTaken = await _context.InstituteTemplates.AsNoTracking()
                 .AnyAsync(t =>
                     t.InstituteId == instituteId &&
-                    t.ProjectId == projectId &&
-                    t.Name.ToLower() == insertName.ToLower());
+                    t.CourseName.ToLower() == insertName.ToLower() &&
+                    (instituteProject
+                        ? t.InstituteProjectId == projectId && t.ProjectId == null
+                        : t.ProjectId == projectId && t.InstituteProjectId == null));
             if (insertNameTaken)
             {
                 return Conflict($"A template named \"{insertName}\" already exists for this project.");
@@ -2987,17 +4145,19 @@ Staff request:
             var newRow = new InstituteTemplate
             {
                 InstituteId = instituteId,
-                ProjectId = projectId,
-                Name = insertName,
+                ProjectId = instituteProject ? null : projectId,
+                InstituteProjectId = instituteProject ? projectId : null,
+                CourseName = insertName,
                 TrelloBoardJson = json,
-                IsActive = true
+                // Do not auto-select newly created templates in Project Designs until the user saves an assignment.
+                IsActive = false
             };
             _context.InstituteTemplates.Add(newRow);
             await _context.SaveChangesAsync();
 
             _logger.LogInformation(
-                "Created InstituteTemplates row {Id} for InstituteId={InstituteId}, ProjectId={ProjectId}",
-                newRow.Id, instituteId, projectId);
+                "Created InstituteTemplates row {Id} for InstituteId={InstituteId}, ProjectId={ProjectId}, InstituteProject={InstituteProject}",
+                newRow.Id, instituteId, projectId, instituteProject);
 
             return Ok(new
             {
@@ -3005,7 +4165,8 @@ Staff request:
                 Id = newRow.Id,
                 InstituteId = instituteId,
                 ProjectId = projectId,
-                Name = newRow.Name,
+                Name = newRow.CourseName,
+                CourseName = newRow.CourseName,
                 Updated = false,
             });
         }
@@ -3320,36 +4481,65 @@ Staff request:
     /// Get a single project by ID
     /// </summary>
     [HttpGet("use/{id:int}")]
-    public async Task<ActionResult<Project>> GetProjectById(int id)
+    public async Task<ActionResult<Project>> GetProjectById(
+        int id,
+        [FromQuery] bool instituteProject = false)
     {
         try
         {
-            _logger.LogInformation("Getting project with ID {ProjectId}", id);
+            _logger.LogInformation("Getting project with ID {ProjectId} instituteProject={InstituteProject}", id, instituteProject);
 
-            var project = await _context.Projects
-                .Where(p => p.Id == id)
-                .Select(p => new Project
-                {
-                    Id = p.Id,
-                    Title = p.Title,
-                    Mission = p.Mission,
-                    OneLiner = p.OneLiner,
-                    Description = p.Description,
-                    ExtendedDescription = p.ExtendedDescription,
-                    ShortBrief = p.ShortBrief,
-                    Priority = p.Priority,
-                    OrganizationId = p.OrganizationId,
-                    IsAvailable = p.IsAvailable,
-                    Kickoff = p.Kickoff,
-                    CreatedAt = p.CreatedAt,
-                    UpdatedAt = p.UpdatedAt
-                    // Exclude SystemDesign, SystemDesignDoc, and Organization to avoid serialization issues
-                })
-                .FirstOrDefaultAsync();
+            Project? project;
+            if (instituteProject)
+            {
+                project = await _context.InstituteProjects
+                    .Where(ip => ip.Id == id)
+                    .Select(ip => new Project
+                    {
+                        Id = ip.Id,
+                        Title = ip.Title,
+                        Mission = ip.Mission,
+                        OneLiner = ip.OneLiner,
+                        Description = ip.Description,
+                        ExtendedDescription = ip.ExtendedDescription,
+                        ShortBrief = ip.ShortBrief,
+                        Priority = ip.Priority,
+                        OrganizationId = ip.OrganizationId,
+                        InstituteId = ip.InstituteId,
+                        IsAvailable = ip.IsAvailable,
+                        Kickoff = ip.Kickoff,
+                        CreatedAt = ip.CreatedAt,
+                        UpdatedAt = ip.UpdatedAt,
+                    })
+                    .FirstOrDefaultAsync();
+            }
+            else
+            {
+                project = await _context.Projects
+                    .Where(p => p.Id == id)
+                    .Select(p => new Project
+                    {
+                        Id = p.Id,
+                        Title = p.Title,
+                        Mission = p.Mission,
+                        OneLiner = p.OneLiner,
+                        Description = p.Description,
+                        ExtendedDescription = p.ExtendedDescription,
+                        ShortBrief = p.ShortBrief,
+                        Priority = p.Priority,
+                        OrganizationId = p.OrganizationId,
+                        IsAvailable = p.IsAvailable,
+                        Kickoff = p.Kickoff,
+                        CreatedAt = p.CreatedAt,
+                        UpdatedAt = p.UpdatedAt
+                        // Exclude SystemDesign, SystemDesignDoc, and Organization to avoid serialization issues
+                    })
+                    .FirstOrDefaultAsync();
+            }
 
             if (project == null)
             {
-                _logger.LogWarning("Project with ID {ProjectId} not found", id);
+                _logger.LogWarning("Project with ID {ProjectId} not found (instituteProject={InstituteProject})", id, instituteProject);
                 return NotFound($"Project with ID {id} not found.");
             }
 
@@ -3364,15 +4554,19 @@ Staff request:
     }
 
     /// <summary>
-    /// Duplicate an existing project for an institute.
-    /// New project fields:
-    /// - Title = "{source.Title}-Copy" (single-token copy suffix for Project Designs one-word naming)
-    /// - OrganizationId = 100 if that organization exists, otherwise null (same as create-empty; avoids FK errors)
-    /// - InstituteId = from auth context
-    /// Route: POST /api/Projects/use/duplicate/{id}
+    /// Duplicate into <see cref="InstituteProjects"/>: from a built-in/legacy <see cref="Project"/> or an existing
+    /// <see cref="InstituteProject"/> row when <c>?sourceInstituteProject=true</c>.
+    /// Title uses the same &quot;-Copy&quot; suffix rules; uniqueness is enforced across <c>InstituteProjects</c> and
+    /// legacy institute <c>Projects</c> rows for the institute.
+    /// The copy does not include a course: <c>TrelloBoardJson</c> is null and no <c>InstituteTemplates</c> rows are created;
+    /// modules and other header fields are copied as before.
+    /// Route: POST /api/Projects/use/duplicate/{id}?sourceInstituteProject=true
     /// </summary>
     [HttpPost("use/duplicate/{id:int}")]
-    public async Task<ActionResult<Project>> DuplicateProject(int id, [FromBody] DuplicateProjectRequest request)
+    public async Task<ActionResult<ProjectDesignsListItemDto>> DuplicateProject(
+        int id,
+        [FromBody] DuplicateProjectRequest request,
+        [FromQuery] bool sourceInstituteProject = false)
     {
         try
         {
@@ -3398,48 +4592,13 @@ Staff request:
             if (organizationId == null)
             {
                 _logger.LogWarning(
-                    "DuplicateProject: Organizations.Id={PreferredOrgId} not found — inserting with OrganizationId=null (avoid FK violation). SourceProjectId={SourceId}, InstituteId={InstituteId}",
+                    "DuplicateProject: Organizations.Id={PreferredOrgId} not found — inserting with OrganizationId=null (avoid FK violation). SourceId={SourceId}, InstituteId={InstituteId}",
                     preferredOrganizationId,
                     id,
                     instituteId);
             }
 
-            var source = await _context.Projects
-                .AsNoTracking()
-                .Include(p => p.Organization)
-                .FirstOrDefaultAsync(p => p.Id == id);
-            if (source == null)
-            {
-                return NotFound($"Project with ID {id} not found.");
-            }
-
-            var sourceModules = await _context.ProjectModules
-                .AsNoTracking()
-                .Where(pm => pm.ProjectId == source.Id)
-                .OrderBy(pm => pm.Sequence ?? int.MaxValue)
-                .ThenBy(pm => pm.Id)
-                .ToListAsync();
-            _logger.LogInformation(
-                "DuplicateProject: SourceProjectId={SourceProjectId}, SourceModulesCount={SourceModulesCount}",
-                source.Id,
-                sourceModules.Count);
-
             const int titleLimit = 200;
-            var rawSourceTitle = string.IsNullOrWhiteSpace(source.Title) ? "Project" : source.Title.Trim();
-            var sourceTitle = Regex.Replace(
-                rawSourceTitle,
-                @"-copy\d*$",
-                string.Empty,
-                RegexOptions.IgnoreCase | RegexOptions.CultureInvariant).Trim();
-            if (string.IsNullOrWhiteSpace(sourceTitle))
-            {
-                sourceTitle = "Project";
-            }
-            var existingTitles = await _context.Projects
-                .AsNoTracking()
-                .Where(p => p.Title != null)
-                .Select(p => p.Title!)
-                .ToListAsync();
 
             static string BuildCopyTitle(string baseTitle, int suffixNumber, int limit)
             {
@@ -3449,100 +4608,164 @@ Staff request:
                 return $"{trimmedBase}{suffix}";
             }
 
-            var existingSet = new HashSet<string>(existingTitles, StringComparer.OrdinalIgnoreCase);
-            var suffixNumber = 1;
-            var copyTitle = BuildCopyTitle(sourceTitle, suffixNumber, titleLimit);
-            while (existingSet.Contains(copyTitle))
-            {
-                suffixNumber++;
-                copyTitle = BuildCopyTitle(sourceTitle, suffixNumber, titleLimit);
-            }
+            var instituteIpTitles = await _context.InstituteProjects
+                .AsNoTracking()
+                .Where(ip => ip.InstituteId == instituteId && ip.Title != null)
+                .Select(ip => ip.Title!)
+                .ToListAsync();
+            var legacyInstituteProjectTitles = await _context.Projects
+                .AsNoTracking()
+                .Where(p => p.InstituteId == instituteId && p.Title != null)
+                .Select(p => p.Title!)
+                .ToListAsync();
+            var existingSet = new HashSet<string>(
+                instituteIpTitles.Concat(legacyInstituteProjectTitles),
+                StringComparer.OrdinalIgnoreCase);
 
-            var duplicate = new Project
-            {
-                Title = copyTitle,
-                Mission = source.Mission,
-                OneLiner = source.OneLiner,
-                Description = source.Description,
-                ExtendedDescription = source.ExtendedDescription,
-                Logo = source.InstituteId == null
-                    ? (source.Organization != null ? source.Organization.Logo : source.Logo)
-                    : source.Logo,
-                SystemDesign = source.SystemDesign,
-                DataSchema = source.DataSchema,
-                SystemDesignDoc = source.SystemDesignDoc,
-                SystemDesignFormatted = source.SystemDesignFormatted,
-                Priority = source.Priority,
-                InstituteId = instituteId,
-                IsAvailable = false,
-                Kickoff = source.Kickoff,
-                TrelloBoardJson = source.TrelloBoardJson,
-                CustomerPastStory = source.CustomerPastStory,
-                ShortBrief = source.ShortBrief,
-                DeploymentManifest = source.DeploymentManifest,
-                IdeGenerationStatus = source.IdeGenerationStatus,
-                TotalChunks = source.TotalChunks,
-                CompletedChunks = source.CompletedChunks,
-                MockRecordsCount = source.MockRecordsCount,
-                CriteriaIds = source.CriteriaIds,
-                OrganizationId = organizationId,
-                CreatedAt = DateTime.UtcNow,
-                UpdatedAt = null
-            };
+            InstituteProject newIp;
+            List<ProjectModule> sourceCatalogModules = new();
+            List<InstituteProjectModule> sourceInstituteModules = new();
 
-            _context.Projects.Add(duplicate);
-            await _context.SaveChangesAsync();
-
-            var oldToNewModuleIdMap = new Dictionary<int, int>();
-            if (sourceModules.Count > 0)
+            if (sourceInstituteProject)
             {
-                var duplicatedModules = sourceModules.Select(pm => new ProjectModule
+                var sourceIp = await _context.InstituteProjects
+                    .AsNoTracking()
+                    .FirstOrDefaultAsync(ip => ip.Id == id && ip.InstituteId == instituteId);
+                if (sourceIp == null)
                 {
-                    ProjectId = duplicate.Id,
-                    ModuleType = pm.ModuleType,
-                    Title = pm.Title,
-                    Description = pm.Description,
-                    Sequence = pm.Sequence,
-                    OriginalModuleId = pm.Id,
-                }).ToList();
-                _context.ProjectModules.AddRange(duplicatedModules);
+                    return NotFound($"Institute project with ID {id} was not found.");
+                }
+
+                var rawSourceTitle = string.IsNullOrWhiteSpace(sourceIp.Title) ? "Project" : sourceIp.Title.Trim();
+                var sourceTitle = Regex.Replace(
+                    rawSourceTitle,
+                    @"-copy\d*$",
+                    string.Empty,
+                    RegexOptions.IgnoreCase | RegexOptions.CultureInvariant).Trim();
+                if (string.IsNullOrWhiteSpace(sourceTitle))
+                {
+                    sourceTitle = "Project";
+                }
+
+                var suffixNumber = 1;
+                var copyTitle = BuildCopyTitle(sourceTitle, suffixNumber, titleLimit);
+                while (existingSet.Contains(copyTitle))
+                {
+                    suffixNumber++;
+                    copyTitle = BuildCopyTitle(sourceTitle, suffixNumber, titleLimit);
+                }
+
+                newIp = InstituteProjectMapper.ForDuplicateFromInstituteProject(sourceIp, instituteId, copyTitle, organizationId);
+                _context.InstituteProjects.Add(newIp);
                 await _context.SaveChangesAsync();
 
-                // Build old -> new from OriginalModuleId (reliable; not dependent on sort order / index alignment).
-                var newModuleRows = await _context.ProjectModules
+                sourceInstituteModules = await _context.InstituteProjectModules
                     .AsNoTracking()
-                    .Where(pm => pm.ProjectId == duplicate.Id && pm.OriginalModuleId != null)
+                    .Where(pm => pm.InstituteProjectId == id)
+                    .OrderBy(pm => pm.Sequence ?? int.MaxValue)
+                    .ThenBy(pm => pm.Id)
                     .ToListAsync();
-                if (newModuleRows.Count != sourceModules.Count)
-                {
-                    _logger.LogWarning(
-                        "DuplicateProject: new module row count with OriginalModuleId {NewCount} != source {SourceCount} for NewProjectId={NewProjectId}; Trello module-id remap may be incomplete.",
-                        newModuleRows.Count,
-                        sourceModules.Count,
-                        duplicate.Id);
-                }
-                foreach (var row in newModuleRows)
-                {
-                    var fromId = row.OriginalModuleId!.Value;
-                    if (fromId > 0 && row.Id > 0 && fromId != row.Id)
-                    {
-                        oldToNewModuleIdMap[fromId] = row.Id;
-                    }
-                }
-
-                if (oldToNewModuleIdMap.Count == 0)
-                {
-                    _logger.LogWarning(
-                        "DuplicateProject: module id map is empty after copy (source modules={SourceCount}, new rows={NewCount}) for NewProjectId={NewProjectId}; TrelloBoardJson will keep source module ids.",
-                        sourceModules.Count,
-                        newModuleRows.Count,
-                        duplicate.Id);
-                }
 
                 _logger.LogInformation(
-                    "DuplicateProject: module id map for Trello (NewProjectId={NewProjectId}): {MapDetails}",
-                    duplicate.Id,
-                    FormatModuleIdMapForLog(oldToNewModuleIdMap));
+                    "DuplicateProject: source=InstituteProject SourceId={SourceId}, NewInstituteProjectId={NewId}, SourceModulesCount={Count}",
+                    id,
+                    newIp.Id,
+                    sourceInstituteModules.Count);
+            }
+            else
+            {
+                var source = await _context.Projects
+                    .AsNoTracking()
+                    .Include(p => p.Organization)
+                    .FirstOrDefaultAsync(p => p.Id == id && (p.InstituteId == null || p.InstituteId == instituteId));
+                if (source == null)
+                {
+                    return NotFound($"Project with ID {id} not found.");
+                }
+
+                var rawSourceTitle = string.IsNullOrWhiteSpace(source.Title) ? "Project" : source.Title.Trim();
+                var sourceTitle = Regex.Replace(
+                    rawSourceTitle,
+                    @"-copy\d*$",
+                    string.Empty,
+                    RegexOptions.IgnoreCase | RegexOptions.CultureInvariant).Trim();
+                if (string.IsNullOrWhiteSpace(sourceTitle))
+                {
+                    sourceTitle = "Project";
+                }
+
+                var suffixNumber = 1;
+                var copyTitle = BuildCopyTitle(sourceTitle, suffixNumber, titleLimit);
+                while (existingSet.Contains(copyTitle))
+                {
+                    suffixNumber++;
+                    copyTitle = BuildCopyTitle(sourceTitle, suffixNumber, titleLimit);
+                }
+
+                var basePid = source.InstituteId == null ? source.Id : (int?)null;
+                newIp = InstituteProjectMapper.ForDuplicateFromProject(source, instituteId, basePid, copyTitle, organizationId);
+
+                _context.InstituteProjects.Add(newIp);
+                await _context.SaveChangesAsync();
+
+                sourceCatalogModules = await _context.ProjectModules
+                    .AsNoTracking()
+                    .Where(pm => pm.ProjectId == source.Id)
+                    .OrderBy(pm => pm.Sequence ?? int.MaxValue)
+                    .ThenBy(pm => pm.Id)
+                    .ToListAsync();
+
+                _logger.LogInformation(
+                    "DuplicateProject: source=Project SourceProjectId={SourceId}, NewInstituteProjectId={NewId}, SourceModulesCount={Count}",
+                    source.Id,
+                    newIp.Id,
+                    sourceCatalogModules.Count);
+            }
+
+            var sourceModulesCount = sourceInstituteProject ? sourceInstituteModules.Count : sourceCatalogModules.Count;
+            if (sourceModulesCount > 0)
+            {
+                if (sourceInstituteProject)
+                {
+                    var duplicatedModules = sourceInstituteModules.Select(pm => new InstituteProjectModule
+                    {
+                        InstituteProjectId = newIp.Id,
+                        ModuleType = pm.ModuleType,
+                        Title = pm.Title,
+                        Description = pm.Description,
+                        Sequence = pm.Sequence,
+                        OriginalModuleId = pm.OriginalModuleId ?? pm.Id,
+                    }).ToList();
+                    _context.InstituteProjectModules.AddRange(duplicatedModules);
+                }
+                else
+                {
+                    var duplicatedModules = sourceCatalogModules.Select(pm => new InstituteProjectModule
+                    {
+                        InstituteProjectId = newIp.Id,
+                        ModuleType = pm.ModuleType,
+                        Title = pm.Title,
+                        Description = pm.Description,
+                        Sequence = pm.Sequence,
+                        OriginalModuleId = pm.Id,
+                    }).ToList();
+                    _context.InstituteProjectModules.AddRange(duplicatedModules);
+                }
+
+                await _context.SaveChangesAsync();
+
+                var newModuleRows = await _context.InstituteProjectModules
+                    .AsNoTracking()
+                    .Where(pm => pm.InstituteProjectId == newIp.Id && pm.OriginalModuleId != null)
+                    .ToListAsync();
+                if (newModuleRows.Count != sourceModulesCount)
+                {
+                    _logger.LogWarning(
+                        "DuplicateProject: new module row count with OriginalModuleId {NewCount} != source {SourceCount} for NewInstituteProjectId={NewProjectId}.",
+                        newModuleRows.Count,
+                        sourceModulesCount,
+                        newIp.Id);
+                }
             }
             else
             {
@@ -3551,9 +4774,9 @@ Staff request:
                     .AnyAsync(mt => mt.Id == 2);
                 if (hasModuleType2)
                 {
-                    _context.ProjectModules.Add(new ProjectModule
+                    _context.InstituteProjectModules.Add(new InstituteProjectModule
                     {
-                        ProjectId = duplicate.Id,
+                        InstituteProjectId = newIp.Id,
                         ModuleType = 2,
                         Title = "Module 1",
                         Description = string.Empty,
@@ -3561,177 +4784,43 @@ Staff request:
                     });
                     await _context.SaveChangesAsync();
                     _logger.LogInformation(
-                        "DuplicateProject: source had no modules; created default module for NewProjectId={NewProjectId}",
-                        duplicate.Id);
+                        "DuplicateProject: source had no modules; created default module for NewInstituteProjectId={NewProjectId}",
+                        newIp.Id);
                 }
                 else
                 {
                     _logger.LogWarning(
-                        "DuplicateProject: source had no modules and ModuleType=2 not found; skipped default ProjectModule row for ProjectId={ProjectId}",
-                        duplicate.Id);
+                        "DuplicateProject: source had no modules and ModuleType=2 not found; skipped default ProjectModule row for InstituteProjectId={ProjectId}",
+                        newIp.Id);
                 }
             }
 
-            if (!string.IsNullOrWhiteSpace(duplicate.TrelloBoardJson))
-            {
-                var jsonIn = duplicate.TrelloBoardJson!;
-                _logger.LogInformation(
-                    "DuplicateProject: TrelloBoardJson remap START NewProjectId={NewProjectId} sourceProjectId={SourceProjectId} inputLen={Len} mapSize={MapSize} map=[{Map}]",
-                    duplicate.Id,
-                    id,
-                    jsonIn.Length,
-                    oldToNewModuleIdMap.Count,
-                    FormatModuleIdMapForLog(oldToNewModuleIdMap));
-                var updatedJson = TryRemapTrelloJsonAfterProjectDuplicate(
-                    jsonIn,
-                    oldToNewModuleIdMap,
-                    sourceProjectId: id,
-                    newProjectId: duplicate.Id);
-                if (string.IsNullOrWhiteSpace(updatedJson))
-                {
-                    _logger.LogWarning(
-                        "DuplicateProject: TrelloBoardJson remapper returned empty; DB json NOT updated. NewProjectId={NewProjectId}",
-                        duplicate.Id);
-                }
-                else if (string.Equals(updatedJson, jsonIn, StringComparison.Ordinal))
-                {
-                    _logger.LogWarning(
-                        "DuplicateProject: TrelloBoardJson remapper made NO string change — DB still has source ids. NewProjectId={NewProjectId} sourceProjectId={Source} mapSize={MapSize} map=[{Map}] (see TryRemapTrelloJson RESIDUAL logs if any)",
-                        duplicate.Id,
-                        id,
-                        oldToNewModuleIdMap.Count,
-                        FormatModuleIdMapForLog(oldToNewModuleIdMap));
-                }
-                else
-                {
-                    duplicate.TrelloBoardJson = updatedJson;
-                    duplicate.UpdatedAt = DateTime.UtcNow;
-                    _context.Entry(duplicate).Property(p => p.TrelloBoardJson).IsModified = true;
-                    await _context.SaveChangesAsync();
-                    _logger.LogInformation(
-                        "DuplicateProject: TrelloBoardJson SAVED after remap. NewProjectId={NewProjectId} oldLen={OldLen} newLen={NewLen}",
-                        duplicate.Id,
-                        jsonIn.Length,
-                        updatedJson.Length);
-                }
-            }
-            else
-            {
-                _logger.LogInformation("DuplicateProject: TrelloBoardJson is empty; no remap. NewProjectId={NewProjectId}", duplicate.Id);
-            }
+            _logger.LogInformation(
+                "DuplicateProject: no course/board copied — TrelloBoardJson cleared, no InstituteTemplates rows. NewInstituteProjectId={NewId}",
+                newIp.Id);
 
-            // Copy institute syllabus template rows to the new project (same InstituteId + new ProjectId).
-            // All remain inactive so the default selection is the built-in board (Project.TrelloBoardJson / id 0) in the UI.
-            var sourceItRows = await _context.InstituteTemplates
-                .AsNoTracking()
-                .Where(t => t.InstituteId == instituteId && t.ProjectId == id)
-                .OrderBy(t => t.Id)
-                .ToListAsync();
-            if (sourceItRows.Count > 0)
+            return Ok(new ProjectDesignsListItemDto
             {
-                // InstituteTemplates.UX_InstituteTemplates_InstituteId_Name_CI: Name is unique per institute
-                // (any ProjectId), so we cannot reuse the source name if another project already has it, or
-                // if two source rows would yield the same name in one batch.
-                const int itNameMax = 100;
-                var nameTaken = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-                var existingItNames = await _context.InstituteTemplates
-                    .AsNoTracking()
-                    .Where(t => t.InstituteId == instituteId)
-                    .Select(t => t.Name ?? string.Empty)
-                    .ToListAsync();
-                foreach (var n in existingItNames)
-                {
-                    if (n.Length > 0) nameTaken.Add(n);
-                }
-
-                string NextUniqueItName(string? baseRaw)
-                {
-                    var baseName = string.IsNullOrWhiteSpace(baseRaw) ? "Template" : baseRaw!.Trim();
-                    if (baseName.Length > itNameMax)
-                    {
-                        baseName = baseName[..itNameMax];
-                    }
-                    if (nameTaken.Add(baseName))
-                    {
-                        return baseName;
-                    }
-                    for (var n = 1; n < 10_000; n++)
-                    {
-                        var suffix = $" (P{duplicate.Id}-{n})";
-                        var headLen = itNameMax - suffix.Length;
-                        if (headLen < 1) headLen = 1;
-                        var head = baseName.Length > headLen ? baseName[..headLen] : baseName;
-                        var candidate = string.Concat(head, suffix);
-                        if (candidate.Length > itNameMax) candidate = candidate[..itNameMax];
-                        if (nameTaken.Add(candidate)) return candidate;
-                    }
-                    var g = Guid.NewGuid().ToString("N", CultureInfo.InvariantCulture);
-                    if (g.Length > 12) g = g[..12];
-                    var fall = $"P{duplicate.Id}-{g}";
-                    if (fall.Length > itNameMax) fall = fall[..itNameMax];
-                    if (!nameTaken.Add(fall))
-                    {
-                        var alt = "T-" + Guid.NewGuid().ToString("N", CultureInfo.InvariantCulture);
-                        if (alt.Length > itNameMax) alt = alt[..itNameMax];
-                        nameTaken.Add(alt);
-                        return alt;
-                    }
-                    return fall;
-                }
-
-                foreach (var it in sourceItRows)
-                {
-                    var jsonIn = it.TrelloBoardJson ?? string.Empty;
-                    var newJson = jsonIn;
-                    if (!string.IsNullOrWhiteSpace(jsonIn))
-                    {
-                        var remapped = TryRemapTrelloJsonAfterProjectDuplicate(
-                            jsonIn,
-                            oldToNewModuleIdMap,
-                            sourceProjectId: id,
-                            newProjectId: duplicate.Id);
-                        if (!string.IsNullOrWhiteSpace(remapped))
-                        {
-                            newJson = remapped;
-                        }
-                    }
-                    var newName = NextUniqueItName(it.Name);
-                    _context.InstituteTemplates.Add(new InstituteTemplate
-                    {
-                        Name = newName,
-                        InstituteId = instituteId,
-                        ProjectId = duplicate.Id,
-                        TrelloBoardJson = newJson,
-                        IsActive = false,
-                    });
-                }
-                await _context.SaveChangesAsync();
-                _logger.LogInformation(
-                    "DuplicateProject: copied {Count} InstituteTemplates rows to NewProjectId={NewProjectId} from SourceProjectId={SourceProjectId}.",
-                    sourceItRows.Count,
-                    duplicate.Id,
-                    id);
-            }
-
-            return Ok(new Project
-            {
-                Id = duplicate.Id,
-                Title = duplicate.Title,
-                Mission = duplicate.Mission,
-                OneLiner = duplicate.OneLiner,
-                Description = duplicate.Description,
-                ExtendedDescription = duplicate.ExtendedDescription,
-                Logo = duplicate.Logo,
-                ShortBrief = duplicate.ShortBrief,
-                Priority = duplicate.Priority,
-                OrganizationId = duplicate.OrganizationId,
-                InstituteId = duplicate.InstituteId,
-                IsAvailable = duplicate.IsAvailable,
-                InUse = duplicate.InUse,
-                Kickoff = duplicate.Kickoff,
-                CriteriaIds = duplicate.CriteriaIds,
-                CreatedAt = duplicate.CreatedAt,
-                UpdatedAt = duplicate.UpdatedAt
+                Id = newIp.Id,
+                Title = newIp.Title,
+                BuiltInCourseName = newIp.BuiltInCourseName,
+                CourseName = newIp.BuiltInCourseName ?? newIp.Title,
+                Mission = newIp.Mission,
+                OneLiner = newIp.OneLiner,
+                Description = newIp.Description,
+                ExtendedDescription = newIp.ExtendedDescription,
+                ShortBrief = newIp.ShortBrief,
+                Priority = newIp.Priority,
+                OrganizationId = newIp.OrganizationId,
+                InstituteId = newIp.InstituteId,
+                IsAvailable = newIp.IsAvailable,
+                InUse = newIp.InUse,
+                Kickoff = newIp.Kickoff,
+                CriteriaIds = newIp.CriteriaIds,
+                CreatedAt = newIp.CreatedAt,
+                UpdatedAt = newIp.UpdatedAt,
+                InstituteProject = true,
+                BaseProjectId = newIp.BaseProjectId,
             });
         }
         catch (Exception ex)
@@ -4233,63 +5322,220 @@ Staff request:
     }
 
     /// <summary>
-    /// Activate a project (set IsAvailable to true)
+    /// Activate a project (set IsAvailable to true). Built-in catalog rows (<c>Projects</c> with no institute) are copied into <c>InstituteProjects</c>.
+    /// Query <paramref name="instituteProject"/> when <paramref name="id"/> refers to <see cref="InstituteProject"/> (custom / activated copy).
     /// </summary>
     [HttpPost("use/activate/{id}")]
-    public async Task<ActionResult> ActivateProject(int id)
+    public async Task<ActionResult<object>> ActivateProject(int id, [FromQuery] bool instituteProject = false)
     {
         try
         {
+            var auth = await ResolveInstituteIdFromAuthContextAsync();
+            if (!auth.HasValue || auth.Value <= 0)
+            {
+                return Unauthorized("Institute authentication is required to activate this project.");
+            }
+
+            var instActivate = auth.Value;
+
+            if (instituteProject)
+            {
+                var ip = await _context.InstituteProjects.FirstOrDefaultAsync(x => x.Id == id && x.InstituteId == instActivate);
+                if (ip == null)
+                {
+                    return NotFound($"Institute project with ID {id} was not found.");
+                }
+
+                var checkIp = await BuildProjectReadyValidationForInstituteProjectRowAsync(id, instActivate);
+                if (!checkIp.IsReady)
+                {
+                    return BadRequest(new
+                    {
+                        error = "Project is not ready to be made available.",
+                        missingRequirements = checkIp.MissingRequirements,
+                    });
+                }
+
+                if (!await InstituteProjectHasSyllabusForInstituteProjectRowAsync(id, instActivate))
+                {
+                    return Ok(new
+                    {
+                        success = false,
+                        title = "Course assignment required",
+                        detail =
+                            "This project cannot be activated because no course is assigned yet. " +
+                            "In Project Designs, open the General tab and assign a course in the Course field, then try activating again.",
+                    });
+                }
+
+                ip.IsAvailable = true;
+                ip.UpdatedAt = DateTime.UtcNow;
+                await _context.SaveChangesAsync();
+
+                _logger.LogInformation("InstituteProject {InstituteProjectId} activated successfully", id);
+                return Ok(new { Success = true, Message = "Project activated successfully.", Id = id, InstituteProject = true });
+            }
+
             var project = await _context.Projects.FindAsync(id);
             if (project == null)
             {
                 return NotFound($"Project with ID {id} not found.");
             }
 
-            if (project.InstituteId is int instActivate)
+            if (project.InstituteId == null)
             {
-                var auth = await ResolveInstituteIdFromAuthContextAsync();
-                if (!auth.HasValue || auth.Value != instActivate)
-                {
-                    return Unauthorized("Institute authentication is required to activate this project.");
-                }
+                return await ActivateCatalogProjectIntoInstituteTableAsync(id, instActivate);
+            }
 
-                var check = await BuildProjectReadyValidationForInstituteProjectAsync(id, instActivate);
-                if (!check.IsReady)
-                {
-                    return BadRequest(new
-                    {
-                        error = "Project is not ready to be made available.",
-                        missingRequirements = check.MissingRequirements
-                    });
-                }
+            if (project.InstituteId != instActivate)
+            {
+                return Unauthorized("Institute authentication is required to activate this project.");
+            }
 
-                if (!await InstituteProjectHasSyllabusTemplateAsync(id, instActivate))
+            var check = await BuildProjectReadyValidationForInstituteProjectAsync(id, instActivate);
+            if (!check.IsReady)
+            {
+                return BadRequest(new
                 {
-                    return BadRequest(new
-                    {
-                        title = "Syllabus template required",
-                        detail =
-                            "A syllabus template must be saved for this project before it can be made available. " +
-                            "In Project Designs, open the General tab and select a template under Syllabus Template. " +
-                            "If none are listed, go to the Syllabus templates tab, create a template for this project, " +
-                            "return to the General tab to select it, and try again."
-                    });
-                }
+                    error = "Project is not ready to be made available.",
+                    missingRequirements = check.MissingRequirements,
+                });
+            }
+
+            if (!await InstituteProjectHasSyllabusTemplateAsync(id, instActivate))
+            {
+                return Ok(new
+                {
+                    success = false,
+                    title = "Course assignment required",
+                    detail =
+                        "This project cannot be activated because no course is assigned yet. " +
+                        "In Project Designs, open the General tab and assign a course in the Course field, then try activating again.",
+                });
             }
 
             project.IsAvailable = true;
             project.UpdatedAt = DateTime.UtcNow;
-
             await _context.SaveChangesAsync();
 
             _logger.LogInformation("Project {ProjectId} activated successfully", id);
-            return Ok(new { Success = true, Message = "Project activated successfully." });
+            return Ok(new { Success = true, Message = "Project activated successfully.", Id = id, InstituteProject = false });
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error activating project {ProjectId}", id);
             return StatusCode(500, "An error occurred while activating the project");
+        }
+    }
+
+    /// <summary>
+    /// Deactivate a project.
+    /// - For activated built-in copies (<see cref="InstituteProject.BaseProjectId"/> != null), deactivation removes the institute copy and its modules.
+    /// - For custom institute projects, deactivation only sets <see cref="InstituteProject.IsAvailable"/> to false.
+    /// Route: POST /api/Projects/use/deactivate/{id}?instituteProject=true
+    /// </summary>
+    [HttpPost("use/deactivate/{id:int}")]
+    public async Task<ActionResult<object>> DeactivateProject(int id, [FromQuery] bool instituteProject = false)
+    {
+        try
+        {
+            var auth = await ResolveInstituteIdFromAuthContextAsync();
+            if (!auth.HasValue || auth.Value <= 0)
+            {
+                return Unauthorized("Institute authentication is required to deactivate this project.");
+            }
+
+            var instituteId = auth.Value;
+
+            if (instituteProject)
+            {
+                var ip = await _context.InstituteProjects
+                    .FirstOrDefaultAsync(x => x.Id == id && x.InstituteId == instituteId);
+                if (ip == null)
+                {
+                    return NotFound($"Institute project with ID {id} was not found.");
+                }
+
+                var shouldDeleteAsBuiltInMirror = ip.IsBuiltIn && ip.BaseProjectId.HasValue;
+
+                if (shouldDeleteAsBuiltInMirror)
+                {
+                    var hasTemplates = await _context.InstituteTemplates
+                        .AsNoTracking()
+                        .AnyAsync(t => t.InstituteId == instituteId && t.InstituteProjectId == ip.Id);
+                    if (hasTemplates)
+                    {
+                        ip.IsAvailable = false;
+                        ip.UpdatedAt = DateTime.UtcNow;
+                        await _context.SaveChangesAsync();
+                        return Ok(new { Success = true, Deleted = false, Id = id, InstituteProject = true });
+                    }
+
+                    var modules = await _context.InstituteProjectModules
+                        .Where(m => m.InstituteProjectId == ip.Id)
+                        .ToListAsync();
+                    if (modules.Count > 0)
+                    {
+                        _context.InstituteProjectModules.RemoveRange(modules);
+                    }
+                    _context.InstituteProjects.Remove(ip);
+                    await _context.SaveChangesAsync();
+                    return Ok(new { Success = true, Deleted = true, Id = id, InstituteProject = true });
+                }
+
+                ip.IsAvailable = false;
+                ip.UpdatedAt = DateTime.UtcNow;
+                await _context.SaveChangesAsync();
+                return Ok(new { Success = true, Deleted = false, Id = id, InstituteProject = true });
+            }
+
+            var baseProject = await _context.Projects
+                .AsNoTracking()
+                .FirstOrDefaultAsync(p => p.Id == id && p.InstituteId == null && p.IsAvailable);
+            if (baseProject == null)
+            {
+                return NotFound($"Catalog project with ID {id} was not found or is not available.");
+            }
+
+            var baseTitleNorm = NormalizeProjectTitleKey(baseProject.Title);
+            var activatedCopies = await _context.InstituteProjects
+                .Where(ip => ip.InstituteId == instituteId && ip.BaseProjectId == id && ip.IsAvailable)
+                .OrderByDescending(ip => ip.UpdatedAt ?? ip.CreatedAt)
+                .ThenByDescending(ip => ip.Id)
+                .ToListAsync();
+            var target = activatedCopies.FirstOrDefault(ip => NormalizeProjectTitleKey(ip.Title) == baseTitleNorm)
+                ?? activatedCopies.FirstOrDefault();
+            if (target == null)
+            {
+                return NotFound("This built-in project is not currently activated for your institute.");
+            }
+
+            var targetModules = await _context.InstituteProjectModules
+                .Where(m => m.InstituteProjectId == target.Id)
+                .ToListAsync();
+            var hasTemplatesForTarget = await _context.InstituteTemplates
+                .AsNoTracking()
+                .AnyAsync(t => t.InstituteId == instituteId && t.InstituteProjectId == target.Id);
+            if (hasTemplatesForTarget)
+            {
+                target.IsAvailable = false;
+                target.UpdatedAt = DateTime.UtcNow;
+                await _context.SaveChangesAsync();
+                return Ok(new { Success = true, Deleted = false, Id = target.Id, InstituteProject = true, BaseProjectId = id });
+            }
+            if (targetModules.Count > 0)
+            {
+                _context.InstituteProjectModules.RemoveRange(targetModules);
+            }
+            _context.InstituteProjects.Remove(target);
+            await _context.SaveChangesAsync();
+
+            return Ok(new { Success = true, Deleted = true, Id = target.Id, InstituteProject = true, BaseProjectId = id });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error deactivating project {ProjectId}", id);
+            return StatusCode(500, "An error occurred while deactivating the project");
         }
     }
 

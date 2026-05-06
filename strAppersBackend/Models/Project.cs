@@ -11,8 +11,12 @@ public class Project
     [MaxLength(200)]
     public string Title { get; set; } = string.Empty;
 
+    /// <summary>Student-facing course label in Courses / Task Builder (built-in catalog). Falls back to <see cref="Title"/> when unset.</summary>
+    [MaxLength(100)]
+    public string? CourseName { get; set; }
+
     /// <summary>Short mission statement (enforced: max 45 words; column supports long copy).</summary>
-    [MaxLength(2000)]
+    [Column(TypeName = "TEXT")]
     public string? Mission { get; set; }
 
     /// <summary>Single-line pitch or tagline (enforced: max 8 words).</summary>
@@ -36,8 +40,7 @@ public class Project
     
     public byte[]? SystemDesignDoc { get; set; }
     
-    [MaxLength(2000)]
-    [Column("SystemDesignFormatted")]
+    [Column("SystemDesignFormatted", TypeName = "TEXT")]
     public string? SystemDesignFormatted { get; set; }
     
     [MaxLength(50)]
@@ -75,8 +78,7 @@ public class Project
     public string? CustomerPastStory { get; set; }
 
     /// <summary>Short brief/summary (enforced: max 150 words; column supports long copy).</summary>
-    [MaxLength(2000)]
-    [Column("ShortBrief")]
+    [Column("ShortBrief", TypeName = "TEXT")]
     public string? ShortBrief { get; set; }
 
     // IDE Generation fields
@@ -109,6 +111,9 @@ public class Project
     public ICollection<DesignVersion> DesignVersions { get; set; } = new List<DesignVersion>();
     public ICollection<ProjectsIDE> IDEChunks { get; set; } = new List<ProjectsIDE>();
     public ICollection<InstituteTemplate> InstituteTemplates { get; set; } = new List<InstituteTemplate>();
+
+    /// <summary>Per-institute copies created from this catalog project (<see cref="InstituteProject.BaseProjectId"/>).</summary>
+    public ICollection<InstituteProject> InstituteProjectCopies { get; set; } = new List<InstituteProject>();
 }
 
 public class CreateProjectRequest

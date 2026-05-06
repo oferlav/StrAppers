@@ -217,19 +217,23 @@ public partial class MentorController
 
         if (!string.IsNullOrWhiteSpace(moduleIdStr) && int.TryParse(moduleIdStr.Trim(), out var moduleInt))
         {
-            var pm = await _context.ProjectModules.AsNoTracking()
-                .FirstOrDefaultAsync(m => m.Id == moduleInt && m.ProjectId == projectId);
+            var pm = await strAppersBackend.Utilities.ProjectModuleLookup.FindByBoardScopeAsync(
+                _context,
+                moduleInt,
+                projectId,
+                CancellationToken.None);
             sb.AppendLine("## Project module (database)");
             if (pm == null)
             {
-                sb.AppendLine($"No `ProjectModules` row found for ModuleId **{moduleInt}** and ProjectId **{projectId}**.");
+                sb.AppendLine(
+                    $"No module row for ModuleId **{moduleInt}** and project scope **{projectId}** (catalog or institute design).");
             }
             else
             {
                 sb.AppendLine($"- **ModuleId:** {pm.Id}");
                 sb.AppendLine($"- **Title:** {pm.Title ?? "(none)"}");
                 sb.AppendLine("- **Description:**");
-                sb.AppendLine(string.IsNullOrWhiteSpace(pm.Description) ? "(none)" : pm.Description.Trim());
+                sb.AppendLine(string.IsNullOrWhiteSpace(pm.Description) ? "(none)" : pm.Description!.Trim());
             }
             sb.AppendLine();
 

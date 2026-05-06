@@ -10,7 +10,9 @@ public class SaveInstituteRolesRequest
     [Required]
     public int InstituteId { get; set; }
 
-    /// <summary>Optional UI flag (session); not written to DB in this endpoint.</summary>
+    /// <summary>
+    /// When <see cref="TemplateScopeId"/> is set, persisted on the linked <see cref="InstituteSquad"/> row; otherwise ignored.
+    /// </summary>
     public bool? RequireDeveloperRule { get; set; }
 
     /// <summary>

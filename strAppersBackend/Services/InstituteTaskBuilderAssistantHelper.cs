@@ -29,7 +29,7 @@ public static class InstituteTaskBuilderAssistantHelper
 
     public static string BuildUserPrompt(
         Project project,
-        ProjectModule? module,
+        IProjectModuleRow? module,
         ProjectInstituteTemplatesAssistantRequest request,
         string? historyBlock)
     {
@@ -93,6 +93,22 @@ public static class InstituteTaskBuilderAssistantHelper
         userSb.AppendLine("## User message");
         userSb.AppendLine(request.UserMessage.Trim());
         return userSb.ToString();
+    }
+
+    /// <inheritdoc cref="BuildUserPrompt(Project, ProjectModule?, ProjectInstituteTemplatesAssistantRequest, string?)"/>
+    public static string BuildUserPrompt(
+        InstituteProject project,
+        IProjectModuleRow? module,
+        ProjectInstituteTemplatesAssistantRequest request,
+        string? historyBlock)
+    {
+        var synthetic = new Project
+        {
+            Id = project.Id,
+            Title = project.Title,
+            ExtendedDescription = project.ExtendedDescription,
+        };
+        return BuildUserPrompt(synthetic, module, request, historyBlock);
     }
 
     public static string TruncateForPreview(string s, int maxLen) =>

@@ -41,24 +41,33 @@ public static class InstituteAssistantChatHelper
     };
 
     /// <summary>Recent chat (user + assistant) for the last hour, for prompt context.</summary>
+    /// <remarks>Pass either <paramref name="projectId"/> (legacy <c>Projects</c> row) or <paramref name="instituteProjectId"/> (not both).</remarks>
     public static async Task<string> BuildRecentContextBlockAsync(
         ApplicationDbContext db,
         int instituteId,
         int teacherId,
-        int projectId,
+        int? projectId,
+        int? instituteProjectId,
         string source,
         ILogger? logger = null,
         CancellationToken cancellationToken = default)
     {
+        if (projectId.HasValue == instituteProjectId.HasValue)
+        {
+            return string.Empty;
+        }
+
         var since = DateTime.UtcNow.AddHours(-1);
         var rows = await db.InstituteAssistantChatHistory
             .AsNoTracking()
             .Where(h =>
                 h.InstituteId == instituteId &&
                 h.TeacherId == teacherId &&
-                h.ProjectId == projectId &&
                 h.Source == source &&
-                h.CreatedAt >= since)
+                h.CreatedAt >= since &&
+                (instituteProjectId.HasValue
+                    ? h.InstituteProjectId == instituteProjectId
+                    : h.ProjectId == projectId && h.InstituteProjectId == null))
             .OrderBy(h => h.CreatedAt)
             .ToListAsync(cancellationToken);
 
@@ -82,13 +91,19 @@ public static class InstituteAssistantChatHelper
         ApplicationDbContext db,
         int instituteId,
         int teacherId,
-        int projectId,
+        int? projectId,
+        int? instituteProjectId,
         string source,
         string? userMessage,
         string? assistantMessage,
         ILogger? logger = null,
         CancellationToken cancellationToken = default)
     {
+        if (projectId.HasValue == instituteProjectId.HasValue)
+        {
+            return;
+        }
+
         if (string.IsNullOrWhiteSpace(userMessage) && string.IsNullOrWhiteSpace(assistantMessage))
         {
             return;
@@ -101,6 +116,7 @@ public static class InstituteAssistantChatHelper
                 InstituteId = instituteId,
                 TeacherId = teacherId,
                 ProjectId = projectId,
+                InstituteProjectId = instituteProjectId,
                 Source = source,
                 IsAssistant = false,
                 Message = userMessage.Trim(),
@@ -115,6 +131,7 @@ public static class InstituteAssistantChatHelper
                 InstituteId = instituteId,
                 TeacherId = teacherId,
                 ProjectId = projectId,
+                InstituteProjectId = instituteProjectId,
                 Source = source,
                 IsAssistant = true,
                 Message = assistantMessage.Trim(),
