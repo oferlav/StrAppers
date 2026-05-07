@@ -229,6 +229,40 @@ public class StudentsController : ControllerBase
                 return NotFound($"Student with ID {studentId} not found.");
             }
 
+            // Guard: never overwrite an active student's ProjectId or Status
+            if (student.Status == 3 && !string.IsNullOrWhiteSpace(student.BoardId))
+            {
+                _logger.LogWarning(
+                    "AllocateWithPriority blocked for active student {StudentId} (Status=3, BoardId={BoardId}): only priority fields updated.",
+                    studentId, student.BoardId);
+
+                // Helper to normalize 0 -> null
+                int? ToNullable(int value) => value <= 0 ? (int?)null : value;
+
+                // Only update priority slots — leave ProjectId, Status, BoardId untouched
+                student.ProjectPriority1 = ToNullable(projectId1);
+                student.ProjectPriority2 = ToNullable(projectId2);
+                student.ProjectPriority3 = ToNullable(projectId3);
+                student.ProjectPriority4 = ToNullable(projectId4);
+                student.UpdatedAt = DateTime.UtcNow;
+
+                await _context.SaveChangesAsync();
+
+                return Ok(new
+                {
+                    Success = true,
+                    Message = "Priority fields updated. ProjectId and Status unchanged (student is active on a board).",
+                    StudentId = student.Id,
+                    ProjectId = student.ProjectId,
+                    Priority1 = student.ProjectPriority1,
+                    Priority2 = student.ProjectPriority2,
+                    Priority3 = student.ProjectPriority3,
+                    Priority4 = student.ProjectPriority4,
+                    Status = student.Status,
+                    StartPendingAt = student.StartPendingAt
+                });
+            }
+
             // Helper to normalize 0 -> null
             int? ToNullable(int value) => value <= 0 ? (int?)null : value;
 
