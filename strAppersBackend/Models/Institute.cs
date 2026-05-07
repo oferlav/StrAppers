@@ -64,4 +64,6 @@ public class Institute
     public ICollection<InstituteSquad> InstituteSquads { get; set; } = new List<InstituteSquad>();
 
     public ICollection<InstituteProject> InstituteProjects { get; set; } = new List<InstituteProject>();
+
+    public ICollection<ProjectBoard> ProjectBoards { get; set; } = new List<ProjectBoard>();
 }

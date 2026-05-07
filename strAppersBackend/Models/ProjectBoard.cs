@@ -24,6 +24,12 @@ namespace strAppersBackend.Models
         public int ProjectId { get; set; }
 
         /// <summary>
+        /// Optional foreign key to Institutes table.
+        /// </summary>
+        [Column("InstituteId")]
+        public int? InstituteId { get; set; }
+
+        /// <summary>
         /// Project start date
         /// </summary>
         [Column("StartDate")]
@@ -306,6 +312,12 @@ namespace strAppersBackend.Models
         /// </summary>
         [ForeignKey(nameof(ProjectId))]
         public virtual Project Project { get; set; } = null!;
+
+        /// <summary>
+        /// Navigation property to the associated institute.
+        /// </summary>
+        [ForeignKey(nameof(InstituteId))]
+        public virtual Institute? Institute { get; set; }
 
         /// <summary>
         /// Navigation property to the project status

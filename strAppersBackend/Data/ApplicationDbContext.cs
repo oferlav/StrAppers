@@ -759,6 +759,7 @@ public class ApplicationDbContext : DbContext
             // Explicit column mappings
             entity.Property(e => e.Id).HasColumnName("BoardId");
             entity.Property(e => e.ProjectId).HasColumnName("ProjectId");
+            entity.Property(e => e.InstituteId).HasColumnName("InstituteId");
             entity.Property(e => e.StatusId).HasColumnName("StatusId");
             entity.Property(e => e.AdminId).HasColumnName("AdminId");
             entity.Property(e => e.BoardUrl).HasColumnName("BoardURL").HasMaxLength(500);
@@ -800,6 +801,11 @@ public class ApplicationDbContext : DbContext
                   .HasForeignKey(e => e.ProjectId)
                   .OnDelete(DeleteBehavior.Cascade);
 
+            entity.HasOne(e => e.Institute)
+                  .WithMany(i => i.ProjectBoards)
+                  .HasForeignKey(e => e.InstituteId)
+                  .OnDelete(DeleteBehavior.SetNull);
+
             // Temporarily disable Status foreign key relationship
             // entity.HasOne(e => e.Status)
             //       .WithMany()
@@ -822,6 +828,7 @@ public class ApplicationDbContext : DbContext
 
             // Indexes for better performance
             entity.HasIndex(e => e.ProjectId);
+            entity.HasIndex(e => e.InstituteId);
             entity.HasIndex(e => e.CreatedAt);
             entity.HasIndex(e => e.StatusId);
             entity.HasIndex(e => e.SystemBoardId);
