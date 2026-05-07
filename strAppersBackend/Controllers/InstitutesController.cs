@@ -524,6 +524,10 @@ public class InstitutesController : ControllerBase
             if (teacher.Email.ToLower() == callerEmail)
                 return BadRequest(new { Success = false, Message = "You cannot remove yourself." });
 
+            // Prevent deleting another admin
+            if (teacher.IsAdmin)
+                return BadRequest(new { Success = false, Message = "Admin teachers cannot be removed." });
+
             // Remove any pending invite tokens first (FK constraint)
             var tokens = await _context.TeacherInviteTokens
                 .Where(t => t.TeacherId == teacherId)
