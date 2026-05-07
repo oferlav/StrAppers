@@ -99,6 +99,15 @@ public partial class BoardsController
     {
         try
         {
+            if (!instituteId.HasValue)
+            {
+                return Ok(new StaffSquadsResponseDto
+                {
+                    Squads = new List<StaffSquadRowDto>(),
+                    ObservedSprintNumbers = new List<int>(),
+                });
+            }
+
             var sprintLengthWeeks = _configuration.GetValue<int>("BusinessLogicConfig:SprintLengthInWeeks", 1);
             var nowUtc = DateTime.UtcNow;
 
@@ -107,8 +116,7 @@ public partial class BoardsController
                 .Include(pb => pb.Project)
                 .ThenInclude(p => p.Organization)
                 .Include(pb => pb.SprintMerges)
-                .Where(pb => !pb.IsSystemBoard && pb.Project.IsAvailable
-                    && instituteId != null && pb.InstituteId == instituteId)
+                .Where(pb => !pb.IsSystemBoard && pb.Project.IsAvailable && pb.InstituteId == instituteId.Value)
                 .OrderBy(pb => pb.Project.Title)
                 .ThenBy(pb => pb.SquadName)
                 .ThenBy(pb => pb.Id)
@@ -234,11 +242,13 @@ public partial class BoardsController
     {
         try
         {
+            if (!instituteId.HasValue)
+                return Ok(new StaffSquadsAssistResponseDto { Squads = new List<StaffSquadAssistRowDto>() });
+
             var boards = await _context.ProjectBoards
                 .AsNoTracking()
                 .Include(pb => pb.Project)
-                .Where(pb => !pb.IsSystemBoard && pb.Project.IsAvailable
-                    && instituteId != null && pb.InstituteId == instituteId)
+                .Where(pb => !pb.IsSystemBoard && pb.Project.IsAvailable && pb.InstituteId == instituteId.Value)
                 .OrderBy(pb => pb.Project!.Title)
                 .ThenBy(pb => pb.SquadName)
                 .ThenBy(pb => pb.Id)

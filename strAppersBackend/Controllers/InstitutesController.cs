@@ -483,7 +483,7 @@ public class InstitutesController : ControllerBase
                 })
                 .ToListAsync();
 
-            return Ok(new { Success = true, Teachers = teachers });
+            return Ok(new { Success = true, InstituteName = institute.Name, Teachers = teachers });
         }
         catch (Exception ex)
         {
