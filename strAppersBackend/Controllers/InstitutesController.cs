@@ -309,6 +309,188 @@ public class InstitutesController : ControllerBase
             return StatusCode(500, new { Success = false, Message = "An error occurred during login" });
         }
     }
+
+    /// <summary>
+    /// Invite a new teacher to the institute: creates the Teacher row (no password yet)
+    /// and sends them a one-time invite link by email.
+    /// </summary>
+    [HttpPost("{id}/teachers/invite")]
+    public async Task<ActionResult<object>> InviteTeacher(int id, [FromBody] InviteTeacherRequest request)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(request.Email) ||
+                string.IsNullOrWhiteSpace(request.FirstName) ||
+                string.IsNullOrWhiteSpace(request.LastName))
+                return BadRequest(new { Success = false, Message = "FirstName, LastName and Email are required" });
+
+            var institute = await _context.Institutes.FindAsync(id);
+            if (institute == null || !institute.IsActive)
+                return NotFound(new { Success = false, Message = "Institute not found" });
+
+            var email = request.Email.Trim().ToLower();
+
+            // Prevent duplicate teacher emails
+            var exists = await _context.Teachers.AnyAsync(t => t.Email.ToLower() == email);
+            if (exists)
+                return Conflict(new { Success = false, Message = "A teacher with this email already exists" });
+
+            // Create teacher without a password — invite will complete registration
+            var teacher = new Teacher
+            {
+                InstituteId = id,
+                FirstName = request.FirstName.Trim(),
+                LastName = request.LastName.Trim(),
+                Email = email,
+                CreatedAt = DateTime.UtcNow
+            };
+            _context.Teachers.Add(teacher);
+            await _context.SaveChangesAsync();
+
+            // Generate a secure one-time token (48h expiry)
+            var rawToken = Convert.ToBase64String(System.Security.Cryptography.RandomNumberGenerator.GetBytes(64))
+                           .Replace("+", "-").Replace("/", "_").TrimEnd('=');
+
+            var inviteToken = new TeacherInviteToken
+            {
+                TeacherId = teacher.Id,
+                Token = rawToken,
+                ExpiresAt = DateTime.UtcNow.AddHours(48),
+                CreatedAt = DateTime.UtcNow
+            };
+            _context.TeacherInviteTokens.Add(inviteToken);
+            await _context.SaveChangesAsync();
+
+            // Build invite link pointing to frontend
+            var frontendBase = (_configuration["GoogleAuth:FrontendBaseUrl"]
+                                ?? _configuration["GitHub:FrontendBaseUrl"]
+                                ?? "https://skill-in.com").TrimEnd('/');
+            var inviteLink = $"{frontendBase}/AcceptTeacherInvite?token={rawToken}";
+
+            var emailBody =
+                $"Hi {teacher.FirstName},\n\n" +
+                $"You've been invited to join {institute.Name} on Skill-in as a staff member.\n\n" +
+                $"Click the link below to set your password and activate your account (link expires in 48 hours):\n\n" +
+                $"{inviteLink}\n\n" +
+                $"If you did not expect this invitation, you can ignore this email.\n\n" +
+                $"The Skill-in Team";
+
+            var sent = await _smtpEmailService.SendPlainEmailAsync(
+                teacher.Email,
+                $"You're invited to join {institute.Name} on Skill-in",
+                emailBody);
+
+            _logger.LogInformation(
+                "Teacher invite sent: teacherId={TeacherId}, email={Email}, sent={Sent}",
+                teacher.Id, teacher.Email, sent);
+
+            return Ok(new
+            {
+                Success = true,
+                Message = sent
+                    ? "Invitation sent successfully"
+                    : "Teacher created but email delivery failed — check SMTP config",
+                EmailSent = sent,
+                Teacher = new { teacher.Id, teacher.FirstName, teacher.LastName, teacher.Email }
+            });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error inviting teacher to institute {InstituteId}", id);
+            return StatusCode(500, new { Success = false, Message = "An error occurred while inviting the teacher" });
+        }
+    }
+
+    /// <summary>
+    /// Accept an invite token and set the teacher's password, completing registration.
+    /// </summary>
+    [HttpPost("use/accept-invite")]
+    public async Task<ActionResult<object>> AcceptInvite([FromBody] AcceptInviteRequest request)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(request.Token) || string.IsNullOrWhiteSpace(request.Password))
+                return BadRequest(new { Success = false, Message = "Token and password are required" });
+
+            if (request.Password.Length < 8)
+                return BadRequest(new { Success = false, Message = "Password must be at least 8 characters" });
+
+            var inviteToken = await _context.TeacherInviteTokens
+                .Include(t => t.Teacher)
+                    .ThenInclude(t => t.Institute)
+                .FirstOrDefaultAsync(t => t.Token == request.Token);
+
+            if (inviteToken == null)
+                return NotFound(new { Success = false, Message = "Invalid or expired invite link" });
+
+            if (inviteToken.UsedAt != null)
+                return BadRequest(new { Success = false, Message = "This invite link has already been used" });
+
+            if (inviteToken.ExpiresAt < DateTime.UtcNow)
+                return BadRequest(new { Success = false, Message = "This invite link has expired. Please ask your admin to resend the invitation." });
+
+            var teacher = inviteToken.Teacher;
+            if (teacher?.Institute == null || !teacher.Institute.IsActive)
+                return BadRequest(new { Success = false, Message = "Account no longer active" });
+
+            // Set password and mark token used
+            teacher.PasswordHash = _passwordHasher.HashPassword(request.Password);
+            teacher.UpdatedAt = DateTime.UtcNow;
+            inviteToken.UsedAt = DateTime.UtcNow;
+
+            await _context.SaveChangesAsync();
+
+            _logger.LogInformation("Teacher {TeacherId} accepted invite and set password", teacher.Id);
+
+            return Ok(new
+            {
+                Success = true,
+                Message = "Password set successfully. You can now log in.",
+                Institute = new { teacher.Institute.Id, teacher.Institute.Name },
+                Teacher = new { teacher.Id, teacher.FirstName, teacher.LastName, teacher.Email, teacher.InstituteId }
+            });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error accepting teacher invite");
+            return StatusCode(500, new { Success = false, Message = "An error occurred while activating your account" });
+        }
+    }
+
+    /// <summary>
+    /// List all teachers for an institute (safe shape, no password hash).
+    /// </summary>
+    [HttpGet("{id}/teachers")]
+    public async Task<ActionResult<object>> GetTeachers(int id)
+    {
+        try
+        {
+            var institute = await _context.Institutes.FindAsync(id);
+            if (institute == null) return NotFound(new { Success = false, Message = "Institute not found" });
+
+            var teachers = await _context.Teachers
+                .Where(t => t.InstituteId == id)
+                .OrderBy(t => t.FirstName)
+                .Select(t => new
+                {
+                    t.Id,
+                    t.FirstName,
+                    t.LastName,
+                    t.Email,
+                    t.InstituteId,
+                    t.CreatedAt,
+                    HasPassword = t.PasswordHash != null
+                })
+                .ToListAsync();
+
+            return Ok(new { Success = true, Teachers = teachers });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error fetching teachers for institute {InstituteId}", id);
+            return StatusCode(500, new { Success = false, Message = "An error occurred" });
+        }
+    }
 }
 
 public class InstituteJoinMeetingRequest
@@ -336,5 +518,31 @@ public class InstituteLoginRequest
 
     [Required]
     [MaxLength(100)]
+    public string Password { get; set; } = string.Empty;
+}
+
+public class InviteTeacherRequest
+{
+    [Required]
+    [MaxLength(100)]
+    public string FirstName { get; set; } = string.Empty;
+
+    [Required]
+    [MaxLength(100)]
+    public string LastName { get; set; } = string.Empty;
+
+    [Required]
+    [EmailAddress]
+    [MaxLength(255)]
+    public string Email { get; set; } = string.Empty;
+}
+
+public class AcceptInviteRequest
+{
+    [Required]
+    public string Token { get; set; } = string.Empty;
+
+    [Required]
+    [MinLength(8)]
     public string Password { get; set; } = string.Empty;
 }

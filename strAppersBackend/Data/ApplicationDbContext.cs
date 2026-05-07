@@ -63,6 +63,7 @@ public class ApplicationDbContext : DbContext
     public DbSet<InstituteTemplate> InstituteTemplates { get; set; }
     public DbSet<InstituteProject> InstituteProjects { get; set; }
     public DbSet<InstituteAssistantChatHistory> InstituteAssistantChatHistory { get; set; }
+    public DbSet<TeacherInviteToken> TeacherInviteTokens { get; set; }
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -1064,6 +1065,22 @@ public class ApplicationDbContext : DbContext
             entity.HasIndex(e => e.BoardId);
             entity.HasIndex(e => e.StudentId);
             entity.HasIndex(e => e.MetricId);
+        });
+
+        modelBuilder.Entity<TeacherInviteToken>(entity =>
+        {
+            entity.ToTable("TeacherInviteTokens");
+            entity.HasKey(e => e.Id);
+            entity.Property(e => e.Token).IsRequired().HasMaxLength(128);
+            entity.Property(e => e.ExpiresAt).IsRequired();
+            entity.Property(e => e.UsedAt).HasColumnType("timestamp with time zone");
+            entity.Property(e => e.CreatedAt).HasDefaultValueSql("CURRENT_TIMESTAMP");
+            entity.HasIndex(e => e.Token).IsUnique();
+            entity.HasIndex(e => e.TeacherId);
+            entity.HasOne(e => e.Teacher)
+                .WithMany()
+                .HasForeignKey(e => e.TeacherId)
+                .OnDelete(DeleteBehavior.Cascade);
         });
 
         // Configure MentorChatHistory entity (Id is identity; ensure value-generated on add to avoid duplicate key when sequence is out of sync)
