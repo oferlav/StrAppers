@@ -33,6 +33,9 @@ public class Teacher
     [MaxLength(256)]
     public string? PasswordHash { get; set; }
 
+    [Column("IsAdmin")]
+    public bool IsAdmin { get; set; } = false;
+
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
 
     public DateTime? UpdatedAt { get; set; }
