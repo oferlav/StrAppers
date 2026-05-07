@@ -214,6 +214,9 @@ public partial class ProjectsController : ControllerBase
         /// <summary>For <see cref="Kind"/> institute: true when <see cref="ProjectId"/> is an <see cref="InstituteProject"/> id.</summary>
         public bool InstituteProjectDesign { get; set; }
 
+        /// <summary>When <see cref="InstituteProjectDesign"/> is true: <see cref="InstituteProject.IsBuiltIn"/> (activated catalog copy).</summary>
+        public bool InstituteProjectIsBuiltIn { get; set; }
+
         /// <summary>Whether the underlying project is marked in use (Create Course / catalog filtering).</summary>
         public bool InUse { get; set; } = true;
 
@@ -1767,6 +1770,8 @@ Scope:
 Behavior:
 - Support targeted edits like "change module 3 title to ...", "rewrite module 2 body ...".
 - To reorder (e.g. swap module 1 and 2): return suggestedModules with the same moduleId values but updated sequence values — do not duplicate rows or swap text between unrelated slots unless the user asked for a content swap.
+- To remove one or more modules: return suggestedModules as the **complete list of modules that should remain**, each with its **moduleId** from the snapshot. **Omit** removed modules entirely — do not claim you removed a module unless it is absent from suggestedModules and you returned every survivor row.
+- For a single-module edit when multiple modules exist, still return **every** surviving module in suggestedModules (same count as before unless removing). Returning only the edited row may be ignored by the client.
 - Always include moduleId for every existing module you return in suggestedModules so the client can apply updates without confusing array positions.
 - Use uploaded design document context only when it is explicitly provided in the prompt. If it is marked empty/missing, do not assume any design-document content.
 - If uploaded design document context is provided and non-empty, you must treat it as available context. Do not claim that it is missing.
@@ -3575,6 +3580,7 @@ Staff request:
                         : t.Project!.Title,
                     BoardUrl = t.BoardUrl,
                     InstituteProjectDesign = t.InstituteProjectId != null,
+                    InstituteProjectIsBuiltIn = t.InstituteProjectId != null && t.InstituteProject!.IsBuiltIn,
                     InUse = t.InstituteProjectId != null ? t.InstituteProject!.InUse : t.Project!.InUse,
                     IsActive = t.IsActive,
                 })
@@ -3627,10 +3633,13 @@ Staff request:
 
     /// <summary>
     /// Project picker for Courses &quot;Create Course&quot;: institute-owned projects with <see cref="Project.InUse"/> /
-    /// <see cref="InstituteProject.InUse"/> that pass project-ready validation (not in &quot;Pending&quot;);
-    /// when <paramref name="includeBuiltIn"/> is true, also includes global catalog projects (<c>InstituteId</c> is null)
-    /// that are <see cref="Project.InUse"/>, <see cref="Project.IsAvailable"/>, have a saved Trello template JSON, and pass
-    /// catalog readiness (same notion as catalog built-ins).
+    /// <see cref="InstituteProject.InUse"/> that pass project-ready validation (not in &quot;Pending&quot;).
+    /// Rows where <see cref="InstituteProject.IsBuiltIn"/> is true (activated catalog copies in <c>InstituteProjects</c>)
+    /// are never returned — use global catalog rows when <paramref name="includeBuiltIn"/> is true. With
+    /// <paramref name="includeBuiltIn"/> false, the list is institute non-built-in mirrors and legacy institute projects only.
+    /// When <paramref name="includeBuiltIn"/> is true, also includes global catalog projects
+    /// (<c>InstituteId</c> is null) that are <see cref="Project.InUse"/>, <see cref="Project.IsAvailable"/>, have a saved
+    /// Trello template JSON, and pass catalog readiness (same notion as catalog built-ins).
     /// </summary>
     /// <remarks>
     /// Exposed twice so proxies or older clients can call either route:
@@ -3672,7 +3681,7 @@ Staff request:
                     Id = ip.Id,
                     Title = ip.Title ?? string.Empty,
                     InstituteId = instituteId,
-                    IsBuiltIn = false,
+                    IsBuiltIn = ip.IsBuiltIn,
                     IsInstituteProject = true,
                 })
                 .ToListAsync();
@@ -3713,6 +3722,11 @@ Staff request:
             instituteOwned.AddRange(readyLegacyInstitute);
             instituteOwned.Sort((a, b) =>
                 string.Compare(a.Title, b.Title, StringComparison.OrdinalIgnoreCase));
+
+            // Never list activated catalog mirrors (InstituteProjects.IsBuiltIn); "include built-in" adds global Projects rows instead.
+            instituteOwned = instituteOwned
+                .Where(o => !(o.IsInstituteProject && o.IsBuiltIn))
+                .ToList();
 
             if (!includeBuiltIn)
                 return Ok(instituteOwned);

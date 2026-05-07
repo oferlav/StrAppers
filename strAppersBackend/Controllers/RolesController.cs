@@ -555,7 +555,7 @@ namespace strAppersBackend.Controllers
         }
 
         /// <summary>
-        /// AI assistance for improving role competencies text (spelling, grammar, clarity, and structure).
+        /// AI assistance for improving role competencies text (spelling, grammar, clarity, structure, tech stack, and AI-related expectations).
         /// </summary>
         [HttpPost("use/ai-competencies-assistance")]
         public async Task<ActionResult<RoleCompetenciesAssistanceResponse>> AssistCompetencies(
@@ -594,6 +594,9 @@ Requirements:
 4) Use a clean bullet list format.
 5) If the input is very short or empty, propose a strong baseline competencies list for this role.
 6) For technical roles, emphasize technical capabilities. For non-technical roles, emphasize communication, planning, and domain competencies.
+7) Always weave in explicit tech-stack expectations when the role is technical or engineering-oriented: languages, frameworks, platforms, and tooling that fit the role name and teacher instruction. If no stack is stated, infer a concise, realistic baseline; if the instruction names specific technologies, align to those.
+8) Always include AI-related expectations where they matter for the role: for technical roles, cover responsible use of AI coding assistants, testing/review with AI, and relevant ML/GenAI literacy; for non-technical roles, cover AI literacy, safe and ethical use, and using AI tools appropriately for that discipline—not low-level implementation unless the role demands it.
+9) If the teacher instruction specifies tech stack or AI constraints, reflect them directly in the bullets.
 
 Teacher draft:
 {source}

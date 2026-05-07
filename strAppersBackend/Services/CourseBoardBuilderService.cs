@@ -123,6 +123,13 @@ public class CourseBoardBuilderService : ICourseBoardBuilderService
                 return Fail($"InstituteTemplate {request.TemplateId} was not found for project {request.ProjectId}.");
         }
 
+        var duplicateNameMessage = await ValidateInstituteTemplateCourseNameUniqueAsync(
+            instituteTemplate,
+            request.ProjectId,
+            request.InstituteProject);
+        if (duplicateNameMessage != null)
+            return Fail(duplicateNameMessage);
+
         // ── 2. Load roles ─────────────────────────────────────────────────────
         List<InstituteRole> roles;
         if (instituteTemplate.SquadId is > 0)
@@ -231,11 +238,6 @@ public class CourseBoardBuilderService : ICourseBoardBuilderService
         {
             moduleLengths = Enumerable.Repeat(request.ModuleLengthInSprints, moduleCount).ToArray();
         }
-
-        var totalModuleSprints = moduleLengths.Sum();
-        if (sprintCount < totalModuleSprints + 3)
-            return Fail($"NumberOfSprints ({sprintCount}) must be at least sum(module lengths) + 3 = {totalModuleSprints + 3}. " +
-                        $"Current module lengths sum to {totalModuleSprints} sprint(s) across {moduleCount} module(s).");
 
         var config = new CourseConfig(sprintCount, moduleCount, request.SprintLengthInDays, moduleLengths);
         var modules = allModules.Take(moduleCount).ToList();
@@ -805,6 +807,33 @@ public class CourseBoardBuilderService : ICourseBoardBuilderService
     // ─────────────────────────────────────────────────────────────────────────
     // Helpers
     // ─────────────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Same uniqueness rule as <c>ProjectsController.AddInstituteTemplate</c> insert/update — must run before AI/Trello work.
+    /// </summary>
+    private async Task<string?> ValidateInstituteTemplateCourseNameUniqueAsync(
+        InstituteTemplate instituteTemplate,
+        int projectId,
+        bool instituteProject)
+    {
+        var courseName = instituteTemplate.CourseName?.Trim() ?? string.Empty;
+        if (courseName.Length == 0)
+            return null;
+
+        var duplicateExists = await _context.InstituteTemplates.AsNoTracking()
+            .AnyAsync(t =>
+                t.Id != instituteTemplate.Id &&
+                t.InstituteId == instituteTemplate.InstituteId &&
+                t.CourseName.ToLower() == courseName.ToLower() &&
+                (instituteProject
+                    ? t.InstituteProjectId == projectId && t.ProjectId == null
+                    : t.ProjectId == projectId && t.InstituteProjectId == null));
+
+        if (!duplicateExists)
+            return null;
+
+        return $"A template named \"{courseName}\" already exists for this project.";
+    }
 
     private static CourseBoardBuildResponse Fail(string message) =>
         new() { Success = false, Message = message };

@@ -31,6 +31,11 @@ public class CoursesController : ControllerBase
                 return NotFound(result);
             }
 
+            if (result.Message.Contains("already exists for this project", StringComparison.OrdinalIgnoreCase))
+            {
+                return Conflict(result);
+            }
+
             return BadRequest(result);
         }
 

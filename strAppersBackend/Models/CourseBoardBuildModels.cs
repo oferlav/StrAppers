@@ -19,7 +19,6 @@ public class CourseBoardBuildRequest
     /// <summary>
     /// Number of project modules to include in the course. Defaults to all modules found on the project.
     /// Cannot exceed the actual number of modules in the project.
-    /// Must satisfy: NumberOfSprints >= sum(ModuleLengths) + 3.
     /// </summary>
     [Range(2, 20)]
     public int? NumberOfModules { get; set; }
