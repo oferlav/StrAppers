@@ -491,6 +491,48 @@ public class InstitutesController : ControllerBase
             return StatusCode(500, new { Success = false, Message = "An error occurred" });
         }
     }
+
+    /// <summary>
+    /// Remove a teacher from an institute. Cannot delete yourself (caller's email header must differ).
+    /// DELETE /api/Institutes/{id}/teachers/{teacherId}
+    /// </summary>
+    [HttpDelete("{id}/teachers/{teacherId}")]
+    public async Task<ActionResult<object>> DeleteTeacher(int id, int teacherId)
+    {
+        try
+        {
+            var institute = await _context.Institutes.FindAsync(id);
+            if (institute == null)
+                return NotFound(new { Success = false, Message = "Institute not found" });
+
+            var teacher = await _context.Teachers
+                .FirstOrDefaultAsync(t => t.Id == teacherId && t.InstituteId == id);
+            if (teacher == null)
+                return NotFound(new { Success = false, Message = "Teacher not found in this institute" });
+
+            // Prevent self-deletion via the caller email header
+            var callerEmail = (Request.Headers["X-User-Email"].FirstOrDefault() ?? "").Trim().ToLower();
+            if (!string.IsNullOrEmpty(callerEmail) && teacher.Email.ToLower() == callerEmail)
+                return BadRequest(new { Success = false, Message = "You cannot remove yourself." });
+
+            // Remove any pending invite tokens first (FK constraint)
+            var tokens = await _context.TeacherInviteTokens
+                .Where(t => t.TeacherId == teacherId)
+                .ToListAsync();
+            _context.TeacherInviteTokens.RemoveRange(tokens);
+
+            _context.Teachers.Remove(teacher);
+            await _context.SaveChangesAsync();
+
+            _logger.LogInformation("Teacher {TeacherId} removed from institute {InstituteId}", teacherId, id);
+            return Ok(new { Success = true, Message = "Teacher removed." });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error deleting teacher {TeacherId} from institute {InstituteId}", teacherId, id);
+            return StatusCode(500, new { Success = false, Message = "An error occurred" });
+        }
+    }
 }
 
 public class InstituteJoinMeetingRequest
