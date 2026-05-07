@@ -236,6 +236,23 @@ public class GoogleAuthController : ControllerBase
                 ("instituteId", institute.Id.ToString())));
         }
 
+        // Teacher accounts (individual staff, not the institute contact email)
+        var teacher = await _db.Teachers
+            .AsNoTracking()
+            .Include(t => t.Institute)
+            .FirstOrDefaultAsync(t =>
+                t.Email != null &&
+                t.Email.ToLower() == normalizedEmail.ToLower());
+
+        if (teacher != null && teacher.Institute?.IsActive == true)
+        {
+            return Redirect(BuildGoogleCallbackUrl(frontendBase,
+                ("status", "ok"),
+                ("userType", "institute"),
+                ("email", normalizedEmail),
+                ("instituteId", teacher.InstituteId.ToString())));
+        }
+
         var student = await _db.Students
             .AsNoTracking()
             .FirstOrDefaultAsync(s =>
