@@ -92,10 +92,10 @@ public partial class BoardsController
 
     /// <summary>
     /// Live project boards (non-system) with org/project links, sprint window hint, and onboard students for the staff dashboard.
-    /// Route: GET /api/Boards/use/staff-squads
+    /// Route: GET /api/Boards/use/staff-squads?instituteId={id}
     /// </summary>
     [HttpGet("staff-squads")]
-    public async Task<ActionResult<StaffSquadsResponseDto>> GetStaffSquads(CancellationToken cancellationToken)
+    public async Task<ActionResult<StaffSquadsResponseDto>> GetStaffSquads([FromQuery] int? instituteId, CancellationToken cancellationToken)
     {
         try
         {
@@ -107,7 +107,8 @@ public partial class BoardsController
                 .Include(pb => pb.Project)
                 .ThenInclude(p => p.Organization)
                 .Include(pb => pb.SprintMerges)
-                .Where(pb => !pb.IsSystemBoard && pb.Project.IsAvailable)
+                .Where(pb => !pb.IsSystemBoard && pb.Project.IsAvailable
+                    && instituteId != null && pb.InstituteId == instituteId)
                 .OrderBy(pb => pb.Project.Title)
                 .ThenBy(pb => pb.SquadName)
                 .ThenBy(pb => pb.Id)
@@ -226,17 +227,18 @@ public partial class BoardsController
     }
 
     /// <summary>
-    /// Staff dashboard: poll-only payload with <see cref="Student.AssistMe"/> per student (lightweight). GET /api/Boards/use/staff-squads-assist — no success-path logging (errors only in <c>catch</c>).
+    /// Staff dashboard: poll-only payload with <see cref="Student.AssistMe"/> per student (lightweight). GET /api/Boards/use/staff-squads-assist?instituteId={id} — no success-path logging (errors only in <c>catch</c>).
     /// </summary>
     [HttpGet("staff-squads-assist")]
-    public async Task<ActionResult<StaffSquadsAssistResponseDto>> GetStaffSquadsAssist(CancellationToken cancellationToken)
+    public async Task<ActionResult<StaffSquadsAssistResponseDto>> GetStaffSquadsAssist([FromQuery] int? instituteId, CancellationToken cancellationToken)
     {
         try
         {
             var boards = await _context.ProjectBoards
                 .AsNoTracking()
                 .Include(pb => pb.Project)
-                .Where(pb => !pb.IsSystemBoard && pb.Project.IsAvailable)
+                .Where(pb => !pb.IsSystemBoard && pb.Project.IsAvailable
+                    && instituteId != null && pb.InstituteId == instituteId)
                 .OrderBy(pb => pb.Project!.Title)
                 .ThenBy(pb => pb.SquadName)
                 .ThenBy(pb => pb.Id)
