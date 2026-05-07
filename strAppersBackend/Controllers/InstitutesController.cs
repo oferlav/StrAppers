@@ -479,6 +479,7 @@ public class InstitutesController : ControllerBase
                     t.Email,
                     t.InstituteId,
                     t.CreatedAt,
+                    t.IsAdmin,
                     HasPassword = t.PasswordHash != null
                 })
                 .ToListAsync();
@@ -510,9 +511,17 @@ public class InstitutesController : ControllerBase
             if (teacher == null)
                 return NotFound(new { Success = false, Message = "Teacher not found in this institute" });
 
-            // Prevent self-deletion via the caller email header
             var callerEmail = (Request.Headers["X-User-Email"].FirstOrDefault() ?? "").Trim().ToLower();
-            if (!string.IsNullOrEmpty(callerEmail) && teacher.Email.ToLower() == callerEmail)
+
+            // Only admin teachers can delete others
+            var caller = !string.IsNullOrEmpty(callerEmail)
+                ? await _context.Teachers.FirstOrDefaultAsync(t => t.Email.ToLower() == callerEmail && t.InstituteId == id)
+                : null;
+            if (caller == null || !caller.IsAdmin)
+                return StatusCode(403, new { Success = false, Message = "Only admin teachers can remove staff." });
+
+            // Prevent self-deletion
+            if (teacher.Email.ToLower() == callerEmail)
                 return BadRequest(new { Success = false, Message = "You cannot remove yourself." });
 
             // Remove any pending invite tokens first (FK constraint)
