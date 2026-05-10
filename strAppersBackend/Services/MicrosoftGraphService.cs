@@ -1627,7 +1627,35 @@ public class MicrosoftGraphService : IMicrosoftGraphService
                 $"https://graph.microsoft.com/v1.0/users/{userId}/onlineMeetings/{onlineMeetingId}",
                 patch);
             if (response.IsSuccessStatusCode)
+            {
                 _logger.LogInformation("recordAutomatically set on onlineMeeting {Id}", onlineMeetingId);
+
+                // Verify: read back to confirm setting took and log who Teams considers the organizer
+                try
+                {
+                    var verifyResponse = await _httpClient.GetAsync(
+                        $"https://graph.microsoft.com/v1.0/users/{userId}/onlineMeetings/{onlineMeetingId}?$select=id,recordAutomatically,organizer");
+                    if (verifyResponse.IsSuccessStatusCode)
+                    {
+                        var verifyData = JsonSerializer.Deserialize<JsonElement>(await verifyResponse.Content.ReadAsStringAsync());
+                        var recordAuto = verifyData.TryGetProperty("recordAutomatically", out var ra) ? ra.GetBoolean().ToString() : "unknown";
+                        var organizerUpn = "unknown";
+                        if (verifyData.TryGetProperty("organizer", out var org) &&
+                            org.TryGetProperty("upn", out var upn))
+                            organizerUpn = upn.GetString() ?? "unknown";
+                        _logger.LogInformation("Verified onlineMeeting {Id}: recordAutomatically={RecordAuto}, organizer={Organizer}",
+                            onlineMeetingId, recordAuto, organizerUpn);
+                    }
+                    else
+                    {
+                        _logger.LogWarning("Could not verify onlineMeeting settings: {StatusCode}", verifyResponse.StatusCode);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Exception verifying onlineMeeting settings (non-critical)");
+                }
+            }
             else
             {
                 var err = await response.Content.ReadAsStringAsync();
