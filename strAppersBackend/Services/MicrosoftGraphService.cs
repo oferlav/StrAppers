@@ -360,14 +360,37 @@ public class MicrosoftGraphService : IMicrosoftGraphService
             var meetingId = meetingResponse.GetProperty("id").GetString();
             
             // Get the online meeting details from the event
+            string? onlineMeetingId = null;
             var joinUrl = meetingResponse.TryGetProperty("onlineMeeting", out var onlineMeetingElement) &&
                          onlineMeetingElement.TryGetProperty("joinUrl", out var joinUrlElement)
                 ? joinUrlElement.GetString()
                 : null;
 
+            if (onlineMeetingElement.ValueKind == JsonValueKind.Object &&
+                onlineMeetingElement.TryGetProperty("id", out var omIdElement))
+                onlineMeetingId = omIdElement.GetString();
+
             if (string.IsNullOrEmpty(joinUrl))
             {
                 _logger.LogWarning("No Teams join URL found in calendar event response");
+            }
+
+            // Enable auto-recording on the online meeting
+            if (!string.IsNullOrEmpty(onlineMeetingId))
+            {
+                try
+                {
+                    var recPatch = new StringContent(
+                        JsonSerializer.Serialize(new { recordAutomatically = true }, new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase }),
+                        System.Text.Encoding.UTF8, "application/json");
+                    await _httpClient.PatchAsync(
+                        $"https://graph.microsoft.com/v1.0/users/{_serviceAccountEmail}/onlineMeetings/{onlineMeetingId}",
+                        recPatch);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Failed to set recordAutomatically on meeting {MeetingId} (non-critical)", onlineMeetingId);
+                }
             }
 
             // Use the already calculated times for response
@@ -490,6 +513,7 @@ public class MicrosoftGraphService : IMicrosoftGraphService
             
             // Extract join URL from onlineMeeting, handling null case
             string? joinUrl = null;
+            string? onlineMeetingIdNoAttendees = null;
             if (meetingResponse.TryGetProperty("onlineMeeting", out var onlineMeetingElement) &&
                 onlineMeetingElement.ValueKind != JsonValueKind.Null &&
                 onlineMeetingElement.ValueKind == JsonValueKind.Object)
@@ -499,11 +523,34 @@ public class MicrosoftGraphService : IMicrosoftGraphService
                 {
                     joinUrl = joinUrlElement.GetString();
                 }
+                if (onlineMeetingElement.TryGetProperty("id", out var omIdEl) &&
+                    omIdEl.ValueKind != JsonValueKind.Null)
+                {
+                    onlineMeetingIdNoAttendees = omIdEl.GetString();
+                }
             }
 
             if (string.IsNullOrEmpty(joinUrl))
             {
                 _logger.LogWarning("No Teams join URL found in calendar event response");
+            }
+
+            // Enable auto-recording on the online meeting
+            if (!string.IsNullOrEmpty(onlineMeetingIdNoAttendees))
+            {
+                try
+                {
+                    var recPatch = new StringContent(
+                        JsonSerializer.Serialize(new { recordAutomatically = true }, new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase }),
+                        System.Text.Encoding.UTF8, "application/json");
+                    await _httpClient.PatchAsync(
+                        $"https://graph.microsoft.com/v1.0/users/{_serviceAccountEmail}/onlineMeetings/{onlineMeetingIdNoAttendees}",
+                        recPatch);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Failed to set recordAutomatically on meeting {MeetingId} (non-critical)", onlineMeetingIdNoAttendees);
+                }
             }
 
             _logger.LogInformation("Teams meeting (no attendees) created successfully. Meeting ID: {MeetingId}", meetingId);
@@ -899,7 +946,8 @@ public class MicrosoftGraphService : IMicrosoftGraphService
                             isLobbyBypassEnabled = false // Disable lobby bypass
                         },
                         allowAnonymousUsersToStartMeeting = false, // Don't allow anonymous users
-                        allowedPresenters = "organizer" // Only organizer can present
+                        allowedPresenters = "organizer", // Only organizer can present
+                        recordAutomatically = true
                     };
 
                     var settingsJson = JsonSerializer.Serialize(meetingSettingsUpdate, new JsonSerializerOptions
