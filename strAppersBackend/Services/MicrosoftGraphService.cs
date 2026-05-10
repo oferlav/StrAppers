@@ -366,31 +366,15 @@ public class MicrosoftGraphService : IMicrosoftGraphService
                 ? joinUrlElement.GetString()
                 : null;
 
-            if (onlineMeetingElement.ValueKind == JsonValueKind.Object &&
-                onlineMeetingElement.TryGetProperty("id", out var omIdElement))
-                onlineMeetingId = omIdElement.GetString();
-
             if (string.IsNullOrEmpty(joinUrl))
-            {
                 _logger.LogWarning("No Teams join URL found in calendar event response");
-            }
 
-            // Enable auto-recording on the online meeting
-            if (!string.IsNullOrEmpty(onlineMeetingId))
+            // Look up the real onlineMeeting resource id and enable auto-recording
+            if (!string.IsNullOrEmpty(joinUrl))
             {
-                try
-                {
-                    var recPatch = new StringContent(
-                        JsonSerializer.Serialize(new { recordAutomatically = true }, new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase }),
-                        System.Text.Encoding.UTF8, "application/json");
-                    await _httpClient.PatchAsync(
-                        $"https://graph.microsoft.com/v1.0/users/{_serviceAccountEmail}/onlineMeetings/{onlineMeetingId}",
-                        recPatch);
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogWarning(ex, "Failed to set recordAutomatically on meeting {MeetingId} (non-critical)", onlineMeetingId);
-                }
+                var omId = await GetOnlineMeetingIdByJoinUrlAsync(joinUrl);
+                if (!string.IsNullOrEmpty(omId))
+                    await SetRecordAutomaticallyAsync(omId);
             }
 
             // Use the already calculated times for response
@@ -513,7 +497,6 @@ public class MicrosoftGraphService : IMicrosoftGraphService
             
             // Extract join URL from onlineMeeting, handling null case
             string? joinUrl = null;
-            string? onlineMeetingIdNoAttendees = null;
             if (meetingResponse.TryGetProperty("onlineMeeting", out var onlineMeetingElement) &&
                 onlineMeetingElement.ValueKind != JsonValueKind.Null &&
                 onlineMeetingElement.ValueKind == JsonValueKind.Object)
@@ -523,34 +506,17 @@ public class MicrosoftGraphService : IMicrosoftGraphService
                 {
                     joinUrl = joinUrlElement.GetString();
                 }
-                if (onlineMeetingElement.TryGetProperty("id", out var omIdEl) &&
-                    omIdEl.ValueKind != JsonValueKind.Null)
-                {
-                    onlineMeetingIdNoAttendees = omIdEl.GetString();
-                }
             }
 
             if (string.IsNullOrEmpty(joinUrl))
-            {
                 _logger.LogWarning("No Teams join URL found in calendar event response");
-            }
 
-            // Enable auto-recording on the online meeting
-            if (!string.IsNullOrEmpty(onlineMeetingIdNoAttendees))
+            // Look up the real onlineMeeting resource id and enable auto-recording
+            if (!string.IsNullOrEmpty(joinUrl))
             {
-                try
-                {
-                    var recPatch = new StringContent(
-                        JsonSerializer.Serialize(new { recordAutomatically = true }, new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase }),
-                        System.Text.Encoding.UTF8, "application/json");
-                    await _httpClient.PatchAsync(
-                        $"https://graph.microsoft.com/v1.0/users/{_serviceAccountEmail}/onlineMeetings/{onlineMeetingIdNoAttendees}",
-                        recPatch);
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogWarning(ex, "Failed to set recordAutomatically on meeting {MeetingId} (non-critical)", onlineMeetingIdNoAttendees);
-                }
+                var omId = await GetOnlineMeetingIdByJoinUrlAsync(joinUrl);
+                if (!string.IsNullOrEmpty(omId))
+                    await SetRecordAutomaticallyAsync(omId);
             }
 
             _logger.LogInformation("Teams meeting (no attendees) created successfully. Meeting ID: {MeetingId}", meetingId);
@@ -933,54 +899,48 @@ public class MicrosoftGraphService : IMicrosoftGraphService
                 }
             }
 
-            // Update online meeting settings to restrict access (require lobby admission)
-            if (!string.IsNullOrEmpty(onlineMeetingId))
+            // Look up the real onlineMeeting resource id via JoinWebUrl and apply settings
+            if (!string.IsNullOrEmpty(joinUrl))
             {
-                try
+                var omId = await GetOnlineMeetingIdByJoinUrlAsync(joinUrl);
+                if (!string.IsNullOrEmpty(omId))
                 {
-                    var meetingSettingsUpdate = new
+                    try
                     {
-                        lobbyBypassSettings = new
+                        var meetingSettingsUpdate = new
                         {
-                            scope = "organizer", // Only organizer can bypass lobby
-                            isLobbyBypassEnabled = false // Disable lobby bypass
-                        },
-                        allowAnonymousUsersToStartMeeting = false, // Don't allow anonymous users
-                        allowedPresenters = "organizer", // Only organizer can present
-                        recordAutomatically = true
-                    };
-
-                    var settingsJson = JsonSerializer.Serialize(meetingSettingsUpdate, new JsonSerializerOptions
-                    {
-                        PropertyNamingPolicy = JsonNamingPolicy.CamelCase
-                    });
-
-                    var settingsContent = new StringContent(settingsJson, System.Text.Encoding.UTF8, "application/json");
-                    
-                    // Update online meeting settings
-                    var settingsResponse = await _httpClient.PatchAsync(
-                        $"https://graph.microsoft.com/v1.0/users/{_serviceAccountEmail}/onlineMeetings/{onlineMeetingId}",
-                        settingsContent);
-
-                    if (settingsResponse.IsSuccessStatusCode)
-                    {
-                        _logger.LogInformation("Successfully updated online meeting settings to restrict access (lobby required for non-invited users)");
+                            lobbyBypassSettings = new
+                            {
+                                scope = "organizer",
+                                isLobbyBypassEnabled = false
+                            },
+                            allowAnonymousUsersToStartMeeting = false,
+                            allowedPresenters = "organizer",
+                            recordAutomatically = true
+                        };
+                        var settingsContent = new StringContent(
+                            JsonSerializer.Serialize(meetingSettingsUpdate, new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase }),
+                            System.Text.Encoding.UTF8, "application/json");
+                        var settingsResponse = await _httpClient.PatchAsync(
+                            $"https://graph.microsoft.com/v1.0/users/{_serviceAccountEmail}/onlineMeetings/{omId}",
+                            settingsContent);
+                        if (settingsResponse.IsSuccessStatusCode)
+                            _logger.LogInformation("Online meeting settings updated (lobby restricted, recordAutomatically=true)");
+                        else
+                        {
+                            var err = await settingsResponse.Content.ReadAsStringAsync();
+                            _logger.LogWarning("Failed to update online meeting settings: {StatusCode} - {Error}", settingsResponse.StatusCode, err);
+                        }
                     }
-                    else
+                    catch (Exception ex)
                     {
-                        var settingsError = await settingsResponse.Content.ReadAsStringAsync();
-                        _logger.LogWarning("Failed to update online meeting settings: {StatusCode} - {Content}. Meeting created with attendees but may not be fully restricted.", 
-                            settingsResponse.StatusCode, settingsError);
+                        _logger.LogWarning(ex, "Error updating online meeting settings");
                     }
                 }
-                catch (Exception ex)
+                else
                 {
-                    _logger.LogWarning(ex, "Error updating online meeting settings. Meeting created with attendees but may not be fully restricted.");
+                    _logger.LogWarning("Could not resolve onlineMeetingId — lobby/recording settings not applied");
                 }
-            }
-            else
-            {
-                _logger.LogWarning("No online meeting ID found, cannot set restricted access settings. Meeting created with attendees but access restrictions may not be applied.");
             }
 
             _logger.LogInformation("Restricted Teams meeting created successfully. Meeting ID: {MeetingId}", meetingId);
@@ -1599,6 +1559,70 @@ public class MicrosoftGraphService : IMicrosoftGraphService
         {
             _logger.LogError(ex, "Error sending custom meeting invites: {Message}", ex.Message);
             return false;
+        }
+    }
+
+    /// <summary>
+    /// Looks up the onlineMeeting resource ID by JoinWebUrl so we can PATCH settings like recordAutomatically.
+    /// The Calendar Events API response never returns the onlineMeeting resource id directly.
+    /// </summary>
+    private async Task<string?> GetOnlineMeetingIdByJoinUrlAsync(string joinUrl)
+    {
+        try
+        {
+            var filter = Uri.EscapeDataString($"JoinWebUrl eq '{joinUrl}'");
+            var response = await _httpClient.GetAsync(
+                $"https://graph.microsoft.com/v1.0/users/{_serviceAccountEmail}/onlineMeetings?$filter={filter}");
+            if (!response.IsSuccessStatusCode)
+            {
+                _logger.LogWarning("onlineMeetings lookup failed: {StatusCode}", response.StatusCode);
+                return null;
+            }
+            var data = JsonSerializer.Deserialize<JsonElement>(await response.Content.ReadAsStringAsync());
+            if (data.TryGetProperty("value", out var values) &&
+                values.ValueKind == JsonValueKind.Array &&
+                values.GetArrayLength() > 0 &&
+                values[0].TryGetProperty("id", out var idEl))
+            {
+                var id = idEl.GetString();
+                _logger.LogInformation("Resolved onlineMeetingId via JoinWebUrl lookup: {Id}", id);
+                return id;
+            }
+            _logger.LogWarning("onlineMeetings lookup returned no results for JoinWebUrl");
+            return null;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Exception during onlineMeetings JoinWebUrl lookup");
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Sets recordAutomatically = true on an online meeting resource.
+    /// </summary>
+    private async Task SetRecordAutomaticallyAsync(string onlineMeetingId)
+    {
+        try
+        {
+            var patch = new StringContent(
+                JsonSerializer.Serialize(new { recordAutomatically = true },
+                    new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase }),
+                System.Text.Encoding.UTF8, "application/json");
+            var response = await _httpClient.PatchAsync(
+                $"https://graph.microsoft.com/v1.0/users/{_serviceAccountEmail}/onlineMeetings/{onlineMeetingId}",
+                patch);
+            if (response.IsSuccessStatusCode)
+                _logger.LogInformation("recordAutomatically set on onlineMeeting {Id}", onlineMeetingId);
+            else
+            {
+                var err = await response.Content.ReadAsStringAsync();
+                _logger.LogWarning("Failed to set recordAutomatically on {Id}: {StatusCode} - {Error}", onlineMeetingId, response.StatusCode, err);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Exception setting recordAutomatically on {Id}", onlineMeetingId);
         }
     }
 
