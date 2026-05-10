@@ -1568,34 +1568,46 @@ public class MicrosoftGraphService : IMicrosoftGraphService
     /// </summary>
     private async Task<string?> GetOnlineMeetingIdByJoinUrlAsync(string joinUrl)
     {
-        try
+        // Use userId (GUID) — some Graph endpoints require the object ID, not email
+        var userId = !string.IsNullOrEmpty(_serviceAccountUserId) ? _serviceAccountUserId : _serviceAccountEmail;
+        var filter = Uri.EscapeDataString($"JoinWebUrl eq '{joinUrl}'");
+
+        // Retry with increasing delays: Teams online meeting may not be immediately
+        // queryable after the calendar event is created (eventual consistency)
+        int[] delaysMs = { 2000, 4000, 6000 };
+        foreach (var delay in delaysMs)
         {
-            var filter = Uri.EscapeDataString($"JoinWebUrl eq '{joinUrl}'");
-            var response = await _httpClient.GetAsync(
-                $"https://graph.microsoft.com/v1.0/users/{_serviceAccountEmail}/onlineMeetings?$filter={filter}");
-            if (!response.IsSuccessStatusCode)
+            await Task.Delay(delay);
+            try
             {
-                _logger.LogWarning("onlineMeetings lookup failed: {StatusCode}", response.StatusCode);
-                return null;
+                var url = $"https://graph.microsoft.com/v1.0/users/{userId}/onlineMeetings?$filter={filter}";
+                _logger.LogInformation("onlineMeetings lookup attempt (delay {Delay}ms): {Url}", delay, url);
+                var response = await _httpClient.GetAsync(url);
+                if (!response.IsSuccessStatusCode)
+                {
+                    _logger.LogWarning("onlineMeetings lookup failed: {StatusCode}", response.StatusCode);
+                    continue;
+                }
+                var data = JsonSerializer.Deserialize<JsonElement>(await response.Content.ReadAsStringAsync());
+                if (data.TryGetProperty("value", out var values) &&
+                    values.ValueKind == JsonValueKind.Array &&
+                    values.GetArrayLength() > 0 &&
+                    values[0].TryGetProperty("id", out var idEl))
+                {
+                    var id = idEl.GetString();
+                    _logger.LogInformation("Resolved onlineMeetingId via JoinWebUrl lookup: {Id}", id);
+                    return id;
+                }
+                _logger.LogWarning("onlineMeetings lookup returned no results for JoinWebUrl");
             }
-            var data = JsonSerializer.Deserialize<JsonElement>(await response.Content.ReadAsStringAsync());
-            if (data.TryGetProperty("value", out var values) &&
-                values.ValueKind == JsonValueKind.Array &&
-                values.GetArrayLength() > 0 &&
-                values[0].TryGetProperty("id", out var idEl))
+            catch (Exception ex)
             {
-                var id = idEl.GetString();
-                _logger.LogInformation("Resolved onlineMeetingId via JoinWebUrl lookup: {Id}", id);
-                return id;
+                _logger.LogWarning(ex, "Exception during onlineMeetings JoinWebUrl lookup");
             }
-            _logger.LogWarning("onlineMeetings lookup returned no results for JoinWebUrl");
-            return null;
         }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "Exception during onlineMeetings JoinWebUrl lookup");
-            return null;
-        }
+
+        _logger.LogWarning("Could not resolve onlineMeetingId after all retries");
+        return null;
     }
 
     /// <summary>
