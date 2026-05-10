@@ -921,8 +921,9 @@ public class MicrosoftGraphService : IMicrosoftGraphService
                         var settingsContent = new StringContent(
                             JsonSerializer.Serialize(meetingSettingsUpdate, new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase }),
                             System.Text.Encoding.UTF8, "application/json");
+                        var patchUserId = !string.IsNullOrEmpty(_serviceAccountUserId) ? _serviceAccountUserId : _serviceAccountEmail;
                         var settingsResponse = await _httpClient.PatchAsync(
-                            $"https://graph.microsoft.com/v1.0/users/{_serviceAccountEmail}/onlineMeetings/{omId}",
+                            $"https://graph.microsoft.com/v1.0/users/{patchUserId}/onlineMeetings/{omId}",
                             settingsContent);
                         if (settingsResponse.IsSuccessStatusCode)
                             _logger.LogInformation("Online meeting settings updated (lobby restricted, recordAutomatically=true)");
@@ -1617,12 +1618,13 @@ public class MicrosoftGraphService : IMicrosoftGraphService
     {
         try
         {
+            var userId = !string.IsNullOrEmpty(_serviceAccountUserId) ? _serviceAccountUserId : _serviceAccountEmail;
             var patch = new StringContent(
                 JsonSerializer.Serialize(new { recordAutomatically = true },
                     new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase }),
                 System.Text.Encoding.UTF8, "application/json");
             var response = await _httpClient.PatchAsync(
-                $"https://graph.microsoft.com/v1.0/users/{_serviceAccountEmail}/onlineMeetings/{onlineMeetingId}",
+                $"https://graph.microsoft.com/v1.0/users/{userId}/onlineMeetings/{onlineMeetingId}",
                 patch);
             if (response.IsSuccessStatusCode)
                 _logger.LogInformation("recordAutomatically set on onlineMeeting {Id}", onlineMeetingId);
