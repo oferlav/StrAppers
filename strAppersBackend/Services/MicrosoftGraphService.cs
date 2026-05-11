@@ -1576,13 +1576,18 @@ public class MicrosoftGraphService : IMicrosoftGraphService
         try
         {
             var uri = new Uri(joinUrl);
-            var query = System.Web.HttpUtility.ParseQueryString(uri.Query);
-            var contextJson = query["context"];
-            if (string.IsNullOrEmpty(contextJson))
-                return null;
-            var context = JsonSerializer.Deserialize<JsonElement>(contextJson);
-            if (context.TryGetProperty("Oid", out var oid))
-                return oid.GetString();
+            var query = uri.Query.TrimStart('?');
+            foreach (var part in query.Split('&'))
+            {
+                var kv = part.Split('=', 2);
+                if (kv.Length == 2 && kv[0] == "context")
+                {
+                    var contextJson = Uri.UnescapeDataString(kv[1]);
+                    var context = JsonSerializer.Deserialize<JsonElement>(contextJson);
+                    if (context.TryGetProperty("Oid", out var oid))
+                        return oid.GetString();
+                }
+            }
         }
         catch { }
         return null;
