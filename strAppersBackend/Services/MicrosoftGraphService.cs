@@ -372,9 +372,9 @@ public class MicrosoftGraphService : IMicrosoftGraphService
             // Look up the real onlineMeeting resource id and enable auto-recording
             if (!string.IsNullOrEmpty(joinUrl))
             {
-                var (omId, omUserId) = await GetOnlineMeetingIdByJoinUrlAsync(joinUrl);
+                var omId = await GetOnlineMeetingIdByJoinUrlAsync(joinUrl);
                 if (!string.IsNullOrEmpty(omId))
-                    await SetRecordAutomaticallyAsync(omId, omUserId);
+                    await SetRecordAutomaticallyAsync(omId);
             }
 
             // Use the already calculated times for response
@@ -514,9 +514,9 @@ public class MicrosoftGraphService : IMicrosoftGraphService
             // Look up the real onlineMeeting resource id and enable auto-recording
             if (!string.IsNullOrEmpty(joinUrl))
             {
-                var (omId, omUserId) = await GetOnlineMeetingIdByJoinUrlAsync(joinUrl);
+                var omId = await GetOnlineMeetingIdByJoinUrlAsync(joinUrl);
                 if (!string.IsNullOrEmpty(omId))
-                    await SetRecordAutomaticallyAsync(omId, omUserId);
+                    await SetRecordAutomaticallyAsync(omId);
             }
 
             _logger.LogInformation("Teams meeting (no attendees) created successfully. Meeting ID: {MeetingId}", meetingId);
@@ -902,7 +902,7 @@ public class MicrosoftGraphService : IMicrosoftGraphService
             // Look up the real onlineMeeting resource id via JoinWebUrl and apply settings
             if (!string.IsNullOrEmpty(joinUrl))
             {
-                var (omId, omUserId) = await GetOnlineMeetingIdByJoinUrlAsync(joinUrl);
+                var omId = await GetOnlineMeetingIdByJoinUrlAsync(joinUrl);
                 if (!string.IsNullOrEmpty(omId))
                 {
                     try
@@ -921,8 +921,9 @@ public class MicrosoftGraphService : IMicrosoftGraphService
                         var settingsContent = new StringContent(
                             JsonSerializer.Serialize(meetingSettingsUpdate, new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase }),
                             System.Text.Encoding.UTF8, "application/json");
+                        var patchUserId = !string.IsNullOrEmpty(_serviceAccountUserId) ? _serviceAccountUserId : _serviceAccountEmail;
                         var settingsResponse = await _httpClient.PatchAsync(
-                            $"https://graph.microsoft.com/v1.0/users/{omUserId}/onlineMeetings/{omId}",
+                            $"https://graph.microsoft.com/v1.0/users/{patchUserId}/onlineMeetings/{omId}",
                             settingsContent);
                         if (settingsResponse.IsSuccessStatusCode)
                             _logger.LogInformation("Online meeting settings updated (lobby restricted, recordAutomatically=true)");
@@ -1566,42 +1567,10 @@ public class MicrosoftGraphService : IMicrosoftGraphService
     /// Looks up the onlineMeeting resource ID by JoinWebUrl so we can PATCH settings like recordAutomatically.
     /// The Calendar Events API response never returns the onlineMeeting resource id directly.
     /// </summary>
-    /// <summary>
-    /// Extracts the organizer Oid from the Teams join URL context parameter.
-    /// The join URL contains context={"Tid":"...","Oid":"<organizer-user-id>"}.
-    /// Graph API requires the userId in the path to match the meeting organizer.
-    /// </summary>
-    private static string? ExtractOidFromJoinUrl(string joinUrl)
+    private async Task<string?> GetOnlineMeetingIdByJoinUrlAsync(string joinUrl)
     {
-        try
-        {
-            var uri = new Uri(joinUrl);
-            var query = uri.Query.TrimStart('?');
-            foreach (var part in query.Split('&'))
-            {
-                var kv = part.Split('=', 2);
-                if (kv.Length == 2 && kv[0] == "context")
-                {
-                    var contextJson = Uri.UnescapeDataString(kv[1]);
-                    var context = JsonSerializer.Deserialize<JsonElement>(contextJson);
-                    if (context.TryGetProperty("Oid", out var oid))
-                        return oid.GetString();
-                }
-            }
-        }
-        catch { }
-        return null;
-    }
-
-    private async Task<(string? meetingId, string userId)> GetOnlineMeetingIdByJoinUrlAsync(string joinUrl)
-    {
-        // Prefer the Oid embedded in the join URL context — Graph API requires the userId
-        // in the path to match the meeting organizer, not the service account.
-        var oidFromUrl = ExtractOidFromJoinUrl(joinUrl);
-        var userId = oidFromUrl
-            ?? (!string.IsNullOrEmpty(_serviceAccountUserId) ? _serviceAccountUserId : _serviceAccountEmail);
-        _logger.LogInformation("onlineMeetings lookup using userId={UserId} (source: {Source})",
-            userId, oidFromUrl != null ? "JoinUrl Oid" : "ServiceAccountUserId config");
+        // Use userId (GUID) — some Graph endpoints require the object ID, not email
+        var userId = !string.IsNullOrEmpty(_serviceAccountUserId) ? _serviceAccountUserId : _serviceAccountEmail;
         var filter = Uri.EscapeDataString($"JoinWebUrl eq '{joinUrl}'");
 
         // Retry with increasing delays: Teams online meeting may not be immediately
@@ -1628,7 +1597,7 @@ public class MicrosoftGraphService : IMicrosoftGraphService
                 {
                     var id = idEl.GetString();
                     _logger.LogInformation("Resolved onlineMeetingId via JoinWebUrl lookup: {Id}", id);
-                    return (id, userId);
+                    return id;
                 }
                 _logger.LogWarning("onlineMeetings lookup returned no results for JoinWebUrl");
             }
@@ -1639,17 +1608,17 @@ public class MicrosoftGraphService : IMicrosoftGraphService
         }
 
         _logger.LogWarning("Could not resolve onlineMeetingId after all retries");
-        return (null, userId);
+        return null;
     }
 
     /// <summary>
     /// Sets recordAutomatically = true on an online meeting resource.
-    /// userId must be the meeting organizer (extracted from join URL Oid).
     /// </summary>
-    private async Task SetRecordAutomaticallyAsync(string onlineMeetingId, string userId)
+    private async Task SetRecordAutomaticallyAsync(string onlineMeetingId)
     {
         try
         {
+            var userId = !string.IsNullOrEmpty(_serviceAccountUserId) ? _serviceAccountUserId : _serviceAccountEmail;
             var patch = new StringContent(
                 JsonSerializer.Serialize(new { recordAutomatically = true },
                     new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase }),
