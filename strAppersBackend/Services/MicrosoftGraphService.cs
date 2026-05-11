@@ -15,6 +15,7 @@ public interface IMicrosoftGraphService
     Task<bool> TestConnectionAsync();
     Task<MeetingTrackingResponse> TrackMeetingsByParticipantsAsync(DateTime startDate, DateTime endDate, List<string> emailAddresses, List<string> participantNames = null);
     Task<TeamsMeetingResponse> CreateRestrictedTeamsMeetingAsync(CreateTeamsMeetingRequest request);
+    Task<MeetingTranscriptCheckResult> CheckMeetingTranscriptsAsync(string joinUrl);
 }
 
 public class MicrosoftGraphService : IMicrosoftGraphService
@@ -1802,6 +1803,59 @@ END:VCALENDAR";
         _logger.LogInformation("Generated Google Calendar link for meeting: {Title}", title);
         return url;
     }
+
+    public async Task<MeetingTranscriptCheckResult> CheckMeetingTranscriptsAsync(string joinUrl)
+    {
+        var result = new MeetingTranscriptCheckResult { JoinUrl = joinUrl };
+
+        var (meetingId, userId) = await GetOnlineMeetingIdByJoinUrlAsync(joinUrl);
+        result.OrganizerOid = userId;
+        result.OnlineMeetingId = meetingId;
+
+        if (string.IsNullOrEmpty(meetingId))
+        {
+            result.Error = "Could not resolve onlineMeetingId from join URL";
+            return result;
+        }
+
+        try
+        {
+            var url = $"https://graph.microsoft.com/v1.0/users/{userId}/onlineMeetings/{meetingId}/transcripts";
+            _logger.LogInformation("Checking transcripts: {Url}", url);
+            var response = await _httpClient.GetAsync(url);
+            result.TranscriptApiStatusCode = (int)response.StatusCode;
+
+            if (!response.IsSuccessStatusCode)
+            {
+                var err = await response.Content.ReadAsStringAsync();
+                result.Error = $"Graph API {response.StatusCode}: {err}";
+                return result;
+            }
+
+            var data = JsonSerializer.Deserialize<JsonElement>(await response.Content.ReadAsStringAsync());
+            if (data.TryGetProperty("value", out var values) && values.ValueKind == JsonValueKind.Array)
+            {
+                result.TranscriptCount = values.GetArrayLength();
+                var transcripts = new List<TranscriptSummary>();
+                foreach (var t in values.EnumerateArray())
+                {
+                    var ts = new TranscriptSummary();
+                    if (t.TryGetProperty("id", out var id)) ts.Id = id.GetString();
+                    if (t.TryGetProperty("createdDateTime", out var created)) ts.CreatedDateTime = created.GetString();
+                    if (t.TryGetProperty("transcriptContentUrl", out var contentUrl)) ts.ContentUrl = contentUrl.GetString();
+                    transcripts.Add(ts);
+                }
+                result.Transcripts = transcripts;
+            }
+        }
+        catch (Exception ex)
+        {
+            result.Error = ex.Message;
+            _logger.LogWarning(ex, "Exception checking transcripts for meeting {Id}", meetingId);
+        }
+
+        return result;
+    }
 }
 
 /// <summary>
@@ -1889,4 +1943,22 @@ public class ParticipantRecord
     public TimeSpan? Duration { get; set; }
     public string? Platform { get; set; }
     public string? UserId { get; set; }
+}
+
+public class MeetingTranscriptCheckResult
+{
+    public string JoinUrl { get; set; } = string.Empty;
+    public string? OrganizerOid { get; set; }
+    public string? OnlineMeetingId { get; set; }
+    public int? TranscriptApiStatusCode { get; set; }
+    public int TranscriptCount { get; set; }
+    public List<TranscriptSummary> Transcripts { get; set; } = new();
+    public string? Error { get; set; }
+}
+
+public class TranscriptSummary
+{
+    public string? Id { get; set; }
+    public string? CreatedDateTime { get; set; }
+    public string? ContentUrl { get; set; }
 }

@@ -678,6 +678,35 @@ public class TeamsController : ControllerBase
     }
 
     /// <summary>
+    /// Diagnostic: check if a transcript exists for the most recent meeting of a student on a board.
+    /// Calls Graph API transcripts endpoint and returns raw result — useful for verifying transcript availability.
+    /// </summary>
+    [HttpGet("check-transcript")]
+    public async Task<ActionResult<object>> CheckTranscript([FromQuery] string boardId, [FromQuery] string studentEmail)
+    {
+        if (string.IsNullOrEmpty(boardId) || string.IsNullOrEmpty(studentEmail))
+            return BadRequest(new { Success = false, Message = "boardId and studentEmail are required" });
+
+        var boardMeeting = await _context.BoardMeetings
+            .Where(bm => bm.BoardId == boardId && bm.StudentEmail == studentEmail && bm.ActualMeetingUrl != null)
+            .OrderByDescending(bm => bm.MeetingTime)
+            .FirstOrDefaultAsync();
+
+        if (boardMeeting == null)
+            return NotFound(new { Success = false, Message = "No BoardMeeting record found for this boardId + studentEmail" });
+
+        var result = await _graphService.CheckMeetingTranscriptsAsync(boardMeeting.ActualMeetingUrl!);
+
+        return Ok(new
+        {
+            BoardMeetingId = boardMeeting.Id,
+            MeetingTime = boardMeeting.MeetingTime,
+            ActualMeetingUrl = boardMeeting.ActualMeetingUrl,
+            TranscriptCheck = result
+        });
+    }
+
+    /// <summary>
     /// Get custom meeting URL for a specific student email and boardId
     /// Returns the custom meeting URL without tracking access
     /// </summary>
