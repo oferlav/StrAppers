@@ -229,15 +229,15 @@ public class StudentsController : ControllerBase
                 return NotFound($"Student with ID {studentId} not found.");
             }
 
+            // Helper to normalize 0 -> null
+            int? ToNullable(int value) => value <= 0 ? (int?)null : value;
+
             // Guard: never overwrite an active student's ProjectId or Status
             if (student.Status == 3 && !string.IsNullOrWhiteSpace(student.BoardId))
             {
                 _logger.LogWarning(
                     "AllocateWithPriority blocked for active student {StudentId} (Status=3, BoardId={BoardId}): only priority fields updated.",
                     studentId, student.BoardId);
-
-                // Helper to normalize 0 -> null
-                int? ToNullable(int value) => value <= 0 ? (int?)null : value;
 
                 // Only update priority slots — leave ProjectId, Status, BoardId untouched
                 student.ProjectPriority1 = ToNullable(projectId1);
@@ -262,9 +262,6 @@ public class StudentsController : ControllerBase
                     StartPendingAt = student.StartPendingAt
                 });
             }
-
-            // Helper to normalize 0 -> null
-            int? ToNullable(int value) => value <= 0 ? (int?)null : value;
 
             student.ProjectId = ToNullable(projectId1); // Active allocation mirrors Priority1
             student.ProjectPriority1 = ToNullable(projectId1);
