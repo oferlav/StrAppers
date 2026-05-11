@@ -1808,6 +1808,11 @@ END:VCALENDAR";
     {
         var result = new MeetingTranscriptCheckResult { JoinUrl = joinUrl };
 
+        // Acquire token and set on shared HttpClient (same pattern as all other methods)
+        var accessToken = await GetAccessTokenAsync();
+        _httpClient.DefaultRequestHeaders.Authorization =
+            new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", accessToken);
+
         // Run a single diagnostic lookup (no retries) to capture the raw Graph API response
         var oidFromUrl = ExtractOidFromJoinUrl(joinUrl);
         var userId = oidFromUrl
