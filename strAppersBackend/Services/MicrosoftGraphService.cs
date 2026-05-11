@@ -1808,8 +1808,27 @@ END:VCALENDAR";
     {
         var result = new MeetingTranscriptCheckResult { JoinUrl = joinUrl };
 
-        var (meetingId, userId) = await GetOnlineMeetingIdByJoinUrlAsync(joinUrl);
+        // Run a single diagnostic lookup (no retries) to capture the raw Graph API response
+        var oidFromUrl = ExtractOidFromJoinUrl(joinUrl);
+        var userId = oidFromUrl
+            ?? (!string.IsNullOrEmpty(_serviceAccountUserId) ? _serviceAccountUserId : _serviceAccountEmail);
         result.OrganizerOid = userId;
+
+        try
+        {
+            var filter = Uri.EscapeDataString($"JoinWebUrl eq '{joinUrl}'");
+            var lookupUrl = $"https://graph.microsoft.com/v1.0/users/{userId}/onlineMeetings?$filter={filter}";
+            var diagResponse = await _httpClient.GetAsync(lookupUrl);
+            var diagBody = await diagResponse.Content.ReadAsStringAsync();
+            result.LookupStatusCode = (int)diagResponse.StatusCode;
+            result.LookupRawResponse = diagBody.Length > 500 ? diagBody[..500] : diagBody;
+        }
+        catch (Exception ex)
+        {
+            result.LookupRawResponse = ex.Message;
+        }
+
+        var (meetingId, _) = await GetOnlineMeetingIdByJoinUrlAsync(joinUrl);
         result.OnlineMeetingId = meetingId;
 
         if (string.IsNullOrEmpty(meetingId))
@@ -1950,6 +1969,8 @@ public class MeetingTranscriptCheckResult
     public string JoinUrl { get; set; } = string.Empty;
     public string? OrganizerOid { get; set; }
     public string? OnlineMeetingId { get; set; }
+    public int? LookupStatusCode { get; set; }
+    public string? LookupRawResponse { get; set; }
     public int? TranscriptApiStatusCode { get; set; }
     public int TranscriptCount { get; set; }
     public List<TranscriptSummary> Transcripts { get; set; } = new();
