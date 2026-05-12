@@ -428,6 +428,23 @@ public class TrelloController : ControllerBase
         }
 
         /// <summary>
+        /// Returns the Trello card ID for the sprint role card matching the given roleName in the given sprint list.
+        /// Used by the frontend to check if a Full Stack label card exists before falling back to Backend+Frontend split.
+        /// GET /api/Trello/use/board/{boardId}/sprint/{sprintNumber}/role-card-id?roleName=...
+        /// </summary>
+        [HttpGet("use/board/{boardId}/sprint/{sprintNumber}/role-card-id")]
+        public async Task<ActionResult<object>> GetSprintRoleCardId(string boardId, int sprintNumber, [FromQuery] string roleName)
+        {
+            if (string.IsNullOrWhiteSpace(boardId))
+                return BadRequest(new { success = false, message = "boardId is required." });
+            if (string.IsNullOrWhiteSpace(roleName))
+                return BadRequest(new { success = false, message = "roleName is required." });
+
+            var cardId = await _trelloService.GetSprintRoleCardIdAsync(boardId, sprintNumber, roleName);
+            return Ok(new { cardId });
+        }
+
+        /// <summary>
         /// Toggle the state of the checklist item at checkIndex on the Trello card (complete &lt;-&gt; incomplete).
         /// </summary>
         /// <param name="request">BoardId, CardId (custom field e.g. "1-B"), and 0-based checkIndex.</param>

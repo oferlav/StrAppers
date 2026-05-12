@@ -22,6 +22,12 @@ namespace strAppersBackend.Services
         Task<string?> GetSprintCardBranchContextAsync(string boardId, int sprintNumber, string roleName);
         /// <summary>Sprint role card: title, description, and flattened checklists for gap-analysis context.</summary>
         Task<SprintRoleCardSnapshot?> GetSprintRoleCardSnapshotAsync(string boardId, int sprintNumber, string roleName);
+        /// <summary>
+        /// Resolves Trello sprint card labels for a role.
+        /// For Full Stack roles: checks if a sprint card with the Full Stack label exists; uses it directly if found, otherwise falls back to ["Backend Developer", "Frontend Developer"].
+        /// For all other roles: returns [roleName].
+        /// </summary>
+        Task<string[]> ResolveSprintLabelsAsync(string boardId, int sprintNumber, string roleName);
         /// <summary>Trello card id in the sprint list for the given role label (e.g. "Backend Developer"). Returns null if not found.</summary>
         Task<string?> GetSprintRoleCardIdAsync(string boardId, int sprintNumber, string roleName);
         /// <summary>Custom field display name → value (checkboxes as "True"/"False").</summary>
@@ -1507,6 +1513,23 @@ namespace strAppersBackend.Services
                 _logger.LogWarning(ex, "GetSprintCardCustomFieldValueAsync failed for board {BoardId}, sprint {Sprint}, role {Role}, field {Field}.", boardId, sprintNumber, roleName, customFieldName);
                 return null;
             }
+        }
+
+        /// <inheritdoc />
+        public async Task<string[]> ResolveSprintLabelsAsync(string boardId, int sprintNumber, string roleName)
+        {
+            var isFullStack = roleName.Contains("full stack", StringComparison.OrdinalIgnoreCase) ||
+                              roleName.Contains("fullstack", StringComparison.OrdinalIgnoreCase);
+            if (!isFullStack)
+                return new[] { roleName };
+
+            // Check if a Full Stack card exists for this sprint — lightweight ID-only check
+            var fsCardId = await GetSprintRoleCardIdAsync(boardId, sprintNumber, roleName);
+            if (!string.IsNullOrEmpty(fsCardId))
+                return new[] { roleName }; // Full Stack card exists on this board → use directly
+
+            // No Full Stack card found → fall back to BE + FE split
+            return new[] { "Backend Developer", "Frontend Developer" };
         }
 
         /// <inheritdoc />

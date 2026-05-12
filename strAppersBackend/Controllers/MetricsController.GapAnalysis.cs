@@ -73,6 +73,25 @@ public partial class MetricsController
             {
                 if (IsFullStackRole(roleName))
                 {
+                    var fsLabelsTest = await _trelloService.ResolveSprintLabelsAsync(boardId, request.SprintNumber, roleName);
+                    if (fsLabelsTest.Length == 1)
+                    {
+                        // Board has a Full Stack card — treat as single-track
+                        var backendFirstFsTest = IsBackendDeveloperRole(roleName) ||
+                            (ContainsDeveloper(roleName) && !IsFrontendDeveloperRole(roleName));
+                        var singleFsPrompts = await BuildGapAnalysisPromptsForTrackAsync(
+                            boardId, board, student.Id, request.SprintNumber, fsLabelsTest[0], roleDesc, roleName,
+                            isBackend: backendFirstFsTest, cancellationToken);
+                        return Ok(new
+                        {
+                            success = true,
+                            test = true,
+                            message = "Test mode: LLM not called; CacheMetrics not updated.",
+                            systemPrompt = singleFsPrompts.SystemPrompt,
+                            userPrompt = singleFsPrompts.UserPrompt,
+                        });
+                    }
+                    // Fall back to two-track (BE + FE)
                     var bePrompts = await BuildGapAnalysisPromptsForTrackAsync(
                         boardId, board, student.Id, request.SprintNumber, "Backend Developer", $"{roleDesc} (backend repository)", roleName, isBackend: true, cancellationToken);
                     var fePrompts = await BuildGapAnalysisPromptsForTrackAsync(
@@ -106,6 +125,40 @@ public partial class MetricsController
 
             if (IsFullStackRole(roleName))
             {
+                var fsLabels = await _trelloService.ResolveSprintLabelsAsync(boardId, request.SprintNumber, roleName);
+                if (fsLabels.Length == 1)
+                {
+                    // Board has a Full Stack card — single track analysis
+                    var backendFirstFs = IsBackendDeveloperRole(roleName) ||
+                        (ContainsDeveloper(roleName) && !IsFrontendDeveloperRole(roleName));
+                    var fsTrackResult = await RunGapAnalysisForTrackAsync(
+                        boardId, board, student.Id, request.SprintNumber, fsLabels[0], roleDesc, roleName,
+                        isBackend: backendFirstFs, cancellationToken);
+
+                    if (!fsTrackResult.ParsedOk)
+                    {
+                        return UnprocessableEntity(new
+                        {
+                            success = false,
+                            message = "Gap analysis did not return valid JSON. Nothing was saved to CacheMetrics.",
+                            preview = Truncate(fsTrackResult.Narrative, 4000),
+                        });
+                    }
+
+                    var graphSingleFs = GapAnalysisBarChartRenderer.ToBase64Png(GapAnalysisBarChartRenderer.RenderSingleChart(fsTrackResult.ChartRows));
+                    await UpsertCacheMetricsAsync(boardId, student.Id, request.SprintNumber, GapAnalysisMetricId, fsTrackResult.Narrative, graphSingleFs, cancellationToken);
+
+                    return Ok(new
+                    {
+                        success = true,
+                        metricId = GapAnalysisMetricId,
+                        reviewContent = fsTrackResult.Narrative,
+                        graphBase64 = graphSingleFs,
+                        model = fsTrackResult.RawModel
+                    });
+                }
+
+                // Two-track (BE + FE) — existing behavior
                 var be = await RunGapAnalysisForTrackAsync(
                     boardId, board, student.Id, request.SprintNumber, "Backend Developer", $"{roleDesc} (backend repository)", roleName, isBackend: true, cancellationToken);
 

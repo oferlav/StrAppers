@@ -100,12 +100,21 @@ public partial class MetricsController : ControllerBase
         bool requiredSkill;
         bool requiredResource;
 
-        // Trello sprint lists label cards as Backend Developer / Frontend Developer, not "Full Stack Developer".
-        // Merge checkbox flags from both cards and run developer adherence once (AppendSkillDataFindingsAsync already checks both repos).
+        // For Full Stack: check if the board has a Full Stack sprint card first; if not, fall back to Backend Developer + Frontend Developer.
         if (fullStackRole)
         {
-            sprintBackendCardId = await _trelloService.GetSprintRoleCardIdAsync(boardId, request.SprintNumber, "Backend Developer");
-            sprintFrontendCardId = await _trelloService.GetSprintRoleCardIdAsync(boardId, request.SprintNumber, "Frontend Developer");
+            var fsLabels = await _trelloService.ResolveSprintLabelsAsync(boardId, request.SprintNumber, roleName);
+            if (fsLabels.Length == 1)
+            {
+                // Board has a Full Stack card — use it as the single card
+                sprintBackendCardId = await _trelloService.GetSprintRoleCardIdAsync(boardId, request.SprintNumber, fsLabels[0]);
+                sprintFrontendCardId = null;
+            }
+            else
+            {
+                sprintBackendCardId = await _trelloService.GetSprintRoleCardIdAsync(boardId, request.SprintNumber, "Backend Developer");
+                sprintFrontendCardId = await _trelloService.GetSprintRoleCardIdAsync(boardId, request.SprintNumber, "Frontend Developer");
+            }
 
             if (string.IsNullOrEmpty(sprintBackendCardId) && string.IsNullOrEmpty(sprintFrontendCardId))
             {
@@ -114,7 +123,7 @@ public partial class MetricsController : ControllerBase
                     success = true,
                     metricId = AdherenceMetricId,
                     reviewContent = "",
-                    message = $"No sprint card found in Sprint {request.SprintNumber} with label \"Backend Developer\" or \"Frontend Developer\" (required for Full Stack adherence).",
+                    message = $"No sprint card found in Sprint {request.SprintNumber} for Full Stack role (checked for \"{roleName}\", \"Backend Developer\", and \"Frontend Developer\").",
                     requiredSkillData = false,
                     requiredResourceData = false
                 });

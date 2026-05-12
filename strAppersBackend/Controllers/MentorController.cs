@@ -347,8 +347,10 @@ namespace strAppersBackend.Controllers
                     }
                 }
 
-                // B. Fetch Current Trello Tasks for current sprint (filtered by role label(s); Full Stack Developer = Backend + Frontend labels)
-                var trelloLabelNames = GetTrelloLabelNamesForRole(roleName);
+                // B. Fetch Current Trello Tasks for current sprint (filtered by role label(s); Full Stack Developer: check for FS card first, else Backend + Frontend labels)
+                var trelloLabelNames = IsFullStackStudentRoleName(roleName)
+                    ? await _trelloService.ResolveSprintLabelsAsync(student.BoardId, sprintId, roleName)
+                    : (IReadOnlyList<string>)GetTrelloLabelNamesForRole(roleName);
                 var seenCardIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                 var mergedCards = new List<JsonElement>();
                 foreach (var labelName in trelloLabelNames)
@@ -605,17 +607,19 @@ namespace strAppersBackend.Controllers
                     }
                 }
 
-                // G. Fetch Team Member Tasks for current sprint (Full Stack Developer = Backend + Frontend labels)
+                // G. Fetch Team Member Tasks for current sprint (Full Stack Developer: check for FS card first, else Backend + Frontend labels)
                 var teamMemberTasks = new List<object>();
                 foreach (var teamMember in teamMembers)
                 {
                     var memberObj = JsonSerializer.Serialize(teamMember);
                     var memberElement = JsonSerializer.Deserialize<JsonElement>(memberObj);
                     var memberRoleName = memberElement.TryGetProperty("RoleName", out var roleProp) ? roleProp.GetString() : "";
-                    
+
                     if (!string.IsNullOrEmpty(memberRoleName))
                     {
-                        var memberLabelNames = GetTrelloLabelNamesForRole(memberRoleName);
+                        var memberLabelNames = IsFullStackStudentRoleName(memberRoleName)
+                            ? await _trelloService.ResolveSprintLabelsAsync(student.BoardId, sprintId, memberRoleName)
+                            : (IReadOnlyList<string>)GetTrelloLabelNamesForRole(memberRoleName);
                         var memberSeenIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                         foreach (var labelName in memberLabelNames)
                         {

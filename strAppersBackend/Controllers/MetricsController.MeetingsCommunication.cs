@@ -307,9 +307,10 @@ public partial class MetricsController
 
         var activeRole = student.StudentRoles?.FirstOrDefault(sr => sr.IsActive);
         var roleName2 = activeRole?.Role?.Name?.Trim() ?? string.Empty;
-        var trelloLabelUsed = IsFullStackRole(roleName2)
-            ? "Backend Developer + Frontend Developer"
-            : ResolveTrelloSprintCardLabel(activeRole?.Role, fullStackTrackLabel: null);
+        var resolvedLabels = IsFullStackRole(roleName2)
+            ? await _trelloService.ResolveSprintLabelsAsync(boardId, request.SprintNumber, roleName2)
+            : new[] { ResolveTrelloSprintCardLabel(activeRole?.Role, fullStackTrackLabel: null) };
+        var trelloLabelUsed = string.Join(" + ", resolvedLabels);
         var sprintContextMd = await BuildMeetingsCommunicationContextAsync(
             boardId, board, request.SprintNumber, activeRole?.Role, cancellationToken);
 
@@ -519,9 +520,9 @@ public partial class MetricsController
         var sb = new StringBuilder();
         var roleName = role?.Name?.Trim() ?? string.Empty;
 
-        // Full Stack: fetch both Backend and Frontend cards (same pattern as GapAnalysis)
+        // Full Stack: check if a Full Stack card exists; if so use it directly, else fetch both Backend and Frontend cards
         var trelloLabels = IsFullStackRole(roleName)
-            ? new[] { "Backend Developer", "Frontend Developer" }
+            ? await _trelloService.ResolveSprintLabelsAsync(boardId, sprintNumber, roleName)
             : new[] { ResolveTrelloSprintCardLabel(role, fullStackTrackLabel: null) };
 
         foreach (var trelloLabel in trelloLabels)

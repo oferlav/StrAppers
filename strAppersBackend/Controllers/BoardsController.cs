@@ -3915,9 +3915,12 @@ public partial class BoardsController : ControllerBase
                 var roleName = student.StudentRoles?.FirstOrDefault(sr => sr.IsActive)?.Role?.Name
                     ?? student.StudentRoles?.FirstOrDefault()?.Role?.Name
                     ?? "Team Member";
-                // Treat Fullstack / Full Stack Developer as Backend Developer for sprint card (label) lookup
-                if (string.Equals(roleName, "Fullstack Developer", StringComparison.OrdinalIgnoreCase) || string.Equals(roleName, "Full Stack Developer", StringComparison.OrdinalIgnoreCase))
-                    roleName = "Backend Developer";
+                // For Full Stack: check if a Full Stack card exists; if so use it, otherwise fall back to Backend Developer
+                if (roleName.Contains("full stack", StringComparison.OrdinalIgnoreCase) || roleName.Contains("fullstack", StringComparison.OrdinalIgnoreCase))
+                {
+                    var fsLabels = await _trelloService.ResolveSprintLabelsAsync(boardId.Trim(), sprintNumber.Value, roleName);
+                    roleName = fsLabels[0]; // Use first resolved label (Full Stack card if it exists, else "Backend Developer")
+                }
                 var moduleId = await _trelloService.GetModuleIdFromSprintCardAsync(boardId.Trim(), sprintNumber.Value, roleName);
                 if (string.IsNullOrWhiteSpace(moduleId))
                     return NotFound(new { Success = false, Message = "No ModuleId on sprint card for this role." });
