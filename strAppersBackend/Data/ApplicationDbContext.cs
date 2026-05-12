@@ -193,6 +193,8 @@ public class ApplicationDbContext : DbContext
             entity.Property(e => e.TrelloBoardJson).HasColumnType("text").IsRequired();
             entity.Property(e => e.BoardUrl).HasColumnName("BoardURL").HasMaxLength(500);
             entity.Property(e => e.IsActive).HasDefaultValue(false);
+            entity.Property(e => e.CourseType).HasMaxLength(20).HasDefaultValue("Squad");
+            entity.Property(e => e.RoleCount).IsRequired(false);
             entity.HasIndex(e => e.InstituteId);
             entity.HasIndex(e => e.ProjectId);
             entity.HasIndex(e => e.SquadId);
@@ -1413,7 +1415,8 @@ public class ApplicationDbContext : DbContext
             entity.Property(e => e.AssistMe).HasDefaultValue(false);
             entity.Property(e => e.NextMeetingTime).HasColumnName("NextMeetingTime").HasColumnType("timestamp with time zone");
             entity.Property(e => e.NextMeetingUrl).HasColumnName("NextMeetingUrl").HasMaxLength(1000);
-            
+            entity.Property(e => e.RoleIndex).HasDefaultValue(0);
+
             entity.HasOne(e => e.SubscriptionType)
                   .WithMany(s => s.Students)
                   .HasForeignKey(e => e.SubscriptionTypeId)

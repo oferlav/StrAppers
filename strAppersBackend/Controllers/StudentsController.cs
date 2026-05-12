@@ -1422,6 +1422,7 @@ public class StudentsController : ControllerBase
                     RoleId = s.StudentRoles?.FirstOrDefault(sr => sr.IsActive)?.RoleId,
                     RoleName = roleName,
                     RoleNames = roleNames,
+                    RoleIndex = s.RoleIndex,
                     CreatedAt = s.CreatedAt,
                     UpdatedAt = s.UpdatedAt
                 };

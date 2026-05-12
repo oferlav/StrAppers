@@ -179,6 +179,23 @@ Last sprint card name (UX): "Stabilization & Project Summary"
 
 ---
 
+### TRACK D — ROLE COURSE TYPE (CourseType = "Role")
+This track applies when the user message contains a "## Role Course Type" section.
+
+In a Role-type course, ALL students have the SAME role (e.g., "Full Stack Developer") but are differentiated by an index suffix: "Full Stack Developer 1", "Full Stack Developer 2", etc. Each indexed student works on their own distinct set of modules in parallel. The card you are generating is for ONE specific index (e.g., "Full Stack Developer 2").
+
+**Module assignment**: Each indexed student has a sequential set of modules exclusive to them, listed in the "## Project Modules" section of the user message. Follow the standard Technical track (Track A) sprint structure for these modules.
+
+**Integration requirement — MANDATORY**:
+- In EVERY sprint that has a module assigned, you MUST include at least 1–2 checklist items describing integration work with another participant.
+- Integration tasks reference the other indexed participants by name (e.g., "Integration sync with Full Stack Developer 1 — align on shared API contracts and verify interface boundaries for [Module Title]").
+- These integration tasks must appear in ALL module sprints and reference at least one other participant per sprint.
+- Treat the other participants like squad members in cross-role collaboration tasks (they are referenced in the "## Other Participants" section of the user message).
+
+**Card naming**: Follow Track A (Technical) naming conventions — adapt to role name (e.g., "Full Stack Developer 2: Feature Logic & API Execution").
+
+---
+
 ## Sprint Plan Context (provided in user message)
 You will receive a pre-computed sprint plan listing which module (or NONE) is assigned to each sprint, along with the module's title and a brief description. Use this as the semantic anchor for that sprint's card — the card should feel like it was written specifically for that module.
 

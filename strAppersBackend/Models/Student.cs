@@ -93,6 +93,13 @@ public class Student
     [Column("TeamsDisplayName")]
     public string? TeamsDisplayName { get; set; }
 
+    /// <summary>
+    /// 1-based index within a "Role" course type (e.g. 1 = RoleName1, 2 = RoleName2).
+    /// 0 = unassigned / not applicable (Squad course type). Default 0.
+    /// </summary>
+    [Column("RoleIndex")]
+    public int RoleIndex { get; set; } = 0;
+
     /// <summary>B2C track flag; maps to database column b2c. Default true.</summary>
     [Column("b2c")]
     public bool B2c { get; set; } = true;

@@ -19,6 +19,14 @@ public class AddInstituteTemplateRequest
 
     /// <summary>When set, updates this <c>InstituteTemplates</c> row (must belong to query project + institute). When omitted, inserts a new row.</summary>
     public int? InstituteTemplateId { get; set; }
+
+    /// <summary>Course structure type: "Squad" (default) or "Role".</summary>
+    [MaxLength(20)]
+    public string? CourseType { get; set; }
+
+    /// <summary>For Role-type courses: number of parallel role-students per team (1–5).</summary>
+    [Range(1, 5)]
+    public int? RoleCount { get; set; }
 }
 
 public class DeleteInstituteTemplateRequest
@@ -78,4 +86,17 @@ public class InstituteTemplate
     public string? BoardUrl { get; set; }
 
     public bool IsActive { get; set; } = false;
+
+    /// <summary>
+    /// Course structure type. "Squad" = multiple roles per sprint (default/existing behaviour).
+    /// "Role" = single repeated role per student, differentiated by <see cref="RoleIndex"/> suffix on Trello card labels.
+    /// </summary>
+    [MaxLength(20)]
+    public string CourseType { get; set; } = "Squad";
+
+    /// <summary>
+    /// Number of parallel role-students per team. Used only when <see cref="CourseType"/> = "Role".
+    /// Drives label generation (RoleName1…RoleNameN) and module-count validation.
+    /// </summary>
+    public int? RoleCount { get; set; }
 }

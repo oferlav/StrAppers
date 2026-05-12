@@ -63,6 +63,9 @@ public class CourseBoardBuilderService : ICourseBoardBuilderService
         public List<string> ChecklistItems { get; set; } = new();
     }
 
+    /// <summary>Extra context injected into the user prompt for Role-type courses.</summary>
+    private sealed record RoleTypeContext(int RoleIndex, int TotalRoles, IReadOnlyList<string> OtherParticipantNames);
+
     // ─────────────────────────────────────────────────────────────────────────
 
     public CourseBoardBuilderService(
@@ -197,6 +200,10 @@ public class CourseBoardBuilderService : ICourseBoardBuilderService
         if (project.InstituteId.HasValue && roles.Any(r => r.InstituteId != project.InstituteId.Value))
             return Fail("One or more roles do not belong to the project's institute.");
 
+        // Detect Role-type course
+        var isRoleType = string.Equals(instituteTemplate.CourseType, "Role", StringComparison.OrdinalIgnoreCase)
+                         && instituteTemplate.RoleCount is >= 1 and <= 5;
+
         // ── 3. Load modules & resolve course config ───────────────────────────
         List<IProjectModuleRow> allModules;
         if (request.InstituteProject)
@@ -242,12 +249,76 @@ public class CourseBoardBuilderService : ICourseBoardBuilderService
         var config = new CourseConfig(sprintCount, moduleCount, request.SprintLengthInDays, moduleLengths);
         var modules = allModules.Take(moduleCount).ToList();
 
+        // ── 3b. Role-type: validate module count and expand roles list ─────────
+        List<(InstituteRole Role, List<IProjectModuleRow> Modules, int[] ModuleLengths, RoleTypeContext Context)>?
+            roleTypeEntries = null;
+
+        if (isRoleType)
+        {
+            var roleCount = instituteTemplate.RoleCount!.Value;
+            var baseRole = roles.First();
+
+            // Validate: need at least roleCount modules (each student gets ≥ 1)
+            var modulesPerStudent = modules.Count / roleCount;
+            if (modulesPerStudent < 1)
+                return Fail(
+                    $"Role-type course requires at least {roleCount} module(s) — one per student " +
+                    $"(found {modules.Count}). Increase the module count or reduce RoleCount.");
+
+            // Build N indexed role variants with their own module slice and config
+            var indexedNames = Enumerable.Range(1, roleCount)
+                .Select(i => $"{baseRole.Name} {i}")
+                .ToList();
+
+            roleTypeEntries = Enumerable.Range(0, roleCount).Select(i =>
+            {
+                var idx = i + 1; // 1-based role index
+                var studentModules = modules.Skip(i * modulesPerStudent).Take(modulesPerStudent).ToList<IProjectModuleRow>();
+
+                // Slice module lengths: use per-module lengths if provided, else uniform 1s
+                var studentLengths = config.ModuleLengths.Length == modules.Count
+                    ? config.ModuleLengths.Skip(i * modulesPerStudent).Take(modulesPerStudent).ToArray()
+                    : Enumerable.Repeat(1, modulesPerStudent).ToArray();
+
+                var indexedRole = new InstituteRole
+                {
+                    Id = baseRole.Id,
+                    InstituteId = baseRole.InstituteId,
+                    Name = $"{baseRole.Name} {idx}",
+                    Description = baseRole.Description,
+                    Competencies = baseRole.Competencies,
+                    Category = baseRole.Category,
+                    Type = baseRole.Type,
+                    SkillId = baseRole.SkillId,
+                    Skill = baseRole.Skill,
+                    CustomerEngagement = baseRole.CustomerEngagement,
+                    IsTechnical = true, // Role-type is always technical track
+                    IsActive = true,
+                    CreatedAt = baseRole.CreatedAt,
+                    UpdatedAt = baseRole.UpdatedAt,
+                };
+
+                var otherNames = indexedNames.Where(n => n != indexedRole.Name).ToList();
+                var context = new RoleTypeContext(idx, roleCount, otherNames);
+                return (indexedRole, studentModules, studentLengths, context);
+            }).ToList();
+        }
+
         // ── 4. Dry run — return sprint plans without AI ───────────────────────
         if (request.DryRun)
         {
-            var dryRunPlans = roles.Select(role =>
+            // For Role-type: iterate over the expanded indexed entries
+            var dryRunInputs = roleTypeEntries != null
+                ? roleTypeEntries.Select(e =>
+                    (Role: e.Role,
+                     Modules: e.Modules,
+                     Cfg: new CourseConfig(config.SprintCount, e.Modules.Count, config.SprintLengthInDays, e.ModuleLengths)))
+                : roles.Select(role => (Role: role, Modules: modules, Cfg: config));
+
+            var dryRunPlans = dryRunInputs.Select(input =>
             {
-                var slots = ComputeSprintModules(modules, role, config);
+                var role = input.Role;
+                var slots = ComputeSprintModules(input.Modules, role, input.Cfg);
                 var track = role.IsTechnical ? "Technical" :
                             role.Type == LeadershipTypeId ? "Leadership" : "Customer-facing";
 
@@ -270,7 +341,7 @@ public class CourseBoardBuilderService : ICourseBoardBuilderService
                         }
                         else
                         {
-                            label = GetSpecialSprintLabel(s, role, config);
+                            label = GetSpecialSprintLabel(s, role, input.Cfg);
                         }
 
                         return new DryRunSprintSlot
@@ -312,8 +383,29 @@ public class CourseBoardBuilderService : ICourseBoardBuilderService
             roles.Count, project.Id, config.SprintCount, config.SprintLengthInDays,
             config.ModuleCount, string.Join(",", config.ModuleLengths));
 
-        var generationTasks = roles.Select(role =>
-            GenerateRoleCardsAsync(project, role, modules, systemPrompt, roles, config));
+        IEnumerable<Task<RoleGenerationResult>> generationTasks;
+        if (roleTypeEntries != null)
+        {
+            // Role-type: generate one card set per indexed participant
+            generationTasks = roleTypeEntries.Select(e =>
+            {
+                var studentConfig = new CourseConfig(
+                    config.SprintCount, e.Modules.Count,
+                    config.SprintLengthInDays, e.ModuleLengths);
+                // otherRoles list is the other indexed roles (for cross-role section in prompt)
+                var otherIndexedRoles = roleTypeEntries
+                    .Where(x => x.Role.Name != e.Role.Name)
+                    .Select(x => x.Role)
+                    .ToList<InstituteRole>();
+                return GenerateRoleCardsAsync(project, e.Role, e.Modules, systemPrompt,
+                    otherIndexedRoles, studentConfig, e.Context);
+            });
+        }
+        else
+        {
+            generationTasks = roles.Select(role =>
+                GenerateRoleCardsAsync(project, role, modules, systemPrompt, roles, config));
+        }
 
         var generationResults = await Task.WhenAll(generationTasks);
 
@@ -446,11 +538,12 @@ public class CourseBoardBuilderService : ICourseBoardBuilderService
         List<IProjectModuleRow> modules,
         string systemPrompt,
         IReadOnlyList<InstituteRole> allRoles,
-        CourseConfig config)
+        CourseConfig config,
+        RoleTypeContext? roleTypeContext = null)
     {
         var sprintSlots = ComputeSprintModules(modules, role, config);
         var otherRoles = allRoles.Where(r => r.Id != role.Id).ToList();
-        var userPrompt = BuildUserPrompt(project, role, sprintSlots, otherRoles, config);
+        var userPrompt = BuildUserPrompt(project, role, sprintSlots, otherRoles, config, roleTypeContext);
 
         _logger.LogInformation("Generating cards for role {RoleName}", role.Name);
         var aiResult = await _aiService.GenerateCourseAsync(systemPrompt, userPrompt);
@@ -553,7 +646,8 @@ public class CourseBoardBuilderService : ICourseBoardBuilderService
         InstituteRole role,
         SprintSlot?[] sprintSlots,
         IReadOnlyList<InstituteRole> otherSquadMembers,
-        CourseConfig config)
+        CourseConfig config,
+        RoleTypeContext? roleTypeContext = null)
     {
         var sb = new StringBuilder();
 
@@ -581,7 +675,25 @@ public class CourseBoardBuilderService : ICourseBoardBuilderService
             sb.AppendLine($"Competencies: {role.Competencies}");
         sb.AppendLine();
 
-        if (otherSquadMembers.Count > 0)
+        if (roleTypeContext != null)
+        {
+            sb.AppendLine("## Role Course Type");
+            sb.AppendLine($"CourseType: Role (parallel same-role course)");
+            sb.AppendLine($"This student index: {roleTypeContext.RoleIndex} of {roleTypeContext.TotalRoles}");
+            sb.AppendLine($"Role label on cards: {role.Name}");
+            sb.AppendLine();
+            sb.AppendLine("## Other Participants (same role, different module set — reference them in integration tasks)");
+            foreach (var name in roleTypeContext.OtherParticipantNames)
+                sb.AppendLine($"- {name}");
+            sb.AppendLine();
+            sb.AppendLine(
+                "Integration requirement: In EVERY sprint that has a module assigned, " +
+                "include at least 1–2 checklist items describing integration work with the other participant(s) " +
+                $"(e.g., \"Integration sync with {roleTypeContext.OtherParticipantNames.FirstOrDefault() ?? "other participant"} — align on shared interfaces and verify merge points for [Module Title]\"). " +
+                "This is MANDATORY in all module sprints.");
+            sb.AppendLine();
+        }
+        else if (otherSquadMembers.Count > 0)
         {
             sb.AppendLine("## Squad (other roles — reference them by name in cross-role tasks)");
             foreach (var m in otherSquadMembers)

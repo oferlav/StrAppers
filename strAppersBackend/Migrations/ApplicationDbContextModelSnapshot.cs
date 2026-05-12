@@ -1425,6 +1425,13 @@ namespace strAppersBackend.Migrations
                         .HasMaxLength(100)
                         .HasColumnType("character varying(100)");
 
+                    b.Property<string>("CourseType")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasMaxLength(20)
+                        .HasColumnType("character varying(20)")
+                        .HasDefaultValue("Squad");
+
                     b.Property<int>("InstituteId")
                         .HasColumnType("integer");
 
@@ -1437,6 +1444,9 @@ namespace strAppersBackend.Migrations
                         .HasDefaultValue(false);
 
                     b.Property<int?>("ProjectId")
+                        .HasColumnType("integer");
+
+                    b.Property<int?>("RoleCount")
                         .HasColumnType("integer");
 
                     b.Property<int?>("SquadId")
@@ -3385,6 +3395,12 @@ namespace strAppersBackend.Migrations
                         .HasColumnType("boolean")
                         .HasDefaultValue(false);
 
+                    b.Property<int>("RoleIndex")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer")
+                        .HasDefaultValue(0)
+                        .HasColumnName("RoleIndex");
+
                     b.Property<DateTime?>("StartPendingAt")
                         .HasColumnType("timestamp with time zone");
 
@@ -3482,6 +3498,7 @@ namespace strAppersBackend.Migrations
                             NightShiftWork = false,
                             PartTimeWork = false,
                             RelocationWork = false,
+                            RoleIndex = 0,
                             StudentId = "TU001",
                             StudentWork = false,
                             SuperUser = false,
@@ -3511,6 +3528,7 @@ namespace strAppersBackend.Migrations
                             NightShiftWork = false,
                             PartTimeWork = false,
                             RelocationWork = false,
+                            RoleIndex = 0,
                             StudentId = "TU002",
                             StudentWork = false,
                             SuperUser = false,
@@ -3540,6 +3558,7 @@ namespace strAppersBackend.Migrations
                             NightShiftWork = false,
                             PartTimeWork = false,
                             RelocationWork = false,
+                            RoleIndex = 0,
                             StudentId = "TU003",
                             StudentWork = false,
                             SuperUser = false,
@@ -3569,6 +3588,7 @@ namespace strAppersBackend.Migrations
                             NightShiftWork = false,
                             PartTimeWork = false,
                             RelocationWork = false,
+                            RoleIndex = 0,
                             StudentId = "TU004",
                             StudentWork = false,
                             SuperUser = false,
@@ -3598,6 +3618,7 @@ namespace strAppersBackend.Migrations
                             NightShiftWork = false,
                             PartTimeWork = false,
                             RelocationWork = false,
+                            RoleIndex = 0,
                             StudentId = "TU005",
                             StudentWork = false,
                             SuperUser = false,

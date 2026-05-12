@@ -4120,6 +4120,10 @@ Staff request:
                 }
 
                 row.TrelloBoardJson = json;
+                if (!string.IsNullOrWhiteSpace(request.CourseType))
+                    row.CourseType = request.CourseType.Trim();
+                if (request.RoleCount is >= 1 and <= 5)
+                    row.RoleCount = request.RoleCount;
                 await _context.SaveChangesAsync();
 
                 _logger.LogInformation(
@@ -4164,7 +4168,9 @@ Staff request:
                 CourseName = insertName,
                 TrelloBoardJson = json,
                 // Do not auto-select newly created templates in Project Designs until the user saves an assignment.
-                IsActive = false
+                IsActive = false,
+                CourseType = !string.IsNullOrWhiteSpace(request.CourseType) ? request.CourseType.Trim() : "Squad",
+                RoleCount = request.RoleCount is >= 1 and <= 5 ? request.RoleCount : null,
             };
             _context.InstituteTemplates.Add(newRow);
             await _context.SaveChangesAsync();
