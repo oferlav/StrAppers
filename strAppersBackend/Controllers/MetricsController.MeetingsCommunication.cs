@@ -204,9 +204,18 @@ public partial class MetricsController
                     "MeetingsCommunication: {Email} not found in attendance report ({Count} attendees) — student was absent",
                     studentEmail, attendeeNamesForLog.Count);
                 var absentMsg = "The student did not attend the meeting for this sprint, so a meeting communication review was not produced.";
-                await UpsertCacheMetricsAsync(boardId, request.StudentId, request.SprintNumber,
-                    MeetingsCommunicationMetricId, absentMsg, null, cancellationToken);
-                return Ok(new { success = true, metricId = MeetingsCommunicationMetricId, skippedLlm = true, reviewContent = absentMsg });
+                if (!request.Test)
+                    await UpsertCacheMetricsAsync(boardId, request.StudentId, request.SprintNumber,
+                        MeetingsCommunicationMetricId, absentMsg, null, cancellationToken);
+                return Ok(new
+                {
+                    success = true,
+                    metricId = MeetingsCommunicationMetricId,
+                    skippedLlm = true,
+                    reviewContent = absentMsg,
+                    studentEmailChecked = studentEmail,
+                    attendeeNamesFromReport = attendeeNamesForLog,
+                });
             }
 
             // Attendance report was empty (API failure or permissions) — fall back to DB name and proceed
