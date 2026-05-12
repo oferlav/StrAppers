@@ -26,6 +26,7 @@ public partial class MetricsController : ControllerBase
     private readonly IChatCompletionService _chatCompletionService;
     private readonly IHttpClientFactory _httpClientFactory;
     private readonly PromptConfig _promptConfig;
+    private readonly IMicrosoftGraphService _graphService;
 
     public MetricsController(
         ApplicationDbContext context,
@@ -35,7 +36,8 @@ public partial class MetricsController : ControllerBase
         ILogger<MetricsController> logger,
         IChatCompletionService chatCompletionService,
         IHttpClientFactory httpClientFactory,
-        IOptions<PromptConfig> promptConfig)
+        IOptions<PromptConfig> promptConfig,
+        IMicrosoftGraphService graphService)
     {
         _context = context;
         _trelloService = trelloService;
@@ -45,6 +47,7 @@ public partial class MetricsController : ControllerBase
         _chatCompletionService = chatCompletionService;
         _httpClientFactory = httpClientFactory;
         _promptConfig = promptConfig.Value;
+        _graphService = graphService;
     }
 
     public class AdherenceRequest

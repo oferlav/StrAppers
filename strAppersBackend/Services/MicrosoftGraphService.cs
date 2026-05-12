@@ -16,6 +16,11 @@ public interface IMicrosoftGraphService
     Task<MeetingTrackingResponse> TrackMeetingsByParticipantsAsync(DateTime startDate, DateTime endDate, List<string> emailAddresses, List<string> participantNames = null);
     Task<TeamsMeetingResponse> CreateRestrictedTeamsMeetingAsync(CreateTeamsMeetingRequest request);
     Task<MeetingTranscriptCheckResult> CheckMeetingTranscriptsAsync(string joinUrl);
+    /// <summary>
+    /// Resolves the latest transcript for a meeting (via join URL) and downloads its VTT content.
+    /// Returns (transcriptId, vttContent, null) on success or (null, null, errorMessage) on failure.
+    /// </summary>
+    Task<(string? TranscriptId, string? VttContent, string? Error)> FetchLatestTranscriptVttAsync(string joinUrl);
 }
 
 public class MicrosoftGraphService : IMicrosoftGraphService
@@ -1802,6 +1807,62 @@ END:VCALENDAR";
 
         _logger.LogInformation("Generated Google Calendar link for meeting: {Title}", title);
         return url;
+    }
+
+    public async Task<(string? TranscriptId, string? VttContent, string? Error)> FetchLatestTranscriptVttAsync(string joinUrl)
+    {
+        try
+        {
+            var accessToken = await GetAccessTokenAsync();
+            _httpClient.DefaultRequestHeaders.Authorization =
+                new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", accessToken);
+
+            var oidFromUrl = ExtractOidFromJoinUrl(joinUrl);
+            var userId = oidFromUrl
+                ?? (!string.IsNullOrEmpty(_serviceAccountUserId) ? _serviceAccountUserId : _serviceAccountEmail);
+
+            var (meetingId, _) = await GetOnlineMeetingIdByJoinUrlAsync(joinUrl);
+            if (string.IsNullOrEmpty(meetingId))
+                return (null, null, "Could not resolve onlineMeetingId from join URL");
+
+            // List transcripts
+            var listUrl = $"https://graph.microsoft.com/v1.0/users/{userId}/onlineMeetings/{meetingId}/transcripts";
+            var listResponse = await _httpClient.GetAsync(listUrl);
+            if (!listResponse.IsSuccessStatusCode)
+            {
+                var err = await listResponse.Content.ReadAsStringAsync();
+                return (null, null, $"Transcript list failed ({listResponse.StatusCode}): {err}");
+            }
+
+            var listData = JsonSerializer.Deserialize<JsonElement>(await listResponse.Content.ReadAsStringAsync());
+            if (!listData.TryGetProperty("value", out var values) || values.ValueKind != JsonValueKind.Array || values.GetArrayLength() == 0)
+                return (null, null, "No transcripts available for this meeting yet");
+
+            // Take the latest (last in the array)
+            var latest = values[values.GetArrayLength() - 1];
+            if (!latest.TryGetProperty("id", out var idEl))
+                return (null, null, "Transcript entry has no id");
+
+            var transcriptId = idEl.GetString()!;
+
+            // Download VTT content
+            var vttUrl = $"https://graph.microsoft.com/v1.0/users/{userId}/onlineMeetings/{meetingId}/transcripts/{transcriptId}/content?$format=text/vtt";
+            var vttResponse = await _httpClient.GetAsync(vttUrl);
+            if (!vttResponse.IsSuccessStatusCode)
+            {
+                var err = await vttResponse.Content.ReadAsStringAsync();
+                return (null, null, $"VTT download failed ({vttResponse.StatusCode}): {err}");
+            }
+
+            var vttContent = await vttResponse.Content.ReadAsStringAsync();
+            _logger.LogInformation("Downloaded VTT transcript ({Length} chars) for meeting {MeetingId}", vttContent.Length, meetingId);
+            return (transcriptId, vttContent, null);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "FetchLatestTranscriptVttAsync failed for joinUrl {JoinUrl}", joinUrl);
+            return (null, null, ex.Message);
+        }
     }
 
     public async Task<MeetingTranscriptCheckResult> CheckMeetingTranscriptsAsync(string joinUrl)
