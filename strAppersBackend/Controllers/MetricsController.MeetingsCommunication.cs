@@ -524,7 +524,6 @@ public partial class MetricsController
             ? new[] { "Backend Developer", "Frontend Developer" }
             : new[] { ResolveTrelloSprintCardLabel(role, fullStackTrackLabel: null) };
 
-        bool moduleAppended = false;
         foreach (var trelloLabel in trelloLabels)
         {
             var snapshot = await _trelloService.GetSprintRoleCardSnapshotAsync(boardId, sprintNumber, trelloLabel);
@@ -539,18 +538,6 @@ public partial class MetricsController
             }
 
             // Only append module once (both tracks share the same module)
-            if (!moduleAppended)
-            {
-                var moduleIdStr = await _trelloService.GetModuleIdFromSprintCardAsync(boardId, sprintNumber, trelloLabel);
-                if (!string.IsNullOrWhiteSpace(moduleIdStr) && int.TryParse(moduleIdStr.Trim(), out var moduleId))
-                {
-                    await AppendGapAnalysisProjectModuleSectionFromModuleIdAsync(
-                        sb, board, moduleId,
-                        "### Project module (sprint scope — context for communication relevance)",
-                        cancellationToken);
-                    moduleAppended = true;
-                }
-            }
         }
 
         return sb.Length == 0 ? "(No sprint context available.)" : sb.ToString().Trim();
