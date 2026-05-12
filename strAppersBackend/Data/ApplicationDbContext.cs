@@ -1114,6 +1114,7 @@ public class ApplicationDbContext : DbContext
             entity.Property(e => e.TranscriptId).HasColumnType("TEXT");
             entity.Property(e => e.TranscriptFetchedAt).HasColumnType("timestamp with time zone");
             entity.Property(e => e.TranscriptVtt).HasColumnType("TEXT");
+            entity.Property(e => e.SpeakerName).HasMaxLength(255);
             
             // Foreign key relationship to ProjectBoard
             entity.HasOne(e => e.ProjectBoard)

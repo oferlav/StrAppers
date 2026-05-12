@@ -79,6 +79,14 @@ namespace strAppersBackend.Models
         [Column("TranscriptVtt", TypeName = "TEXT")]
         public string? TranscriptVtt { get; set; }
 
+        /// <summary>
+        /// The exact speaker name used by this student in the VTT transcript (resolved via attendance report).
+        /// Stored per-student so analysis never needs fuzzy matching.
+        /// </summary>
+        [MaxLength(255)]
+        [Column("SpeakerName")]
+        public string? SpeakerName { get; set; }
+
         // Navigation properties
         /// <summary>
         /// Navigation property to the associated project board

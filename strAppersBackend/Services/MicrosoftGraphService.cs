@@ -22,6 +22,10 @@ public interface IMicrosoftGraphService
     /// </summary>
     Task<(string? TranscriptId, string? VttContent, string? Error)> FetchLatestTranscriptVttAsync(string joinUrl);
     /// <summary>
+    /// Returns email → displayName map for all attendees of a meeting using the attendance report API.
+    /// </summary>
+    Task<Dictionary<string, string>> GetMeetingAttendeeDisplayNamesAsync(string joinUrl);
+    /// <summary>
     /// Looks up the Azure AD / guest profile display name for an email address.
     /// Returns null if not found or on error.
     /// </summary>
@@ -1847,6 +1851,90 @@ END:VCALENDAR";
             _logger.LogWarning(ex, "GetTeamsDisplayNameAsync failed for {Email}", email);
             return null;
         }
+    }
+
+    public async Task<Dictionary<string, string>> GetMeetingAttendeeDisplayNamesAsync(string joinUrl)
+    {
+        var result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        try
+        {
+            var accessToken = await GetAccessTokenAsync();
+            _httpClient.DefaultRequestHeaders.Authorization =
+                new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", accessToken);
+
+            var oidFromUrl = ExtractOidFromJoinUrl(joinUrl);
+            var userId = oidFromUrl
+                ?? (!string.IsNullOrEmpty(_serviceAccountUserId) ? _serviceAccountUserId : _serviceAccountEmail);
+
+            var (meetingId, _) = await GetOnlineMeetingIdByJoinUrlAsync(joinUrl);
+            if (string.IsNullOrEmpty(meetingId))
+            {
+                _logger.LogWarning("GetMeetingAttendeeDisplayNamesAsync: could not resolve meetingId");
+                return result;
+            }
+
+            // Get the latest attendance report
+            var reportsUrl = $"https://graph.microsoft.com/v1.0/users/{userId}/onlineMeetings/{meetingId}/attendanceReports?$orderby=meetingEndDateTime desc&$top=1";
+            var reportsResponse = await _httpClient.GetAsync(reportsUrl);
+            if (!reportsResponse.IsSuccessStatusCode)
+            {
+                _logger.LogWarning("GetMeetingAttendeeDisplayNamesAsync: reports list returned {StatusCode}", reportsResponse.StatusCode);
+                return result;
+            }
+
+            var reportsData = JsonSerializer.Deserialize<JsonElement>(await reportsResponse.Content.ReadAsStringAsync());
+            if (!reportsData.TryGetProperty("value", out var reports) ||
+                reports.ValueKind != JsonValueKind.Array || reports.GetArrayLength() == 0)
+                return result;
+
+            var reportId = reports[0].TryGetProperty("id", out var rid) ? rid.GetString() : null;
+            if (string.IsNullOrEmpty(reportId)) return result;
+
+            // Get attendance records for this report
+            var recordsUrl = $"https://graph.microsoft.com/v1.0/users/{userId}/onlineMeetings/{meetingId}/attendanceReports/{reportId}/attendanceRecords";
+            var recordsResponse = await _httpClient.GetAsync(recordsUrl);
+            if (!recordsResponse.IsSuccessStatusCode)
+            {
+                _logger.LogWarning("GetMeetingAttendeeDisplayNamesAsync: records returned {StatusCode}", recordsResponse.StatusCode);
+                return result;
+            }
+
+            var recordsData = JsonSerializer.Deserialize<JsonElement>(await recordsResponse.Content.ReadAsStringAsync());
+            if (!recordsData.TryGetProperty("value", out var records) || records.ValueKind != JsonValueKind.Array)
+                return result;
+
+            foreach (var record in records.EnumerateArray())
+            {
+                // emailAddress can be nested under identity.emailAddress or directly
+                string? email = null;
+                string? displayName = null;
+
+                if (record.TryGetProperty("emailAddress", out var emailEl))
+                    email = emailEl.GetString();
+
+                if (record.TryGetProperty("identity", out var identity))
+                {
+                    if (string.IsNullOrEmpty(email) && identity.TryGetProperty("email", out var idEmail))
+                        email = idEmail.GetString();
+                    if (identity.TryGetProperty("displayName", out var dn))
+                        displayName = dn.GetString();
+                }
+
+                if (record.TryGetProperty("displayName", out var directDn))
+                    displayName ??= directDn.GetString();
+
+                if (!string.IsNullOrEmpty(email) && !string.IsNullOrEmpty(displayName))
+                {
+                    result[email] = displayName;
+                    _logger.LogInformation("Attendance record: {Email} → {DisplayName}", email, displayName);
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "GetMeetingAttendeeDisplayNamesAsync failed for {JoinUrl}", joinUrl);
+        }
+        return result;
     }
 
     public async Task<(string? TranscriptId, string? VttContent, string? Error)> FetchLatestTranscriptVttAsync(string joinUrl)

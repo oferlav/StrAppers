@@ -168,6 +168,11 @@ namespace strAppersBackend.Migrations
                         .HasColumnType("TEXT")
                         .HasColumnName("TranscriptVtt");
 
+                    b.Property<string>("SpeakerName")
+                        .HasMaxLength(255)
+                        .HasColumnType("character varying(255)")
+                        .HasColumnName("SpeakerName");
+
                     b.HasKey("Id");
 
                     b.HasIndex("Attended");

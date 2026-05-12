@@ -109,6 +109,7 @@ public partial class MetricsController
         // Try to get a transcript — use cached VTT if available, otherwise fetch from Graph API
         string? vttContent = null;
         string? transcriptSource = null;
+        var latestMeeting = meetings.First();
 
         foreach (var meeting in meetings)
         {
@@ -122,8 +123,6 @@ public partial class MetricsController
 
         if (vttContent == null)
         {
-            // Try to fetch transcript from Graph API for the most recent meeting
-            var latestMeeting = meetings.First();
             _logger.LogInformation("MeetingsCommunication: fetching transcript for meeting {Id} ({Url})",
                 latestMeeting.Id, latestMeeting.ActualMeetingUrl);
 
@@ -135,7 +134,10 @@ public partial class MetricsController
                 vttContent = fetchedVtt;
                 transcriptSource = $"fetched from Graph API (meeting {latestMeeting.MeetingTime:yyyy-MM-dd})";
 
-                // Cache transcript on all BoardMeeting rows sharing the same ActualMeetingUrl
+                // Fetch attendance report to resolve email → displayName for all attendees
+                var attendeeNames = await _graphService.GetMeetingAttendeeDisplayNamesAsync(latestMeeting.ActualMeetingUrl!);
+
+                // Cache VTT + SpeakerName on all BoardMeeting rows sharing the same ActualMeetingUrl
                 var now = DateTime.UtcNow;
                 var siblingMeetings = await _context.BoardMeetings
                     .Where(bm => bm.ActualMeetingUrl == latestMeeting.ActualMeetingUrl)
@@ -146,6 +148,10 @@ public partial class MetricsController
                     sibling.TranscriptId = transcriptId;
                     sibling.TranscriptVtt = fetchedVtt;
                     sibling.TranscriptFetchedAt = now;
+                    // Resolve this student's exact VTT speaker name from the attendance report
+                    if (!string.IsNullOrEmpty(sibling.StudentEmail) &&
+                        attendeeNames.TryGetValue(sibling.StudentEmail, out var speakerName))
+                        sibling.SpeakerName = speakerName;
                 }
                 await _context.SaveChangesAsync(cancellationToken);
             }
@@ -159,28 +165,25 @@ public partial class MetricsController
             }
         }
 
-        // Resolve Teams display name: use cached value, else fetch from Graph API and cache it
-        var studentDisplayName = student.TeamsDisplayName?.Trim();
+        // Use stored SpeakerName (resolved from attendance report) — no fuzzy matching needed
+        // Re-query to get the updated SpeakerName after the save above
+        var thisStudentMeeting = meetings.FirstOrDefault(m => !string.IsNullOrEmpty(m.SpeakerName))
+            ?? await _context.BoardMeetings.AsNoTracking()
+                .Where(bm => bm.ActualMeetingUrl == latestMeeting.ActualMeetingUrl &&
+                             bm.StudentEmail != null &&
+                             bm.StudentEmail.ToLower() == emailLower)
+                .OrderByDescending(bm => bm.MeetingTime)
+                .FirstOrDefaultAsync(cancellationToken);
+
+        var studentDisplayName = thisStudentMeeting?.SpeakerName?.Trim();
         if (string.IsNullOrEmpty(studentDisplayName))
         {
-            var fetchedName = await _graphService.GetTeamsDisplayNameAsync(studentEmail);
-            if (!string.IsNullOrEmpty(fetchedName))
-            {
-                studentDisplayName = fetchedName;
-                // Cache on the student record so we don't call Graph API every time
-                var studentToUpdate = await _context.Students.FindAsync(new object[] { request.StudentId }, cancellationToken);
-                if (studentToUpdate != null)
-                {
-                    studentToUpdate.TeamsDisplayName = fetchedName;
-                    await _context.SaveChangesAsync(cancellationToken);
-                }
-            }
-            else
-            {
-                // Fallback to FirstName + LastName
-                studentDisplayName = $"{student.FirstName} {student.LastName}".Trim();
-            }
+            // Fallback: FirstName + LastName if attendance report had no match
+            studentDisplayName = $"{student.FirstName} {student.LastName}".Trim();
+            _logger.LogWarning("MeetingsCommunication: no SpeakerName resolved for {Email}, falling back to '{Name}'",
+                studentEmail, studentDisplayName);
         }
+
         var transcriptMd = BuildTranscriptMarkdown(vttContent, studentDisplayName);
 
         // Build sprint context (Trello card + module + customer narrative)
