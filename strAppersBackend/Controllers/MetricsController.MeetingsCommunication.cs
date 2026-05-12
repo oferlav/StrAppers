@@ -306,7 +306,10 @@ public partial class MetricsController
         var transcriptMd = BuildTranscriptMarkdown(vttContent!, studentDisplayName);
 
         var activeRole = student.StudentRoles?.FirstOrDefault(sr => sr.IsActive);
-        var trelloLabelUsed = ResolveTrelloSprintCardLabel(activeRole?.Role, fullStackTrackLabel: null);
+        var roleName2 = activeRole?.Role?.Name?.Trim() ?? string.Empty;
+        var trelloLabelUsed = IsFullStackRole(roleName2)
+            ? "Backend Developer + Frontend Developer"
+            : ResolveTrelloSprintCardLabel(activeRole?.Role, fullStackTrackLabel: null);
         var sprintContextMd = await BuildMeetingsCommunicationContextAsync(
             boardId, board, request.SprintNumber, activeRole?.Role, cancellationToken);
 
@@ -514,26 +517,40 @@ public partial class MetricsController
         CancellationToken cancellationToken)
     {
         var sb = new StringBuilder();
+        var roleName = role?.Name?.Trim() ?? string.Empty;
 
-        var trelloLabel = ResolveTrelloSprintCardLabel(role, fullStackTrackLabel: null);
-        var snapshot = await _trelloService.GetSprintRoleCardSnapshotAsync(boardId, sprintNumber, trelloLabel);
-        if (snapshot != null)
-        {
-            sb.AppendLine($"### Sprint {sprintNumber} role card ({trelloLabel})");
-            if (!string.IsNullOrWhiteSpace(snapshot.CardName))
-                sb.AppendLine($"**{snapshot.CardName.Trim()}**");
-            if (!string.IsNullOrWhiteSpace(snapshot.Description))
-                sb.AppendLine(snapshot.Description.Trim());
-            sb.AppendLine();
-        }
+        // Full Stack: fetch both Backend and Frontend cards (same pattern as GapAnalysis)
+        var trelloLabels = IsFullStackRole(roleName)
+            ? new[] { "Backend Developer", "Frontend Developer" }
+            : new[] { ResolveTrelloSprintCardLabel(role, fullStackTrackLabel: null) };
 
-        var moduleIdStr = await _trelloService.GetModuleIdFromSprintCardAsync(boardId, sprintNumber, trelloLabel);
-        if (!string.IsNullOrWhiteSpace(moduleIdStr) && int.TryParse(moduleIdStr.Trim(), out var moduleId))
+        bool moduleAppended = false;
+        foreach (var trelloLabel in trelloLabels)
         {
-            await AppendGapAnalysisProjectModuleSectionFromModuleIdAsync(
-                sb, board, moduleId,
-                "### Project module (sprint scope — context for communication relevance)",
-                cancellationToken);
+            var snapshot = await _trelloService.GetSprintRoleCardSnapshotAsync(boardId, sprintNumber, trelloLabel);
+            if (snapshot != null)
+            {
+                sb.AppendLine($"### Sprint {sprintNumber} role card ({trelloLabel})");
+                if (!string.IsNullOrWhiteSpace(snapshot.CardName))
+                    sb.AppendLine($"**{snapshot.CardName.Trim()}**");
+                if (!string.IsNullOrWhiteSpace(snapshot.Description))
+                    sb.AppendLine(snapshot.Description.Trim());
+                sb.AppendLine();
+            }
+
+            // Only append module once (both tracks share the same module)
+            if (!moduleAppended)
+            {
+                var moduleIdStr = await _trelloService.GetModuleIdFromSprintCardAsync(boardId, sprintNumber, trelloLabel);
+                if (!string.IsNullOrWhiteSpace(moduleIdStr) && int.TryParse(moduleIdStr.Trim(), out var moduleId))
+                {
+                    await AppendGapAnalysisProjectModuleSectionFromModuleIdAsync(
+                        sb, board, moduleId,
+                        "### Project module (sprint scope — context for communication relevance)",
+                        cancellationToken);
+                    moduleAppended = true;
+                }
+            }
         }
 
         return sb.Length == 0 ? "(No sprint context available.)" : sb.ToString().Trim();
