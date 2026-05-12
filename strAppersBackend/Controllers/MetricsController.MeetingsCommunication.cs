@@ -186,7 +186,7 @@ public partial class MetricsController
         // Build sprint context (Trello card + module + customer narrative)
         var activeRole = student.StudentRoles?.FirstOrDefault(sr => sr.IsActive);
         var sprintContextMd = await BuildMeetingsCommunicationContextAsync(
-            boardId, board, request.StudentId, request.SprintNumber, activeRole?.Role, cancellationToken);
+            boardId, board, request.SprintNumber, activeRole?.Role, cancellationToken);
 
         var systemPrompt = LoadMeetingsCommunicationSystemPrompt();
         var userPrompt = new StringBuilder()
@@ -281,7 +281,7 @@ public partial class MetricsController
     {
         // Parse cues: "<v Speaker Name>line text"
         var speakerLines = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
-        var cueTextPattern = new Regex(@"<v\s+([^>]+)>(.*)", RegexOptions.Compiled);
+        var cueTextPattern = new Regex(@"<v\s+([^>]+)>(.*?)(?:</v>)?$", RegexOptions.Compiled);
 
         foreach (var rawLine in vttContent.Split('\n'))
         {
@@ -335,22 +335,11 @@ public partial class MetricsController
     private async Task<string> BuildMeetingsCommunicationContextAsync(
         string boardId,
         ProjectBoard board,
-        int studentId,
         int sprintNumber,
         Role? role,
         CancellationToken cancellationToken)
     {
         var sb = new StringBuilder();
-
-        // Customer / project background
-        var project = await _context.Projects.AsNoTracking()
-            .FirstOrDefaultAsync(p => p.Id == board.ProjectId, cancellationToken);
-        if (project != null && !string.IsNullOrWhiteSpace(project.CustomerPastStory))
-        {
-            sb.AppendLine("### Customer / project background");
-            sb.AppendLine(project.CustomerPastStory.Trim());
-            sb.AppendLine();
-        }
 
         // Sprint role card from Trello
         var trelloLabel = ResolveTrelloSprintCardLabel(role, fullStackTrackLabel: null);
