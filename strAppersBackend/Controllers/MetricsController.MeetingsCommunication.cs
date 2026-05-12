@@ -197,11 +197,23 @@ public partial class MetricsController
         var studentDisplayName = thisStudentSibling?.SpeakerName?.Trim();
         if (string.IsNullOrEmpty(studentDisplayName))
         {
-            // Fallback: FirstName + LastName if attendance report had no match
+            if (attendeeNamesForLog.Count > 0)
+            {
+                // Attendance report returned data but this student was not in it → they were absent
+                _logger.LogInformation(
+                    "MeetingsCommunication: {Email} not found in attendance report ({Count} attendees) — student was absent",
+                    studentEmail, attendeeNamesForLog.Count);
+                var absentMsg = "The student did not attend the meeting for this sprint, so a meeting communication review was not produced.";
+                await UpsertCacheMetricsAsync(boardId, request.StudentId, request.SprintNumber,
+                    MeetingsCommunicationMetricId, absentMsg, null, cancellationToken);
+                return Ok(new { success = true, metricId = MeetingsCommunicationMetricId, skippedLlm = true, reviewContent = absentMsg });
+            }
+
+            // Attendance report was empty (API failure or permissions) — fall back to DB name and proceed
             studentDisplayName = $"{student.FirstName} {student.LastName}".Trim();
             _logger.LogWarning(
-                "MeetingsCommunication: no SpeakerName resolved for {Email} (attendee report had {Count} entries). Falling back to '{Name}'",
-                studentEmail, attendeeNamesForLog.Count, studentDisplayName);
+                "MeetingsCommunication: attendance report was empty for {Email} — falling back to '{Name}' (may indicate a permissions issue)",
+                studentEmail, studentDisplayName);
         }
 
         var transcriptMd = BuildTranscriptMarkdown(vttContent, studentDisplayName);
