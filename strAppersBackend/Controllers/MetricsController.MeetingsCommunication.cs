@@ -86,7 +86,7 @@ public partial class MetricsController
             return Ok(new { success = true, metricId = MeetingsCommunicationMetricId, skippedLlm = true, reviewContent = msg });
         }
 
-        // Get meetings for this student in sprint window
+        // Get this student's meetings in the sprint window
         var emailLower = studentEmail.ToLowerInvariant();
         var meetings = await _context.BoardMeetings
             .Where(bm =>
@@ -106,21 +106,42 @@ public partial class MetricsController
             return Ok(new { success = true, metricId = MeetingsCommunicationMetricId, skippedLlm = true, reviewContent = NoMeetingTranscriptReviewMessage });
         }
 
-        // Try to get a transcript — use cached VTT if available, otherwise fetch from Graph API
-        string? vttContent = null;
-        string? transcriptSource = null;
         var latestMeeting = meetings.First();
 
-        foreach (var meeting in meetings)
+        // ── Step 1: Get VTT (from this student's cached row, any sibling's cached row, or Graph API) ──
+        string? vttContent = null;
+        string? vttTranscriptId = null;
+        string? transcriptSource = null;
+
+        // Check this student's own rows first
+        foreach (var m in meetings)
         {
-            if (!string.IsNullOrEmpty(meeting.TranscriptVtt))
+            if (!string.IsNullOrEmpty(m.TranscriptVtt))
             {
-                vttContent = meeting.TranscriptVtt;
-                transcriptSource = $"cached (BoardMeeting #{meeting.Id}, {meeting.MeetingTime:yyyy-MM-dd})";
+                vttContent = m.TranscriptVtt;
+                vttTranscriptId = m.TranscriptId;
+                transcriptSource = $"cached (BoardMeeting #{m.Id}, {m.MeetingTime:yyyy-MM-dd})";
                 break;
             }
         }
 
+        // Then check any other student's row for the same meeting URL
+        if (vttContent == null)
+        {
+            var siblingsWithVtt = await _context.BoardMeetings
+                .AsNoTracking()
+                .Where(bm => bm.ActualMeetingUrl == latestMeeting.ActualMeetingUrl &&
+                             bm.TranscriptVtt != null)
+                .FirstOrDefaultAsync(cancellationToken);
+            if (siblingsWithVtt != null)
+            {
+                vttContent = siblingsWithVtt.TranscriptVtt;
+                vttTranscriptId = siblingsWithVtt.TranscriptId;
+                transcriptSource = $"cached from sibling (BoardMeeting #{siblingsWithVtt.Id})";
+            }
+        }
+
+        // If still nothing, fetch from Graph API
         if (vttContent == null)
         {
             _logger.LogInformation("MeetingsCommunication: fetching transcript for meeting {Id} ({Url})",
@@ -132,20 +153,9 @@ public partial class MetricsController
             if (!string.IsNullOrEmpty(fetchedVtt) && !string.IsNullOrEmpty(transcriptId))
             {
                 vttContent = fetchedVtt;
+                vttTranscriptId = transcriptId;
                 transcriptSource = $"fetched from Graph API (meeting {latestMeeting.MeetingTime:yyyy-MM-dd})";
-
-                // Cache VTT on all sibling BoardMeeting rows (same ActualMeetingUrl)
-                var now = DateTime.UtcNow;
-                var siblingRows = await _context.BoardMeetings
-                    .Where(bm => bm.ActualMeetingUrl == latestMeeting.ActualMeetingUrl)
-                    .ToListAsync(cancellationToken);
-                foreach (var sibling in siblingRows)
-                {
-                    sibling.TranscriptId = transcriptId;
-                    sibling.TranscriptVtt = fetchedVtt;
-                    sibling.TranscriptFetchedAt = now;
-                }
-                await _context.SaveChangesAsync(cancellationToken);
+                // VTT will be stored below only on confirmed-attendee rows
             }
             else
             {
@@ -157,51 +167,92 @@ public partial class MetricsController
             }
         }
 
-        // Resolve SpeakerName for all siblings — runs every time any sibling is missing theirs.
-        // (Separated from VTT fetch so it also runs when VTT was already cached.)
+        // ── Step 2: Resolve SpeakerName for all siblings via attendance report + name matching ──
+        // Load all sibling rows (all students scheduled for this meeting URL)
         var allSiblings = await _context.BoardMeetings
             .Where(bm => bm.ActualMeetingUrl == latestMeeting.ActualMeetingUrl)
             .ToListAsync(cancellationToken);
 
+        // Load student names for all siblings (needed for name-based matching)
+        var siblingEmailKeys = allSiblings
+            .Where(s => !string.IsNullOrEmpty(s.StudentEmail))
+            .Select(s => s.StudentEmail!.Trim().ToLowerInvariant())
+            .Distinct()
+            .ToList();
+        var siblingStudentNames = await _context.Students
+            .Where(s => s.Email != null && siblingEmailKeys.Contains(s.Email.Trim().ToLower()))
+            .ToDictionaryAsync(
+                s => s.Email!.Trim().ToLowerInvariant(),
+                s => $"{s.FirstName} {s.LastName}".Trim(),
+                cancellationToken);
+
         var needsSpeakerNames = allSiblings.Any(s => string.IsNullOrEmpty(s.SpeakerName));
         Dictionary<string, string> attendeeNamesForLog = new(StringComparer.OrdinalIgnoreCase);
+
         if (needsSpeakerNames)
         {
             attendeeNamesForLog = await _graphService.GetMeetingAttendeeDisplayNamesAsync(latestMeeting.ActualMeetingUrl!);
-            _logger.LogInformation("MeetingsCommunication: attendance report returned {Count} entries: {Emails}",
+            _logger.LogInformation("MeetingsCommunication: attendance report returned {Count} display names: {Names}",
                 attendeeNamesForLog.Count,
-                string.Join(", ", attendeeNamesForLog.Keys));
+                string.Join(", ", attendeeNamesForLog.Values));
 
+            var attendeeDisplayNames = attendeeNamesForLog.Values.ToList();
+            var now = DateTime.UtcNow;
             bool anyUpdated = false;
-            foreach (var sibling in allSiblings)
+
+            foreach (var sibling in allSiblings.Where(s => string.IsNullOrEmpty(s.SpeakerName)))
             {
-                if (string.IsNullOrEmpty(sibling.SpeakerName) &&
-                    !string.IsNullOrEmpty(sibling.StudentEmail) &&
-                    attendeeNamesForLog.TryGetValue(sibling.StudentEmail.Trim(), out var speakerName))
+                if (string.IsNullOrEmpty(sibling.StudentEmail)) continue;
+                var key = sibling.StudentEmail.Trim().ToLowerInvariant();
+                if (!siblingStudentNames.TryGetValue(key, out var studentName)) continue;
+
+                // Try exact name match first
+                var resolvedName = attendeeDisplayNames.FirstOrDefault(dn =>
+                    string.Equals(dn.Trim(), studentName, StringComparison.OrdinalIgnoreCase));
+
+                // AI fuzzy fallback when exact match fails
+                if (resolvedName == null && attendeeDisplayNames.Count > 0)
                 {
-                    sibling.SpeakerName = speakerName;
+                    resolvedName = await ResolveDisplayNameWithAiAsync(studentName, attendeeDisplayNames, cancellationToken);
+                    if (resolvedName != null)
+                        _logger.LogInformation("MeetingsCommunication: AI matched '{StudentName}' → '{DisplayName}'",
+                            studentName, resolvedName);
+                }
+
+                if (resolvedName != null)
+                {
+                    sibling.SpeakerName = resolvedName;
+                    // Store VTT only on confirmed-attendee rows
+                    if (string.IsNullOrEmpty(sibling.TranscriptVtt))
+                    {
+                        sibling.TranscriptVtt = vttContent;
+                        sibling.TranscriptId = vttTranscriptId;
+                        sibling.TranscriptFetchedAt = now;
+                    }
                     anyUpdated = true;
-                    _logger.LogInformation("MeetingsCommunication: set SpeakerName='{Name}' for {Email}",
-                        speakerName, sibling.StudentEmail);
+                    _logger.LogInformation("MeetingsCommunication: resolved SpeakerName='{Name}' for {Email}",
+                        resolvedName, sibling.StudentEmail);
                 }
             }
+
             if (anyUpdated)
                 await _context.SaveChangesAsync(cancellationToken);
         }
 
-        // Use SpeakerName from the tracked sibling rows (already updated above if available)
+        // ── Step 3: Determine this student's display name ──
         var thisStudentSibling = allSiblings
             .FirstOrDefault(m => m.StudentEmail?.Trim().ToLowerInvariant() == emailLower &&
                                  !string.IsNullOrEmpty(m.SpeakerName));
 
         var studentDisplayName = thisStudentSibling?.SpeakerName?.Trim();
+
         if (string.IsNullOrEmpty(studentDisplayName))
         {
             if (attendeeNamesForLog.Count > 0)
             {
-                // Attendance report returned data but this student was not in it → they were absent
+                // Report had data but this student wasn't in it → they were absent
                 _logger.LogInformation(
-                    "MeetingsCommunication: {Email} not found in attendance report ({Count} attendees) — student was absent",
+                    "MeetingsCommunication: {Email} not in attendance report ({Count} attendees) — absent",
                     studentEmail, attendeeNamesForLog.Count);
                 var absentMsg = "The student did not attend the meeting for this sprint, so a meeting communication review was not produced.";
                 if (!request.Test)
@@ -218,16 +269,16 @@ public partial class MetricsController
                 });
             }
 
-            // Attendance report was empty (API failure or permissions) — fall back to DB name and proceed
+            // Attendance report was empty (API failure) — fall back to DB name
             studentDisplayName = $"{student.FirstName} {student.LastName}".Trim();
             _logger.LogWarning(
-                "MeetingsCommunication: attendance report was empty for {Email} — falling back to '{Name}' (may indicate a permissions issue)",
+                "MeetingsCommunication: attendance report empty for {Email} — falling back to '{Name}' (possible permissions issue)",
                 studentEmail, studentDisplayName);
         }
 
-        var transcriptMd = BuildTranscriptMarkdown(vttContent, studentDisplayName);
+        // ── Step 4: Build prompts ──
+        var transcriptMd = BuildTranscriptMarkdown(vttContent!, studentDisplayName);
 
-        // Build sprint context (Trello card + module)
         var activeRole = student.StudentRoles?.FirstOrDefault(sr => sr.IsActive);
         var trelloLabelUsed = ResolveTrelloSprintCardLabel(activeRole?.Role, fullStackTrackLabel: null);
         var sprintContextMd = await BuildMeetingsCommunicationContextAsync(
@@ -266,6 +317,7 @@ public partial class MetricsController
             });
         }
 
+        // ── Step 5: LLM evaluation ──
         try
         {
             var cheapName = _configuration["OpenAI:CheapModel"] ?? "gpt-4o-mini";
@@ -323,12 +375,60 @@ public partial class MetricsController
     }
 
     /// <summary>
+    /// Uses GPT-4o-mini to fuzzy-match a student's full name against a list of Teams display names.
+    /// Returns the matched display name exactly as it appears in the list, or null if no match.
+    /// </summary>
+    private async Task<string?> ResolveDisplayNameWithAiAsync(
+        string studentName,
+        List<string> attendeeDisplayNames,
+        CancellationToken cancellationToken)
+    {
+        if (attendeeDisplayNames.Count == 0) return null;
+        try
+        {
+            var nameList = string.Join("\n", attendeeDisplayNames.Select(n => $"- {n}"));
+            var userPrompt =
+                $"Student name: \"{studentName}\"\n\nTeams meeting display names:\n{nameList}\n\n" +
+                "Which display name belongs to this student? Consider name variations, partial names, and Hebrew/English equivalents. " +
+                "Reply with ONLY the exact display name from the list above, or NONE if no reasonable match exists.";
+
+            var model = new AIModel
+            {
+                Name = _configuration["OpenAI:CheapModel"] ?? "gpt-4o-mini",
+                Provider = "OpenAI",
+                BaseUrl = _configuration["OpenAI:BaseUrl"] ?? "https://api.openai.com/v1",
+                MaxTokens = 50,
+                DefaultTemperature = 0
+            };
+
+            var (result, _, _) = await _chatCompletionService.GetChatCompletionAsync(
+                model,
+                "You match person names to their Teams meeting display names. Reply with ONLY the exact display name from the list, or NONE.",
+                userPrompt,
+                null);
+
+            var trimmed = result.Trim().Trim('"').Trim();
+            if (string.IsNullOrEmpty(trimmed) ||
+                string.Equals(trimmed, "NONE", StringComparison.OrdinalIgnoreCase))
+                return null;
+
+            // Verify the returned value is actually in the list (guard against hallucination)
+            return attendeeDisplayNames.FirstOrDefault(n =>
+                string.Equals(n.Trim(), trimmed, StringComparison.OrdinalIgnoreCase));
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "MeetingsCommunication: AI display name resolution failed for '{StudentName}'", studentName);
+            return null;
+        }
+    }
+
+    /// <summary>
     /// Parses VTT content into per-speaker segment markdown.
     /// Highlights the target student's lines; summarises all others.
     /// </summary>
     private static string BuildTranscriptMarkdown(string vttContent, string studentDisplayName)
     {
-        // Parse cues: "<v Speaker Name>line text"
         var speakerLines = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
         var cueTextPattern = new Regex(@"<v\s+([^>]+)>(.*?)(?:</v>)?$", RegexOptions.Compiled);
 
@@ -369,7 +469,6 @@ public partial class MetricsController
                 ? $"### ★ {speaker} [STUDENT BEING EVALUATED] ({lines.Count} turns, ~{wordCount} words, {pct}% of meeting)"
                 : $"### {speaker} ({lines.Count} turns, ~{wordCount} words, {pct}% of meeting)");
 
-            // Include all lines for the target student; cap others at 5 for context
             var toShow = isStudent ? lines : lines.Take(5).ToList();
             foreach (var l in toShow)
                 sb.AppendLine($"- \"{l}\"");
@@ -390,7 +489,6 @@ public partial class MetricsController
     {
         var sb = new StringBuilder();
 
-        // Sprint role card from Trello
         var trelloLabel = ResolveTrelloSprintCardLabel(role, fullStackTrackLabel: null);
         var snapshot = await _trelloService.GetSprintRoleCardSnapshotAsync(boardId, sprintNumber, trelloLabel);
         if (snapshot != null)
@@ -403,7 +501,6 @@ public partial class MetricsController
             sb.AppendLine();
         }
 
-        // Project module
         var moduleIdStr = await _trelloService.GetModuleIdFromSprintCardAsync(boardId, sprintNumber, trelloLabel);
         if (!string.IsNullOrWhiteSpace(moduleIdStr) && int.TryParse(moduleIdStr.Trim(), out var moduleId))
         {
