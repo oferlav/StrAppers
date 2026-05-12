@@ -316,6 +316,7 @@ public class ApplicationDbContext : DbContext
             entity.Property(e => e.LinkedInUrl).IsRequired().HasMaxLength(200);
             entity.Property(e => e.GithubUser).IsRequired().HasMaxLength(255);
             entity.Property(e => e.Photo).HasColumnName("Photo").HasColumnType("text");
+            entity.Property(e => e.TeamsDisplayName).HasMaxLength(255);
             entity.Property(e => e.StartPendingAt).HasColumnType("timestamp with time zone");
             entity.Property(e => e.ProgrammingLanguageId).HasColumnName("ProgrammingLanguageId");
             entity.Property(e => e.CreatedAt).HasDefaultValueSql("CURRENT_TIMESTAMP");

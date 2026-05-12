@@ -84,6 +84,15 @@ public class Student
     /// <summary>Super-user flag; default false.</summary>
     public bool SuperUser { get; set; } = false;
 
+    /// <summary>
+    /// Display name as it appears in Microsoft Teams (from Azure AD / guest profile).
+    /// Fetched via Graph API when a meeting transcript is first processed.
+    /// Used to match VTT speaker names to students.
+    /// </summary>
+    [MaxLength(255)]
+    [Column("TeamsDisplayName")]
+    public string? TeamsDisplayName { get; set; }
+
     /// <summary>B2C track flag; maps to database column b2c. Default true.</summary>
     [Column("b2c")]
     public bool B2c { get; set; } = true;

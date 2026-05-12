@@ -3403,6 +3403,11 @@ namespace strAppersBackend.Migrations
                         .HasColumnType("boolean")
                         .HasDefaultValue(false);
 
+                    b.Property<string>("TeamsDisplayName")
+                        .HasMaxLength(255)
+                        .HasColumnType("character varying(255)")
+                        .HasColumnName("TeamsDisplayName");
+
                     b.Property<bool>("TravelWork")
                         .ValueGeneratedOnAdd()
                         .HasColumnType("boolean")

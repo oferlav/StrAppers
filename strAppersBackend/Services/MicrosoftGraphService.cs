@@ -21,6 +21,11 @@ public interface IMicrosoftGraphService
     /// Returns (transcriptId, vttContent, null) on success or (null, null, errorMessage) on failure.
     /// </summary>
     Task<(string? TranscriptId, string? VttContent, string? Error)> FetchLatestTranscriptVttAsync(string joinUrl);
+    /// <summary>
+    /// Looks up the Azure AD / guest profile display name for an email address.
+    /// Returns null if not found or on error.
+    /// </summary>
+    Task<string?> GetTeamsDisplayNameAsync(string email);
 }
 
 public class MicrosoftGraphService : IMicrosoftGraphService
@@ -1807,6 +1812,41 @@ END:VCALENDAR";
 
         _logger.LogInformation("Generated Google Calendar link for meeting: {Title}", title);
         return url;
+    }
+
+    public async Task<string?> GetTeamsDisplayNameAsync(string email)
+    {
+        try
+        {
+            var accessToken = await GetAccessTokenAsync();
+            _httpClient.DefaultRequestHeaders.Authorization =
+                new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", accessToken);
+
+            var encodedEmail = Uri.EscapeDataString(email);
+            var url = $"https://graph.microsoft.com/v1.0/users?$filter=mail eq '{encodedEmail}' or userPrincipalName eq '{encodedEmail}'&$select=displayName,mail,userPrincipalName";
+            var response = await _httpClient.GetAsync(url);
+            if (!response.IsSuccessStatusCode)
+            {
+                _logger.LogWarning("GetTeamsDisplayNameAsync: Graph API returned {StatusCode} for {Email}", response.StatusCode, email);
+                return null;
+            }
+
+            var data = JsonSerializer.Deserialize<JsonElement>(await response.Content.ReadAsStringAsync());
+            if (data.TryGetProperty("value", out var values) &&
+                values.ValueKind == JsonValueKind.Array &&
+                values.GetArrayLength() > 0 &&
+                values[0].TryGetProperty("displayName", out var dn))
+            {
+                return dn.GetString();
+            }
+
+            return null;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "GetTeamsDisplayNameAsync failed for {Email}", email);
+            return null;
+        }
     }
 
     public async Task<(string? TranscriptId, string? VttContent, string? Error)> FetchLatestTranscriptVttAsync(string joinUrl)

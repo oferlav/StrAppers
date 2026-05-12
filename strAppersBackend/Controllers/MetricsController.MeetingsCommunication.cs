@@ -159,8 +159,28 @@ public partial class MetricsController
             }
         }
 
-        // Parse VTT and build transcript context
-        var studentDisplayName = $"{student.FirstName} {student.LastName}".Trim();
+        // Resolve Teams display name: use cached value, else fetch from Graph API and cache it
+        var studentDisplayName = student.TeamsDisplayName?.Trim();
+        if (string.IsNullOrEmpty(studentDisplayName))
+        {
+            var fetchedName = await _graphService.GetTeamsDisplayNameAsync(studentEmail);
+            if (!string.IsNullOrEmpty(fetchedName))
+            {
+                studentDisplayName = fetchedName;
+                // Cache on the student record so we don't call Graph API every time
+                var studentToUpdate = await _context.Students.FindAsync(new object[] { request.StudentId }, cancellationToken);
+                if (studentToUpdate != null)
+                {
+                    studentToUpdate.TeamsDisplayName = fetchedName;
+                    await _context.SaveChangesAsync(cancellationToken);
+                }
+            }
+            else
+            {
+                // Fallback to FirstName + LastName
+                studentDisplayName = $"{student.FirstName} {student.LastName}".Trim();
+            }
+        }
         var transcriptMd = BuildTranscriptMarkdown(vttContent, studentDisplayName);
 
         // Build sprint context (Trello card + module + customer narrative)
