@@ -173,19 +173,41 @@ public partial class MetricsController
             .Where(bm => bm.ActualMeetingUrl == latestMeeting.ActualMeetingUrl)
             .ToListAsync(cancellationToken);
 
-        // Load student names for all siblings (needed for name-based matching)
+        // Load student records for all siblings (name + cached TeamsDisplayName + id)
         var siblingEmailKeys = allSiblings
             .Where(s => !string.IsNullOrEmpty(s.StudentEmail))
             .Select(s => s.StudentEmail!.Trim().ToLowerInvariant())
             .Distinct()
             .ToList();
-        var siblingStudentNames = await _context.Students
+        var siblingStudents = await _context.Students
             .Where(s => s.Email != null && siblingEmailKeys.Contains(s.Email.Trim().ToLower()))
             .ToDictionaryAsync(
                 s => s.Email!.Trim().ToLowerInvariant(),
-                s => $"{s.FirstName} {s.LastName}".Trim(),
+                s => new { s.Id, FullName = $"{s.FirstName} {s.LastName}".Trim(), s.TeamsDisplayName },
                 cancellationToken);
 
+        // Pass 1: apply already-known TeamsDisplayName (no API call needed)
+        var now1 = DateTime.UtcNow;
+        bool savedPass1 = false;
+        foreach (var sibling in allSiblings.Where(s => string.IsNullOrEmpty(s.SpeakerName)))
+        {
+            if (string.IsNullOrEmpty(sibling.StudentEmail)) continue;
+            var key = sibling.StudentEmail.Trim().ToLowerInvariant();
+            if (!siblingStudents.TryGetValue(key, out var ss)) continue;
+            if (string.IsNullOrEmpty(ss.TeamsDisplayName)) continue;
+
+            sibling.SpeakerName = ss.TeamsDisplayName;
+            if (string.IsNullOrEmpty(sibling.TranscriptVtt))
+            {
+                sibling.TranscriptVtt = vttContent;
+                sibling.TranscriptId = vttTranscriptId;
+                sibling.TranscriptFetchedAt = now1;
+            }
+            savedPass1 = true;
+        }
+        if (savedPass1) await _context.SaveChangesAsync(cancellationToken);
+
+        // Pass 2: fetch attendance report for siblings still missing SpeakerName
         var needsSpeakerNames = allSiblings.Any(s => string.IsNullOrEmpty(s.SpeakerName));
         Dictionary<string, string> attendeeNamesForLog = new(StringComparer.OrdinalIgnoreCase);
 
@@ -197,41 +219,45 @@ public partial class MetricsController
                 string.Join(", ", attendeeNamesForLog.Values));
 
             var attendeeDisplayNames = attendeeNamesForLog.Values.ToList();
-            var now = DateTime.UtcNow;
+            var now2 = DateTime.UtcNow;
             bool anyUpdated = false;
 
             foreach (var sibling in allSiblings.Where(s => string.IsNullOrEmpty(s.SpeakerName)))
             {
                 if (string.IsNullOrEmpty(sibling.StudentEmail)) continue;
                 var key = sibling.StudentEmail.Trim().ToLowerInvariant();
-                if (!siblingStudentNames.TryGetValue(key, out var studentName)) continue;
+                if (!siblingStudents.TryGetValue(key, out var ss)) continue;
 
-                // Try exact name match first
+                // Exact name match first
                 var resolvedName = attendeeDisplayNames.FirstOrDefault(dn =>
-                    string.Equals(dn.Trim(), studentName, StringComparison.OrdinalIgnoreCase));
+                    string.Equals(dn.Trim(), ss.FullName, StringComparison.OrdinalIgnoreCase));
 
-                // AI fuzzy fallback when exact match fails
+                // AI fuzzy fallback
                 if (resolvedName == null && attendeeDisplayNames.Count > 0)
                 {
-                    resolvedName = await ResolveDisplayNameWithAiAsync(studentName, attendeeDisplayNames, cancellationToken);
+                    resolvedName = await ResolveDisplayNameWithAiAsync(ss.FullName, attendeeDisplayNames, cancellationToken);
                     if (resolvedName != null)
                         _logger.LogInformation("MeetingsCommunication: AI matched '{StudentName}' → '{DisplayName}'",
-                            studentName, resolvedName);
+                            ss.FullName, resolvedName);
                 }
 
                 if (resolvedName != null)
                 {
                     sibling.SpeakerName = resolvedName;
-                    // Store VTT only on confirmed-attendee rows
                     if (string.IsNullOrEmpty(sibling.TranscriptVtt))
                     {
                         sibling.TranscriptVtt = vttContent;
                         sibling.TranscriptId = vttTranscriptId;
-                        sibling.TranscriptFetchedAt = now;
+                        sibling.TranscriptFetchedAt = now2;
                     }
                     anyUpdated = true;
                     _logger.LogInformation("MeetingsCommunication: resolved SpeakerName='{Name}' for {Email}",
                         resolvedName, sibling.StudentEmail);
+
+                    // Persist to Students.TeamsDisplayName so future calls skip the API entirely
+                    var studentEntity = await _context.Students.FindAsync(new object[] { ss.Id }, cancellationToken);
+                    if (studentEntity != null && string.IsNullOrEmpty(studentEntity.TeamsDisplayName))
+                        studentEntity.TeamsDisplayName = resolvedName;
                 }
             }
 
