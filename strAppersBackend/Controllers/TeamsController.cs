@@ -707,6 +707,19 @@ public class TeamsController : ControllerBase
     }
 
     /// <summary>
+    /// Diagnostic: check transcript availability for any Teams join URL directly (no DB lookup needed).
+    /// </summary>
+    [HttpGet("check-transcript-url")]
+    public async Task<ActionResult<object>> CheckTranscriptByUrl([FromQuery] string joinUrl)
+    {
+        if (string.IsNullOrEmpty(joinUrl))
+            return BadRequest(new { Success = false, Message = "joinUrl is required" });
+
+        var result = await _graphService.CheckMeetingTranscriptsAsync(joinUrl);
+        return Ok(result);
+    }
+
+    /// <summary>
     /// Get custom meeting URL for a specific student email and boardId
     /// Returns the custom meeting URL without tracking access
     /// </summary>
