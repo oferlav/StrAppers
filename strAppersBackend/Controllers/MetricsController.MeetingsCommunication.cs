@@ -134,24 +134,16 @@ public partial class MetricsController
                 vttContent = fetchedVtt;
                 transcriptSource = $"fetched from Graph API (meeting {latestMeeting.MeetingTime:yyyy-MM-dd})";
 
-                // Fetch attendance report to resolve email → displayName for all attendees
-                var attendeeNames = await _graphService.GetMeetingAttendeeDisplayNamesAsync(latestMeeting.ActualMeetingUrl!);
-
-                // Cache VTT + SpeakerName on all BoardMeeting rows sharing the same ActualMeetingUrl
+                // Cache VTT on all sibling BoardMeeting rows (same ActualMeetingUrl)
                 var now = DateTime.UtcNow;
-                var siblingMeetings = await _context.BoardMeetings
+                var siblingRows = await _context.BoardMeetings
                     .Where(bm => bm.ActualMeetingUrl == latestMeeting.ActualMeetingUrl)
                     .ToListAsync(cancellationToken);
-
-                foreach (var sibling in siblingMeetings)
+                foreach (var sibling in siblingRows)
                 {
                     sibling.TranscriptId = transcriptId;
                     sibling.TranscriptVtt = fetchedVtt;
                     sibling.TranscriptFetchedAt = now;
-                    // Resolve this student's exact VTT speaker name from the attendance report
-                    if (!string.IsNullOrEmpty(sibling.StudentEmail) &&
-                        attendeeNames.TryGetValue(sibling.StudentEmail, out var speakerName))
-                        sibling.SpeakerName = speakerName;
                 }
                 await _context.SaveChangesAsync(cancellationToken);
             }
@@ -165,29 +157,58 @@ public partial class MetricsController
             }
         }
 
-        // Use stored SpeakerName (resolved from attendance report) — no fuzzy matching needed
-        // Re-query to get the updated SpeakerName after the save above
-        var thisStudentMeeting = meetings.FirstOrDefault(m => !string.IsNullOrEmpty(m.SpeakerName))
-            ?? await _context.BoardMeetings.AsNoTracking()
-                .Where(bm => bm.ActualMeetingUrl == latestMeeting.ActualMeetingUrl &&
-                             bm.StudentEmail != null &&
-                             bm.StudentEmail.ToLower() == emailLower)
-                .OrderByDescending(bm => bm.MeetingTime)
-                .FirstOrDefaultAsync(cancellationToken);
+        // Resolve SpeakerName for all siblings — runs every time any sibling is missing theirs.
+        // (Separated from VTT fetch so it also runs when VTT was already cached.)
+        var allSiblings = await _context.BoardMeetings
+            .Where(bm => bm.ActualMeetingUrl == latestMeeting.ActualMeetingUrl)
+            .ToListAsync(cancellationToken);
 
-        var studentDisplayName = thisStudentMeeting?.SpeakerName?.Trim();
+        var needsSpeakerNames = allSiblings.Any(s => string.IsNullOrEmpty(s.SpeakerName));
+        Dictionary<string, string> attendeeNamesForLog = new(StringComparer.OrdinalIgnoreCase);
+        if (needsSpeakerNames)
+        {
+            attendeeNamesForLog = await _graphService.GetMeetingAttendeeDisplayNamesAsync(latestMeeting.ActualMeetingUrl!);
+            _logger.LogInformation("MeetingsCommunication: attendance report returned {Count} entries: {Emails}",
+                attendeeNamesForLog.Count,
+                string.Join(", ", attendeeNamesForLog.Keys));
+
+            bool anyUpdated = false;
+            foreach (var sibling in allSiblings)
+            {
+                if (string.IsNullOrEmpty(sibling.SpeakerName) &&
+                    !string.IsNullOrEmpty(sibling.StudentEmail) &&
+                    attendeeNamesForLog.TryGetValue(sibling.StudentEmail.Trim(), out var speakerName))
+                {
+                    sibling.SpeakerName = speakerName;
+                    anyUpdated = true;
+                    _logger.LogInformation("MeetingsCommunication: set SpeakerName='{Name}' for {Email}",
+                        speakerName, sibling.StudentEmail);
+                }
+            }
+            if (anyUpdated)
+                await _context.SaveChangesAsync(cancellationToken);
+        }
+
+        // Use SpeakerName from the tracked sibling rows (already updated above if available)
+        var thisStudentSibling = allSiblings
+            .FirstOrDefault(m => m.StudentEmail?.Trim().ToLowerInvariant() == emailLower &&
+                                 !string.IsNullOrEmpty(m.SpeakerName));
+
+        var studentDisplayName = thisStudentSibling?.SpeakerName?.Trim();
         if (string.IsNullOrEmpty(studentDisplayName))
         {
             // Fallback: FirstName + LastName if attendance report had no match
             studentDisplayName = $"{student.FirstName} {student.LastName}".Trim();
-            _logger.LogWarning("MeetingsCommunication: no SpeakerName resolved for {Email}, falling back to '{Name}'",
-                studentEmail, studentDisplayName);
+            _logger.LogWarning(
+                "MeetingsCommunication: no SpeakerName resolved for {Email} (attendee report had {Count} entries). Falling back to '{Name}'",
+                studentEmail, attendeeNamesForLog.Count, studentDisplayName);
         }
 
         var transcriptMd = BuildTranscriptMarkdown(vttContent, studentDisplayName);
 
-        // Build sprint context (Trello card + module + customer narrative)
+        // Build sprint context (Trello card + module)
         var activeRole = student.StudentRoles?.FirstOrDefault(sr => sr.IsActive);
+        var trelloLabelUsed = ResolveTrelloSprintCardLabel(activeRole?.Role, fullStackTrackLabel: null);
         var sprintContextMd = await BuildMeetingsCommunicationContextAsync(
             boardId, board, request.SprintNumber, activeRole?.Role, cancellationToken);
 
@@ -217,6 +238,10 @@ public partial class MetricsController
                 transcriptSource,
                 meetingCount = meetings.Count,
                 studentDisplayName,
+                speakerNameResolved = !string.IsNullOrEmpty(thisStudentSibling?.SpeakerName),
+                trelloLabelUsed,
+                sprintContextAvailable = sprintContextMd != "(No sprint context available.)",
+                attendeeNamesFromReport = attendeeNamesForLog,
             });
         }
 
