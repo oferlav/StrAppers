@@ -61,6 +61,24 @@ namespace strAppersBackend.Models
         [Column("JoinTime", TypeName = "timestamp with time zone")]
         public DateTime? JoinTime { get; set; }
 
+        /// <summary>
+        /// Teams transcript ID (from Graph API) for the meeting this row belongs to
+        /// </summary>
+        [Column("TranscriptId", TypeName = "TEXT")]
+        public string? TranscriptId { get; set; }
+
+        /// <summary>
+        /// When the transcript was fetched from Graph API and stored
+        /// </summary>
+        [Column("TranscriptFetchedAt", TypeName = "timestamp with time zone")]
+        public DateTime? TranscriptFetchedAt { get; set; }
+
+        /// <summary>
+        /// Raw VTT transcript content for the meeting (shared across all students in same meeting)
+        /// </summary>
+        [Column("TranscriptVtt", TypeName = "TEXT")]
+        public string? TranscriptVtt { get; set; }
+
         // Navigation properties
         /// <summary>
         /// Navigation property to the associated project board

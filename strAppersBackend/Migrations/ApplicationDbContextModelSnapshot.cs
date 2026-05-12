@@ -156,6 +156,18 @@ namespace strAppersBackend.Migrations
                         .HasColumnType("character varying(255)")
                         .HasColumnName("StudentEmail");
 
+                    b.Property<string>("TranscriptId")
+                        .HasColumnType("TEXT")
+                        .HasColumnName("TranscriptId");
+
+                    b.Property<DateTime?>("TranscriptFetchedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("TranscriptFetchedAt");
+
+                    b.Property<string>("TranscriptVtt")
+                        .HasColumnType("TEXT")
+                        .HasColumnName("TranscriptVtt");
+
                     b.HasKey("Id");
 
                     b.HasIndex("Attended");
