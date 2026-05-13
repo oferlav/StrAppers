@@ -187,6 +187,10 @@ public partial class ProjectsController : ControllerBase
         public string? TrelloBoardJson { get; set; }
         /// <summary>Trello board URL from <c>InstituteTemplates.BoardURL</c> when this payload comes from an institute template row.</summary>
         public string? BoardUrl { get; set; }
+        /// <summary>"Squad" or "Role". Null/empty when the row pre-dates this field.</summary>
+        public string? CourseType { get; set; }
+        /// <summary>Number of parallel students for Role-type courses (1–5).</summary>
+        public int? RoleCount { get; set; }
     }
 
     public sealed class InstituteTemplateListItemDto
@@ -198,6 +202,10 @@ public partial class ProjectsController : ControllerBase
 
         /// <summary><see cref="InstituteTemplates.IsActive"/> — assigned course for Project Designs.</summary>
         public bool IsActive { get; set; }
+        /// <summary>"Squad" or "Role".</summary>
+        public string? CourseType { get; set; }
+        /// <summary>Number of parallel students for Role-type courses (1–5).</summary>
+        public int? RoleCount { get; set; }
     }
 
     public sealed class CourseCatalogItemDto
@@ -228,6 +236,10 @@ public partial class ProjectsController : ControllerBase
 
         /// <summary>Institute rows: <see cref="InstituteTemplates.IsActive"/> (active course in Project Designs). Built-in rows: false.</summary>
         public bool IsActive { get; set; }
+        /// <summary>"Squad" or "Role". Only set for institute rows.</summary>
+        public string? CourseType { get; set; }
+        /// <summary>Number of parallel students for Role-type courses (1–5). Only set for institute rows.</summary>
+        public int? RoleCount { get; set; }
     }
 
     /// <summary>Project row for Courses &quot;Create Course&quot; project combo (institute-owned and optional global built-ins).</summary>
@@ -3534,6 +3546,8 @@ Staff request:
                     Name = t.CourseName,
                     BoardUrl = t.BoardUrl,
                     IsActive = t.IsActive,
+                    CourseType = t.CourseType,
+                    RoleCount = t.RoleCount,
                 })
                 .ToListAsync();
 
@@ -3583,6 +3597,8 @@ Staff request:
                     InstituteProjectIsBuiltIn = t.InstituteProjectId != null && t.InstituteProject!.IsBuiltIn,
                     InUse = t.InstituteProjectId != null ? t.InstituteProject!.InUse : t.Project!.InUse,
                     IsActive = t.IsActive,
+                    CourseType = t.CourseType,
+                    RoleCount = t.RoleCount,
                 })
                 .OrderByDescending(x => x.InstituteTemplateId)
                 .ToListAsync();
@@ -3943,7 +3959,7 @@ Staff request:
                         t.Id == instituteTemplateId.Value &&
                         t.InstituteId == instituteId!.Value &&
                         (instituteProject ? t.InstituteProjectId == projectId : t.ProjectId == projectId))
-                    .Select(t => new { t.TrelloBoardJson, t.CourseName, t.BoardUrl })
+                    .Select(t => new { t.TrelloBoardJson, t.CourseName, t.BoardUrl, t.CourseType, t.RoleCount })
                     .FirstOrDefaultAsync();
 
                 if (byId == null)
@@ -3955,6 +3971,8 @@ Staff request:
                 project.TrelloBoardJson = byId.TrelloBoardJson;
                 project.Name = byId.CourseName;
                 project.BoardUrl = byId.BoardUrl;
+                project.CourseType = byId.CourseType;
+                project.RoleCount = byId.RoleCount;
             }
             else if (instituteId is > 0)
             {
@@ -3964,7 +3982,7 @@ Staff request:
                         t.InstituteId == instituteId.Value &&
                         (instituteProject ? t.InstituteProjectId == projectId : t.ProjectId == projectId))
                     .OrderByDescending(t => t.Id)
-                    .Select(t => new { t.TrelloBoardJson, t.CourseName, t.BoardUrl })
+                    .Select(t => new { t.TrelloBoardJson, t.CourseName, t.BoardUrl, t.CourseType, t.RoleCount })
                     .FirstOrDefaultAsync();
 
                 if (instituteRow != null)
@@ -3972,6 +3990,8 @@ Staff request:
                     project.TrelloBoardJson = instituteRow.TrelloBoardJson;
                     project.Name = instituteRow.CourseName;
                     project.BoardUrl = instituteRow.BoardUrl;
+                    project.CourseType = instituteRow.CourseType;
+                    project.RoleCount = instituteRow.RoleCount;
                 }
             }
 
