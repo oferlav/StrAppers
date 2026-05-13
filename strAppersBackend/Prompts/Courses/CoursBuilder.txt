@@ -146,7 +146,7 @@ Last sprint card name (UX): "Stabilization & Project Summary"
 - Sprint 1 and the final sprint: prefix EVERY item with "[ ] " (GitHub-style checkbox).
 - All other sprints: NO prefix — just the task text.
 - Tasks must be concrete, technically precise, and written for a student/junior professional.
-- Length baseline (7-day sprint): Sprint 1 = ~9 items; Sprint 2 = ~8 items; middle sprints = 12–13 items; final sprint = 7 items. Scale proportionally for shorter or longer sprints (e.g., a 3-day sprint → roughly half the items; a 14-day sprint → add 3–4 items to each range).
+- The user message contains a "Checklist item targets" line with exact counts for the configured sprint length. Use those numbers as the target per sprint type (setup, module, final). Scale content depth (sub-tasks, specificity) rather than just padding with filler items.
 
 ### Required checklist items by sprint (adapt wording to role and project):
 - Sprint 1 (all tracks): Team Kickoff, local environment setup, sprint branch creation via Mentor Panel (branch name: 1-B for backend / 1-F for frontend), a "health check" commit/push, GitHub cycle practice (PR + merge via Mentor Panel), and collaboration with the leadership role (e.g., review the PM's Global Journey Diagram).

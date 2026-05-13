@@ -690,11 +690,17 @@ public class CourseBoardBuilderService : ICourseBoardBuilderService
             .Select(mid => sprintSlots.Count(s => s?.Module.Id == mid))
             .ToArray();
 
+        var (targetSetup, targetModule, targetFinal) = ComputeChecklistTargets(config.SprintLengthInDays);
+
         sb.AppendLine("## Course Configuration");
         sb.AppendLine($"Total sprints: {config.SprintCount}");
         sb.AppendLine($"Total modules: {config.ModuleCount}");
         sb.AppendLine($"Module lengths (sprints per module): [{string.Join(", ", effectiveModuleLengths)}]");
         sb.AppendLine($"Sprint length: {config.SprintLengthInDays} day(s)");
+        sb.AppendLine($"Checklist item targets (for {config.SprintLengthInDays}-day sprints): " +
+                      $"setup/no-module sprints ≈ {targetSetup} items, " +
+                      $"module sprints ≈ {targetModule} items, " +
+                      $"final sprint ≈ {targetFinal} items — scale content depth and sub-tasks proportionally.");
         sb.AppendLine();
 
         sb.AppendLine("## Project");
@@ -986,6 +992,38 @@ public class CourseBoardBuilderService : ICourseBoardBuilderService
             return null;
 
         return $"A template named \"{courseName}\" already exists for this project.";
+    }
+
+    /// <summary>
+    /// Computes target checklist item counts based on sprint length so the LLM
+    /// receives explicit numbers rather than having to interpolate from a soft rule.
+    /// Baseline is the 7-day sprint (setup≈9, module≈12, final≈7).
+    /// Shorter sprints scale down proportionally; longer sprints add ~2–3 items
+    /// per extra week to deepen task coverage without inflating count excessively.
+    /// </summary>
+    private static (int Setup, int Module, int Final) ComputeChecklistTargets(int sprintLengthInDays)
+    {
+        var days = Math.Max(1, sprintLengthInDays);
+
+        int setup, module, final_;
+        if (days <= 7)
+        {
+            // Scale down from the 7-day baseline proportionally.
+            var f = days / 7.0;
+            setup  = Math.Max(4, (int)Math.Round(9  * f));
+            module = Math.Max(5, (int)Math.Round(12 * f));
+            final_ = Math.Max(4, (int)Math.Round(7  * f));
+        }
+        else
+        {
+            // For longer sprints: add ~2 setup items and ~3 module items per extra week.
+            var extraWeeks = (days - 7) / 7.0;
+            setup  = Math.Min(20, 9  + (int)Math.Round(extraWeeks * 2));
+            module = Math.Min(25, 12 + (int)Math.Round(extraWeeks * 3));
+            final_ = Math.Min(18, 7  + (int)Math.Round(extraWeeks * 2));
+        }
+
+        return (setup, module, final_);
     }
 
     private static CourseBoardBuildResponse Fail(string message) =>
