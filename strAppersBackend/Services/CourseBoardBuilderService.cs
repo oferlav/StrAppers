@@ -275,10 +275,10 @@ public class CourseBoardBuilderService : ICourseBoardBuilderService
                 var idx = i + 1; // 1-based role index
                 var studentModules = modules.Skip(i * modulesPerStudent).Take(modulesPerStudent).ToList<IProjectModuleRow>();
 
-                // Slice module lengths: use per-module lengths if provided, else uniform 1s
-                var studentLengths = config.ModuleLengths.Length == modules.Count
-                    ? config.ModuleLengths.Skip(i * modulesPerStudent).Take(modulesPerStudent).ToArray()
-                    : Enumerable.Repeat(1, modulesPerStudent).ToArray();
+                // Module lengths are computed dynamically inside ComputeSprintModules based on
+                // sprint length and available slots — pass a placeholder array here; the actual
+                // slot distribution is authoritative.
+                var studentLengths = Enumerable.Repeat(1, modulesPerStudent).ToArray();
 
                 var indexedRole = new InstituteRole
                 {
@@ -312,13 +312,14 @@ public class CourseBoardBuilderService : ICourseBoardBuilderService
                 ? roleTypeEntries.Select(e =>
                     (Role: e.Role,
                      Modules: e.Modules,
-                     Cfg: new CourseConfig(config.SprintCount, e.Modules.Count, config.SprintLengthInDays, e.ModuleLengths)))
-                : roles.Select(role => (Role: role, Modules: modules, Cfg: config));
+                     Cfg: new CourseConfig(config.SprintCount, e.Modules.Count, config.SprintLengthInDays, e.ModuleLengths),
+                     IsRoleType: true))
+                : roles.Select(role => (Role: role, Modules: modules, Cfg: config, IsRoleType: false));
 
             var dryRunPlans = dryRunInputs.Select(input =>
             {
                 var role = input.Role;
-                var slots = ComputeSprintModules(input.Modules, role, input.Cfg);
+                var slots = ComputeSprintModules(input.Modules, role, input.Cfg, input.IsRoleType);
                 var track = role.IsTechnical ? "Technical" :
                             role.Type == LeadershipTypeId ? "Leadership" : "Customer-facing";
 
@@ -386,19 +387,20 @@ public class CourseBoardBuilderService : ICourseBoardBuilderService
         IEnumerable<Task<RoleGenerationResult>> generationTasks;
         if (roleTypeEntries != null)
         {
-            // Role-type: generate one card set per indexed participant
+            // Role-type: generate one card set per indexed participant.
+            // studentConfig uses SprintCount + SprintLengthInDays; ModuleLengths is a placeholder
+            // because ComputeSprintModules derives the actual distribution internally.
             generationTasks = roleTypeEntries.Select(e =>
             {
                 var studentConfig = new CourseConfig(
                     config.SprintCount, e.Modules.Count,
                     config.SprintLengthInDays, e.ModuleLengths);
-                // otherRoles list is the other indexed roles (for cross-role section in prompt)
                 var otherIndexedRoles = roleTypeEntries
                     .Where(x => x.Role.Name != e.Role.Name)
                     .Select(x => x.Role)
                     .ToList<InstituteRole>();
                 return GenerateRoleCardsAsync(project, e.Role, e.Modules, systemPrompt,
-                    otherIndexedRoles, studentConfig, e.Context);
+                    otherIndexedRoles, studentConfig, e.Context, isRoleType: true);
             });
         }
         else
@@ -539,9 +541,10 @@ public class CourseBoardBuilderService : ICourseBoardBuilderService
         string systemPrompt,
         IReadOnlyList<InstituteRole> allRoles,
         CourseConfig config,
-        RoleTypeContext? roleTypeContext = null)
+        RoleTypeContext? roleTypeContext = null,
+        bool isRoleType = false)
     {
-        var sprintSlots = ComputeSprintModules(modules, role, config);
+        var sprintSlots = ComputeSprintModules(modules, role, config, isRoleType);
         var otherRoles = allRoles.Where(r => r.Id != role.Id).ToList();
         var userPrompt = BuildUserPrompt(project, role, sprintSlots, otherRoles, config, roleTypeContext);
 
@@ -587,35 +590,60 @@ public class CourseBoardBuilderService : ICourseBoardBuilderService
     // Sprint→module assignment
     // ─────────────────────────────────────────────────────────────────────────
 
-    private static SprintSlot?[] ComputeSprintModules(List<IProjectModuleRow> modules, InstituteRole role, CourseConfig config)
+    /// <summary>
+    /// Assigns modules to sprint slots.
+    /// <para>
+    /// Module assignment rules (enforced here, not by the LLM):
+    /// <list type="bullet">
+    ///   <item>Long sprint (&gt;7 days) → ALL sprints get a module (no setup-only sprints).</item>
+    ///   <item>Role-type + short sprint → Sprint 1 only has no module; everything else gets a module.</item>
+    ///   <item>Technical Squad + short sprint → Sprint 1 + 2 have no module; maximum 2 setup sprints.</item>
+    ///   <item>Other tracks + short sprint → Sprint 1 only has no module.</item>
+    /// </list>
+    /// Available sprint slots are distributed evenly across the provided modules so that every
+    /// slot is assigned — no sprint is left without a module past the setup prefix.
+    /// </para>
+    /// </summary>
+    private static SprintSlot?[] ComputeSprintModules(
+        List<IProjectModuleRow> modules,
+        InstituteRole role,
+        CourseConfig config,
+        bool isRoleType = false)
     {
         var result = new SprintSlot?[config.SprintCount];
         if (modules.Count == 0) return result;
 
-        // Determine starting sprint index (0-based) and how many modules this track covers
-        int startIndex;
-        int trackModuleCount;
-
-        if (role.IsTechnical)
-        {
-            startIndex = 2;                       // Sprint 3 (0-based: index 2)
-            trackModuleCount = config.ModuleCount;
-        }
-        else if (role.Type == LeadershipTypeId)
-        {
-            startIndex = 1;                       // Sprint 2 (0-based: index 1)
-            trackModuleCount = config.ModuleCount;
-        }
+        // How many leading sprints are reserved as setup (no module assigned).
+        // Long sprints: none — every sprint carries a module.
+        // Role-type short: only Sprint 1 (environment setup).
+        // Technical Squad short: Sprint 1 (setup) + Sprint 2 (architecture readiness) = 2.
+        // All other short: Sprint 1 only.
+        var isShort = config.SprintLengthInDays <= 7;
+        int setupSprints;
+        if (!isShort)
+            setupSprints = 0;
+        else if (isRoleType)
+            setupSprints = 1;
+        else if (role.IsTechnical)
+            setupSprints = 2;
         else
-        {
-            startIndex = 1;                       // Sprint 2
-            trackModuleCount = config.ModuleCount - 1; // Customer-facing: last module reserved for special sprint
-        }
+            setupSprints = 1;
 
-        var cursor = startIndex;
-        for (var i = 0; i < trackModuleCount && i < modules.Count; i++)
+        var availableSlots = config.SprintCount - setupSprints;
+        if (availableSlots <= 0) return result;
+
+        var moduleCount = modules.Count;
+
+        // Distribute all available slots evenly across modules.
+        // First (availableSlots % moduleCount) modules each get one extra sprint.
+        var baseLen = availableSlots / moduleCount;
+        var extraCount = availableSlots % moduleCount;
+
+        var cursor = setupSprints;
+        for (var i = 0; i < moduleCount; i++)
         {
-            var totalParts = config.ModuleLengths[i];
+            var totalParts = baseLen + (i < extraCount ? 1 : 0);
+            if (totalParts == 0) continue; // safety — shouldn't happen
             for (var part = 1; part <= totalParts; part++)
             {
                 if (cursor < config.SprintCount)
@@ -651,10 +679,21 @@ public class CourseBoardBuilderService : ICourseBoardBuilderService
     {
         var sb = new StringBuilder();
 
+        // Derive effective module lengths from the already-computed sprint slots so the prompt
+        // always reflects the actual distribution (not the stale placeholder lengths).
+        var assignedModuleIds = sprintSlots
+            .Where(s => s != null)
+            .Select(s => s!.Module.Id)
+            .Distinct()
+            .ToList();
+        var effectiveModuleLengths = assignedModuleIds
+            .Select(mid => sprintSlots.Count(s => s?.Module.Id == mid))
+            .ToArray();
+
         sb.AppendLine("## Course Configuration");
         sb.AppendLine($"Total sprints: {config.SprintCount}");
         sb.AppendLine($"Total modules: {config.ModuleCount}");
-        sb.AppendLine($"Module lengths (sprints per module): [{string.Join(", ", config.ModuleLengths)}]");
+        sb.AppendLine($"Module lengths (sprints per module): [{string.Join(", ", effectiveModuleLengths)}]");
         sb.AppendLine($"Sprint length: {config.SprintLengthInDays} day(s)");
         sb.AppendLine();
 
@@ -688,9 +727,11 @@ public class CourseBoardBuilderService : ICourseBoardBuilderService
             sb.AppendLine();
             sb.AppendLine(
                 "Integration requirement: In EVERY sprint that has a module assigned, " +
-                "include at least 1–2 checklist items describing integration work with the other participant(s) " +
-                $"(e.g., \"Integration sync with {roleTypeContext.OtherParticipantNames.FirstOrDefault() ?? "other participant"} — align on shared interfaces and verify merge points for [Module Title]\"). " +
-                "This is MANDATORY in all module sprints.");
+                "include 1–2 checklist items for integration work with the other participant(s). " +
+                $"Example: \"Integration sync with {roleTypeContext.OtherParticipantNames.FirstOrDefault() ?? "other participant"} — align on shared interfaces and verify merge points for this module.\" " +
+                "IMPORTANT: Integration tasks are checklist items INSIDE the module sprint card — " +
+                "do NOT create a separate sprint or a separate card for integration. " +
+                "Implementation, integration, and any review all happen within the same sprint.");
             sb.AppendLine();
         }
         else if (otherSquadMembers.Count > 0)
