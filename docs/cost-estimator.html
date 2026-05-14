@@ -1,0 +1,527 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>StrAppers — Per-Student Cost Estimator</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: #f0f4f8;
+      color: #1e293b;
+      min-height: 100vh;
+      padding: 32px 16px 64px;
+    }
+
+    h1 { font-size: 1.6rem; font-weight: 700; color: #0f172a; }
+    h2 { font-size: 1.05rem; font-weight: 700; color: #0f172a; margin-bottom: 14px; display: flex; align-items: center; gap: 8px; }
+    h2 .icon { font-size: 1.2rem; }
+
+    .page-header {
+      max-width: 960px;
+      margin: 0 auto 28px;
+    }
+    .page-header p {
+      margin-top: 6px;
+      color: #475569;
+      font-size: 0.9rem;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 20px;
+      max-width: 960px;
+      margin: 0 auto;
+    }
+    @media (max-width: 700px) { .grid { grid-template-columns: 1fr; } }
+
+    .card {
+      background: #fff;
+      border-radius: 14px;
+      border: 1px solid #e2e8f0;
+      padding: 22px 24px;
+      box-shadow: 0 1px 4px rgba(0,0,0,.06);
+    }
+    .card.full { grid-column: 1 / -1; }
+
+    /* inputs */
+    .field { margin-bottom: 12px; }
+    .field label {
+      display: block;
+      font-size: 0.78rem;
+      font-weight: 600;
+      color: #64748b;
+      margin-bottom: 5px;
+      text-transform: uppercase;
+      letter-spacing: .04em;
+    }
+    .field input, .field select {
+      width: 100%;
+      padding: 8px 10px;
+      border: 1px solid #cbd5e1;
+      border-radius: 8px;
+      font-size: 0.9rem;
+      color: #1e293b;
+      background: #f8fafc;
+      outline: none;
+      transition: border-color .15s;
+    }
+    .field input:focus, .field select:focus { border-color: #3b82f6; background: #fff; }
+    .field .hint { font-size: 0.74rem; color: #94a3b8; margin-top: 4px; }
+
+    /* model table */
+    .model-table { width: 100%; border-collapse: collapse; font-size: 0.84rem; }
+    .model-table th {
+      text-align: left;
+      font-weight: 600;
+      color: #64748b;
+      font-size: 0.75rem;
+      text-transform: uppercase;
+      letter-spacing: .04em;
+      padding: 6px 8px;
+      border-bottom: 2px solid #e2e8f0;
+    }
+    .model-table td { padding: 7px 8px; border-bottom: 1px solid #f1f5f9; }
+    .model-table tr:last-child td { border-bottom: none; }
+    .model-table tr.selected td { background: #eff6ff; }
+    .model-table td.cost { font-weight: 700; color: #1d4ed8; }
+    .model-table td.cost.high { color: #dc2626; }
+    .model-table td.cost.medium { color: #d97706; }
+    .model-table td.cost.low { color: #16a34a; }
+
+    /* results */
+    .results-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+      gap: 12px;
+      margin-top: 8px;
+    }
+    .result-box {
+      background: #f8fafc;
+      border: 1px solid #e2e8f0;
+      border-radius: 10px;
+      padding: 14px 16px;
+    }
+    .result-box .label { font-size: 0.74rem; font-weight: 600; color: #64748b; text-transform: uppercase; letter-spacing: .04em; margin-bottom: 5px; }
+    .result-box .value { font-size: 1.35rem; font-weight: 800; color: #0f172a; }
+    .result-box .sub { font-size: 0.74rem; color: #94a3b8; margin-top: 2px; }
+    .result-box.highlight { background: #eff6ff; border-color: #bfdbfe; }
+    .result-box.highlight .value { color: #1d4ed8; }
+    .result-box.total { background: #0f172a; border-color: #0f172a; }
+    .result-box.total .label { color: #94a3b8; }
+    .result-box.total .value { color: #fff; font-size: 1.6rem; }
+    .result-box.total .sub { color: #64748b; }
+
+    /* breakdown table */
+    .breakdown { width: 100%; border-collapse: collapse; font-size: 0.86rem; margin-top: 10px; }
+    .breakdown th {
+      text-align: left; font-weight: 600; color: #64748b;
+      font-size: 0.75rem; text-transform: uppercase; letter-spacing: .04em;
+      padding: 6px 10px; border-bottom: 2px solid #e2e8f0;
+    }
+    .breakdown td { padding: 8px 10px; border-bottom: 1px solid #f1f5f9; }
+    .breakdown tr:last-child td { border-bottom: none; }
+    .breakdown td.amount { font-weight: 700; text-align: right; }
+    .breakdown tr.subtotal td { background: #f8fafc; font-weight: 600; }
+    .breakdown tr.grand td { background: #0f172a; color: #fff; font-weight: 700; }
+    .breakdown tr.grand td.amount { color: #60a5fa; }
+
+    /* model comparison bar */
+    .comparison { margin-top: 16px; }
+    .comp-row { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; font-size: 0.84rem; }
+    .comp-row .name { width: 130px; flex-shrink: 0; color: #374151; font-weight: 500; }
+    .comp-row .bar-wrap { flex: 1; background: #e2e8f0; border-radius: 99px; height: 18px; overflow: hidden; }
+    .comp-row .bar { height: 100%; border-radius: 99px; transition: width .4s ease; min-width: 2px; }
+    .comp-row .bar.c0 { background: #3b82f6; }
+    .comp-row .bar.c1 { background: #8b5cf6; }
+    .comp-row .bar.c2 { background: #f59e0b; }
+    .comp-row .bar.c3 { background: #ef4444; }
+    .comp-row .bar.c4 { background: #10b981; }
+    .comp-row .price { width: 70px; text-align: right; font-weight: 700; color: #0f172a; font-size: 0.82rem; }
+
+    .tag { display: inline-block; padding: 2px 7px; border-radius: 99px; font-size: 0.7rem; font-weight: 600; }
+    .tag.cheap { background: #dcfce7; color: #15803d; }
+    .tag.mid { background: #fef9c3; color: #a16207; }
+    .tag.exp { background: #fee2e2; color: #b91c1c; }
+
+    .divider { border: none; border-top: 1px solid #e2e8f0; margin: 16px 0; }
+
+    .note { font-size: 0.78rem; color: #64748b; margin-top: 10px; line-height: 1.5; }
+    .note strong { color: #475569; }
+  </style>
+</head>
+<body>
+
+<div class="page-header">
+  <h1>StrAppers — Per-Student Cost Estimator</h1>
+  <p>Estimate platform cost per student over an 8-week cohort. Adjust any input to recalculate in real time.</p>
+</div>
+
+<div class="grid">
+
+  <!-- LLM Usage Inputs -->
+  <div class="card">
+    <h2><span class="icon">🤖</span> LLM Usage (Mentor + Customer)</h2>
+
+    <div class="field">
+      <label>Model</label>
+      <select id="modelSelect" onchange="recalc()">
+        <option value="gpt4omini">GPT-4o mini — $0.60 / $2.40 per 1M</option>
+        <option value="gpt4o">GPT-4o — $5.00 / $20.00 per 1M</option>
+        <option value="gpt4turbo">GPT-4 Turbo — $10.00 / $30.00 per 1M</option>
+        <option value="o3mini">o3-mini — $1.10 / $4.40 per 1M</option>
+        <option value="claudeSonnet">Claude Sonnet 4.6 — $3.00 / $15.00 per 1M</option>
+      </select>
+    </div>
+
+    <div class="field">
+      <label>Prompts per day (avg)</label>
+      <input type="number" id="promptsPerDay" value="50" min="1" oninput="recalc()" />
+      <div class="hint">Mentor + Customer AI combined, per student</div>
+    </div>
+
+    <div class="field">
+      <label>Avg input tokens per prompt</label>
+      <input type="number" id="inputTokens" value="800" min="1" oninput="recalc()" />
+      <div class="hint">System prompt + conversation context</div>
+    </div>
+
+    <div class="field">
+      <label>Avg output tokens per prompt</label>
+      <input type="number" id="outputTokens" value="400" min="1" oninput="recalc()" />
+    </div>
+
+    <div class="field">
+      <label>Course duration (days)</label>
+      <input type="number" id="courseDays" value="56" min="1" oninput="recalc()" />
+      <div class="hint">Default: 8 weeks = 56 days</div>
+    </div>
+  </div>
+
+  <!-- AI Assessment Inputs -->
+  <div class="card">
+    <h2><span class="icon">📊</span> AI Assessment</h2>
+
+    <div class="field">
+      <label>Number of metrics</label>
+      <input type="number" id="metricCount" value="20" min="1" oninput="recalc()" />
+    </div>
+
+    <div class="field">
+      <label>Runs per metric (over full course)</label>
+      <input type="number" id="runsPerMetric" value="10" min="1" oninput="recalc()" />
+    </div>
+
+    <div class="field">
+      <label>Avg input tokens per assessment call</label>
+      <input type="number" id="assessInputTokens" value="1200" min="1" oninput="recalc()" />
+      <div class="hint">Usually larger — includes full student data context</div>
+    </div>
+
+    <div class="field">
+      <label>Avg output tokens per assessment call</label>
+      <input type="number" id="assessOutputTokens" value="300" min="1" oninput="recalc()" />
+    </div>
+
+    <div class="field">
+      <label>Assessment model</label>
+      <select id="assessModelSelect" onchange="recalc()">
+        <option value="gpt4omini">GPT-4o mini (same as above)</option>
+        <option value="same">Use same model as LLM above</option>
+        <option value="gpt4o">GPT-4o</option>
+        <option value="gpt4turbo">GPT-4 Turbo</option>
+        <option value="o3mini">o3-mini</option>
+        <option value="claudeSonnet">Claude Sonnet 4.6</option>
+      </select>
+    </div>
+  </div>
+
+  <!-- Infrastructure Inputs -->
+  <div class="card">
+    <h2><span class="icon">🗄️</span> Neon DB (per squad)</h2>
+
+    <div class="field">
+      <label>Students per squad</label>
+      <input type="number" id="squadSize" value="5" min="1" oninput="recalc()" />
+      <div class="hint">DB cost is shared across squad members</div>
+    </div>
+
+    <div class="field">
+      <label>Active hours per day</label>
+      <input type="number" id="dbHoursPerDay" value="2" min="0.1" step="0.5" oninput="recalc()" />
+    </div>
+
+    <div class="field">
+      <label>Compute Unit size</label>
+      <select id="cuSize" onchange="recalc()">
+        <option value="0.25">0.25 CU (minimal)</option>
+        <option value="0.5" selected>0.5 CU (small project)</option>
+        <option value="1">1 CU (medium)</option>
+        <option value="2">2 CU (busy)</option>
+      </select>
+    </div>
+
+    <div class="field">
+      <label>Neon plan rate ($/CU-hour)</label>
+      <input type="number" id="neonRate" value="0.106" step="0.001" min="0" oninput="recalc()" />
+      <div class="hint">Launch plan: $0.106 | Scale: $0.222 | Free tier: first 100 CU-hrs/mo free</div>
+    </div>
+
+    <div class="field">
+      <label>Free CU-hours per month</label>
+      <input type="number" id="neonFreeHours" value="100" min="0" oninput="recalc()" />
+    </div>
+  </div>
+
+  <!-- Railway -->
+  <div class="card">
+    <h2><span class="icon">🚂</span> Railway Hosting (per instance)</h2>
+
+    <div class="field">
+      <label>Students sharing this instance</label>
+      <input type="number" id="railwayStudents" value="30" min="1" oninput="recalc()" />
+      <div class="hint">Railway cost is split across all students on the instance</div>
+    </div>
+
+    <div class="field">
+      <label>RAM (GB)</label>
+      <input type="number" id="railwayRam" value="0.5" step="0.25" min="0.25" oninput="recalc()" />
+    </div>
+
+    <div class="field">
+      <label>vCPU</label>
+      <input type="number" id="railwayCpu" value="0.5" step="0.25" min="0.25" oninput="recalc()" />
+    </div>
+
+    <div class="field">
+      <label>Monthly plan credit ($)</label>
+      <input type="number" id="railwayCredit" value="20" min="0" oninput="recalc()" />
+      <div class="hint">Pro plan includes $20/mo usage credit</div>
+    </div>
+  </div>
+
+  <!-- Results -->
+  <div class="card full">
+    <h2><span class="icon">💰</span> Cost Summary — Per Student</h2>
+    <div class="results-grid" id="resultsGrid">
+      <!-- filled by JS -->
+    </div>
+
+    <hr class="divider" />
+
+    <h2><span class="icon">📋</span> Detailed Breakdown</h2>
+    <table class="breakdown" id="breakdownTable">
+      <thead>
+        <tr>
+          <th>Item</th>
+          <th>Details</th>
+          <th style="text-align:right">Cost / Student</th>
+        </tr>
+      </thead>
+      <tbody id="breakdownBody"></tbody>
+    </table>
+  </div>
+
+  <!-- Model Comparison -->
+  <div class="card full">
+    <h2><span class="icon">⚖️</span> Model Cost Comparison (LLM only, same usage)</h2>
+    <div class="comparison" id="comparisonBars"></div>
+    <table class="model-table" id="modelTable" style="margin-top:16px">
+      <thead>
+        <tr>
+          <th>Model</th>
+          <th>Input ($/1M tokens)</th>
+          <th>Output ($/1M tokens)</th>
+          <th>Tier</th>
+          <th>LLM Cost / Student</th>
+        </tr>
+      </thead>
+      <tbody id="modelTableBody"></tbody>
+    </table>
+    <p class="note"><strong>Note:</strong> Prices as of May 2026. Neon and Railway costs are independent of model choice and shown in the summary above.</p>
+  </div>
+
+</div>
+
+<script>
+  const MODELS = {
+    gpt4omini:    { name: 'GPT-4o mini',      inputPer1M: 0.60,  outputPer1M: 2.40,  tier: 'cheap' },
+    gpt4o:        { name: 'GPT-4o',           inputPer1M: 5.00,  outputPer1M: 20.00, tier: 'mid'   },
+    gpt4turbo:    { name: 'GPT-4 Turbo',      inputPer1M: 10.00, outputPer1M: 30.00, tier: 'exp'   },
+    o3mini:       { name: 'o3-mini',          inputPer1M: 1.10,  outputPer1M: 4.40,  tier: 'cheap' },
+    claudeSonnet: { name: 'Claude Sonnet 4.6',inputPer1M: 3.00,  outputPer1M: 15.00, tier: 'mid'   },
+  };
+
+  const TIER_LABELS = { cheap: 'Budget', mid: 'Mid-range', exp: 'Premium' };
+  const RAILWAY_RAM_RATE  = 0.00000386; // $/GB/sec
+  const RAILWAY_CPU_RATE  = 0.00000772; // $/vCPU/sec
+  const MONTHS = 2;
+  const SECS_PER_MONTH = 30 * 24 * 3600;
+
+  function v(id) { return parseFloat(document.getElementById(id).value) || 0; }
+  function s(id) { return document.getElementById(id).value; }
+
+  function llmCost(model, inputTok, outputTok, calls) {
+    return calls * (inputTok / 1e6 * model.inputPer1M + outputTok / 1e6 * model.outputPer1M);
+  }
+
+  function fmt(n) {
+    if (n < 0.01) return '<$0.01';
+    if (n < 1) return '$' + n.toFixed(3);
+    return '$' + n.toFixed(2);
+  }
+  function fmtFull(n) { return '$' + n.toFixed(4); }
+
+  function recalc() {
+    const promptsPerDay   = v('promptsPerDay');
+    const inputTok        = v('inputTokens');
+    const outputTok       = v('outputTokens');
+    const days            = v('courseDays');
+    const modelKey        = s('modelSelect');
+    const model           = MODELS[modelKey];
+
+    const metricCount     = v('metricCount');
+    const runsPerMetric   = v('runsPerMetric');
+    const assessIn        = v('assessInputTokens');
+    const assessOut       = v('assessOutputTokens');
+    const assessModelKey  = s('assessModelSelect') === 'same' ? modelKey : s('assessModelSelect');
+    const assessModel     = MODELS[assessModelKey] || model;
+
+    const squadSize       = v('squadSize');
+    const dbHours         = v('dbHoursPerDay');
+    const cuSize          = v('cuSize');
+    const neonRate        = v('neonRate');
+    const neonFree        = v('neonFreeHours');
+
+    const railwayStudents = v('railwayStudents');
+    const ram             = v('railwayRam');
+    const cpu             = v('railwayCpu');
+    const credit          = v('railwayCredit');
+
+    // ── LLM cost ──────────────────────────────────────────────────────────
+    const llmCalls   = promptsPerDay * days;
+    const llmTotal   = llmCost(model, inputTok, outputTok, llmCalls);
+    const llmTokenIn  = promptsPerDay * days * inputTok;
+    const llmTokenOut = promptsPerDay * days * outputTok;
+
+    // ── Assessment cost ───────────────────────────────────────────────────
+    const assessCalls  = metricCount * runsPerMetric;
+    const assessTotal  = llmCost(assessModel, assessIn, assessOut, assessCalls);
+
+    // ── Neon cost (per squad, then per student) ───────────────────────────
+    const totalCuHours = cuSize * dbHours * days;
+    const months = days / 30;
+    const freeHours = neonFree * months;
+    const billableCuHours = Math.max(0, totalCuHours - freeHours);
+    const neonTotalSquad = billableCuHours * neonRate;
+    const neonPerStudent = neonTotalSquad / squadSize;
+
+    // ── Railway cost (per instance, split across students) ────────────────
+    const railwaySecs      = MONTHS * SECS_PER_MONTH;
+    const railwayRawCost   = ram * railwaySecs * RAILWAY_RAM_RATE + cpu * railwaySecs * RAILWAY_CPU_RATE;
+    const totalCredit      = credit * MONTHS;
+    const railwayBillable  = Math.max(0, railwayRawCost - totalCredit);
+    const railwayPerStudent = railwayBillable / railwayStudents;
+
+    const grandTotal = llmTotal + assessTotal + neonPerStudent + railwayPerStudent;
+
+    // ── Results boxes ─────────────────────────────────────────────────────
+    document.getElementById('resultsGrid').innerHTML = `
+      <div class="result-box highlight">
+        <div class="label">LLM (Mentor + Customer)</div>
+        <div class="value">${fmt(llmTotal)}</div>
+        <div class="sub">${llmCalls.toLocaleString()} calls · ${(llmTokenIn/1000).toFixed(0)}K in / ${(llmTokenOut/1000).toFixed(0)}K out tokens</div>
+      </div>
+      <div class="result-box highlight">
+        <div class="label">AI Assessment</div>
+        <div class="value">${fmt(assessTotal)}</div>
+        <div class="sub">${assessCalls.toLocaleString()} calls (${metricCount} metrics × ${runsPerMetric} runs)</div>
+      </div>
+      <div class="result-box highlight">
+        <div class="label">Neon DB</div>
+        <div class="value">${fmt(neonPerStudent)}</div>
+        <div class="sub">Squad cost ${fmt(neonTotalSquad)} ÷ ${squadSize} students · ${billableCuHours.toFixed(1)} billable CU-hrs</div>
+      </div>
+      <div class="result-box highlight">
+        <div class="label">Railway</div>
+        <div class="value">${fmt(railwayPerStudent)}</div>
+        <div class="sub">Instance ${fmt(railwayBillable)} ÷ ${railwayStudents} students · ${fmt(totalCredit)} credit applied</div>
+      </div>
+      <div class="result-box total">
+        <div class="label">Total / Student</div>
+        <div class="value">${fmt(grandTotal)}</div>
+        <div class="sub">for ${days}-day cohort</div>
+      </div>
+    `;
+
+    // ── Breakdown table ───────────────────────────────────────────────────
+    document.getElementById('breakdownBody').innerHTML = `
+      <tr>
+        <td>LLM prompts</td>
+        <td>${promptsPerDay}/day × ${days} days = ${llmCalls.toLocaleString()} calls<br>
+            <small style="color:#94a3b8">${inputTok} in + ${outputTok} out tokens · ${model.name}</small></td>
+        <td class="amount">${fmtFull(llmTotal)}</td>
+      </tr>
+      <tr>
+        <td>AI Assessment</td>
+        <td>${metricCount} metrics × ${runsPerMetric} runs = ${assessCalls} calls<br>
+            <small style="color:#94a3b8">${assessIn} in + ${assessOut} out tokens · ${assessModel.name}</small></td>
+        <td class="amount">${fmtFull(assessTotal)}</td>
+      </tr>
+      <tr class="subtotal">
+        <td colspan="2"><strong>LLM subtotal</strong></td>
+        <td class="amount">${fmtFull(llmTotal + assessTotal)}</td>
+      </tr>
+      <tr>
+        <td>Neon DB (squad share)</td>
+        <td>${cuSize} CU × ${dbHours} hrs/day × ${days} days = ${totalCuHours.toFixed(1)} CU-hrs total<br>
+            <small style="color:#94a3b8">−${freeHours.toFixed(0)} free hrs → ${billableCuHours.toFixed(1)} billable × $${neonRate}/CU-hr ÷ ${squadSize} students</small></td>
+        <td class="amount">${fmtFull(neonPerStudent)}</td>
+      </tr>
+      <tr>
+        <td>Railway (instance share)</td>
+        <td>${ram} GB RAM + ${cpu} vCPU × ${MONTHS} months<br>
+            <small style="color:#94a3b8">Raw ${fmt(railwayRawCost)} − ${fmt(totalCredit)} credit = ${fmt(railwayBillable)} ÷ ${railwayStudents} students</small></td>
+        <td class="amount">${fmtFull(railwayPerStudent)}</td>
+      </tr>
+      <tr class="grand">
+        <td colspan="2"><strong>Total per student (${days} days)</strong></td>
+        <td class="amount">${fmt(grandTotal)}</td>
+      </tr>
+    `;
+
+    // ── Model comparison ──────────────────────────────────────────────────
+    const modelCosts = Object.entries(MODELS).map(([key, m]) => ({
+      key, m,
+      cost: llmCost(m, inputTok, outputTok, llmCalls)
+    }));
+    const maxCost = Math.max(...modelCosts.map(x => x.cost), 0.001);
+
+    document.getElementById('comparisonBars').innerHTML = modelCosts.map((x, i) => `
+      <div class="comp-row">
+        <span class="name">${x.m.name}</span>
+        <div class="bar-wrap">
+          <div class="bar c${i}" style="width:${Math.max(2, (x.cost / maxCost * 100)).toFixed(1)}%"></div>
+        </div>
+        <span class="price">${fmt(x.cost)}</span>
+      </div>
+    `).join('');
+
+    document.getElementById('modelTableBody').innerHTML = modelCosts.map(x => `
+      <tr class="${x.key === modelKey ? 'selected' : ''}">
+        <td>${x.m.name} ${x.key === modelKey ? '◀ selected' : ''}</td>
+        <td>$${x.m.inputPer1M.toFixed(2)}</td>
+        <td>$${x.m.outputPer1M.toFixed(2)}</td>
+        <td><span class="tag ${x.m.tier}">${TIER_LABELS[x.m.tier]}</span></td>
+        <td class="cost ${x.m.tier === 'cheap' ? 'low' : x.m.tier === 'exp' ? 'high' : 'medium'}">${fmt(x.cost)}</td>
+      </tr>
+    `).join('');
+  }
+
+  recalc();
+</script>
+</body>
+</html>
