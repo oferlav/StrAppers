@@ -111,6 +111,11 @@ public class CourseBoardBuilderService : ICourseBoardBuilderService
 
     public async Task<CourseBoardBuildResponse> BuildAsync(CourseBoardBuildRequest request)
     {
+        _logger.LogInformation("[CustomInstructions] BuildAsync received — value: {Value}",
+            string.IsNullOrWhiteSpace(request.CustomInstructions)
+                ? "(empty/null)"
+                : $"\"{(request.CustomInstructions.Length > 120 ? request.CustomInstructions[..120] + "…" : request.CustomInstructions)}\"");
+
         // ── 1. Load project & template ────────────────────────────────────────
         Project project;
         InstituteTemplate instituteTemplate;
@@ -589,7 +594,16 @@ public class CourseBoardBuilderService : ICourseBoardBuilderService
         var userPrompt = BuildUserPrompt(project, role, sprintSlots, otherRoles, config, roleTypeContext, engagementCtx);
 
         if (!string.IsNullOrWhiteSpace(customInstructions))
+        {
             userPrompt += $"\n\n## Additional Instructions from Course Designer\n{customInstructions.Trim()}";
+            _logger.LogInformation("[CustomInstructions] Appended for role {RoleName} ({Length} chars): {Preview}",
+                role.Name, customInstructions.Length,
+                customInstructions.Length > 120 ? customInstructions[..120] + "…" : customInstructions);
+        }
+        else
+        {
+            _logger.LogInformation("[CustomInstructions] None provided for role {RoleName}", role.Name);
+        }
 
         _logger.LogInformation("Generating cards for role {RoleName}", role.Name);
         var aiResult = await _aiService.GenerateCourseAsync(systemPrompt, userPrompt);
