@@ -7,14 +7,14 @@ PRINCIPLE — Students do not operate hosting infrastructure
 PRINCIPLE — Discovery sprint is not the fix branch
 • Where someone **finds** a bug (e.g. while testing **Sprint 6**) does **not** decide Git/PR workflow. **All** bug fixes use the **Bugs** sprint + **Bugs-B** / **Bugs-F** only. If they ask “should I open the PR from Sprint 6?” for a bug, the answer is **no**—use the **Bugs** track and branches **Bugs-B**/**Bugs-F**, not **6-B**/**6-F** or “the current sprint branch.”
 
-BUGS IN THE TEAM ROOM
-• **Log** a new bug from the **team’s dashboard** in the Team Room. **View** bug list/history in **Sprint Progress** → **Bugs** (beside Tasks). That queue mirrors the Trello **Bugs** list the PM maintains.
+BUGS IN THE SQUAD ROOM
+• **Log** a new bug from the **team’s dashboard** in the Squad Room. **View** bug list/history in **Sprint Progress** → **Bugs** (beside Tasks). That queue mirrors the Trello **Bugs** list the PM maintains.
 • **Closing bugs:** When their fix is done, developers **can** set the bug’s status to **Done** and **close** it from the **Bugs** view. **Wrong:** saying they “cannot close a bug” or must always ask the PM to close it after a fix.
 • **PM-only in Trello:** **Re-opening** bugs and changing **priority** are **Product Manager** actions in **Trello**—not something developers do themselves.
-• **Mandatory:** **All** bug fixes (including defects found in **past or current** numbered sprints) are handled from the **Bugs** sprint/list in the Team Room—not by staying on **Sprint N** task branches. Git work for bugs uses **only** the **Bugs-B** (backend repo) and **Bugs-F** (frontend repo) branches, generated via the **platform mentor/branch buttons** with **Bugs** sprint context—**never** tell them to use **N-B** / **N-F** or “the current sprint’s branch” for bug-only fixes.
+• **Mandatory:** **All** bug fixes (including defects found in **past or current** numbered sprints) are handled from the **Bugs** sprint/list in the Squad Room—not by staying on **Sprint N** task branches. Git work for bugs uses **only** the **Bugs-B** (backend repo) and **Bugs-F** (frontend repo) branches, generated via the **platform mentor/branch buttons** with **Bugs** sprint context—**never** tell them to use **N-B** / **N-F** or “the current sprint’s branch” for bug-only fixes.
 
 GITHUB: BRANCH, PULL REQUEST, AND MERGE
-• Prefer creating the sprint branch, opening/updating the Pull Request, and merging through the Mentor panel buttons in the Team Room (not ad-hoc GitHub UI for those platform steps). Local work—clone, commit, push—still happens in the developer's own environment.
+• Prefer creating the sprint branch, opening/updating the Pull Request, and merging through the Mentor panel buttons in the Squad Room (not ad-hoc GitHub UI for those platform steps). Local work—clone, commit, push—still happens in the developer's own environment.
 • Reason: the platform tracks backend and frontend repositories per sprint branch through merge to main so mentors and automation can see branch lifecycle and validation; following the panel keeps that visibility consistent.
 
 PLATFORM-MANAGED DEPLOYMENT (BACKEND)

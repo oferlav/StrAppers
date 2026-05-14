@@ -22,10 +22,10 @@ These are platform-specific facts to weave naturally into checklist items. Refer
 ### GitHub Branching (via Mentor Panel)
 - Sprint branches are named **N-B** (backend) and **N-F** (frontend), where N is the sprint number (e.g., `3-B`, `3-F`).
 - Bug-fix branches are named **Bugs-B** (backend) and **Bugs-F** (frontend) — always, regardless of which sprint the bug was discovered.
-- Branch creation, Pull Request opening, and merge into main are done through the **Mentor Panel buttons** in the Team Room. Local work (clone, commit, push) happens in the student's own environment.
+- Branch creation, Pull Request opening, and merge into main are done through the **Mentor Panel buttons** in the Squad Room. Local work (clone, commit, push) happens in the student's own environment.
 
 ### Resources (Meeting Room)
-- All project artifacts (PRD, diagrams, presentations, social media links) are shared as **links** under **Resources** in the Team Room.
+- All project artifacts (PRD, diagrams, presentations, social media links) are shared as **links** under **Resources** in the Squad Room.
 - **Figma** design file URLs go under the **Figma section** in the menu, not Resources.
 - Editing rights by role:
   - **Marketing/BizDev**: edits general resources (documentation, social links, presentations).
@@ -43,7 +43,7 @@ These are platform-specific facts to weave naturally into checklist items. Refer
 - This applies to board management only — you still generate full task cards for Sprint 1 and Sprint 2 for every role.
 
 ### Bug Logging & Tracking
-- **Log a new bug**: from the **team dashboard** in the Team Room.
+- **Log a new bug**: from the **team dashboard** in the Squad Room.
 - **View bug list/history**: Sprint Progress → **Bugs** view (mirrors the Trello Bugs list maintained by the PM).
 - **Developers close bugs** they fix by marking them Done in the Bugs view. PM handles priority changes and re-opens in Trello.
 
@@ -336,7 +336,7 @@ The following are real cards from existing **Squad courses** (Tracks A / B / C).
     "[ ] North Star & KPIs: Define the project's North Star Metric and 3–5 supporting KPIs. Add these to the PRD as the decision filter for the entire journey.",
     "[ ] Actor Alignment: Identify the main actors and map out their primary responsibilities and needs within the User Persona section of the PRD.",
     "[ ] Journey Mapping & Centralization: Create a visual diagram of the end-to-end user journey. Integrate this diagram into the PRD so it serves as the project's visual anchor.",
-    "[ ] PRD Accessibility: Save the PRD in the Team Room, clearly marked as the project's \"Source of Truth.\"",
+    "[ ] PRD Accessibility: Save the PRD in the Squad Room, clearly marked as the project's \"Source of Truth.\"",
     "[ ] Team Journey Demonstration: Hold a meeting with the entire team to walk through the Draft PRD and Journey Map. Gather feedback and ensure everyone sees the \"Big Picture.\"",
     "[ ] Vision Alignment Summary: Publish the final meeting summary and a consolidated list of action items in the Team Chat to officially close Sprint 1.",
     "[ ] Sprint 2 Prep: Coordinate with the UI/UX Designer on the research roadmap and align with the Backend Developer on the technical foundation plan."
@@ -355,7 +355,7 @@ The following are real cards from existing **Squad courses** (Tracks A / B / C).
     "Status Sync Recap: Publish a concise summary of the week's tasks and any blockers identified during the status meeting to the Team Chat.",
     "Customer Validation: Interview the AI Customer to finalize requirements for the module and identify the specific business logic and validation rules.",
     "The User Story Deep-Dive: Locate the module card in the \"User Stories\" Trello list and fill it out completely: (1) Write the formal story (\"As a... I want... so that...\"), define In-Scope/Out-of-Scope, and include a Data Table. (2) Populate the Acceptance Criteria checklist with specific \"Done\" conditions.",
-    "Design Alignment: Sync with the UI/UX Designer to review the module designs. Ensure the final design is saved in the Team Room before the sprint ends.",
+    "Design Alignment: Sync with the UI/UX Designer to review the module designs. Ensure the final design is saved in the Squad Room before the sprint ends.",
     "Technical Requirements Sync: Meet with the Backend Developer once your User Story is drafted. Help them identify the specific tables and fields needed based on your Data Specification.",
     "Technical Readiness Audit: Verify the development environment. Confirm the BE has the schema ready and has generated Mock Data, and that the FE has built the UI components.",
     "Next Sprint Meeting (NSM): Lead the planning session. Agenda: (1) Present the User Story, Data Specs, and AC (2) Facilitate T-shirt sizing (S/M/L) (3) Confirm developer understanding (4) Assign owners.",
@@ -391,15 +391,15 @@ The following are real cards from existing **Squad courses** (Tracks A / B / C).
 {
   "sprintNumber": 7,
   "name": "The \"Go-to-Market\" Launch Campaign",
-  "description": "This is the final push. Your mission is to lead a collaborative \"Marketing Task Force\" alongside the UI/UX Designer and the PM to launch the platform into the wild. \n \n You are moving from the \"building\" phase to the \"telling\" phase. This sprint is entirely focused on creating the narrative and visual tools required to convince the world that this solution isn't just a project — it's an essential asset. \n \n Success means having a cohesive brand presence across all platforms with all campaign materials finalized and accessible in the Team Room.",
+  "description": "This is the final push. Your mission is to lead a collaborative \"Marketing Task Force\" alongside the UI/UX Designer and the PM to launch the platform into the wild. \n \n You are moving from the \"building\" phase to the \"telling\" phase. This sprint is entirely focused on creating the narrative and visual tools required to convince the world that this solution isn't just a project — it's an essential asset. \n \n Success means having a cohesive brand presence across all platforms with all campaign materials finalized and accessible in the Squad Room.",
   "checklistItems": [
     "[ ] Marketing Strategy Sync: Convene with the PM and UI/UX Designer to finalize the core campaign message. Ensure the strategy bridges technical features with real-world impact.",
     "[ ] Social Media Campaign: Design and draft a set of high-impact posts for LinkedIn and Instagram. Ensure the link to the finalized Social Media Content Calendar and Assets is saved under the Resources section.",
-    "[ ] Final Pitch Deck: Refine the presentation for online delivery, focusing on the user journey and the platform's value proposition. Save the link to the Online Presentation Deck under the Resources section in the Team Room.",
+    "[ ] Final Pitch Deck: Refine the presentation for online delivery, focusing on the user journey and the platform's value proposition. Save the link to the Online Presentation Deck under the Resources section in the Squad Room.",
     "[ ] YouTube Promotional Video: Develop the script and storyboard for a professional explainer video that highlights the user journey and platform value. Save the link under the Resources section.",
     "[ ] Impact Storytelling (Success Story): Transform a customer use case into a narrative-driven success story that humanizes the platform's benefits. Save the link to the Impact Case Study under Resources.",
     "[ ] Cross-Functional Asset Audit: Conduct a final review of all marketing materials as a team to ensure messaging, visuals, and strategy are perfectly aligned for a unified brand voice.",
-    "[ ] Final Resource Consolidation: Verify that the links for every piece of the campaign are organized, labeled, and listed under the Resources section of the Team Room."
+    "[ ] Final Resource Consolidation: Verify that the links for every piece of the campaign are organized, labeled, and listed under the Resources section of the Squad Room."
   ]
 }
 ```
