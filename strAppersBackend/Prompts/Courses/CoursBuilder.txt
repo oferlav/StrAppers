@@ -149,13 +149,25 @@ Last sprint card name (UX): "Stabilization & Project Summary"
 - The user message contains a "Checklist item targets" line with exact counts for the configured sprint length. Use those numbers as the target per sprint type (setup, module, final). Scale content depth (sub-tasks, specificity) rather than just padding with filler items.
 
 ### Required checklist items by sprint (adapt wording to role and project):
-- Sprint 1 (all tracks): Team Kickoff, local environment setup, sprint branch creation via Mentor Panel (branch name: 1-B for backend / 1-F for frontend), a "health check" commit/push, GitHub cycle practice (PR + merge via Mentor Panel), and collaboration with the leadership role (e.g., review the PM's Global Journey Diagram).
-- Module implementation sprints — technical (Track A): Sprint Launch meeting, branch creation via Mentor Panel (branch name: N-B / N-F), core implementation tasks (3–5 role-specific items), unit/integration tests, peer code review with AI Mentor, Frontend↔Backend Handshake (sync between BE and FE), Next Module Requirements Sync (meet with PM after US is drafted), Technical Readiness Audit (schema/mock data for next sprint), NSM (Next Sprint Meeting), and Feature Shipping (PR + merge to main via Mentor Panel).
+- Sprint 1 (all tracks): Team Kickoff, local environment setup, sprint branch creation via Mentor Panel (branch name: 1-B for backend / 1-F for frontend), a "health check" commit/push, GitHub cycle practice (PR + merge via Mentor Panel), and collaboration with the leadership role (e.g., review the PM's Global Journey Diagram). **Track D exception**: replace the leadership-role collaboration item with an integration sync with another indexed participant from "## Other Participants".
+- Module implementation sprints — technical (Track A, non-Track D): Sprint Launch meeting, branch creation via Mentor Panel (branch name: N-B / N-F), core implementation tasks (3–5 role-specific items), unit/integration tests, peer code review with AI Mentor, Frontend↔Backend Handshake (sync between BE and FE), Next Module Requirements Sync (meet with PM after US is drafted), Technical Readiness Audit (schema/mock data for next sprint), NSM (Next Sprint Meeting), and Feature Shipping (PR + merge to main via Mentor Panel).
+- Module implementation sprints — **Track D (Role Course Type) ordered template**:
+  1. [CustomerEngagement=true ONLY] AI Customer Requirements Interview — gather and confirm requirements for the module BEFORE any build work.
+  2. Sprint Launch meeting with indexed participants.
+  3. Branch creation via Mentor Panel (branch name: N-B / N-F).
+  4. Core implementation tasks (3–5 role-specific items for the assigned module).
+  5. Integration sync with another indexed participant from "## Other Participants" — align on shared API contracts, interface boundaries, or integration points for the module.
+  6. Unit/integration tests.
+  7. Peer code review with AI Mentor.
+  8. [NSM-eligible sprints ONLY — see NSM rule in user message] Next Sprint Meeting.
+  9. Feature Shipping (PR + merge to main via Mentor Panel).
+  Items 1, 8 are conditional. Items 2–7, 9 are always present. Follow this order exactly.
 - Module planning sprints — leadership (Track B): Sprint planning meeting, user story writing + acceptance criteria, module kickoff with technical team, customer/stakeholder validation tasks, and a Next Sprint prep item.
 - Final sprint (all tracks): Final Sprint Launch, dedicated Bugs branch creation via Mentor Panel (branch name: Bugs-B for backend / Bugs-F for frontend), team-wide QA cycle, bug resolution tasks, peer review with AI Mentor, final PR + merge to main via Mentor Panel, and project summary meeting.
 
 ### Cross-role mentions (inject naturally into checklist items):
-- Technical roles: reference the Product Manager for sprint meeting, story review, next sprint sync; reference the counterpart developer (FE mentions BE and vice versa) for handshake/integration tasks.
+- **Track D (Role Course Type)**: The ONLY valid collaborators are the indexed participants listed in "## Other Participants" (e.g., "Full Stack Developer 1", "Full Stack Developer 2"). Never mention PM, UI/UX Designer, Frontend Developer, Backend Developer, Marketing, BizDev, or any role not in that list.
+- Track A (non-Track D): reference the Product Manager for sprint meeting, story review, next sprint sync; reference the counterpart developer (FE mentions BE and vice versa) for handshake/integration tasks.
 - Leadership roles: reference the technical team for sprint readiness reviews; reference UI/UX for design alignment; reference customer/stakeholders for validation.
 - Customer-facing roles: reference the Product Manager for alignment; reference the technical team for design handoff.
 - Sprint 7 (Go-to-Market): ALL non-technical roles reference each other in a joint campaign effort.
