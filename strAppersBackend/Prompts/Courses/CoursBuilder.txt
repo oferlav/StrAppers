@@ -186,13 +186,33 @@ In a Role-type course, ALL students have the SAME role (e.g., "Full Stack Develo
 
 **Module assignment**: Each indexed student has a sequential set of modules exclusive to them, listed in the "## Project Modules" section of the user message. Follow the standard Technical track (Track A) sprint structure for these modules.
 
-**Integration requirement — MANDATORY**:
-- In EVERY sprint that has a module assigned, you MUST include at least 1–2 checklist items describing integration work with another participant.
-- Integration tasks reference the other indexed participants by name (e.g., "Integration sync with Full Stack Developer 1 — align on shared API contracts and verify interface boundaries for [Module Title]").
-- These integration tasks must appear in ALL module sprints and reference at least one other participant per sprint.
-- Treat the other participants like squad members in cross-role collaboration tasks (they are referenced in the "## Other Participants" section of the user message).
-
 **Card naming**: Follow Track A (Technical) naming conventions — adapt to role name (e.g., "Full Stack Developer 2: Feature Logic & API Execution").
+
+---
+
+### TRACK D OVERRIDES — these rules REPLACE the general rules above for Role-type courses
+
+**OVERRIDE 1 — Roles present in this course (STRICT)**
+The ONLY people in this course are the indexed participants listed in the "## Other Participants" section of the user message (e.g., "Full Stack Developer 1", "Full Stack Developer 2", "Full Stack Developer 3").
+- NEVER reference Product Manager, UI/UX Designer, Marketing, BizDev, Frontend Developer, Backend Developer, or ANY other role not listed in "## Other Participants".
+- The reference examples below this section (Sprint 1, Sprint 3, Sprint 8) are for Squad courses and contain PM/UI/UX/FE/BE references — those are WRONG for Track D. Ignore those cross-role references entirely.
+- Sprint 1 required item "collaboration with the leadership role (review the PM's Global Journey Diagram)" does NOT apply — replace it with an integration sync with another participant from "## Other Participants".
+- Cross-role mention rules (Technical roles: reference PM / FE↔BE handshake) do NOT apply. The only cross-role collaboration is between the indexed participants.
+
+**OVERRIDE 2 — Integration with other participants (MANDATORY)**
+- In EVERY sprint that has a module assigned, include at least 1–2 checklist items for integration work with another indexed participant.
+- Reference them by exact name from "## Other Participants" (e.g., "Integration sync with Full Stack Developer 1 — align on shared API contracts and verify interface boundaries for [Module Title]").
+
+**OVERRIDE 3 — NSM (Next Sprint Meeting)**
+- NSM is ONLY included when BOTH conditions are true: (a) there is at least one more sprint after this one, AND (b) that next sprint also has a module assigned.
+- If this is the ONLY sprint in the course, the LAST sprint, or there is no module-carrying sprint after this one: OMIT NSM entirely. Do not mention it.
+- In a single-sprint course, there is no "next sprint" — replace the NSM slot with a cross-participant integration review or a final module retrospective item.
+
+**OVERRIDE 4 — AI Customer requirements gathering (when CustomerEngagement = true)**
+- When CustomerEngagement = true, the AI Customer requirements-gathering task MUST appear as the FIRST or SECOND item in the checklist for every module sprint (gather requirements before any build work begins).
+- Phrase it as: "AI Customer Requirements Interview: Meet with the AI Customer at the start of the sprint to gather and confirm the specific requirements, business rules, and acceptance conditions for [Module Title] before writing a single line of code."
+- Only after this task does the technical implementation sequence begin.
+- If CustomerEngagement = false: no customer tasks — follow standard Track A rules.
 
 ---
 
@@ -215,7 +235,9 @@ The array MUST contain exactly the number of objects equal to "Total sprints" fr
 ---
 
 ## Reference Examples
-The following are real cards from existing courses. Study the voice, structure, specificity, and platform references. Replicate this quality — adapt the content to the new project and role, never copy verbatim.
+The following are real cards from existing **Squad courses** (Tracks A / B / C). Study the voice, structure, specificity, and platform references. Replicate this quality — adapt the content to the new project and role, never copy verbatim.
+
+⚠️ **TRACK D WARNING**: These examples are Squad courses. They reference roles that do NOT exist in a Role-type course: Product Manager, UI/UX Designer, Frontend Developer, Backend Developer. They also include NSM in every module sprint. For Track D, the Track D Overrides above take precedence — do NOT copy these cross-role references or NSM patterns into a Role-type course.
 
 ### TRACK A — TECHNICAL (Backend Developer)
 

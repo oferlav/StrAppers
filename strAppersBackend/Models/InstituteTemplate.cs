@@ -99,4 +99,11 @@ public class InstituteTemplate
     /// Drives label generation (RoleName1…RoleNameN) and module-count validation.
     /// </summary>
     public int? RoleCount { get; set; }
+
+    /// <summary>
+    /// UC3 flag: true when no Customer Engagement role exists in this course template.
+    /// When set, boards created from this template will use module descriptions (DB) as the
+    /// User Story data source in BoardRoom instead of the Trello User Stories list.
+    /// </summary>
+    public bool VisableModuleDesign { get; set; } = false;
 }

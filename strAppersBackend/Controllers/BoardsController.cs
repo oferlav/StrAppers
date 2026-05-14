@@ -2819,6 +2819,12 @@ public partial class BoardsController : ControllerBase
             // Initialize meetingUrl variable (will be set after ProjectBoard is created)
             string? meetingUrl = null;
 
+            // UC3 detection: no Customer Engagement role in this squad → module descriptions
+            // are used as the User Story data source in BoardRoom instead of the Trello list.
+            var visableModuleDesign = !students
+                .SelectMany(s => s.StudentRoles ?? Enumerable.Empty<StudentRole>())
+                .Any(sr => sr.Role?.CustomerEngagement == true);
+
             // If SystemBoard was created, create a ProjectBoard record for it first
             if (!string.IsNullOrEmpty(trelloResponse.SystemBoardId))
             {
@@ -2844,6 +2850,7 @@ public partial class BoardsController : ControllerBase
                     DBPassword = null, // SystemBoard doesn't need database info
                     NeonProjectId = null,
                     NeonBranchId = null,
+                    VisableModuleDesign = visableModuleDesign,
                     CreatedAt = DateTime.UtcNow,
                     UpdatedAt = DateTime.UtcNow
                 };
@@ -2876,6 +2883,7 @@ public partial class BoardsController : ControllerBase
                 DBPassword = dbPassword, // Save the isolated role password for manual connections
                 NeonProjectId = createdNeonProjectId, // Save the Neon project ID (project-per-tenant isolation)
                 NeonBranchId = createdBranchId, // Save the Neon branch ID for this database (ensures isolation)
+                VisableModuleDesign = visableModuleDesign,
                 CreatedAt = DateTime.UtcNow,
                 UpdatedAt = DateTime.UtcNow
             };
@@ -3862,6 +3870,7 @@ public partial class BoardsController : ControllerBase
                 ["githubBackendUrl"] = projectBoard.GithubBackendUrl ?? "",
                 ["githubFrontendUrl"] = projectBoard.GithubFrontendUrl ?? "",
                 ["webApiUrl"] = projectBoard.WebApiUrl ?? "",
+                ["visableModuleDesign"] = projectBoard.VisableModuleDesign,
                 ["stats"] = statsNodeCamel
             };
 
@@ -3962,6 +3971,65 @@ public partial class BoardsController : ControllerBase
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error getting User Story by ModuleId for Board {BoardId}, ModuleId {ModuleId}", boardId, moduleId);
+            return StatusCode(500, new { Success = false, Message = ex.Message });
+        }
+    }
+
+    /// <summary>
+    /// UC3 (VisableModuleDesign) data source: returns the module title + description from the DB
+    /// for the sprint card assigned to this student's role. Used by BoardRoom instead of the
+    /// Trello User Stories list when ProjectBoard.VisableModuleDesign = true.
+    /// GET /api/Boards/use/stats/get-module-description?boardId=...&amp;studentId=...&amp;sprintNumber=...
+    /// </summary>
+    [HttpGet("stats/get-module-description")]
+    public async Task<ActionResult<object>> GetModuleDescription(
+        [FromQuery] string boardId, [FromQuery] int studentId, [FromQuery] int sprintNumber)
+    {
+        if (string.IsNullOrWhiteSpace(boardId))
+            return BadRequest(new { Success = false, Message = "boardId is required." });
+        try
+        {
+            // Resolve role name for this student
+            var student = await _context.Students
+                .Include(s => s.StudentRoles).ThenInclude(sr => sr.Role)
+                .FirstOrDefaultAsync(s => s.Id == studentId);
+            if (student == null)
+                return NotFound(new { Success = false, Message = "Student not found." });
+
+            var roleName = student.StudentRoles?.FirstOrDefault(sr => sr.IsActive)?.Role?.Name
+                ?? student.StudentRoles?.FirstOrDefault()?.Role?.Name ?? "Team Member";
+
+            // Resolve Full Stack to actual label used on this board/sprint
+            if (roleName.Contains("full stack", StringComparison.OrdinalIgnoreCase) ||
+                roleName.Contains("fullstack", StringComparison.OrdinalIgnoreCase))
+            {
+                var fsLabels = await _trelloService.ResolveSprintLabelsAsync(boardId.Trim(), sprintNumber, roleName);
+                roleName = fsLabels[0];
+            }
+
+            // Get module DB id from the sprint card's ModuleId custom field
+            var moduleIdStr = await _trelloService.GetModuleIdFromSprintCardAsync(boardId.Trim(), sprintNumber, roleName);
+            if (!int.TryParse(moduleIdStr, out var moduleId))
+                return NotFound(new { Success = false, Message = "No module assigned to this sprint for this role." });
+
+            // Look up module description — try InstituteProjectModules first, then ProjectModules
+            var ipMod = await _context.InstituteProjectModules
+                .AsNoTracking()
+                .FirstOrDefaultAsync(m => m.Id == moduleId);
+            if (ipMod != null)
+                return Ok(new { moduleId, title = ipMod.Title, description = ipMod.Description ?? "" });
+
+            var pMod = await _context.ProjectModules
+                .AsNoTracking()
+                .FirstOrDefaultAsync(m => m.Id == moduleId);
+            if (pMod != null)
+                return Ok(new { moduleId, title = pMod.Title, description = pMod.Description ?? "" });
+
+            return NotFound(new { Success = false, Message = $"Module {moduleId} not found." });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error getting module description for Board {BoardId}, Student {StudentId}, Sprint {SprintNumber}", boardId, studentId, sprintNumber);
             return StatusCode(500, new { Success = false, Message = ex.Message });
         }
     }

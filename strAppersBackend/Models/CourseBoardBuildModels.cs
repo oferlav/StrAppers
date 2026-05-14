@@ -70,6 +70,11 @@ public class CourseBoardBuildRequest
     /// </summary>
     public bool GenerateTrelloBoard { get; set; } = false;
 
+    /// <summary>
+    /// Optional free-text instructions from the course designer, appended to the LLM user prompt verbatim.
+    /// </summary>
+    public string? CustomInstructions { get; set; }
+
     /// <summary>Resolved effective role IDs — InstituteRoleIds if provided, else InstituteRoleId as a single-item list.</summary>
     public List<int> EffectiveRoleIds =>
         InstituteRoleIds is { Count: > 0 }

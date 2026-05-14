@@ -306,6 +306,13 @@ namespace strAppersBackend.Models
         [Column("SquadName")]
         public string? SquadName { get; set; }
 
+        /// <summary>
+        /// UC3 flag: no Customer Engagement role in this course — module descriptions (from DB)
+        /// are used as the User Story data source in BoardRoom instead of the Trello User Stories list.
+        /// </summary>
+        [Column("VisableModuleDesign")]
+        public bool VisableModuleDesign { get; set; } = false;
+
         // Navigation properties
         /// <summary>
         /// Navigation property to the associated project

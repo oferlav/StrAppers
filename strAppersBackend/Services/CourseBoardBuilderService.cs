@@ -236,8 +236,9 @@ public class CourseBoardBuilderService : ICourseBoardBuilderService
         _logger.LogInformation("Course use case detected: {UseCase} (CE role: {CeRole})",
             engagementCtx.UseCase, engagementCtx.CeRoleName ?? "none");
 
-        // UC3: no CE anywhere — flag template as VisableDesign (deferred: requires ProjectBoard column)
-        // TODO: set instituteTemplate.VisableDesign = true when the column is added.
+        // UC3: no CE anywhere — module descriptions are the User Story source in BoardRoom.
+        if (engagementCtx.UseCase == CourseUseCase.UC3_NoCE)
+            instituteTemplate.VisableModuleDesign = true;
 
         // ── 3. Load modules & resolve course config ───────────────────────────
         List<IProjectModuleRow> allModules;
@@ -435,14 +436,15 @@ public class CourseBoardBuilderService : ICourseBoardBuilderService
                     .Select(x => x.Role)
                     .ToList<InstituteRole>();
                 return GenerateRoleCardsAsync(project, e.Role, e.Modules, systemPrompt,
-                    otherIndexedRoles, studentConfig, e.Context, engagementCtx, isRoleType: true);
+                    otherIndexedRoles, studentConfig, e.Context, engagementCtx, isRoleType: true,
+                    customInstructions: request.CustomInstructions);
             });
         }
         else
         {
             generationTasks = roles.Select(role =>
                 GenerateRoleCardsAsync(project, role, modules, systemPrompt, roles, config,
-                    engagementCtx: engagementCtx));
+                    engagementCtx: engagementCtx, customInstructions: request.CustomInstructions));
         }
 
         var generationResults = await Task.WhenAll(generationTasks);
@@ -579,11 +581,15 @@ public class CourseBoardBuilderService : ICourseBoardBuilderService
         CourseConfig config,
         RoleTypeContext? roleTypeContext = null,
         CourseEngagementContext? engagementCtx = null,
-        bool isRoleType = false)
+        bool isRoleType = false,
+        string? customInstructions = null)
     {
         var sprintSlots = ComputeSprintModules(modules, role, config, isRoleType);
         var otherRoles = allRoles.Where(r => r.Id != role.Id).ToList();
         var userPrompt = BuildUserPrompt(project, role, sprintSlots, otherRoles, config, roleTypeContext, engagementCtx);
+
+        if (!string.IsNullOrWhiteSpace(customInstructions))
+            userPrompt += $"\n\n## Additional Instructions from Course Designer\n{customInstructions.Trim()}";
 
         _logger.LogInformation("Generating cards for role {RoleName}", role.Name);
         var aiResult = await _aiService.GenerateCourseAsync(systemPrompt, userPrompt);
@@ -832,9 +838,10 @@ public class CourseBoardBuilderService : ICourseBoardBuilderService
                 case CourseUseCase.UC4_RoleCE:
                     sb.AppendLine(
                         "This is a role-based course with Customer Engagement. " +
-                        "In EVERY sprint that has a module assigned, include at least one checklist item for this student to: " +
-                        "(1) get the module requirements from the AI Customer, and " +
-                        "(2) upload a PRD/User Story document to the Squad room Resources panel.");
+                        "In EVERY sprint that has a module assigned, the FIRST or SECOND checklist item MUST be a requirements-gathering task with the AI Customer: " +
+                        "interview the AI Customer to confirm the specific requirements, business rules, and acceptance conditions for the module BEFORE any build work begins. " +
+                        "After requirements are gathered, include a second task to upload a PRD/User Story document to the Squad room Resources panel. " +
+                        "These two tasks must come before any implementation items in the checklist.");
                     break;
             }
             sb.AppendLine();
@@ -873,6 +880,21 @@ public class CourseBoardBuilderService : ICourseBoardBuilderService
                 sb.AppendLine($"Sprint {s}: Module [Id={slot.Module.Id}] \"{slot.Module.Title}\"");
             }
         }
+
+        // Emit an explicit NSM eligibility list so the LLM never guesses
+        var nsmEligible = new List<int>();
+        for (var s = 1; s < config.SprintCount; s++)
+        {
+            // NSM is valid in sprint S only if sprint S+1 also carries a module
+            if (sprintSlots[s - 1] != null && sprintSlots[s] != null)
+                nsmEligible.Add(s);
+        }
+        if (nsmEligible.Count > 0)
+            sb.AppendLine($"NSM (Next Sprint Meeting) is applicable ONLY in: {string.Join(", ", nsmEligible.Select(s => $"Sprint {s}"))}. " +
+                          "Do NOT include NSM in any other sprint.");
+        else
+            sb.AppendLine("NSM (Next Sprint Meeting): DO NOT include NSM in any sprint of this course — there is no eligible sprint-to-sprint module handoff.");
+
         sb.AppendLine();
         sb.AppendLine($"Generate exactly {config.SprintCount} sprint cards following all system instructions. Return only the JSON array.");
 
