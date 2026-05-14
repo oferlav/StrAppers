@@ -171,7 +171,9 @@ public partial class MetricsController
                         metricId = GapAnalysisMetricId,
                         reviewContent = fsTrackResult.Narrative,
                         graphBase64 = graphSingleFs,
-                        model = fsTrackResult.RawModel
+                        model = fsTrackResult.RawModel,
+                        inputTokens = fsTrackResult.InputTokens,
+                        outputTokens = fsTrackResult.OutputTokens,
                     });
                 }
 
@@ -228,7 +230,9 @@ public partial class MetricsController
                     graphBase64 = beGraphB64,
                     graph2Base64 = feGraphB64,
                     graphStackedBase64 = stackedB64,
-                    tracks = new { backend = be.RawModel, frontend = fe.RawModel }
+                    tracks = new { backend = be.RawModel, frontend = fe.RawModel },
+                    inputTokens = be.InputTokens + fe.InputTokens,
+                    outputTokens = be.OutputTokens + fe.OutputTokens,
                 });
             }
 
@@ -260,7 +264,9 @@ public partial class MetricsController
                 metricId = GapAnalysisMetricId,
                 reviewContent = single.Narrative,
                 graphBase64 = graphSingle,
-                model = single.RawModel
+                model = single.RawModel,
+                inputTokens = single.InputTokens,
+                outputTokens = single.OutputTokens,
             });
         }
         catch (Exception ex)
@@ -271,7 +277,7 @@ public partial class MetricsController
     }
 
     /// <param name="ParsedOk">False when the model output was not valid JSON — caller must not persist.</param>
-    private sealed record GapTrackResult(string Narrative, List<(string Label, int Score)> ChartRows, object? RawModel, bool ParsedOk);
+    private sealed record GapTrackResult(string Narrative, List<(string Label, int Score)> ChartRows, object? RawModel, bool ParsedOk, int InputTokens = 0, int OutputTokens = 0);
 
     /// <summary>Board sprint cards use a label that matches the role: prefer database <see cref="Role.Description"/>, then <see cref="Role.Name"/>. Full-stack tracks use fixed developer labels.</summary>
     private static string ResolveTrelloSprintCardLabel(Role? role, string? fullStackTrackLabel)
@@ -355,10 +361,10 @@ public partial class MetricsController
             DefaultTemperature = 0.2
         };
 
-        var (llmText, _, _) = await _chatCompletionService.GetChatCompletionAsync(aiModel, systemPrompt, userPrompt, null);
+        var (llmText, inputTokens, outputTokens) = await _chatCompletionService.GetChatCompletionAsync(aiModel, systemPrompt, userPrompt, null);
         var parsed = TryParseGapAnalysisJson(llmText, out var dto);
         if (!parsed || dto == null)
-            return new GapTrackResult(llmText.Trim(), new List<(string, int)>(), new { parseError = true, raw = llmText }, ParsedOk: false);
+            return new GapTrackResult(llmText.Trim(), new List<(string, int)>(), new { parseError = true, raw = llmText }, ParsedOk: false, inputTokens, outputTokens);
 
         var rows = dto.Categories
             .Where(c => !string.IsNullOrWhiteSpace(c.Name))
@@ -367,7 +373,7 @@ public partial class MetricsController
         if (rows.Count == 0)
             rows.Add(("Overall", 0));
 
-        return new GapTrackResult(dto.Narrative.Trim(), rows, dto, ParsedOk: true);
+        return new GapTrackResult(dto.Narrative.Trim(), rows, dto, ParsedOk: true, inputTokens, outputTokens);
     }
 
     private static string LoadGapAnalysisSystemPrompt()
