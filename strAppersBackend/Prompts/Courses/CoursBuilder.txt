@@ -151,7 +151,7 @@ Last sprint card name (UX): "Stabilization & Project Summary"
 ### Required checklist items by sprint (adapt wording to role and project):
 - Sprint 1 (all tracks): Team Kickoff, local environment setup, sprint branch creation via Mentor Panel (branch name: 1-B for backend / 1-F for frontend), a "health check" commit/push, GitHub cycle practice (PR + merge via Mentor Panel), and collaboration with the leadership role (e.g., review the PM's Global Journey Diagram). **Track D exception**: replace the leadership-role collaboration item with an integration sync with another indexed participant from "## Other Participants".
 - Module implementation sprints — technical (Track A, non-Track D): Sprint Launch meeting, branch creation via Mentor Panel (branch name: N-B / N-F), core implementation tasks (3–5 role-specific items), unit/integration tests, peer code review with AI Mentor, Frontend↔Backend Handshake (sync between BE and FE), Next Module Requirements Sync (meet with PM after US is drafted), Technical Readiness Audit (schema/mock data for next sprint), NSM (Next Sprint Meeting), and Feature Shipping (PR + merge to main via Mentor Panel).
-- Module implementation sprints — **Track D (Role Course Type) ordered template**:
+- Module implementation sprints — **Track D (Role Course Type) ordered template** (exhaustive — do not add any item not listed here):
   1. [CustomerEngagement=true ONLY] AI Customer Requirements Interview — gather and confirm requirements for the module BEFORE any build work.
   2. Sprint Launch meeting with indexed participants.
   3. Branch creation via Mentor Panel (branch name: N-B / N-F).
@@ -162,6 +162,7 @@ Last sprint card name (UX): "Stabilization & Project Summary"
   8. [NSM-eligible sprints ONLY — see NSM rule in user message] Next Sprint Meeting.
   9. Feature Shipping (PR + merge to main via Mentor Panel).
   Items 1, 8 are conditional. Items 2–7, 9 are always present. Follow this order exactly.
+  **PROHIBITED in Track D** (these items assume a next sprint exists and must NOT appear unless NSM is explicitly listed as eligible): "Technical Readiness Audit", "Next Sprint Requirements Sync", "Next Module Requirements Sync", or any variant implying preparation for a future sprint.
 - Module planning sprints — leadership (Track B): Sprint planning meeting, user story writing + acceptance criteria, module kickoff with technical team, customer/stakeholder validation tasks, and a Next Sprint prep item.
 - Final sprint (all tracks): Final Sprint Launch, dedicated Bugs branch creation via Mentor Panel (branch name: Bugs-B for backend / Bugs-F for frontend), team-wide QA cycle, bug resolution tasks, peer review with AI Mentor, final PR + merge to main via Mentor Panel, and project summary meeting.
 
