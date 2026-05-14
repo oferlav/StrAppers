@@ -66,6 +66,33 @@ public class CourseBoardBuilderService : ICourseBoardBuilderService
     /// <summary>Extra context injected into the user prompt for Role-type courses.</summary>
     private sealed record RoleTypeContext(int RoleIndex, int TotalRoles, IReadOnlyList<string> OtherParticipantNames);
 
+    /// <summary>
+    /// Platform-detected customer engagement use case.
+    /// UC1: Squad + CE role with Trello as primary tool.
+    /// UC2: Squad + CE role without Trello.
+    /// UC3: No CE role anywhere (Squad or Role mode) — requirements available to all.
+    /// UC4: Role mode + CE flag on the base role.
+    /// </summary>
+    private enum CourseUseCase { UC1_SquadCETrello, UC2_SquadCENoTrello, UC3_NoCE, UC4_RoleCE }
+
+    private sealed record CourseEngagementContext(CourseUseCase UseCase, string? CeRoleName)
+    {
+        public static CourseEngagementContext Detect(IReadOnlyList<InstituteRole> roles, bool isRoleType)
+        {
+            if (isRoleType)
+            {
+                var baseRole = roles.First();
+                return baseRole.CustomerEngagement
+                    ? new(CourseUseCase.UC4_RoleCE, null)
+                    : new(CourseUseCase.UC3_NoCE, null);
+            }
+            var ceRole = roles.FirstOrDefault(r => r.CustomerEngagement);
+            if (ceRole == null) return new(CourseUseCase.UC3_NoCE, null);
+            var hasTrello = string.Equals(ceRole.Skill?.Name, "Trello", StringComparison.OrdinalIgnoreCase);
+            return new(hasTrello ? CourseUseCase.UC1_SquadCETrello : CourseUseCase.UC2_SquadCENoTrello, ceRole.Name);
+        }
+    }
+
     // ─────────────────────────────────────────────────────────────────────────
 
     public CourseBoardBuilderService(
@@ -203,6 +230,14 @@ public class CourseBoardBuilderService : ICourseBoardBuilderService
         // Detect Role-type course
         var isRoleType = string.Equals(instituteTemplate.CourseType, "Role", StringComparison.OrdinalIgnoreCase)
                          && instituteTemplate.RoleCount is >= 1 and <= 5;
+
+        // Detect customer engagement use case (platform-side, not LLM)
+        var engagementCtx = CourseEngagementContext.Detect(roles, isRoleType);
+        _logger.LogInformation("Course use case detected: {UseCase} (CE role: {CeRole})",
+            engagementCtx.UseCase, engagementCtx.CeRoleName ?? "none");
+
+        // UC3: no CE anywhere — flag template as VisableDesign (deferred: requires ProjectBoard column)
+        // TODO: set instituteTemplate.VisableDesign = true when the column is added.
 
         // ── 3. Load modules & resolve course config ───────────────────────────
         List<IProjectModuleRow> allModules;
@@ -400,13 +435,14 @@ public class CourseBoardBuilderService : ICourseBoardBuilderService
                     .Select(x => x.Role)
                     .ToList<InstituteRole>();
                 return GenerateRoleCardsAsync(project, e.Role, e.Modules, systemPrompt,
-                    otherIndexedRoles, studentConfig, e.Context, isRoleType: true);
+                    otherIndexedRoles, studentConfig, e.Context, engagementCtx, isRoleType: true);
             });
         }
         else
         {
             generationTasks = roles.Select(role =>
-                GenerateRoleCardsAsync(project, role, modules, systemPrompt, roles, config));
+                GenerateRoleCardsAsync(project, role, modules, systemPrompt, roles, config,
+                    engagementCtx: engagementCtx));
         }
 
         var generationResults = await Task.WhenAll(generationTasks);
@@ -542,11 +578,12 @@ public class CourseBoardBuilderService : ICourseBoardBuilderService
         IReadOnlyList<InstituteRole> allRoles,
         CourseConfig config,
         RoleTypeContext? roleTypeContext = null,
+        CourseEngagementContext? engagementCtx = null,
         bool isRoleType = false)
     {
         var sprintSlots = ComputeSprintModules(modules, role, config, isRoleType);
         var otherRoles = allRoles.Where(r => r.Id != role.Id).ToList();
-        var userPrompt = BuildUserPrompt(project, role, sprintSlots, otherRoles, config, roleTypeContext);
+        var userPrompt = BuildUserPrompt(project, role, sprintSlots, otherRoles, config, roleTypeContext, engagementCtx);
 
         _logger.LogInformation("Generating cards for role {RoleName}", role.Name);
         var aiResult = await _aiService.GenerateCourseAsync(systemPrompt, userPrompt);
@@ -675,7 +712,8 @@ public class CourseBoardBuilderService : ICourseBoardBuilderService
         SprintSlot?[] sprintSlots,
         IReadOnlyList<InstituteRole> otherSquadMembers,
         CourseConfig config,
-        RoleTypeContext? roleTypeContext = null)
+        RoleTypeContext? roleTypeContext = null,
+        CourseEngagementContext? engagementCtx = null)
     {
         var sb = new StringBuilder();
 
@@ -750,6 +788,54 @@ public class CourseBoardBuilderService : ICourseBoardBuilderService
                 if (m.Type == LeadershipTypeId) tags.Add("Leadership");
                 if (m.CustomerEngagement) tags.Add("CustomerEngagement");
                 sb.AppendLine($"- {m.Name}" + (tags.Count > 0 ? $" ({string.Join(", ", tags)})" : string.Empty));
+            }
+            sb.AppendLine();
+        }
+
+        // ── Customer Engagement instructions (platform-detected, injected per use case) ──
+        if (engagementCtx != null)
+        {
+            sb.AppendLine("## Customer Engagement Instructions");
+            switch (engagementCtx.UseCase)
+            {
+                case CourseUseCase.UC1_SquadCETrello:
+                    if (role.CustomerEngagement)
+                        sb.AppendLine(
+                            $"This role ({role.Name}) is responsible for Customer Engagement. " +
+                            "In EVERY sprint, include a checklist item for this role to interact with the AI Customer, " +
+                            "gather sprint requirements, and document them as a User Story card on the Trello sprint board.");
+                    else
+                        sb.AppendLine(
+                            $"The {engagementCtx.CeRoleName} role handles Customer Engagement for this squad. " +
+                            "Reference them when tasks depend on requirements they will gather.");
+                    break;
+
+                case CourseUseCase.UC2_SquadCENoTrello:
+                    if (role.CustomerEngagement)
+                        sb.AppendLine(
+                            $"This role ({role.Name}) is responsible for Customer Engagement. " +
+                            "In EVERY sprint, include a checklist item for this role to interact with the AI Customer, " +
+                            "gather sprint requirements, and write a PRD/User Story document.");
+                    else
+                        sb.AppendLine(
+                            $"The {engagementCtx.CeRoleName} role handles Customer Engagement for this squad. " +
+                            "Reference them when tasks depend on requirements they will gather.");
+                    break;
+
+                case CourseUseCase.UC3_NoCE:
+                    sb.AppendLine(
+                        "No Customer Engagement role is assigned in this course. " +
+                        "Assume that all project requirements and system design are available to all participants. " +
+                        "Do not include requirement-gathering tasks — focus entirely on implementation.");
+                    break;
+
+                case CourseUseCase.UC4_RoleCE:
+                    sb.AppendLine(
+                        "This is a role-based course with Customer Engagement. " +
+                        "In EVERY sprint that has a module assigned, include at least one checklist item for this student to: " +
+                        "(1) get the module requirements from the AI Customer, and " +
+                        "(2) upload a PRD/User Story document to the Squad room Resources panel.");
+                    break;
             }
             sb.AppendLine();
         }
