@@ -89,6 +89,8 @@ public partial class MetricsController
                             message = "Test mode: LLM not called; CacheMetrics not updated.",
                             systemPrompt = singleFsPrompts.SystemPrompt,
                             userPrompt = singleFsPrompts.UserPrompt,
+                            estimatedInputTokens = EstimateTokens(singleFsPrompts.SystemPrompt) + EstimateTokens(singleFsPrompts.UserPrompt),
+                            maxOutputTokens = 16384,
                         });
                     }
                     // Fall back to two-track (BE + FE)
@@ -101,8 +103,21 @@ public partial class MetricsController
                         success = true,
                         test = true,
                         message = "Test mode: LLM not called; CacheMetrics not updated.",
-                        backend = new { systemPrompt = bePrompts.SystemPrompt, userPrompt = bePrompts.UserPrompt },
-                        frontend = new { systemPrompt = fePrompts.SystemPrompt, userPrompt = fePrompts.UserPrompt },
+                        backend = new
+                        {
+                            systemPrompt = bePrompts.SystemPrompt,
+                            userPrompt = bePrompts.UserPrompt,
+                            estimatedInputTokens = EstimateTokens(bePrompts.SystemPrompt) + EstimateTokens(bePrompts.UserPrompt),
+                        },
+                        frontend = new
+                        {
+                            systemPrompt = fePrompts.SystemPrompt,
+                            userPrompt = fePrompts.UserPrompt,
+                            estimatedInputTokens = EstimateTokens(fePrompts.SystemPrompt) + EstimateTokens(fePrompts.UserPrompt),
+                        },
+                        estimatedInputTokensTotal = EstimateTokens(bePrompts.SystemPrompt) + EstimateTokens(bePrompts.UserPrompt)
+                                                  + EstimateTokens(fePrompts.SystemPrompt) + EstimateTokens(fePrompts.UserPrompt),
+                        maxOutputTokens = 16384,
                     });
                 }
 
@@ -120,6 +135,8 @@ public partial class MetricsController
                     message = "Test mode: LLM not called; CacheMetrics not updated.",
                     systemPrompt = singlePrompts.SystemPrompt,
                     userPrompt = singlePrompts.UserPrompt,
+                    estimatedInputTokens = EstimateTokens(singlePrompts.SystemPrompt) + EstimateTokens(singlePrompts.UserPrompt),
+                    maxOutputTokens = 16384,
                 });
             }
 
@@ -269,6 +286,13 @@ public partial class MetricsController
     }
 
     private sealed record GapAnalysisPrompts(string SystemPrompt, string UserPrompt);
+
+    /// <summary>
+    /// Rough token estimate: ~4 characters per token (GPT tokeniser average for English).
+    /// Used only in test mode — no LLM call is made, so real counts are unavailable.
+    /// </summary>
+    private static int EstimateTokens(string text) =>
+        (int)Math.Ceiling(text.Length / 4.0);
 
     private async Task<GapAnalysisPrompts> BuildGapAnalysisPromptsForTrackAsync(
         string boardId,
