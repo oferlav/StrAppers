@@ -174,6 +174,19 @@ public class GoogleAuthController : ControllerBase
 
         var normalizedEmail = email.Trim();
 
+        // Parse userTypeHint from state (e.g. state = "https://host/GoogleCallback?userTypeHint=student")
+        var userTypeHint = "";
+        if (!string.IsNullOrEmpty(state))
+        {
+            try
+            {
+                var stateUri = new Uri(state, UriKind.Absolute);
+                var stateQuery = System.Web.HttpUtility.ParseQueryString(stateUri.Query);
+                userTypeHint = stateQuery["userTypeHint"] ?? "";
+            }
+            catch { /* state is not a valid URI, ignore */ }
+        }
+
         var employer = await _db.Employers
             .AsNoTracking()
             .FirstOrDefaultAsync(e =>
@@ -246,11 +259,35 @@ public class GoogleAuthController : ControllerBase
 
         if (teacher != null && teacher.Institute?.IsActive == true)
         {
-            return Redirect(BuildGoogleCallbackUrl(frontendBase,
-                ("status", "ok"),
-                ("userType", "institute"),
-                ("email", normalizedEmail),
-                ("instituteId", teacher.InstituteId.ToString())));
+            // If caller hinted student preference, check if a student record also exists and prefer it
+            if (userTypeHint == "student")
+            {
+                var studentExists = await _db.Students
+                    .AsNoTracking()
+                    .AnyAsync(s => s.Email != null && s.Email.ToLower() == normalizedEmail.ToLower());
+                if (studentExists)
+                {
+                    _logger.LogInformation(
+                        "Google login: userTypeHint=student overrides teacher record for {Email}", normalizedEmail);
+                    // fall through to student lookup below
+                }
+                else
+                {
+                    return Redirect(BuildGoogleCallbackUrl(frontendBase,
+                        ("status", "ok"),
+                        ("userType", "institute"),
+                        ("email", normalizedEmail),
+                        ("instituteId", teacher.InstituteId.ToString())));
+                }
+            }
+            else
+            {
+                return Redirect(BuildGoogleCallbackUrl(frontendBase,
+                    ("status", "ok"),
+                    ("userType", "institute"),
+                    ("email", normalizedEmail),
+                    ("instituteId", teacher.InstituteId.ToString())));
+            }
         }
 
         var student = await _db.Students
