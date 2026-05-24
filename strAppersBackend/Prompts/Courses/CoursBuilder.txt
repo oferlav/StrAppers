@@ -181,10 +181,11 @@ Last sprint card name (UX): "Stabilization & Project Summary"
 - Unknown or unlisted tool (SkillId=none or not above): infer the primary tool(s) from the role name and Competencies field. Integrate those tools naturally into the checklist items — e.g. a Data Engineer would reference Python, SQL, dbt, or Airflow depending on what the competencies describe.
 
 ### Pedagogical competencies:
-- If Competencies are provided, treat them as the learning backbone of the entire course. Every sprint must advance at least one competency from the list.
+- If Competencies are provided, treat them as the **mandatory learning backbone** of the entire course. This is NON-NEGOTIABLE — generic task descriptions are unacceptable when Competencies are available.
 - Distribution rule: Sprint 1–2 = introduce and set up the tools/foundations named in the competencies. Sprints 3–6 = apply each competency directly within the context of the assigned module (name the competency concept explicitly in the checklist item, e.g. "Implement RAG pipeline for the [Module Title] feature"). Sprint 7 = demonstrate mastery in a real deliverable. Sprint 8 = validate and reflect.
-- If a competency mentions a specific technology, pattern, or methodology (e.g. "RAG", "PostgreSQL indexing", "REST API contracts", "ETL pipeline") — use that exact terminology in the relevant checklist items. Do not paraphrase into generic language.
-- For roles with no few-shot examples in this prompt (e.g. Data Engineer, DevOps, QA Engineer): rely entirely on the Competencies and PrimaryTool fields to determine the specific tasks. The sprint structure rules still apply exactly — only the task content changes to reflect the role's domain.
+- If a competency mentions a specific technology, pattern, or methodology (e.g. "RAG", "PostgreSQL indexing", "REST API contracts", "Node.js", "React", "ETL pipeline") — use that **exact terminology** in the relevant checklist items. Do not paraphrase into generic language. A task like "implement the API endpoint" is WRONG when the competencies specify "build a RESTful Node.js Express endpoint with JWT authentication" — use the specific stack.
+- Every module implementation sprint MUST contain at least 2–3 checklist items that name specific technologies or patterns from the Competencies field verbatim. If the checklist reads like it could belong to any developer in any language, you have failed this rule.
+- For roles with no few-shot examples in this prompt (e.g. Data Engineer, DevOps, QA Engineer, Full Stack Developer): rely entirely on the Competencies and PrimaryTool fields to determine the specific tasks. The sprint structure rules still apply exactly — only the task content changes to reflect the role's domain.
 
 ### CustomerEngagement:
 - If CustomerEngagement = true: include at least 1–2 tasks per sprint (where relevant) involving direct customer/stakeholder interaction: interviews, demos, feedback collection, or market validation.
@@ -207,10 +208,16 @@ In a Role-type course, ALL students have the SAME role (e.g., "Full Stack Develo
 
 **OVERRIDE 1 — Roles present in this course (STRICT)**
 The ONLY people in this course are the indexed participants listed in the "## Other Participants" section of the user message (e.g., "Full Stack Developer 1", "Full Stack Developer 2", "Full Stack Developer 3").
-- NEVER reference Product Manager, UI/UX Designer, Marketing, BizDev, Frontend Developer, Backend Developer, or ANY other role not listed in "## Other Participants".
+- NEVER reference Product Manager, UI/UX Designer, Marketing, BizDev, Frontend Developer, Backend Developer, or ANY other role not listed in "## Other Participants". This prohibition is absolute — a task like "Develop UI components based on wireframes provided by the UI/UX team" is WRONG and must never appear.
 - The reference examples below this section (Sprint 1, Sprint 3, Sprint 8) are for Squad courses and contain PM/UI/UX/FE/BE references — those are WRONG for Track D. Ignore those cross-role references entirely.
 - Sprint 1 required item "collaboration with the leadership role (review the PM's Global Journey Diagram)" does NOT apply — replace it with an integration sync with another participant from "## Other Participants".
 - Cross-role mention rules (Technical roles: reference PM / FE↔BE handshake) do NOT apply. The only cross-role collaboration is between the indexed participants.
+
+**OVERRIDE 1B — Full Stack module orientation (STRICT)**
+When the role is Full Stack Developer (or any full-stack variant), each module is scoped to ONE side — backend or frontend — determined by the module title and description:
+- If the module title or description contains "backend", "API", "endpoint", "database", "server", "data processing", "server-side" → this is a **Backend module**. Generate ONLY backend implementation tasks. Use branch **N-B**. NEVER include UI design, wireframe, or component tasks.
+- If the module title or description contains "frontend", "UI", "interface", "components", "page", "view", "screen", "wireframe" → this is a **Frontend module**. Generate ONLY frontend tasks. Use branch **N-F**. NEVER include database schema, API endpoint, or server-side logic tasks.
+- "Full Stack" does NOT mean both sides in one sprint. Read the module description and stay strictly on the side it describes.
 
 **OVERRIDE 2 — Integration with other participants (MANDATORY)**
 - In EVERY sprint that has a module assigned, include at least 1–2 checklist items for integration work with another indexed participant.

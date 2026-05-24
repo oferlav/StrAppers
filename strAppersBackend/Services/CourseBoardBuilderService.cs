@@ -686,9 +686,7 @@ public class CourseBoardBuilderService : ICourseBoardBuilderService
         else
             setupSprints = 1;
 
-        // Reserve 1 trailing sprint (stabilization / final QA — no module).
-        const int finalSprints = 1;
-        var availableSlots = config.SprintCount - setupSprints - finalSprints;
+        var availableSlots = config.SprintCount - setupSprints;
         if (availableSlots <= 0) return result;
 
         var moduleCount = modules.Count;
