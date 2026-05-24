@@ -686,26 +686,22 @@ public class CourseBoardBuilderService : ICourseBoardBuilderService
         else
             setupSprints = 1;
 
-        var availableSlots = config.SprintCount - setupSprints;
+        // Reserve 1 trailing sprint (stabilization / final QA — no module).
+        const int finalSprints = 1;
+        var availableSlots = config.SprintCount - setupSprints - finalSprints;
         if (availableSlots <= 0) return result;
 
         var moduleCount = modules.Count;
 
-        // Distribute all available slots evenly across modules.
-        // First (availableSlots % moduleCount) modules each get one extra sprint.
-        var baseLen = availableSlots / moduleCount;
-        var extraCount = availableSlots % moduleCount;
-
+        // Each module gets at most 1 sprint. When there are more available slots than
+        // modules the extra slots remain empty (the AI fills them with integration /
+        // hardening content via GetSpecialSprintLabel). When there are more modules
+        // than slots only the first N modules are assigned.
+        var assignable = Math.Min(moduleCount, availableSlots);
         var cursor = setupSprints;
-        for (var i = 0; i < moduleCount; i++)
+        for (var i = 0; i < assignable; i++)
         {
-            var totalParts = baseLen + (i < extraCount ? 1 : 0);
-            if (totalParts == 0) continue; // safety — shouldn't happen
-            for (var part = 1; part <= totalParts; part++)
-            {
-                if (cursor < config.SprintCount)
-                    result[cursor++] = new SprintSlot(modules[i], part, totalParts);
-            }
+            result[cursor++] = new SprintSlot(modules[i], 1, 1);
         }
 
         return result;
