@@ -2589,8 +2589,17 @@ Return the JSON response now:";
 
     public async Task<CourseGenerationResult> GenerateCourseAsync(string systemPrompt, string userPrompt, string? modelName = null)
     {
-        var model = !string.IsNullOrWhiteSpace(modelName) ? modelName : _aiConfig.Model;
+        // Allow a dedicated course model override (Courses:AiModel) so the course builder
+        // can use a different provider without affecting other AI calls.
+        var courseModelOverride = _configuration["Courses:AiModel"];
+        var model = !string.IsNullOrWhiteSpace(modelName) ? modelName
+            : !string.IsNullOrWhiteSpace(courseModelOverride) ? courseModelOverride
+            : _aiConfig.Model;
+
         _logger.LogInformation("Generating course board with model {Model}", model);
+
+        if (model.StartsWith("claude-", StringComparison.OrdinalIgnoreCase))
+            return await GenerateCourseAsyncClaude(systemPrompt, userPrompt, model);
 
         try
         {
@@ -2645,6 +2654,72 @@ Return the JSON response now:";
         catch (Exception ex)
         {
             _logger.LogError(ex, "Exception during course generation");
+            return new CourseGenerationResult { Success = false, ErrorMessage = ex.Message };
+        }
+    }
+
+    private async Task<CourseGenerationResult> GenerateCourseAsyncClaude(string systemPrompt, string userPrompt, string model)
+    {
+        try
+        {
+            var anthropicApiKey = _configuration["Anthropic:ApiKey"]
+                ?? throw new InvalidOperationException("Anthropic:ApiKey is not configured");
+            var anthropicBaseUrl = (_configuration["Anthropic:BaseUrl"] ?? "https://api.anthropic.com/v1").TrimEnd('/');
+            var anthropicVersion = _configuration["Anthropic:ApiVersion"] ?? "2023-06-01";
+
+            using var client = new System.Net.Http.HttpClient();
+            client.DefaultRequestHeaders.Add("x-api-key", anthropicApiKey);
+            client.DefaultRequestHeaders.Add("anthropic-version", anthropicVersion);
+            client.Timeout = TimeSpan.FromMinutes(10);
+
+            var requestBody = new
+            {
+                model,
+                max_tokens = _aiConfig.MaxTokens > 0 ? _aiConfig.MaxTokens : 16384,
+                temperature = _aiConfig.Temperature,
+                system = systemPrompt,
+                messages = new[] { new { role = "user", content = userPrompt } }
+            };
+
+            var json = JsonSerializer.Serialize(requestBody);
+            var httpContent = new System.Net.Http.StringContent(json, Encoding.UTF8, "application/json");
+
+            var response = await client.PostAsync($"{anthropicBaseUrl}/messages", httpContent);
+            var responseContent = await response.Content.ReadAsStringAsync();
+
+            if (!response.IsSuccessStatusCode)
+            {
+                _logger.LogError("Anthropic course generation error: {StatusCode} - {Content}", response.StatusCode, responseContent);
+                return new CourseGenerationResult { Success = false, ErrorMessage = $"Anthropic API error: {response.StatusCode}" };
+            }
+
+            var claudeResponse = JsonSerializer.Deserialize<ClaudeResponse>(responseContent, new JsonSerializerOptions
+            {
+                PropertyNameCaseInsensitive = true
+            });
+
+            var content = claudeResponse?.Content?.FirstOrDefault(c => c.Type == "text")?.Text;
+            if (string.IsNullOrWhiteSpace(content))
+            {
+                _logger.LogError("Empty course generation response from Anthropic");
+                return new CourseGenerationResult { Success = false, ErrorMessage = "Empty response from Anthropic" };
+            }
+
+            var inputTokens = claudeResponse?.Usage?.InputTokens ?? 0;
+            var outputTokens = claudeResponse?.Usage?.OutputTokens ?? 0;
+            _logger.LogInformation("Course generation (Claude) completed. InputTokens={In} OutputTokens={Out}", inputTokens, outputTokens);
+
+            return new CourseGenerationResult
+            {
+                Success = true,
+                Content = content,
+                PromptTokens = inputTokens,
+                CompletionTokens = outputTokens
+            };
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Exception during Claude course generation");
             return new CourseGenerationResult { Success = false, ErrorMessage = ex.Message };
         }
     }
