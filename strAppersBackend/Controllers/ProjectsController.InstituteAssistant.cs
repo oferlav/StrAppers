@@ -218,7 +218,7 @@ public partial class ProjectsController
         var chatProjectId = instituteProject ? (int?)null : id;
         var chatInstituteProjectId = instituteProject ? id : (int?)null;
 
-        const int maxUserRequestLength = 12_000;
+        const int maxUserRequestLength = 30_000;
         if (string.IsNullOrWhiteSpace(request.UserRequest))
         {
             return BadRequest("userRequest in body is required (non-empty).");
@@ -482,7 +482,7 @@ public partial class ProjectsController
         var chatProjectId = instituteProject ? (int?)null : id;
         var chatInstituteProjectId = instituteProject ? id : (int?)null;
 
-        const int maxUserRequestLength = 12_000;
+        const int maxUserRequestLength = 30_000;
         if (string.IsNullOrWhiteSpace(request.UserRequest))
         {
             return BadRequest("userRequest in body is required (non-empty).");
@@ -665,7 +665,7 @@ public partial class ProjectsController
         var chatProjectId = instituteProject ? (int?)null : id;
         var chatInstituteProjectId = instituteProject ? id : (int?)null;
 
-        const int maxUserRequestLength = 12_000;
+        const int maxUserRequestLength = 30_000;
         if (string.IsNullOrWhiteSpace(request.UserRequest))
         {
             return BadRequest("userRequest in body is required (non-empty).");
@@ -972,7 +972,7 @@ public partial class ProjectsController
         var chatProjectId = instituteProject ? (int?)null : id;
         var chatInstituteProjectId = instituteProject ? id : (int?)null;
 
-        const int maxUserRequestLength = 12_000;
+        const int maxUserRequestLength = 30_000;
         if (string.IsNullOrWhiteSpace(request.UserRequest))
         {
             return BadRequest("userRequest in body is required (non-empty).");
