@@ -157,24 +157,12 @@ public partial class ProjectsController : ControllerBase
         int instituteId,
         CancellationToken cancellationToken = default)
     {
-        var hasCustomTemplate = await _context.InstituteTemplates
+        // Only an explicit InstituteTemplates selection counts as a course assignment.
+        // TrelloBoardJson on the project row is NOT sufficient — modules may have diverged after copy.
+        return await _context.InstituteTemplates
             .AsNoTracking()
             .AnyAsync(
                 t => t.InstituteId == instituteId && t.ProjectId == projectId,
-                cancellationToken);
-        if (hasCustomTemplate)
-        {
-            return true;
-        }
-
-        // "System" option for copied projects: backed by Project.TrelloBoardJson.
-        return await _context.Projects
-            .AsNoTracking()
-            .AnyAsync(
-                p => p.Id == projectId
-                     && p.InstituteId == instituteId
-                     && p.TrelloBoardJson != null
-                     && p.TrelloBoardJson.Trim() != "",
                 cancellationToken);
     }
 
