@@ -313,6 +313,13 @@ namespace strAppersBackend.Models
         [Column("VisableModuleDesign")]
         public bool VisableModuleDesign { get; set; } = false;
 
+        /// <summary>
+        /// True for role-based (single-role) courses where each developer has their own branch set
+        /// and branch names include a developer index (e.g. 1-F-1 instead of 1-F).
+        /// </summary>
+        [Column("IsSingleRole")]
+        public bool IsSingleRole { get; set; } = false;
+
         // Navigation properties
         /// <summary>
         /// Navigation property to the associated project

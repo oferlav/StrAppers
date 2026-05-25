@@ -2475,6 +2475,12 @@ namespace strAppersBackend.Migrations
                         .HasColumnType("integer")
                         .HasColumnName("InstituteId");
 
+                    b.Property<bool>("IsSingleRole")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("boolean")
+                        .HasDefaultValue(false)
+                        .HasColumnName("IsSingleRole");
+
                     b.Property<bool>("IsSystemBoard")
                         .ValueGeneratedOnAdd()
                         .HasColumnType("boolean")
@@ -2567,6 +2573,12 @@ namespace strAppersBackend.Migrations
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("UpdatedAt")
                         .HasDefaultValueSql("CURRENT_TIMESTAMP");
+
+                    b.Property<bool>("VisableModuleDesign")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("boolean")
+                        .HasDefaultValue(false)
+                        .HasColumnName("VisableModuleDesign");
 
                     b.Property<string>("WebApiUrl")
                         .HasMaxLength(1000)

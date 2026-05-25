@@ -798,6 +798,8 @@ public class ApplicationDbContext : DbContext
             entity.Property(e => e.SystemBoardId).HasColumnName("SystemBoardId").HasMaxLength(50);
             entity.Property(e => e.IsSystemBoard).HasColumnName("IsSystemBoard").HasDefaultValue(false);
             entity.Property(e => e.SquadName).HasColumnName("SquadName").HasMaxLength(100);
+            entity.Property(e => e.VisableModuleDesign).HasColumnName("VisableModuleDesign").HasDefaultValue(false);
+            entity.Property(e => e.IsSingleRole).HasColumnName("IsSingleRole").HasDefaultValue(false);
             
             // Foreign key relationships
             entity.HasOne(e => e.Project)

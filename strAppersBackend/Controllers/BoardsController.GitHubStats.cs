@@ -29,8 +29,8 @@ public sealed class GitHubStatsResponseDto
 
 public partial class BoardsController
 {
-    private static readonly Regex RxFeSprintBranch = new(@"^(\d+-F|Bugs-F)$", RegexOptions.Compiled | RegexOptions.CultureInvariant);
-    private static readonly Regex RxBeSprintBranch = new(@"^(\d+-B|Bugs-B)$", RegexOptions.Compiled | RegexOptions.CultureInvariant);
+    private static readonly Regex RxFeSprintBranch = new(@"^(\d+-F|Bugs-F)(-\d+)?$", RegexOptions.Compiled | RegexOptions.CultureInvariant);
+    private static readonly Regex RxBeSprintBranch = new(@"^(\d+-B|Bugs-B)(-\d+)?$", RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
     private sealed record GitHubRepoRef(string Kind, string Owner, string Repo);
 
@@ -107,6 +107,17 @@ public partial class BoardsController
                 targets.Add(t);
         }
 
+        var devSuffix = "";
+        if (board.IsSingleRole && studentId is > 0)
+        {
+            var stu = await _context.Students.AsNoTracking()
+                .Where(s => s.Id == studentId.Value && s.BoardId == boardId)
+                .Select(s => new { s.Id, s.RoleIndex })
+                .FirstOrDefaultAsync(cancellationToken);
+            if (stu?.RoleIndex > 0)
+                devSuffix = $"-{stu.RoleIndex}";
+        }
+
         var hasExplicitBranch = !string.IsNullOrWhiteSpace(branchName);
         var bn = branchName?.Trim() ?? "";
         var sprint = sprintNumber is > 0 ? sprintNumber.Value : (int?)null;
@@ -118,7 +129,7 @@ public partial class BoardsController
         }
         else if (sprint != null)
         {
-            AppendSprintTargets(fe, be, scope, sprint.Value, AddTarget);
+            AppendSprintTargets(fe, be, scope, sprint.Value, AddTarget, devSuffix);
         }
         else
         {
@@ -126,7 +137,7 @@ public partial class BoardsController
         }
 
         if (sprint != null)
-            AppendSprintBugBranches(fe, be, AddTarget);
+            AppendSprintBugBranches(fe, be, AddTarget, devSuffix);
 
         if (targets.Count == 0)
         {
@@ -163,10 +174,11 @@ public partial class BoardsController
         GitHubRepoRef? be,
         ReposScope scope,
         int sprintN,
-        Action<string, string, string, string> add)
+        Action<string, string, string, string> add,
+        string devSuffix = "")
     {
-        var f = $"{sprintN}-F";
-        var b = $"{sprintN}-B";
+        var f = $"{sprintN}-F{devSuffix}";
+        var b = $"{sprintN}-B{devSuffix}";
         switch (scope)
         {
             case ReposScope.FrontendOnly:
@@ -182,15 +194,15 @@ public partial class BoardsController
         }
     }
 
-    /// <summary>When a sprint filter is active, always include Bugs-F (FE repo) and Bugs-B (BE repo) per scope rules.</summary>
     /// <summary>Whenever <paramref name="sprintNumber"/> is set, include Bugs-F (FE repo) and Bugs-B (BE repo) if those repos exist.</summary>
     private static void AppendSprintBugBranches(
         GitHubRepoRef? fe,
         GitHubRepoRef? be,
-        Action<string, string, string, string> add)
+        Action<string, string, string, string> add,
+        string devSuffix = "")
     {
-        if (fe != null) add(fe.Kind, fe.Owner, fe.Repo, "Bugs-F");
-        if (be != null) add(be.Kind, be.Owner, be.Repo, "Bugs-B");
+        if (fe != null) add(fe.Kind, fe.Owner, fe.Repo, $"Bugs-F{devSuffix}");
+        if (be != null) add(be.Kind, be.Owner, be.Repo, $"Bugs-B{devSuffix}");
     }
 
     private IEnumerable<GitStatTarget> ResolveExplicitBranchTargets(
@@ -233,14 +245,13 @@ public partial class BoardsController
     /// <returns>"frontend", "backend", or null if ambiguous.</returns>
     private static string? InferRepoKindFromBranchName(string branch)
     {
-        if (string.Equals(branch, "Bugs-F", StringComparison.OrdinalIgnoreCase))
-            return "frontend";
-        if (string.Equals(branch, "Bugs-B", StringComparison.OrdinalIgnoreCase))
-            return "backend";
-        if (branch.EndsWith("-F", StringComparison.OrdinalIgnoreCase) && !branch.EndsWith("-B", StringComparison.OrdinalIgnoreCase))
-            return "frontend";
-        if (branch.EndsWith("-B", StringComparison.OrdinalIgnoreCase))
-            return "backend";
+        // Branch format: {sprint}-{letter} | {sprint}-{letter}-{idx} | Bugs-{letter} | Bugs-{letter}-{idx}
+        // The role letter is always at index 1 after splitting on '-'.
+        var parts = branch.Split('-');
+        if (parts.Length < 2) return null;
+        var letter = parts[1].Trim();
+        if (letter.Equals("F", StringComparison.OrdinalIgnoreCase)) return "frontend";
+        if (letter.Equals("B", StringComparison.OrdinalIgnoreCase)) return "backend";
         return null;
     }
 

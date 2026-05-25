@@ -9,12 +9,14 @@ public partial class MentorController
     private const string CacheReviewRoleBackend = "Backend Developer";
     private const string CacheReviewRoleFrontend = "Frontend Developer";
 
-    /// <summary>Parses sprint number from task branch names like "2-F", "Bugs-B".</summary>
+    /// <summary>Parses sprint number from task branch names like "2-F", "Bugs-B", "2-F-1", "Bugs-B-2".</summary>
     private static bool TryGetSprintNumberFromGithubTaskBranch(string githubBranch, out int sprintNumber)
     {
         sprintNumber = 0;
         var branchParts = githubBranch.Split('-');
-        if (branchParts.Length == 2 && branchParts[0].Equals("Bugs", StringComparison.OrdinalIgnoreCase) &&
+        // Accept "Bugs-B" (2 parts) and "Bugs-B-1" (3 parts)
+        if ((branchParts.Length == 2 || branchParts.Length == 3) &&
+            branchParts[0].Equals("Bugs", StringComparison.OrdinalIgnoreCase) &&
             (branchParts[1].Equals("B", StringComparison.OrdinalIgnoreCase) ||
              branchParts[1].Equals("F", StringComparison.OrdinalIgnoreCase)))
         {
@@ -22,7 +24,8 @@ public partial class MentorController
             return true;
         }
 
-        if (branchParts.Length != 2 || !int.TryParse(branchParts[0], out sprintNumber))
+        // Accept "2-F" (2 parts) and "2-F-1" (3 parts)
+        if (branchParts.Length < 2 || branchParts.Length > 3 || !int.TryParse(branchParts[0], out sprintNumber))
             return false;
         return true;
     }
@@ -35,7 +38,8 @@ public partial class MentorController
         isBackend = false;
         isFrontend = false;
         var branchParts = githubBranch.Split('-');
-        if (branchParts.Length != 2)
+        // Accept "N-B/F" (2 parts) and "N-B/F-idx" (3 parts); letter is always at index 1
+        if (branchParts.Length < 2)
             return false;
 
         var track = branchParts[1].Trim();

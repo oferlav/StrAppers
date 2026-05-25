@@ -23,6 +23,7 @@ These are platform-specific facts to weave naturally into checklist items. Refer
 - Sprint branches are named **N-B** (backend) and **N-F** (frontend), where N is the sprint number (e.g., `3-B`, `3-F`).
 - Bug-fix branches are named **Bugs-B** (backend) and **Bugs-F** (frontend) — always, regardless of which sprint the bug was discovered.
 - Branch creation, Pull Request opening, and merge into main are done through the **Mentor Panel buttons** in the Squad Room. Local work (clone, commit, push) happens in the student's own environment.
+- **Track D (Role Course Type) exception**: every developer has their own unique branch. Sprint branches are named **N-B-{idx}** (backend) and **N-F-{idx}** (frontend), where {idx} is the developer's index number (e.g., `3-B-1` for Full Stack Developer 1 in Sprint 3 backend, `3-F-2` for Full Stack Developer 2 in Sprint 3 frontend). Bug-fix branches follow the same pattern: **Bugs-B-{idx}** / **Bugs-F-{idx}**. Never use the bare `N-B` / `N-F` format in a Track D course.
 
 ### Resources (Meeting Room)
 - All project artifacts (PRD, diagrams, presentations, social media links) are shared as **links** under **Resources** in the Squad Room.
@@ -149,12 +150,12 @@ Last sprint card name (UX): "Stabilization & Project Summary"
 - The user message contains a "Checklist item targets" line with exact counts for the configured sprint length. Use those numbers as the target per sprint type (setup, module, final). Scale content depth (sub-tasks, specificity) rather than just padding with filler items.
 
 ### Required checklist items by sprint (adapt wording to role and project):
-- Sprint 1 (all tracks): Team Kickoff, local environment setup, sprint branch creation via Mentor Panel (branch name: 1-B for backend / 1-F for frontend), a "health check" commit/push, GitHub cycle practice (PR + merge via Mentor Panel), and collaboration with the leadership role (e.g., review the PM's Global Journey Diagram). **Track D exception**: replace the leadership-role collaboration item with an integration sync with another indexed participant from "## Other Participants".
+- Sprint 1 (all tracks): Team Kickoff, local environment setup, sprint branch creation via Mentor Panel (branch name: 1-B for backend / 1-F for frontend), a "health check" commit/push, GitHub cycle practice (PR + merge via Mentor Panel), and collaboration with the leadership role (e.g., review the PM's Global Journey Diagram). **Track D exception**: (a) replace the leadership-role collaboration item with an integration sync with another indexed participant from "## Other Participants"; (b) use the developer-indexed branch name — `1-B-{idx}` or `1-F-{idx}` — not the bare `1-B` / `1-F` format.
 - Module implementation sprints — technical (Track A, non-Track D): Sprint Launch meeting, branch creation via Mentor Panel (branch name: N-B / N-F), core implementation tasks (3–5 role-specific items), unit/integration tests, peer code review with AI Mentor, Frontend↔Backend Handshake (sync between BE and FE), Next Module Requirements Sync (meet with PM after US is drafted), Technical Readiness Audit (schema/mock data for next sprint), NSM (Next Sprint Meeting), and Feature Shipping (PR + merge to main via Mentor Panel).
 - Module implementation sprints — **Track D (Role Course Type) ordered template** (exhaustive — do not add any item not listed here):
   1. [CustomerEngagement=true ONLY] AI Customer Requirements Interview — gather and confirm requirements for the module BEFORE any build work.
   2. Sprint Launch meeting with indexed participants.
-  3. Branch creation via Mentor Panel (branch name: N-B / N-F).
+  3. Branch creation via Mentor Panel (branch name: N-B-{idx} / N-F-{idx}, where {idx} is this developer's index — e.g., `3-B-2` for Full Stack Developer 2 in Sprint 3 on the backend side).
   4. Core implementation tasks (3–5 role-specific items for the assigned module).
   5. Integration sync with another indexed participant from "## Other Participants" — align on shared API contracts, interface boundaries, or integration points for the module.
   6. Unit/integration tests.
@@ -164,7 +165,7 @@ Last sprint card name (UX): "Stabilization & Project Summary"
   Items 1, 8 are conditional. Items 2–7, 9 are always present. Follow this order exactly.
   **PROHIBITED in Track D** (these items assume a next sprint exists and must NOT appear unless NSM is explicitly listed as eligible): "Technical Readiness Audit", "Next Sprint Requirements Sync", "Next Module Requirements Sync", or any variant implying preparation for a future sprint.
 - Module planning sprints — leadership (Track B): Sprint planning meeting, user story writing + acceptance criteria, module kickoff with technical team, customer/stakeholder validation tasks, and a Next Sprint prep item.
-- Final sprint (all tracks): Final Sprint Launch, dedicated Bugs branch creation via Mentor Panel (branch name: Bugs-B for backend / Bugs-F for frontend), team-wide QA cycle, bug resolution tasks, peer review with AI Mentor, final PR + merge to main via Mentor Panel, and project summary meeting.
+- Final sprint (all tracks): Final Sprint Launch, dedicated Bugs branch creation via Mentor Panel (branch name: Bugs-B for backend / Bugs-F for frontend; **Track D exception**: Bugs-B-{idx} / Bugs-F-{idx}), team-wide QA cycle, bug resolution tasks, peer review with AI Mentor, final PR + merge to main via Mentor Panel, and project summary meeting.
 
 ### Cross-role mentions (inject naturally into checklist items):
 - **Track D (Role Course Type)**: The ONLY valid collaborators are the indexed participants listed in "## Other Participants" (e.g., "Full Stack Developer 1", "Full Stack Developer 2"). Never mention PM, UI/UX Designer, Frontend Developer, Backend Developer, Marketing, BizDev, or any role not in that list.
@@ -215,8 +216,8 @@ The ONLY people in this course are the indexed participants listed in the "## Ot
 
 **OVERRIDE 1B — Full Stack module orientation (STRICT)**
 When the role is Full Stack Developer (or any full-stack variant), each module is scoped to ONE side — backend or frontend — determined by the module title and description:
-- If the module title or description contains "backend", "API", "endpoint", "database", "server", "data processing", "server-side" → this is a **Backend module**. Generate ONLY backend implementation tasks. Use branch **N-B**. NEVER include UI design, wireframe, or component tasks.
-- If the module title or description contains "frontend", "UI", "interface", "components", "page", "view", "screen", "wireframe" → this is a **Frontend module**. Generate ONLY frontend tasks. Use branch **N-F**. NEVER include database schema, API endpoint, or server-side logic tasks.
+- If the module title or description contains "backend", "API", "endpoint", "database", "server", "data processing", "server-side" → this is a **Backend module**. Generate ONLY backend implementation tasks. Use branch **N-B-{idx}**. NEVER include UI design, wireframe, or component tasks.
+- If the module title or description contains "frontend", "UI", "interface", "components", "page", "view", "screen", "wireframe" → this is a **Frontend module**. Generate ONLY frontend tasks. Use branch **N-F-{idx}**. NEVER include database schema, API endpoint, or server-side logic tasks.
 - "Full Stack" does NOT mean both sides in one sprint. Read the module description and stay strictly on the side it describes.
 
 **OVERRIDE 2 — Integration with other participants (MANDATORY)**

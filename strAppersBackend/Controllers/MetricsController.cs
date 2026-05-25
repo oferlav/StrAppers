@@ -166,7 +166,10 @@ public partial class MetricsController : ControllerBase
         var lines = new List<string>();
 
         if (requiredSkill)
-            await AppendSkillDataFindingsAsync(lines, boardId, board, request.SprintNumber, student.Id, roleName, cancellationToken);
+        {
+            var roleIndex = board.IsSingleRole ? student.RoleIndex : 0;
+            await AppendSkillDataFindingsAsync(lines, boardId, board, request.SprintNumber, student.Id, roleName, cancellationToken, roleIndex);
+        }
 
         bool? resourceArtifactPresent = null;
         if (requiredResource)
@@ -241,7 +244,8 @@ public partial class MetricsController : ControllerBase
         int sprintNumber,
         int studentId,
         string roleName,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        int roleIndex = 0)
     {
         var rn = roleName;
 
@@ -302,8 +306,8 @@ public partial class MetricsController : ControllerBase
 
             if (IsFullStackRole(rn))
             {
-                var bOk = await BranchHasAnyCommitAsync(backendUrl, sprintNumber, isBackend: true, token);
-                var fOk = await BranchHasAnyCommitAsync(frontendUrl, sprintNumber, isBackend: false, token);
+                var bOk = await BranchHasAnyCommitAsync(backendUrl, sprintNumber, isBackend: true, token, roleIndex);
+                var fOk = await BranchHasAnyCommitAsync(frontendUrl, sprintNumber, isBackend: false, token, roleIndex);
                 if (!bOk)
                     lines.Add("Backend work was not completed or was not committed for this sprint.");
                 if (!fOk)
@@ -313,21 +317,21 @@ public partial class MetricsController : ControllerBase
 
             if (IsBackendDeveloperRole(rn))
             {
-                if (!await BranchHasAnyCommitAsync(backendUrl, sprintNumber, isBackend: true, token))
+                if (!await BranchHasAnyCommitAsync(backendUrl, sprintNumber, isBackend: true, token, roleIndex))
                     lines.Add("Backend work was not completed or was not committed for this sprint.");
                 return;
             }
 
             if (IsFrontendDeveloperRole(rn))
             {
-                if (!await BranchHasAnyCommitAsync(frontendUrl, sprintNumber, isBackend: false, token))
+                if (!await BranchHasAnyCommitAsync(frontendUrl, sprintNumber, isBackend: false, token, roleIndex))
                     lines.Add("Frontend work was not completed or was not committed for this sprint.");
                 return;
             }
 
             // Generic "Developer" without Backend/Frontend/Full Stack: require a commit on either track
-            var anyB = await BranchHasAnyCommitAsync(backendUrl, sprintNumber, isBackend: true, token);
-            var anyF = await BranchHasAnyCommitAsync(frontendUrl, sprintNumber, isBackend: false, token);
+            var anyB = await BranchHasAnyCommitAsync(backendUrl, sprintNumber, isBackend: true, token, roleIndex);
+            var anyF = await BranchHasAnyCommitAsync(frontendUrl, sprintNumber, isBackend: false, token, roleIndex);
             if (!anyB && !anyF)
                 lines.Add("No committed work was found on either the backend or frontend branch for this sprint.");
         }
@@ -360,16 +364,17 @@ public partial class MetricsController : ControllerBase
     private static bool IsFrontendDeveloperRole(string roleName) =>
         roleName.Contains("Frontend", StringComparison.OrdinalIgnoreCase);
 
-    private async Task<bool> BranchHasAnyCommitAsync(string? githubRepoUrl, int sprintNumber, bool isBackend, string token)
+    private async Task<bool> BranchHasAnyCommitAsync(string? githubRepoUrl, int sprintNumber, bool isBackend, string token, int roleIndex = 0)
     {
         if (string.IsNullOrWhiteSpace(githubRepoUrl))
             return false;
         if (!TryParseOwnerRepo(githubRepoUrl, out var owner, out var repo))
             return false;
 
+        var idxSuffix = roleIndex > 0 ? $"-{roleIndex}" : "";
         var branch = sprintNumber == 0
-            ? (isBackend ? "Bugs-B" : "Bugs-F")
-            : $"{sprintNumber}-{(isBackend ? "B" : "F")}";
+            ? (isBackend ? $"Bugs-B{idxSuffix}" : $"Bugs-F{idxSuffix}")
+            : $"{sprintNumber}-{(isBackend ? "B" : "F")}{idxSuffix}";
 
         var commits = await _githubService.GetRecentCommitsOnBranchAsync(owner, repo, branch, 1, token);
         return commits.Count > 0;

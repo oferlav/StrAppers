@@ -632,7 +632,7 @@ public class CourseBoardBuilderService : ICourseBoardBuilderService
         for (var s = 1; s <= config.SprintCount; s++)
         {
             var aiCard = aiCards.FirstOrDefault(c => c.SprintNumber == s) ?? aiCards.ElementAtOrDefault(s - 1);
-            trelloCards.Add(MapToTrelloCard(aiCard, role, s, sprintSlots[s - 1]));
+            trelloCards.Add(MapToTrelloCard(aiCard, role, s, sprintSlots[s - 1], roleTypeContext?.RoleIndex ?? 0));
         }
 
         return new RoleGenerationResult
@@ -991,10 +991,36 @@ public class CourseBoardBuilderService : ICourseBoardBuilderService
     // Card assembly
     // ─────────────────────────────────────────────────────────────────────────
 
-    private static TrelloCard MapToTrelloCard(AiSprintCard? ai, InstituteRole role, int sprintNumber, SprintSlot? slot)
+    /// <summary>
+    /// Maps a role name to the single-letter branch code used in CardId and branch names.
+    /// For Full Stack (no explicit backend/frontend in the name), the module title/description
+    /// is used as a tiebreaker; defaults to "F" when no backend keywords are present.
+    /// </summary>
+    private static string GetRoleLetter(InstituteRole role, SprintSlot? slot)
+    {
+        var name = role.Name ?? string.Empty;
+        if (name.Contains("Backend", StringComparison.OrdinalIgnoreCase)) return "B";
+        if (name.Contains("Frontend", StringComparison.OrdinalIgnoreCase)) return "F";
+        if (name.Contains("UI", StringComparison.OrdinalIgnoreCase) ||
+            name.Contains("UX", StringComparison.OrdinalIgnoreCase)) return "U";
+        if (name.Contains("Product", StringComparison.OrdinalIgnoreCase)) return "P";
+        if (name.Contains("Marketing", StringComparison.OrdinalIgnoreCase) ||
+            name.Contains("Business", StringComparison.OrdinalIgnoreCase)) return "M";
+
+        // Full Stack or unknown — use module context to pick B vs F
+        var moduleText = (slot?.Module.Title ?? string.Empty) + " " + (slot?.Module.Description ?? string.Empty);
+        if (moduleText.Contains("Backend", StringComparison.OrdinalIgnoreCase) ||
+            moduleText.Contains("API", StringComparison.OrdinalIgnoreCase) ||
+            moduleText.Contains("Server", StringComparison.OrdinalIgnoreCase) ||
+            moduleText.Contains("Database", StringComparison.OrdinalIgnoreCase)) return "B";
+        return "F";
+    }
+
+    private static TrelloCard MapToTrelloCard(AiSprintCard? ai, InstituteRole role, int sprintNumber, SprintSlot? slot, int roleIndex = 0)
     {
         var (requiredSkill, requiredResource) = TrelloRequiredDataFieldRules.ValuesForListName($"Sprint {sprintNumber}");
-        var roleTag = role.Name.Replace(" ", string.Empty);
+        var roleLetter = GetRoleLetter(role, slot);
+        var cardId = roleIndex > 0 ? $"{sprintNumber}-{roleLetter}-{roleIndex}" : $"{sprintNumber}-{roleLetter}";
 
         return new TrelloCard
         {
@@ -1011,7 +1037,7 @@ public class CourseBoardBuilderService : ICourseBoardBuilderService
             Status = "To Do",
             Risk = sprintNumber >= 7 ? "High" : "Medium",
             ModuleId = slot?.Module.Id.ToString() ?? string.Empty,
-            CardId = $"{sprintNumber}-{roleTag[..Math.Min(2, roleTag.Length)]}",
+            CardId = cardId,
             Dependencies = new List<string>(),
             Branched = false,
             ChecklistItems = ai?.ChecklistItems ?? new List<string>(),

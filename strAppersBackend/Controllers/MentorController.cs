@@ -1483,7 +1483,12 @@ namespace strAppersBackend.Controllers
         }
 
         /// <summary>Builds the Platform GitHub &amp; Workflow Rules section for developer-only mentor context. Uses GitHub:BranchNamingPatterns and GitHub:ValidationContext from config.</summary>
-        private string BuildPlatformGitHubWorkflowRulesSection()
+        /// <summary>Returns true for Bugs-B, Bugs-F, Bugs-B-1, Bugs-F-2, etc. — any bugs branch regardless of dev-index suffix.</summary>
+        private static bool IsBugsBranch(string? name) =>
+            !string.IsNullOrEmpty(name) &&
+            System.Text.RegularExpressions.Regex.IsMatch(name, @"^Bugs-[BF](-\d+)?$", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+
+        private string BuildPlatformGitHubWorkflowRulesSection(bool isSingleRole = false, int roleIndex = 0)
         {
             var backendPattern = _configuration["GitHub:BranchNamingPatterns:Backend"] ?? "^([1-9]|1[0-9]|20)-B$";
             var frontendPattern = _configuration["GitHub:BranchNamingPatterns:Frontend"] ?? "^([1-9]|1[0-9]|20)-F$";
@@ -1501,7 +1506,7 @@ namespace strAppersBackend.Controllers
                 "2. Sprint & Branching Logic (Strict)\n" +
                 "- Platform-Only Branching: Users cannot create branches manually via Git CLI or the GitHub UI. Branching is handled ONLY by the platform backend.\n" +
                 "- Sprint Initialization: No work can begin until the developer initiates the Sprint via the platform's chat buttons.\n" +
-                "- When explaining how to launch the sprint or generate the branch, say to use the buttons above the chat input box (e.g. \"Use the buttons above the chat box to launch the sprint and generate your 1-B and 1-F branches\"). Do NOT say \"via the AI Mentor chat\" or \"in the chat\"—it is the action buttons above the chat input, not the chat itself.\n" +
+                "- When explaining how to launch the sprint or generate the branch, say to use the buttons above the chat input box (e.g. \"Use the buttons above the chat box to launch the sprint and generate your " + (isSingleRole && roleIndex > 0 ? $"1-B-{roleIndex} and 1-F-{roleIndex}" : "1-B and 1-F") + " branches\"). Do NOT say \"via the AI Mentor chat\" or \"in the chat\"—it is the action buttons above the chat input, not the chat itself.\n" +
                 "- Validation Check: The Mentor Agent must always verify if a sprint is initialized by checking if a branch exists that follows the pre-defined naming convention.\n" +
                 "- **Bugs (mandatory):** **All** bug fixes—whether the defect showed up in an old sprint or the active one—go through the **Bugs** list/sprint in the Squad Room and **only** the **Bugs-B** (backend) and **Bugs-F** (frontend) branches, created via the **platform buttons** under **Bugs** sprint context (sprint id 0 / \"Bugs\" in the product). **Do not** instruct users to fix bugs on **N-B** / **N-F** or to \"generate the branch for the current numbered sprint\" for bug work; numbered sprint branches are for sprint feature work, not the Bugs pipeline.\n\n" +
                 "3. Naming Conventions & Enforcement\n" +
@@ -1525,7 +1530,10 @@ namespace strAppersBackend.Controllers
                 "- When a task's breakdown is fully completed (e.g. 5 of 5 in CURRENT TASK DETAILS), you may suggest that they are ready to open a Pull Request and proceed to merge after validation. Example: \"You've completed all items for this task. When you're ready, open a Pull Request; once it passes validation, you can merge.\" Keep the tone professional.\n" +
                 "- For **bug fixes**, PRs are from **Bugs-B** / **Bugs-F** after work on the **Bugs** sprint tasks—not from a numbered sprint branch.\n\n" +
                 "8. Code Review Requests\n" +
-                "- Code review is a built-in platform feature. When the user asks you to review their code, comment on their code, give your opinion on their commits, or feedback on their code (e.g. \"review my code\", \"what do you think about these commits?\", \"can you review this?\", \"feedback on my code\"), do NOT list commits, give task-alignment advice, or perform the review in chat. Your response must direct them to use the built-in feature: the \"Review my code\" button below the chat input box. Example: \"We have a built-in code review—click the 'Review my code' button below the chat to get detailed feedback on your branch.\"";
+                "- Code review is a built-in platform feature. When the user asks you to review their code, comment on their code, give your opinion on their commits, or feedback on their code (e.g. \"review my code\", \"what do you think about these commits?\", \"can you review this?\", \"feedback on my code\"), do NOT list commits, give task-alignment advice, or perform the review in chat. Your response must direct them to use the built-in feature: the \"Review my code\" button below the chat input box. Example: \"We have a built-in code review—click the 'Review my code' button below the chat to get detailed feedback on your branch.\"" +
+                (isSingleRole && roleIndex > 0
+                    ? $"\n\n⚠️ ROLE COURSE BRANCH OVERRIDE: This is a Role Course. Every branch name includes this developer's index ({roleIndex}). Wherever the rules above say N-B / N-F, the actual branch is N-B-{roleIndex} / N-F-{roleIndex}. Wherever the rules say Bugs-B / Bugs-F, the actual branch is Bugs-B-{roleIndex} / Bugs-F-{roleIndex}. Never omit the -{roleIndex} suffix for this developer."
+                    : "");
         }
 
         private string GetModuleDescriptionForFirstTask(JsonElement firstTask, Dictionary<string, string> moduleDescriptions)
@@ -5668,7 +5676,9 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                 // Add Platform GitHub & Workflow Rules for developers only (after DeveloperCapabilitiesInfo, before CRITICAL GITHUB INFORMATION)
                 if (isDeveloperRole)
                 {
-                    var platformRules = BuildPlatformGitHubWorkflowRulesSection();
+                    var platformRules = BuildPlatformGitHubWorkflowRulesSection(
+                        student?.ProjectBoard?.IsSingleRole ?? false,
+                        student?.RoleIndex ?? 0);
                     if (!string.IsNullOrEmpty(platformRules))
                         enhancedSystemPrompt = $"{enhancedSystemPrompt}{Dbg(4865)}{platformRules}";
                     // Frontend-only or Backend-only instructions (not for Full Stack)
@@ -5686,20 +5696,25 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                         var isFullStackRole = IsFullStackStudentRoleName(roleNameForBranch);
                         var checkBackend = isFullStackRole || roleNameForBranch.Contains("Backend", StringComparison.OrdinalIgnoreCase);
                         var checkFrontend = isFullStackRole || roleNameForBranch.Contains("Frontend", StringComparison.OrdinalIgnoreCase);
+                        // For role-based boards, Sprint 1 branches carry the developer index suffix
+                        var isSingleRoleBoard = student.ProjectBoard?.IsSingleRole ?? false;
+                        var devIdx = isSingleRoleBoard && student.RoleIndex > 0 ? $"-{student.RoleIndex}" : "";
+                        var sprint1B = $"1-B{devIdx}";
+                        var sprint1F = $"1-F{devIdx}";
                         bool? branch1B = null, branch1F = null;
-                        if (checkBackend) branch1B = await BranchExistsForBoardAsync(student.BoardId, "1-B", true);
-                        if (checkFrontend) branch1F = await BranchExistsForBoardAsync(student.BoardId, "1-F", false);
+                        if (checkBackend) branch1B = await BranchExistsForBoardAsync(student.BoardId, sprint1B, true);
+                        if (checkFrontend) branch1F = await BranchExistsForBoardAsync(student.BoardId, sprint1F, false);
                         var parts = new List<string>();
-                        if (branch1B.HasValue) parts.Add($"1-B: {(branch1B.Value ? "exists (initialized)" : "not created")}");
-                        if (branch1F.HasValue) parts.Add($"1-F: {(branch1F.Value ? "exists (initialized)" : "not created")}");
+                        if (branch1B.HasValue) parts.Add($"{sprint1B}: {(branch1B.Value ? "exists (initialized)" : "not created")}");
+                        if (branch1F.HasValue) parts.Add($"{sprint1F}: {(branch1F.Value ? "exists (initialized)" : "not created")}");
                         if (parts.Count > 0)
                         {
                             var existingBranches = new List<string>();
-                            if (branch1B == true) existingBranches.Add("1-B");
-                            if (branch1F == true) existingBranches.Add("1-F");
+                            if (branch1B == true) existingBranches.Add(sprint1B);
+                            if (branch1F == true) existingBranches.Add(sprint1F);
                             var missingBranches = new List<string>();
-                            if (branch1B == false) missingBranches.Add("1-B");
-                            if (branch1F == false) missingBranches.Add("1-F");
+                            if (branch1B == false) missingBranches.Add(sprint1B);
+                            if (branch1F == false) missingBranches.Add(sprint1F);
                             var statusLine = "?? SPRINT BRANCH STATUS: " + string.Join("; ", parts) + ".";
                             if (existingBranches.Count > 0)
                                 statusLine += " Do NOT suggest creating " + string.Join(" or ", existingBranches) + "—already initialized.";
@@ -5793,7 +5808,7 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                         var frontendCommit = pushFrontend != null && (!string.IsNullOrEmpty(pushFrontend.LatestCommitId) || !string.IsNullOrEmpty(pushFrontend.LatestCommitDescription))
                             ? (pushFrontend.LatestCommitDescription ?? $"commit {pushFrontend.LatestCommitId}")
                             : null;
-                        var frontendActivity = boardStatesList.Any(bs => (bs.Source == "GitHub" && bs.ServiceName == "pull_request" || bs.Source == "GithubPages") && bs.GithubBranch == "1-F" && !string.IsNullOrEmpty(bs.LatestCommitId));
+                        var frontendActivity = boardStatesList.Any(bs => (bs.Source == "GitHub" && bs.ServiceName == "pull_request" || bs.Source == "GithubPages") && bs.GithubBranch != null && bs.GithubBranch.StartsWith("1-F", StringComparison.OrdinalIgnoreCase) && !string.IsNullOrEmpty(bs.LatestCommitId));
                         fullStackCommitStatusLine = "\n?? FULL STACK – YOU MUST REPORT BOTH BRANCHES. Use ONLY the BOARD STATES data below (latest push and **backend deployment** build; internal Source label may be Railway):\n";
                         fullStackCommitStatusLine += $"  • Backend (1-B): {(backendCommit != null ? "Latest push: " + backendCommit : "no push in BOARD STATES yet")}";
                         if (!string.IsNullOrEmpty(backendBuildStatus))
@@ -6158,11 +6173,6 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                     return StatusCode(402, new { Success = false, Message = "AI API credits insufficient. Please check your API account billing." });
                 }
 
-                // Append token usage to response only when Testing:ShowTokenUsage is true
-                var responseToReturn = _testingConfig.Value.ShowTokenUsage
-                    ? $"{aiResponse}\n\n---\n[Token Usage: Input={inputTokens}, Output={outputTokens}, Total={inputTokens + outputTokens}]"
-                    : aiResponse;
-
                 // Save AI response to chat history (without token info)
                 var assistantMessage = new MentorChatHistory
                 {
@@ -6185,7 +6195,10 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                         aiModel.Name,
                         aiModel.Provider
                     },
-                    Response = responseToReturn,
+                    Response = aiResponse,
+                    TokenUsage = _testingConfig.Value.ShowTokenUsage
+                        ? new { Input = inputTokens, Output = outputTokens, Total = inputTokens + outputTokens }
+                        : null,
                     Context = contextResult
                 });
             }
@@ -7097,20 +7110,18 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                 var repo = pathParts[1];
 
                 string branchName;
+                var repoLetter = request.IsBackend ? "B" : "F";
                 if (request.SprintNumber == 0)
-                {
-                    // Special case: sprintNumber 0 creates a "Bugs" branch (Bugs-B for backend, Bugs-F for frontend)
-                    var bugsLetter = request.IsBackend ? "B" : "F";
-                    branchName = $"Bugs-{bugsLetter}";
-                }
+                    branchName = $"Bugs-{repoLetter}";
                 else
-                {
-                    // Normal case: use sprint number and repo type letter
-                    var patternKey = request.IsBackend ? "GitHub:BranchNamingPatterns:Backend" : "GitHub:BranchNamingPatterns:Frontend";
-                    var pattern = _configuration[patternKey] ?? (request.IsBackend ? "^([1-9]|1[0-9]|20)-B$" : "^([1-9]|1[0-9]|20)-F$");
+                    branchName = $"{request.SprintNumber}-{repoLetter}";
 
-                    var repoTypeLetter = request.IsBackend ? "B" : "F";
-                    branchName = $"{request.SprintNumber}-{repoTypeLetter}";
+                // For role-based boards, append the developer's index (e.g. "3-F" → "3-F-2")
+                if (board.IsSingleRole && request.StudentId > 0)
+                {
+                    var student = await _context.Students.FirstOrDefaultAsync(s => s.Id == request.StudentId);
+                    if (student?.RoleIndex > 0)
+                        branchName = $"{branchName}-{student.RoleIndex}";
                 }
 
                 var accessToken = _configuration["GitHub:AccessToken"];
@@ -7123,9 +7134,7 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                 var openPRs = await _githubService.GetOpenPullRequestsAsync(owner, repo, accessToken);
                 var branchesWithOpenPRs = openPRs
                     .Select(pr => pr.HeadBranch)
-                    .Where(refName => !string.IsNullOrEmpty(refName) &&
-                        !string.Equals(refName, "Bugs-F", StringComparison.Ordinal) &&
-                        !string.Equals(refName, "Bugs-B", StringComparison.Ordinal))
+                    .Where(refName => !string.IsNullOrEmpty(refName) && !IsBugsBranch(refName))
                     .Distinct()
                     .ToList();
                 if (branchesWithOpenPRs.Count > 0 && request.SprintNumber != 0)
@@ -7179,11 +7188,11 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                     _logger.LogWarning("⚠️ [GITHUB BRANCH] Failed to get branches list. Status: {StatusCode}", branchesResponse.StatusCode);
                 }
                 
-                // Block only branches that are not merged into main (Bugs-F/Bugs-B are always allowed).
+                // Block only branches that are not merged into main (Bugs branches are always allowed).
                 // Prefer "merged PR" check: if the branch has a closed PR that was merged (including squash-merge), treat as merged.
                 // Fallback: GitHub compare main...branch; ahead_by == 0 means all commits are in main (merge-commit merge).
                 var candidateBlocking = unmergedBranches
-                    .Where(b => !string.Equals(b, "Bugs-F", StringComparison.Ordinal) && !string.Equals(b, "Bugs-B", StringComparison.Ordinal))
+                    .Where(b => !IsBugsBranch(b))
                     .ToList();
                 var blockingBranches = new List<string>();
                 foreach (var b in candidateBlocking)
@@ -9238,6 +9247,8 @@ Your intelligence is strictly tethered to the Current Project Context and the us
             public int SprintNumber { get; set; }
             public bool IsBackend { get; set; }
             public string BoardId { get; set; } = string.Empty;
+            /// <summary>Required when the board's IsSingleRole=true; used to append the developer index to the branch name.</summary>
+            public int StudentId { get; set; } = 0;
         }
 
         /// <summary>
@@ -9480,20 +9491,24 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                     return NotFound(new { Success = false, Message = $"Board with ID {request.BoardId} not found" });
                 }
 
-                // Parse branch name to get sprint number and role
-                // Format: "SprintNumber-RoleLetter" (e.g., "2-F") or "Bugs-B" / "Bugs-F"
+                // Parse branch name to get sprint number and role.
+                // Accepts: "N-B", "N-F", "Bugs-B", "Bugs-F" and their role-indexed variants "N-B-k", "N-F-k", "Bugs-B-k", "Bugs-F-k".
                 var branchParts = request.GithubBranch.Split('-');
                 int sprintNumber;
                 string roleLetter;
-                if (branchParts.Length == 2 && branchParts[0].Equals("Bugs", StringComparison.OrdinalIgnoreCase) &&
+                if (branchParts.Length < 2 || branchParts.Length > 3)
+                {
+                    return BadRequest(new { Success = false, Message = $"Invalid branch name format. Expected 'N-B', 'N-F', 'Bugs-B', 'Bugs-F' (or their indexed variants e.g. '2-F-1')." });
+                }
+                if (branchParts[0].Equals("Bugs", StringComparison.OrdinalIgnoreCase) &&
                     (branchParts[1].Equals("B", StringComparison.OrdinalIgnoreCase) || branchParts[1].Equals("F", StringComparison.OrdinalIgnoreCase)))
                 {
                     sprintNumber = 0;
                     roleLetter = branchParts[1].ToUpper();
                 }
-                else if (branchParts.Length != 2 || !int.TryParse(branchParts[0], out sprintNumber))
+                else if (!int.TryParse(branchParts[0], out sprintNumber))
                 {
-                    return BadRequest(new { Success = false, Message = $"Invalid branch name format. Expected format: 'SprintNumber-RoleLetter' (e.g., '2-F') or 'Bugs-B' / 'Bugs-F'" });
+                    return BadRequest(new { Success = false, Message = $"Invalid branch name format. Expected 'N-B', 'N-F', 'Bugs-B', 'Bugs-F' (or their indexed variants e.g. '2-F-1')." });
                 }
                 else
                 {

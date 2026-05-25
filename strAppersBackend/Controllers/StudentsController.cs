@@ -1157,6 +1157,7 @@ public class StudentsController : ControllerBase
                 .Include(s => s.ProgrammingLanguage)
                 .Include(s => s.StudentRoles)
                     .ThenInclude(sr => sr.Role)
+                .Include(s => s.ProjectBoard)
                 .FirstOrDefaultAsync(s => s.Email == email);
 
             if (student == null)
@@ -1211,7 +1212,9 @@ public class StudentsController : ControllerBase
                 AssistMe = student.AssistMe,
                 NextMeetingTime = student.NextMeetingTime,
                 NextMeetingUrl = student.NextMeetingUrl,
-                B2c = student.B2c
+                B2c = student.B2c,
+                RoleIndex = student.RoleIndex,
+                IsSingleRole = student.ProjectBoard?.IsSingleRole ?? false
             });
         }
         catch (Exception ex)

@@ -646,7 +646,17 @@ public partial class MetricsController
                 sb.AppendLine("(GitHub token not configured — cannot load diffs or pull requests.)");
             }
             else
-                await AppendGitHubDeveloperArtifactsAsync(sb, boardId, board, sprintNumber, trelloRoleLabel, isBackend, ghToken, cancellationToken);
+            {
+                var roleIndex = 0;
+                if (board.IsSingleRole && studentId > 0)
+                {
+                    var stu = await _context.Students.AsNoTracking()
+                        .Select(s => new { s.Id, s.RoleIndex })
+                        .FirstOrDefaultAsync(s => s.Id == studentId, cancellationToken);
+                    if (stu?.RoleIndex > 0) roleIndex = stu.RoleIndex;
+                }
+                await AppendGitHubDeveloperArtifactsAsync(sb, boardId, board, sprintNumber, trelloRoleLabel, isBackend, ghToken, cancellationToken, roleIndex);
+            }
         }
 
         sb.AppendLine("### Resource links (non-Figma; sprint-scoped when sprint number ≥ 1)");
@@ -827,7 +837,8 @@ public partial class MetricsController
         string trelloRoleLabel,
         bool isBackend,
         string token,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        int roleIndex = 0)
     {
         var repoUrl = isBackend ? board.GithubBackendUrl : board.GithubFrontendUrl;
         sb.AppendLine($"### Skill — GitHub ({(isBackend ? "Backend" : "Frontend")} repository)");
@@ -837,9 +848,10 @@ public partial class MetricsController
             return;
         }
 
+        var idxSuffix = roleIndex > 0 ? $"-{roleIndex}" : "";
         var defaultHead = sprintNumber == 0
-            ? (isBackend ? "Bugs-B" : "Bugs-F")
-            : $"{sprintNumber}-{(isBackend ? "B" : "F")}";
+            ? (isBackend ? $"Bugs-B{idxSuffix}" : $"Bugs-F{idxSuffix}")
+            : $"{sprintNumber}-{(isBackend ? "B" : "F")}{idxSuffix}";
 
         string head;
         var branchContext = await _trelloService.GetSprintCardBranchContextAsync(boardId, sprintNumber, trelloRoleLabel);
