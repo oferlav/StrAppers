@@ -4092,14 +4092,22 @@ This is a ROLE COURSE (Track D). Every squad-based assumption in the context abo
                 _logger.LogInformation("Getting mentor response for StudentId: {StudentId}, SprintId: {SprintId}, Model: {Model}", 
                     request.StudentId, request.SprintId, aiModelName);
 
-                // Get the AI model from database
-                var aiModel = await _context.AIModels
-                    .FirstOrDefaultAsync(m => m.Name == aiModelName && m.IsActive);
+                // Resolve model name: "default" (or empty) → Mentor:AiModel config → first active DB model
+                var resolvedModelName = aiModelName;
+                if (string.IsNullOrWhiteSpace(resolvedModelName) || resolvedModelName.Equals("default", StringComparison.OrdinalIgnoreCase))
+                {
+                    resolvedModelName = _configuration["Mentor:AiModel"] ?? string.Empty;
+                    _logger.LogInformation("Mentor model resolved from config: {ModelName}", resolvedModelName);
+                }
+
+                var aiModel = string.IsNullOrWhiteSpace(resolvedModelName)
+                    ? await _context.AIModels.FirstOrDefaultAsync(m => m.IsActive)
+                    : await _context.AIModels.FirstOrDefaultAsync(m => m.Name == resolvedModelName && m.IsActive);
 
                 if (aiModel == null)
                 {
-                    _logger.LogWarning("AI model '{ModelName}' not found or not active", aiModelName);
-                    return NotFound(new { Success = false, Message = $"AI model '{aiModelName}' not found or not active" });
+                    _logger.LogWarning("AI model '{ModelName}' not found or not active", resolvedModelName);
+                    return NotFound(new { Success = false, Message = $"AI model '{resolvedModelName}' not found or not active" });
                 }
 
                 // Get mentor intent

@@ -91,12 +91,22 @@ namespace strAppersBackend.Controllers
 
                 _logger.LogInformation("Customer respond: BoardId={BoardId}, ProjectId={ProjectId}, StudentId={StudentId}, SprintNumber={SprintNumber}, Model={Model}", request.BoardId, projectId, request.StudentId, request.SprintNumber, aiModelName);
 
-                var aiModel = await _context.AIModels
-                    .FirstOrDefaultAsync(m => m.Name == aiModelName && m.IsActive);
+                // Resolve model name: "default" (or empty) → Customer:AiModel config → first active DB model
+                var resolvedModelName = aiModelName;
+                if (string.IsNullOrWhiteSpace(resolvedModelName) || resolvedModelName.Equals("default", StringComparison.OrdinalIgnoreCase))
+                {
+                    resolvedModelName = _configuration["Customer:AiModel"] ?? string.Empty;
+                    _logger.LogInformation("Customer model resolved from config: {ModelName}", resolvedModelName);
+                }
+
+                var aiModel = string.IsNullOrWhiteSpace(resolvedModelName)
+                    ? await _context.AIModels.FirstOrDefaultAsync(m => m.IsActive)
+                    : await _context.AIModels.FirstOrDefaultAsync(m => m.Name == resolvedModelName && m.IsActive);
+
                 if (aiModel == null)
                 {
-                    _logger.LogWarning("AI model '{ModelName}' not found or not active", aiModelName);
-                    return NotFound(new { Success = false, Message = $"AI model '{aiModelName}' not found or not active" });
+                    _logger.LogWarning("AI model '{ModelName}' not found or not active", resolvedModelName);
+                    return NotFound(new { Success = false, Message = $"AI model '{resolvedModelName}' not found or not active" });
                 }
 
                 var userQuestion = request.UserQuestion ?? "";
@@ -182,10 +192,6 @@ namespace strAppersBackend.Controllers
                     return StatusCode(402, new { Success = false, Message = "AI API credits insufficient. Please check your API account billing." });
                 }
 
-                var responseToReturn = _testingConfig.ShowTokenUsage
-                    ? $"{aiResponse}\n\n---\n[Token Usage: Input={inputTokens}, Output={outputTokens}, Total={inputTokens + outputTokens}]"
-                    : aiResponse;
-
                 var assistantMessage = new CustomerChatHistory
                 {
                     StudentId = request.StudentId,
@@ -202,7 +208,10 @@ namespace strAppersBackend.Controllers
                 {
                     Success = true,
                     Model = new { aiModel.Id, aiModel.Name, aiModel.Provider },
-                    Response = responseToReturn
+                    Response = aiResponse,
+                    TokenUsage = _testingConfig.ShowTokenUsage
+                        ? new { Input = inputTokens, Output = outputTokens, Total = inputTokens + outputTokens }
+                        : null,
                 });
             }
             catch (Exception ex)
