@@ -1718,6 +1718,7 @@ This is a ROLE COURSE (Track D). Every squad-based assumption in the context abo
    - There is no staggered sprint model. This student does not wait for PM specs or Figma handoffs.
    - If asked ""where are my requirements?"": direct them to the MODULE DESCRIPTION in the Squad Room.
    - NEVER say ""ask the Product Manager"", ""check the User Story card"", or ""wait for the PM spec"" — none of these exist.
+   - There are no formal acceptance criteria — the MODULE DESCRIPTION is the sole definition of done for each sprint task.
 
 3. BRANCH NAMES — single source of truth (overrides every branch reference above)
    - Every branch MUST include the developer index -{n}.
@@ -1738,6 +1739,7 @@ This is a ROLE COURSE (Track D). Every squad-based assumption in the context abo
 
 6. ERRORS & DEPLOYMENT — check BOARD STATES first
    - When the student reports errors or deployment issues, read BOARD STATES and state what you see before giving generic troubleshooting advice.
+   - Railway deployment errors reflect the shared backend deployment. An error may have been caused by a peer developer's merge to main, not your own branch.
 
 7. MEETINGS — peer coordination, not PM-driven
    - There is no PM responsible for scheduling meetings. Coordination is between indexed peer developers with the same role.
@@ -5810,6 +5812,14 @@ This is a ROLE COURSE (Track D). Every squad-based assumption in the context abo
                     IQueryable<BoardState> boardStatesQuery = _context.BoardStates.Where(bs => bs.BoardId == boardId); // current board only, all such records
                     if (!isFullStack)
                         boardStatesQuery = boardStatesQuery.Where(bs => bs.DevRole == "Backend" || bs.DevRole == "Frontend");
+                    // Role-based: keep only this developer's branch records plus shared empty-branch records (Railway, GitHub Pages)
+                    if ((student.ProjectBoard?.IsSingleRole ?? false) && student.RoleIndex > 0)
+                    {
+                        var devBranchSuffix = $"-{student.RoleIndex}";
+                        boardStatesQuery = boardStatesQuery.Where(bs =>
+                            string.IsNullOrEmpty(bs.GithubBranch) ||
+                            bs.GithubBranch.EndsWith(devBranchSuffix));
+                    }
 
                     var boardStatesList = await boardStatesQuery
                         .OrderByDescending(bs => bs.UpdatedAt)
