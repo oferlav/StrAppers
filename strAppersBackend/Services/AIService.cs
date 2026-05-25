@@ -2568,21 +2568,69 @@ Return the JSON response now:";
             var model = !string.IsNullOrWhiteSpace(modelName) ? modelName : _aiConfig.Model;
 
             _logger.LogInformation("Using AI model: {Model} for text generation", model);
-            var result = await CallOpenAIAsync(prompt, model);
 
+            if (model.StartsWith("claude-", StringComparison.OrdinalIgnoreCase))
+                return await CallAnthropicTextAsync(prompt, model);
+
+            var result = await CallOpenAIAsync(prompt, model);
             if (result.Success)
-            {
                 return result.Content;
-            }
-            else
-            {
-                _logger.LogError("Failed to generate text response: {Error}", result.ErrorMessage);
-                return null;
-            }
+
+            _logger.LogError("Failed to generate text response: {Error}", result.ErrorMessage);
+            return null;
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error generating text response");
+            return null;
+        }
+    }
+
+    private async Task<string?> CallAnthropicTextAsync(string prompt, string model)
+    {
+        try
+        {
+            var apiKey = _configuration["Anthropic:ApiKey"]
+                ?? throw new InvalidOperationException("Anthropic:ApiKey is not configured");
+            var baseUrl = (_configuration["Anthropic:BaseUrl"] ?? "https://api.anthropic.com/v1").TrimEnd('/');
+            var apiVersion = _configuration["Anthropic:ApiVersion"] ?? "2023-06-01";
+
+            using var client = new HttpClient();
+            client.DefaultRequestHeaders.Add("x-api-key", apiKey);
+            client.DefaultRequestHeaders.Add("anthropic-version", apiVersion);
+            client.Timeout = TimeSpan.FromMinutes(10);
+
+            var requestBody = new
+            {
+                model,
+                max_tokens = _aiConfig.MaxTokens > 0 ? _aiConfig.MaxTokens : 16384,
+                temperature = _aiConfig.Temperature,
+                messages = new[] { new { role = "user", content = prompt } }
+            };
+
+            var json = JsonSerializer.Serialize(requestBody);
+            var content = new StringContent(json, Encoding.UTF8, "application/json");
+
+            _logger.LogInformation("Calling Anthropic API with model {Model}", model);
+            var response = await client.PostAsync($"{baseUrl}/messages", content);
+            var responseContent = await response.Content.ReadAsStringAsync();
+
+            if (!response.IsSuccessStatusCode)
+            {
+                _logger.LogError("Anthropic API error: {StatusCode} - {Content}", response.StatusCode, responseContent);
+                return null;
+            }
+
+            var claudeResponse = JsonSerializer.Deserialize<ClaudeResponse>(responseContent, new JsonSerializerOptions
+            {
+                PropertyNameCaseInsensitive = true
+            });
+
+            return claudeResponse?.Content?.FirstOrDefault(c => c.Type == "text")?.Text;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error calling Anthropic API for text generation with model {Model}", model);
             return null;
         }
     }

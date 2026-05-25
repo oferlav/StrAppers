@@ -9811,22 +9811,25 @@ APPROVAL: yes   (code is ready for merge)
 APPROVAL: no    (request changes before merge)";
                 }
 
-                // Look up AI model from database if AIServiceName is provided
+                // Resolve model: explicit request → DB lookup; otherwise Assessment:AiModel config
                 string? modelName = null;
                 if (!string.IsNullOrWhiteSpace(request.AIServiceName))
                 {
                     var aiModel = await _context.AIModels
                         .FirstOrDefaultAsync(m => m.Name == request.AIServiceName && m.IsActive);
-                    
                     if (aiModel == null)
-                    {
-                        _logger.LogWarning("⚠️ [CODE REVIEW] AI model '{ModelName}' not found or not active, using default", request.AIServiceName);
-                    }
+                        _logger.LogWarning("⚠️ [CODE REVIEW] AI model '{ModelName}' not found or not active, falling back to config", request.AIServiceName);
                     else
                     {
                         modelName = aiModel.Name;
-                        _logger.LogInformation("✅ [CODE REVIEW] Using AI model: {ModelName} (Provider: {Provider})", aiModel.Name, aiModel.Provider);
+                        _logger.LogInformation("✅ [CODE REVIEW] Using AI model from DB: {ModelName} (Provider: {Provider})", aiModel.Name, aiModel.Provider);
                     }
+                }
+                if (string.IsNullOrWhiteSpace(modelName))
+                {
+                    modelName = _configuration["Assessment:AiModel"];
+                    if (!string.IsNullOrWhiteSpace(modelName))
+                        _logger.LogInformation("✅ [CODE REVIEW] Using AI model from Assessment config: {ModelName}", modelName);
                 }
 
                 // Call AI service for code review
