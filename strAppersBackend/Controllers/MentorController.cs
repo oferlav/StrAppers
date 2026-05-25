@@ -1490,8 +1490,8 @@ namespace strAppersBackend.Controllers
 
         private string BuildPlatformGitHubWorkflowRulesSection(bool isSingleRole = false, int roleIndex = 0)
         {
-            var backendPattern = _configuration["GitHub:BranchNamingPatterns:Backend"] ?? "^([1-9]|1[0-9]|20)-B$";
-            var frontendPattern = _configuration["GitHub:BranchNamingPatterns:Frontend"] ?? "^([1-9]|1[0-9]|20)-F$";
+            var backendPattern = _configuration["GitHub:BranchNamingPatterns:Backend"] ?? "^(Bugs-B|([1-9]|1[0-9]|20)-B)(-\\d+)?$";
+            var frontendPattern = _configuration["GitHub:BranchNamingPatterns:Frontend"] ?? "^(Bugs-F|([1-9]|1[0-9]|20)-F)(-\\d+)?$";
             var validationContext = _configuration["GitHub:ValidationContext"] ?? "Mentor-Validation";
             return $"\n\n🛠 PLATFORM GITHUB & WORKFLOW RULES (Developer Role):\n" +
                 "0. Two workflows—never mix them up\n" +
@@ -5809,14 +5809,17 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                             ? (pushFrontend.LatestCommitDescription ?? $"commit {pushFrontend.LatestCommitId}")
                             : null;
                         var frontendActivity = boardStatesList.Any(bs => (bs.Source == "GitHub" && bs.ServiceName == "pull_request" || bs.Source == "GithubPages") && bs.GithubBranch != null && bs.GithubBranch.StartsWith("1-F", StringComparison.OrdinalIgnoreCase) && !string.IsNullOrEmpty(bs.LatestCommitId));
+                        var fsDevIdx = (student.ProjectBoard?.IsSingleRole ?? false) && student.RoleIndex > 0 ? $"-{student.RoleIndex}" : "";
+                        var fsSprintB = $"1-B{fsDevIdx}";
+                        var fsSprintF = $"1-F{fsDevIdx}";
                         fullStackCommitStatusLine = "\n?? FULL STACK – YOU MUST REPORT BOTH BRANCHES. Use ONLY the BOARD STATES data below (latest push and **backend deployment** build; internal Source label may be Railway):\n";
-                        fullStackCommitStatusLine += $"  • Backend (1-B): {(backendCommit != null ? "Latest push: " + backendCommit : "no push in BOARD STATES yet")}";
+                        fullStackCommitStatusLine += $"  • Backend ({fsSprintB}): {(backendCommit != null ? "Latest push: " + backendCommit : "no push in BOARD STATES yet")}";
                         if (!string.IsNullOrEmpty(backendBuildStatus))
                             fullStackCommitStatusLine += $" | Backend deployment build: {backendBuildStatus}";
                         if (backendBuildFailed && !string.IsNullOrEmpty(backendBuildError))
                             fullStackCommitStatusLine += $" | Build error/details: {backendBuildError}";
                         fullStackCommitStatusLine += "\n";
-                        fullStackCommitStatusLine += $"  • Frontend (1-F): {(frontendCommit != null ? "Latest push: " + frontendCommit : (frontendActivity ? "has activity (PR/webhook)" : "no push in BOARD STATES yet"))}\n";
+                        fullStackCommitStatusLine += $"  • Frontend ({fsSprintF}): {(frontendCommit != null ? "Latest push: " + frontendCommit : (frontendActivity ? "has activity (PR/webhook)" : "no push in BOARD STATES yet"))}\n";
                     }
                     // Board States prompt text from config (PromptConfig:Mentor:BoardStates*) to avoid large inline strings; fallback only when config not set
                     var boardStatesAwareness = !string.IsNullOrWhiteSpace(_promptConfig.Mentor.BoardStatesAwareness)
@@ -10838,7 +10841,7 @@ APPROVAL: no    (request changes before merge)";
                 _logger.LogInformation("🔍 [VALIDATE-PR] Extracted branch name: {Branch}", branchName);
                 
                 var patternKey = type == "be" ? "GitHub:BranchNamingPatterns:Backend" : "GitHub:BranchNamingPatterns:Frontend";
-                var pattern = _configuration[patternKey] ?? (type == "be" ? "^(Bugs-B|([1-9]|1[0-9]|20)-B)$" : "^(Bugs-F|([1-9]|1[0-9]|20)-F)$");
+                var pattern = _configuration[patternKey] ?? (type == "be" ? "^(Bugs-B|([1-9]|1[0-9]|20)-B)(-\\d+)?$" : "^(Bugs-F|([1-9]|1[0-9]|20)-F)(-\\d+)?$");
                 _logger.LogInformation("🔍 [VALIDATE-PR] Branch naming pattern: {Pattern} (from config key: {PatternKey})", pattern, patternKey);
 
                 var regex = new System.Text.RegularExpressions.Regex(pattern);
@@ -11334,7 +11337,7 @@ APPROVAL: no    (request changes before merge)";
                 // Step 2: Branch naming validation
                 _logger.LogInformation("🔍 [SHARED VALIDATION] Step 2: Validating branch naming");
                 var patternKey = type == "be" ? "GitHub:BranchNamingPatterns:Backend" : "GitHub:BranchNamingPatterns:Frontend";
-                var pattern = _configuration[patternKey] ?? (type == "be" ? "^(Bugs-B|([1-9]|1[0-9]|20)-B)$" : "^(Bugs-F|([1-9]|1[0-9]|20)-F)$");
+                var pattern = _configuration[patternKey] ?? (type == "be" ? "^(Bugs-B|([1-9]|1[0-9]|20)-B)(-\\d+)?$" : "^(Bugs-F|([1-9]|1[0-9]|20)-F)(-\\d+)?$");
                 var regex = new System.Text.RegularExpressions.Regex(pattern);
                 
                 if (!regex.IsMatch(branchName))
