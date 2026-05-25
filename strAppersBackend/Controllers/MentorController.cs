@@ -1693,6 +1693,62 @@ Your intelligence is strictly tethered to the Current Project Context and the us
             return sb.ToString();
         }
 
+        /// <summary>
+        /// Injected for role-based (Track D) boards only. Provides positive, authoritative context that
+        /// overrides squad-model assumptions present in the static prompt files (PM/User Story model,
+        /// cross-functional coordination, bare branch names). Suppresses the cross-role coordination
+        /// section that is added for squad courses via BuildFrontendBackendRoleInstructions.
+        /// </summary>
+        private static string BuildRoleCourseContextBlock(int roleIndex, string roleName)
+        {
+            var n = roleIndex;
+            return $@"
+
+⚠️ ROLE COURSE CONTEXT — overrides all squad-model instructions above
+
+This is a ROLE COURSE (Track D). Every squad-based assumption in the context above is REPLACED by the following rules.
+
+1. COURSE STRUCTURE
+   - All developers on this board share one role: {roleName}. This student is developer index {n}.
+   - Each developer works INDEPENDENTLY on their own copy of the project. Peers have a different index number but the same role.
+   - There is NO Product Manager, NO UI/UX Designer, NO Marketing/BizDev, and no cross-functional squad on this board.
+
+2. REQUIREMENTS — no PM, no staggered delivery
+   - Sprint requirements come from the MODULE DESCRIPTION set at course creation, NOT from a PM-authored User Story card.
+   - There is no staggered sprint model. This student does not wait for PM specs or Figma handoffs.
+   - If asked ""where are my requirements?"": direct them to the MODULE DESCRIPTION in the Squad Room.
+   - NEVER say ""ask the Product Manager"", ""check the User Story card"", or ""wait for the PM spec"" — none of these exist.
+
+3. BRANCH NAMES — single source of truth (overrides every branch reference above)
+   - Every branch MUST include the developer index -{n}.
+   - Sprint N backend:    N-B-{n}      (e.g. 3-B-{n})
+   - Sprint N frontend:   N-F-{n}      (e.g. 3-F-{n})
+   - Bugs backend:        Bugs-B-{n}
+   - Bugs frontend:       Bugs-F-{n}
+   - The bare format (e.g. 1-B, Bugs-F) belongs to a DIFFERENT student — NEVER use it for this student.
+
+4. TRELLO CARD IDs — also indexed
+   - Sprint card IDs follow the same suffix: e.g. 3-B-{n}. This is correct — not a typo.
+   - There is no PM-owned User Story card. Module requirements live in the MODULE DESCRIPTION.
+
+5. PULL REQUESTS — fully independent
+   - Each developer has their own PR from their own indexed branch. PRs are NOT coordinated across peers.
+   - Do NOT suggest waiting for a peer's PR or coordinating merge order.
+   - ""Review my code"" reviews ONLY this student's indexed branch.
+
+6. ERRORS & DEPLOYMENT — check BOARD STATES first
+   - When the student reports errors or deployment issues, read BOARD STATES and state what you see before giving generic troubleshooting advice.
+
+7. MEETINGS — peer coordination, not PM-driven
+   - There is no PM responsible for scheduling meetings. Coordination is between indexed peer developers with the same role.
+
+8. WHAT DOES NOT EXIST IN THIS COURSE
+   - No Product Manager, UI/UX Designer, Figma handoff, or Marketing/BizDev.
+   - No staggered User Story delivery model.
+   - No cross-role API handshake between separate Frontend/Backend teammates.
+   - No shared bare branches — each student has their own indexed branches.";
+        }
+
         /// <summary>Returns role-specific instructions for Frontend or Backend developer (not Full Stack). Shown only for that role.</summary>
         private static string BuildFrontendBackendRoleInstructions(string roleName)
         {
@@ -5676,18 +5732,35 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                 // Add Platform GitHub & Workflow Rules for developers only (after DeveloperCapabilitiesInfo, before CRITICAL GITHUB INFORMATION)
                 if (isDeveloperRole)
                 {
-                    var platformRules = BuildPlatformGitHubWorkflowRulesSection(
-                        student?.ProjectBoard?.IsSingleRole ?? false,
-                        student?.RoleIndex ?? 0);
+                    var isSingleRoleCourse = student?.ProjectBoard?.IsSingleRole ?? false;
+                    var studentRoleIndex = student?.RoleIndex ?? 0;
+
+                    var platformRules = BuildPlatformGitHubWorkflowRulesSection(isSingleRoleCourse, studentRoleIndex);
                     if (!string.IsNullOrEmpty(platformRules))
                         enhancedSystemPrompt = $"{enhancedSystemPrompt}{Dbg(4865)}{platformRules}";
-                    // Frontend-only or Backend-only instructions (not for Full Stack)
-                    if (student != null)
+
+                    if (isSingleRoleCourse && studentRoleIndex > 0)
                     {
-                        var roleName = student.StudentRoles?.FirstOrDefault(sr => sr.IsActive)?.Role?.Name ?? "";
-                        var frontendBackendSection = BuildFrontendBackendRoleInstructions(roleName);
-                        if (!string.IsNullOrEmpty(frontendBackendSection))
-                            enhancedSystemPrompt = $"{enhancedSystemPrompt}{frontendBackendSection}";
+                        // Role-based course: inject comprehensive override block covering branch naming,
+                        // requirements source, PM absence, PR independence, and Trello card structure.
+                        // Cross-role coordination instructions (BuildFrontendBackendRoleInstructions)
+                        // are deliberately suppressed — they don't apply when all teammates share the same role.
+                        var activeRoleName = student?.StudentRoles?.FirstOrDefault(sr => sr.IsActive)?.Role?.Name ?? "Developer";
+                        var roleCourseBlock = BuildRoleCourseContextBlock(studentRoleIndex, activeRoleName);
+                        if (!string.IsNullOrEmpty(roleCourseBlock))
+                            enhancedSystemPrompt = $"{enhancedSystemPrompt}{roleCourseBlock}";
+                    }
+                    else
+                    {
+                        // Squad course: inject Frontend/Backend cross-role coordination instructions.
+                        // Skipped for role-based courses where those cross-role dependencies don't exist.
+                        if (student != null)
+                        {
+                            var roleName = student.StudentRoles?.FirstOrDefault(sr => sr.IsActive)?.Role?.Name ?? "";
+                            var frontendBackendSection = BuildFrontendBackendRoleInstructions(roleName);
+                            if (!string.IsNullOrEmpty(frontendBackendSection))
+                                enhancedSystemPrompt = $"{enhancedSystemPrompt}{frontendBackendSection}";
+                        }
                     }
                     // Sprint branch status so mentor does not tell user to initialize when branches already exist
                     if (student != null && !string.IsNullOrEmpty(student.BoardId))
