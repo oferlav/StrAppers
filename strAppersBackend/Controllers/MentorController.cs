@@ -10095,6 +10095,7 @@ APPROVAL: no    (request changes before merge)";
                     CardName = cardNameForResponse,
                     Feedback = feedbackWithoutApprovalLine,
                     Approval = approval,
+                    ModelUsed = modelName,
                     Timestamp = DateTime.UtcNow
                 });
             }
