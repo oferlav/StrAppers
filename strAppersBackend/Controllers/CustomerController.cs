@@ -4,6 +4,7 @@ using Microsoft.Extensions.Options;
 using strAppersBackend.Data;
 using strAppersBackend.Models;
 using strAppersBackend.Services;
+using Microsoft.Extensions.Configuration;
 
 namespace strAppersBackend.Controllers
 {
@@ -19,19 +20,22 @@ namespace strAppersBackend.Controllers
         private readonly PromptConfig _promptConfig;
         private readonly TestingConfig _testingConfig;
         private readonly ILogger<CustomerController> _logger;
+        private readonly IConfiguration _configuration;
 
         public CustomerController(
             ApplicationDbContext context,
             IChatCompletionService chatCompletionService,
             IOptions<PromptConfig> promptConfig,
             IOptions<TestingConfig> testingConfig,
-            ILogger<CustomerController> logger)
+            ILogger<CustomerController> logger,
+            IConfiguration configuration)
         {
             _context = context;
             _chatCompletionService = chatCompletionService;
             _promptConfig = promptConfig.Value;
             _testingConfig = testingConfig.Value;
             _logger = logger;
+            _configuration = configuration;
         }
 
         /// <summary>
