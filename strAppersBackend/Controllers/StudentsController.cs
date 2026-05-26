@@ -1391,7 +1391,7 @@ public class StudentsController : ControllerBase
                 .ToListAsync();
 
             var boardIsSingleRole = await _context.ProjectBoards
-                .Where(b => b.BoardId == boardId)
+                .Where(b => b.Id == boardId)
                 .Select(b => b.IsSingleRole)
                 .FirstOrDefaultAsync();
 
