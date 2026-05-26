@@ -9645,10 +9645,14 @@ This is a ROLE COURSE (Track D). Every squad-based assumption in the context abo
                 {
                     roleLetter = branchParts[1].ToUpper();
                 }
-                var cardId = request.GithubBranch; // CardId matches branch name
                 var isBugsBranch = sprintNumber == 0;
+                // Role-indexed branches (e.g. "1-B-4") map to the base Trello CardId "1-B".
+                // The developer index is only in the branch name; the Trello card uses the sprint-role key.
+                var cardId = (!isBugsBranch && branchParts.Length == 3)
+                    ? $"{branchParts[0]}-{branchParts[1]}"
+                    : request.GithubBranch;
 
-                // Get Trello card by CardId (required only for sprint branches; Bugs branches are reviewed by diff only)
+                // Get Trello card by CardId (required only for sprint branches; Bugs branches are diff-only).
                 JsonElement? trelloCard = null;
                 if (!isBugsBranch)
                 {

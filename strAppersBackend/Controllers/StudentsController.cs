@@ -1243,13 +1243,6 @@ public class StudentsController : ControllerBase
             if (student == null)
                 return NotFound(new { success = false, message = "Student not found." });
 
-            if (student.B2c)
-                return BadRequest(new
-                {
-                    success = false,
-                    message = "Human assistance is only available for institute (non-B2C) students."
-                });
-
             var now = DateTime.UtcNow;
             if (student.NextMeetingTime.HasValue && student.NextMeetingTime.Value > now)
             {
