@@ -2819,7 +2819,7 @@ Staff request:
         {
             var rows = await _context.InstituteProjectModules
                 .AsNoTracking()
-                .Where(m => m.InstituteProjectId == template.InstituteProjectId.Value)
+                .Where(m => m.InstituteProjectId == template.InstituteProjectId.Value && m.ModuleType != 1)
                 .OrderBy(m => m.Sequence ?? int.MaxValue)
                 .ThenBy(m => m.Id)
                 .ToListAsync();
@@ -2832,7 +2832,7 @@ Staff request:
         {
             var fromProjectRows = await _context.ProjectModules
                 .AsNoTracking()
-                .Where(m => m.ProjectId == template.ProjectId.Value)
+                .Where(m => m.ProjectId == template.ProjectId.Value && m.ModuleType != 1)
                 .OrderBy(m => m.Sequence ?? int.MaxValue)
                 .ThenBy(m => m.Id)
                 .ToListAsync();
@@ -2847,7 +2847,7 @@ Staff request:
             // Backward-compatibility: some legacy rows stored InstituteProject id in ProjectId.
             var fallbackRows = await _context.InstituteProjectModules
                 .AsNoTracking()
-                .Where(m => m.InstituteProjectId == template.ProjectId.Value)
+                .Where(m => m.InstituteProjectId == template.ProjectId.Value && m.ModuleType != 1)
                 .OrderBy(m => m.Sequence ?? int.MaxValue)
                 .ThenBy(m => m.Id)
                 .ToListAsync();
