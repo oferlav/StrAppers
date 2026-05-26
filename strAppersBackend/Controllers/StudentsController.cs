@@ -1390,13 +1390,19 @@ public class StudentsController : ControllerBase
                 .Where(s => s.BoardId == boardId && s.IsAvailable)
                 .ToListAsync();
 
+            var boardIsSingleRole = await _context.ProjectBoards
+                .Where(b => b.BoardId == boardId)
+                .Select(b => b.IsSingleRole)
+                .FirstOrDefaultAsync();
+
             var students = studentsRaw.Select(s =>
             {
                 var roleName = s.StudentRoles?
                     .Where(sr => sr.IsActive && sr.Role != null)
                     .Select(sr => sr.Role!.Name)
                     .FirstOrDefault() ?? "Team Member";
-                var roleNames = (roleName.Contains("Fullstack", StringComparison.OrdinalIgnoreCase) || roleName.Contains("Full Stack", StringComparison.OrdinalIgnoreCase))
+                var isFullStack = roleName.Contains("Fullstack", StringComparison.OrdinalIgnoreCase) || roleName.Contains("Full Stack", StringComparison.OrdinalIgnoreCase);
+                var roleNames = (!boardIsSingleRole && isFullStack)
                     ? new[] { roleName, "Backend Developer", "Frontend Developer" }
                     : new[] { roleName };
                 return (object)new
