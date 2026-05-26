@@ -292,6 +292,17 @@ public partial class BoardsController : ControllerBase
                             teamRoleNames.Add("Frontend Developer");
                             teamRoleNames.Add("Backend Developer");
                         }
+                        // For role-based (IsSingleRole) courses, template cards use "{RoleName} {RoleIndex}" labels
+                        // (e.g. "Full Stack Developer 4"). Add all indexed variants so the filter passes them through.
+                        if (request.IsSingleRole)
+                        {
+                            foreach (var s in students)
+                            {
+                                var sRoleName = s.StudentRoles?.FirstOrDefault(sr => sr.IsActive)?.Role?.Name;
+                                if (!string.IsNullOrEmpty(sRoleName) && s.RoleIndex > 0)
+                                    teamRoleNames.Add($"{sRoleName} {s.RoleIndex}");
+                            }
+                        }
                         if (trelloRequest.SprintPlan?.Cards != null && teamRoleNames.Count > 0)
                         {
                             var before = trelloRequest.SprintPlan.Cards.Count;
