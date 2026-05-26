@@ -9646,17 +9646,22 @@ This is a ROLE COURSE (Track D). Every squad-based assumption in the context abo
                     roleLetter = branchParts[1].ToUpper();
                 }
                 var isBugsBranch = sprintNumber == 0;
-                // Role-indexed branches (e.g. "1-B-4") map to the base Trello CardId "1-B".
-                // The developer index is only in the branch name; the Trello card uses the sprint-role key.
-                var cardId = (!isBugsBranch && branchParts.Length == 3)
-                    ? $"{branchParts[0]}-{branchParts[1]}"
-                    : request.GithubBranch;
+                var cardId = request.GithubBranch; // CardId matches branch name
 
                 // Get Trello card by CardId (required only for sprint branches; Bugs branches are diff-only).
+                // For role-indexed branches (e.g. "1-B-4"), Full Stack developers have one card per sprint
+                // regardless of the B/F panel — so if "1-B-4" is not found, also try "1-F-4" (and vice versa).
                 JsonElement? trelloCard = null;
                 if (!isBugsBranch)
                 {
                     var card = await _trelloService.GetCardByCardIdAsync(request.BoardId, cardId);
+                    if (card == null && branchParts.Length == 3)
+                    {
+                        var altLetter = roleLetter == "B" ? "F" : "B";
+                        var altCardId = $"{branchParts[0]}-{altLetter}-{branchParts[2]}";
+                        card = await _trelloService.GetCardByCardIdAsync(request.BoardId, altCardId);
+                        if (card != null) cardId = altCardId;
+                    }
                     if (card == null)
                     {
                         return NotFound(new { Success = false, Message = $"Trello card with CardId '{cardId}' not found" });
