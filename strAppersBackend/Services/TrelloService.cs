@@ -795,6 +795,7 @@ namespace strAppersBackend.Services
                 string.Join(", ", listIds.Keys));
             var cardCreatedCount = 0;
             var cardSkippedCount = 0;
+            var cardsByList = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
             // Create cards (tasks)
             foreach (var card in request.SprintPlan.Cards)
                 {
@@ -828,6 +829,9 @@ namespace strAppersBackend.Services
                         if (createCardResponse.IsSuccessStatusCode)
                         {
                             cardCreatedCount++;
+                            if (!cardsByList.TryGetValue(card.ListName, out var listCardNames))
+                                cardsByList[card.ListName] = listCardNames = new List<string>();
+                            listCardNames.Add(card.Name);
                             var cardJson = await createCardResponse.Content.ReadAsStringAsync();
                             var cardData = JsonSerializer.Deserialize<JsonElement>(cardJson);
                             var cardId = cardData.GetProperty("id").GetString();
@@ -926,6 +930,9 @@ namespace strAppersBackend.Services
                 }
             _logger.LogInformation("[BOARD-CARDS] CreateCardsOnBoardAsync complete: created={Created}, skipped={Skipped}, errors={ErrorCount}",
                 cardCreatedCount, cardSkippedCount, errors.Count);
+            foreach (var kv in cardsByList)
+                _logger.LogInformation("[BOARD-CARDS] List '{ListName}': {Count} card(s) — {Names}",
+                    kv.Key, kv.Value.Count, string.Join(", ", kv.Value));
         }
 
         /// <summary>
