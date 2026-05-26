@@ -212,10 +212,19 @@ public partial class BoardsController : ControllerBase
 
             if (students.Count != request.StudentIds.Count)
             {
-                _logger.LogWarning("Student validation failed. Found {FoundCount}, requested {RequestedCount}", 
+                _logger.LogWarning("Student validation failed. Found {FoundCount}, requested {RequestedCount}",
                     students.Count, request.StudentIds.Count);
                 return BadRequest("One or more students not found or not available.");
             }
+
+            // Mark students as "in progress" immediately so the UI reflects board creation is underway
+            foreach (var s in students)
+            {
+                s.Status = 2;
+                s.UpdatedAt = DateTime.UtcNow;
+            }
+            await _context.SaveChangesAsync();
+            _logger.LogInformation("[BOARD-CREATE] Set Status=2 for {Count} student(s). Starting board creation.", students.Count);
 
             // Get configuration values
             var projectLengthWeeks = _configuration.GetValue<int>("BusinessLogicConfig:ProjectLengthInWeeks", 12);

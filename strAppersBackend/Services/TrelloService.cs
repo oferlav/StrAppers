@@ -3155,25 +3155,22 @@ namespace strAppersBackend.Services
                 boardId, listId, cards.Count);
             try
             {
+                // Fetch existing cards BEFORE creating new ones — we only archive after new creation succeeds
                 var listCardsUrl = $"https://api.trello.com/1/lists/{listId}/cards?key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
                 var listCardsResponse = await _httpClient.GetAsync(listCardsUrl);
-                var archivedCount = 0;
+                var existingCardIds = new List<string>();
                 if (listCardsResponse.IsSuccessStatusCode)
                 {
                     var listCardsJson = await listCardsResponse.Content.ReadAsStringAsync();
                     var existingCards = JsonSerializer.Deserialize<JsonElement[]>(listCardsJson);
                     if (existingCards != null)
                     {
-                        _logger.LogInformation("[OVERRIDE-SPRINT] Archiving {ExistingCount} existing cards in list {ListId}.", existingCards.Length, listId);
+                        _logger.LogInformation("[OVERRIDE-SPRINT] Found {ExistingCount} existing cards in list {ListId} (will archive after new cards are created).", existingCards.Length, listId);
                         foreach (var ec in existingCards)
                         {
-                            var cardId = ec.TryGetProperty("id", out var idProp) ? idProp.GetString() : null;
-                            if (string.IsNullOrEmpty(cardId)) continue;
-                            var closeUrl = $"https://api.trello.com/1/cards/{cardId}?closed=true&key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
-                            var archiveResp = await _httpClient.PutAsync(closeUrl, null);
-                            if (archiveResp.IsSuccessStatusCode) archivedCount++;
+                            var cid = ec.TryGetProperty("id", out var idProp) ? idProp.GetString() : null;
+                            if (!string.IsNullOrEmpty(cid)) existingCardIds.Add(cid);
                         }
-                        _logger.LogInformation("[OVERRIDE-SPRINT] Archived {Archived}/{Total} cards.", archivedCount, existingCards.Length);
                     }
                 }
                 else
@@ -3226,7 +3223,7 @@ namespace strAppersBackend.Services
                         createCardUrl += $"&due={card.DueDate.Value:yyyy-MM-dd}";
                     if (!string.IsNullOrEmpty(card.RoleName) && roleLabelIds.TryGetValue(card.RoleName, out var labelId))
                         createCardUrl += $"&idLabels={labelId}";
-                    var createResponse = await _httpClient.PostAsync(createCardUrl, null);
+                    var createResponse = await SendWithRateLimitRetryAsync(() => _httpClient.PostAsync(createCardUrl, null));
                     if (!createResponse.IsSuccessStatusCode)
                     {
                         var err = await createResponse.Content.ReadAsStringAsync();
@@ -3260,8 +3257,27 @@ namespace strAppersBackend.Services
                     if (!string.IsNullOrEmpty(card.CardId) && !string.IsNullOrEmpty(cardIdFieldId))
                         await SetCustomFieldValueAsync(newCardId, cardIdFieldId, "text", card.CardId, errors);
                 }
-                _logger.LogInformation("[OVERRIDE-SPRINT] Card creation complete: created={Created}/{Total}, errors={ErrorCount}",
+                _logger.LogInformation("[OVERRIDE-SPRINT] New card creation complete: created={Created}/{Total}, errors={ErrorCount}",
                     overrideCreated, cards.Count, errors.Count);
+
+                if (overrideCreated == 0 && cards.Count > 0)
+                {
+                    // No new cards created at all — do NOT archive existing cards, leave Sprint intact
+                    _logger.LogWarning("[OVERRIDE-SPRINT] Zero cards created; skipping archive of {Count} existing card(s) to avoid empty Sprint.", existingCardIds.Count);
+                    return (false, errors.Count > 0 ? string.Join("; ", errors) : "No cards created");
+                }
+
+                // Archive old cards only after new ones were successfully created
+                var archivedCount = 0;
+                foreach (var cid in existingCardIds)
+                {
+                    var closeUrl = $"https://api.trello.com/1/cards/{cid}?closed=true&key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
+                    var archiveResp = await SendWithRateLimitRetryAsync(() => _httpClient.PutAsync(closeUrl, null));
+                    if (archiveResp.IsSuccessStatusCode) archivedCount++;
+                }
+                _logger.LogInformation("[OVERRIDE-SPRINT] Archived {Archived}/{Total} old cards after creating {Created} new cards.",
+                    archivedCount, existingCardIds.Count, overrideCreated);
+
                 if (errors.Count > 0)
                     return (false, string.Join("; ", errors));
                 return (true, null);

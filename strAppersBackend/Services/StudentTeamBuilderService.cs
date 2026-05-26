@@ -377,6 +377,7 @@ namespace strAppersBackend.Services
             try
             {
                 var client = _httpClientFactory.CreateClient();
+                client.Timeout = TimeSpan.FromMinutes(10);
                 var json = JsonSerializer.Serialize(payload);
                 var content = new StringContent(json, Encoding.UTF8, "application/json");
 
