@@ -2309,6 +2309,28 @@ This is a ROLE COURSE (Track D). Every squad-based assumption in the context abo
 
 
         /// <summary>
+        /// Debug endpoint: returns the resolved Mentor:AiModel config value and all active DB models.
+        /// Use this to diagnose config vs DB mismatches (e.g. env var overriding appsettings.json).
+        /// </summary>
+        [HttpGet("use/debug-model")]
+        public async Task<ActionResult<object>> DebugModel()
+        {
+            var configValue = _configuration["Mentor:AiModel"];
+            var activeModels = await _context.AIModels
+                .Where(m => m.IsActive)
+                .Select(m => new { m.Name, m.Provider, m.MaxTokens })
+                .ToListAsync();
+            var resolvedMatch = activeModels.Any(m => m.Name == configValue);
+            return Ok(new
+            {
+                ConfigKey = "Mentor:AiModel",
+                ConfigValue = configValue ?? "(not set)",
+                ResolvedMatch = resolvedMatch,
+                ActiveModels = activeModels
+            });
+        }
+
+        /// <summary>
         /// Webhook endpoint for Railway build failure notifications
         /// Receives deployment failure events from Railway and processes them
         /// </summary>
@@ -7518,11 +7540,26 @@ This is a ROLE COURSE (Track D). Every squad-based assumption in the context abo
             }
 
             // 5. Build Status Validation (Railway)
-            var buildStatusResult = await ValidateBuildStatusBackendAsync(board, boardId);
-            var buildStatusValid = buildStatusResult.Valid;
-            if (!buildStatusValid)
+            // The BoardState record is written by the Railway webhook. When step 2 already confirmed
+            // via live Railway API that the service is deployed and active, a missing webhook record
+            // means the webhook was missed (e.g. fired before this board existed in DB, or webhook
+            // not yet configured for this service) — not that the deployment failed.
+            // Only run this check when step 2 could not confirm Railway status on its own.
+            (bool Valid, List<string> Issues, object Details) buildStatusResult;
+            bool buildStatusValid;
+            if (railwayValid)
             {
-                issues.AddRange(buildStatusResult.Issues);
+                buildStatusValid = true;
+                buildStatusResult = (true, new List<string>(), new { Skipped = true, Reason = "Railway API (step 2) already confirmed deployment is active" });
+            }
+            else
+            {
+                buildStatusResult = await ValidateBuildStatusBackendAsync(board, boardId);
+                buildStatusValid = buildStatusResult.Valid;
+                if (!buildStatusValid)
+                {
+                    issues.AddRange(buildStatusResult.Issues);
+                }
             }
 
             var overallValid = githubValid && railwayValid && databaseValid && codeStructureValid && buildStatusValid;
