@@ -3292,9 +3292,14 @@ Staff request:
                 {
                     if (!sourceById.TryGetValue(moduleId, out var sourceModule))
                     {
-                        return await UnassignCourseWithValidationResult(
-                            "The selected course could not be applied because its modules do not match this project.",
-                            $"Course JSON references module id {moduleId} but that id is not in the source module list for this course. AvailableSourceIds=[{string.Join(", ", sourceModules.Select(m => m.Id))}], courseSource={(templateId == 0 ? $"ProjectModules for BaseProjectId={ipMeta.BaseProjectId}" : $"ResolveTemplateSourceModules for InstituteTemplates.Id={templateId}")}.");
+                        // Module id is in the Trello JSON but not in the filtered source list.
+                        // This is expected for ModuleType=1 modules (e.g. kickoff/intro) which are
+                        // intentionally excluded from matching — skip them silently.
+                        _logger.LogInformation(
+                            "SetActiveTemplate: skipping module id {ModuleId} — not in filtered source list (likely ModuleType=1). courseSource={CourseSource}",
+                            moduleId,
+                            templateId == 0 ? $"ProjectModules for BaseProjectId={ipMeta.BaseProjectId}" : $"InstituteTemplates.Id={templateId}");
+                        continue;
                     }
 
                     sourceStructure.Add((moduleId, NormalizeModuleTitle(sourceModule.Title)));
