@@ -239,11 +239,17 @@ public partial class BoardsController : ControllerBase
             TrelloProjectCreationRequest? trelloRequest = null;
             object? sprintPlanForStorage = null;
             var useSavedTrelloJson = false;
+            _logger.LogInformation("[BOARD-CREATE] UseDBProjectBoard={UseDB}, EffectiveTrelloBoardJson present={HasJson}, Length={JsonLen}",
+                useDBProjectBoard,
+                !string.IsNullOrWhiteSpace(effectiveTrelloBoardJson),
+                effectiveTrelloBoardJson?.Length ?? 0);
             if (useDBProjectBoard && !string.IsNullOrWhiteSpace(effectiveTrelloBoardJson))
             {
                 try
                 {
                     var saved = System.Text.Json.JsonSerializer.Deserialize<TrelloProjectCreationRequest>(effectiveTrelloBoardJson);
+                    _logger.LogInformation("[BOARD-CREATE] Deserialized TrelloBoardJson: saved={Saved}, SprintPlan={HasPlan}, CardCount={CardCount}",
+                        saved != null, saved?.SprintPlan != null, saved?.SprintPlan?.Cards?.Count ?? 0);
                     if (saved != null && saved.SprintPlan != null)
                     {
                         useSavedTrelloJson = true;
