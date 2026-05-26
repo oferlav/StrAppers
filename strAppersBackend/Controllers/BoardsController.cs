@@ -165,8 +165,37 @@ public partial class BoardsController : ControllerBase
     {
         try
         {
-            _logger.LogInformation("Starting board creation for project {ProjectId} with {StudentCount} students", 
+            _logger.LogInformation("Starting board creation for project {ProjectId} with {StudentCount} students",
                 request.ProjectId, request.StudentIds.Count);
+
+            // Load and validate students BEFORE the transaction so Status=2 commits immediately
+            // and is visible to other DB connections (the transaction only commits at the very end)
+            _logger.LogInformation("Validating students: {StudentIds}", string.Join(",", request.StudentIds));
+            var students = await _context.Students
+                .Include(s => s.StudentRoles)
+                .ThenInclude(sr => sr.Role)
+                .Include(s => s.ProgrammingLanguage)
+                .Where(s => request.StudentIds.Contains(s.Id) && s.IsAvailable)
+                .ToListAsync();
+
+            _logger.LogInformation("Found {FoundCount} students out of {RequestedCount} requested",
+                students.Count, request.StudentIds.Count);
+
+            if (students.Count != request.StudentIds.Count)
+            {
+                _logger.LogWarning("Student validation failed. Found {FoundCount}, requested {RequestedCount}",
+                    students.Count, request.StudentIds.Count);
+                return BadRequest("One or more students not found or not available.");
+            }
+
+            // Set Status=2 and auto-commit (no transaction yet) so it is immediately visible externally
+            foreach (var s in students)
+            {
+                s.Status = 2;
+                s.UpdatedAt = DateTime.UtcNow;
+            }
+            await _context.SaveChangesAsync();
+            _logger.LogInformation("[BOARD-CREATE] Set Status=2 for {Count} student(s). Starting board creation.", students.Count);
 
             using var transaction = await _context.Database.BeginTransactionAsync();
 
@@ -197,34 +226,6 @@ public partial class BoardsController : ControllerBase
             var effectiveTrelloBoardJson = instituteProject?.TrelloBoardJson ?? project.TrelloBoardJson;
             var effectiveTitle = instituteProject?.Title ?? project.Title;
             var effectiveDescription = instituteProject?.Description ?? project.Description;
-
-            // Validate students exist and are available
-            _logger.LogInformation("Validating students: {StudentIds}", string.Join(",", request.StudentIds));
-            var students = await _context.Students
-                .Include(s => s.StudentRoles)
-                .ThenInclude(sr => sr.Role)
-                .Include(s => s.ProgrammingLanguage)  // Include ProgrammingLanguage for backend code generation
-                .Where(s => request.StudentIds.Contains(s.Id) && s.IsAvailable)
-                .ToListAsync();
-
-            _logger.LogInformation("Found {FoundCount} students out of {RequestedCount} requested", 
-                students.Count, request.StudentIds.Count);
-
-            if (students.Count != request.StudentIds.Count)
-            {
-                _logger.LogWarning("Student validation failed. Found {FoundCount}, requested {RequestedCount}",
-                    students.Count, request.StudentIds.Count);
-                return BadRequest("One or more students not found or not available.");
-            }
-
-            // Mark students as "in progress" immediately so the UI reflects board creation is underway
-            foreach (var s in students)
-            {
-                s.Status = 2;
-                s.UpdatedAt = DateTime.UtcNow;
-            }
-            await _context.SaveChangesAsync();
-            _logger.LogInformation("[BOARD-CREATE] Set Status=2 for {Count} student(s). Starting board creation.", students.Count);
 
             // Get configuration values
             var projectLengthWeeks = _configuration.GetValue<int>("BusinessLogicConfig:ProjectLengthInWeeks", 12);
