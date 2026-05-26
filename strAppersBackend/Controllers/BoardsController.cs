@@ -183,6 +183,21 @@ public partial class BoardsController : ControllerBase
             }
             _logger.LogInformation("Project found: {ProjectTitle}", project.Title);
 
+            // When InstituteProjectId is provided, load the institute project and use its JSON/metadata
+            InstituteProject? instituteProject = null;
+            if (request.InstituteProjectId.HasValue)
+            {
+                instituteProject = await _context.InstituteProjects
+                    .Include(ip => ip.Organization)
+                    .FirstOrDefaultAsync(ip => ip.Id == request.InstituteProjectId.Value);
+                if (instituteProject == null)
+                    return NotFound($"Institute project {request.InstituteProjectId} not found.");
+                _logger.LogInformation("[INSTITUTE-BOARD] Using InstituteProject {IpId} '{Title}' for board creation.", instituteProject.Id, instituteProject.Title);
+            }
+            var effectiveTrelloBoardJson = instituteProject?.TrelloBoardJson ?? project.TrelloBoardJson;
+            var effectiveTitle = instituteProject?.Title ?? project.Title;
+            var effectiveDescription = instituteProject?.Description ?? project.Description;
+
             // Validate students exist and are available
             _logger.LogInformation("Validating students: {StudentIds}", string.Join(",", request.StudentIds));
             var students = await _context.Students
@@ -224,18 +239,18 @@ public partial class BoardsController : ControllerBase
             TrelloProjectCreationRequest? trelloRequest = null;
             object? sprintPlanForStorage = null;
             var useSavedTrelloJson = false;
-            if (useDBProjectBoard && !string.IsNullOrWhiteSpace(project.TrelloBoardJson))
+            if (useDBProjectBoard && !string.IsNullOrWhiteSpace(effectiveTrelloBoardJson))
             {
                 try
                 {
-                    var saved = System.Text.Json.JsonSerializer.Deserialize<TrelloProjectCreationRequest>(project.TrelloBoardJson);
+                    var saved = System.Text.Json.JsonSerializer.Deserialize<TrelloProjectCreationRequest>(effectiveTrelloBoardJson);
                     if (saved != null && saved.SprintPlan != null)
                     {
                         useSavedTrelloJson = true;
                         trelloRequest = saved;
                         trelloRequest.ProjectId = request.ProjectId;
-                        trelloRequest.ProjectTitle = project.Title ?? trelloRequest.ProjectTitle;
-                        trelloRequest.ProjectDescription = project.Description ?? trelloRequest.ProjectDescription;
+                        trelloRequest.ProjectTitle = effectiveTitle ?? trelloRequest.ProjectTitle;
+                        trelloRequest.ProjectDescription = effectiveDescription ?? trelloRequest.ProjectDescription;
                         trelloRequest.StudentEmails = students.Select(s => s.Email).ToList();
                         trelloRequest.ProjectLengthWeeks = projectLengthWeeks;
                         trelloRequest.SprintLengthWeeks = sprintLengthWeeks;
@@ -2884,6 +2899,8 @@ public partial class BoardsController : ControllerBase
                 NeonProjectId = createdNeonProjectId, // Save the Neon project ID (project-per-tenant isolation)
                 NeonBranchId = createdBranchId, // Save the Neon branch ID for this database (ensures isolation)
                 VisableModuleDesign = visableModuleDesign,
+                IsSingleRole = request.IsSingleRole,
+                InstituteId = instituteProject?.InstituteId,
                 CreatedAt = DateTime.UtcNow,
                 UpdatedAt = DateTime.UtcNow
             };
@@ -8141,6 +8158,10 @@ public class CreateBoardRequest
     public string? Title { get; set; }
     public string? DateTime { get; set; } // Format: "2024-01-15T14:30:00Z"
     public int? DurationMinutes { get; set; }
+    /// <summary>When set, board JSON and metadata are sourced from this InstituteProject row instead of the catalog Project.</summary>
+    public int? InstituteProjectId { get; set; }
+    /// <summary>When true, marks the board as role-based; each student gets a unique RoleIndex suffix on branch names.</summary>
+    public bool IsSingleRole { get; set; }
 }
 
 public class CreateBoardResponse

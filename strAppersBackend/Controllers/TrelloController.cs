@@ -564,13 +564,17 @@ public class TrelloController : ControllerBase
             try
             {
                 var (mergedCount, errorCount, errors) = await _studentTeamBuilderService.RunDueSprintMergesAsync();
+                var (boardsCreated, boardsSkipped, teamMessages) = await _studentTeamBuilderService.RunInstituteTeamBuildingAsync();
                 return Ok(new
                 {
                     Success = true,
-                    Message = $"Due sprint merges completed. Merged: {mergedCount}, Errors: {errorCount}.",
+                    Message = $"Due sprint merges completed. Merged: {mergedCount}, Errors: {errorCount}. Institute boards created: {boardsCreated}, skipped: {boardsSkipped}.",
                     MergedCount = mergedCount,
                     ErrorCount = errorCount,
-                    Errors = errors
+                    Errors = errors,
+                    InstituteBoardsCreated = boardsCreated,
+                    InstituteBoardsSkipped = boardsSkipped,
+                    InstituteMessages = teamMessages
                 });
             }
             catch (Exception ex)

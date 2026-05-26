@@ -367,6 +367,27 @@ public class ApplicationDbContext : DbContext
                   .HasForeignKey(e => e.ProjectPriority4)
                   .OnDelete(DeleteBehavior.SetNull);
 
+            // Institute project priorities (nullable FKs to InstituteProjects)
+            entity.HasOne(e => e.InstitutePriority1Project)
+                  .WithMany()
+                  .HasForeignKey(e => e.InstitutePriority1)
+                  .OnDelete(DeleteBehavior.SetNull);
+
+            entity.HasOne(e => e.InstitutePriority2Project)
+                  .WithMany()
+                  .HasForeignKey(e => e.InstitutePriority2)
+                  .OnDelete(DeleteBehavior.SetNull);
+
+            entity.HasOne(e => e.InstitutePriority3Project)
+                  .WithMany()
+                  .HasForeignKey(e => e.InstitutePriority3)
+                  .OnDelete(DeleteBehavior.SetNull);
+
+            entity.HasOne(e => e.InstitutePriority4Project)
+                  .WithMany()
+                  .HasForeignKey(e => e.InstitutePriority4)
+                  .OnDelete(DeleteBehavior.SetNull);
+
             // Foreign key relationship to ProjectBoard (Trello board)
             entity.HasOne(e => e.ProjectBoard)
                   .WithMany()

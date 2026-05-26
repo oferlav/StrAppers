@@ -53,11 +53,22 @@ public class Student
     public int? ProjectPriority3 { get; set; }
     public int? ProjectPriority4 { get; set; }
     
-    // Navigation to preferred projects
+    // Navigation to preferred projects (B2C)
     [ForeignKey("ProjectPriority1")] public Project? ProjectPriority1Project { get; set; }
     [ForeignKey("ProjectPriority2")] public Project? ProjectPriority2Project { get; set; }
     [ForeignKey("ProjectPriority3")] public Project? ProjectPriority3Project { get; set; }
     [ForeignKey("ProjectPriority4")] public Project? ProjectPriority4Project { get; set; }
+
+    // Institute project priorities (for institute-enrolled students)
+    public int? InstitutePriority1 { get; set; }
+    public int? InstitutePriority2 { get; set; }
+    public int? InstitutePriority3 { get; set; }
+    public int? InstitutePriority4 { get; set; }
+
+    [ForeignKey("InstitutePriority1")] public InstituteProject? InstitutePriority1Project { get; set; }
+    [ForeignKey("InstitutePriority2")] public InstituteProject? InstitutePriority2Project { get; set; }
+    [ForeignKey("InstitutePriority3")] public InstituteProject? InstitutePriority3Project { get; set; }
+    [ForeignKey("InstitutePriority4")] public InstituteProject? InstitutePriority4Project { get; set; }
     
     // Trello board relationship
     [MaxLength(50)]
