@@ -1484,13 +1484,13 @@ public class ApplicationDbContext : DbContext
                 new AIModel
                 {
                     Id = 2,
-                    Name = "claude-sonnet-4-5-20250929",
+                    Name = "claude-sonnet-4-6",
                     Provider = "Anthropic",
                     BaseUrl = "https://api.anthropic.com/v1",
                     ApiVersion = "2023-06-01",
-                    MaxTokens = 200000,
+                    MaxTokens = 64000,
                     DefaultTemperature = 0.3,
-                    Description = "Anthropic Claude Sonnet 4.5 model - powerful for complex tasks",
+                    Description = "Anthropic Claude Sonnet 4.6 model - powerful for complex tasks",
                     IsActive = true,
                     CreatedAt = DateTime.UtcNow
                 }
