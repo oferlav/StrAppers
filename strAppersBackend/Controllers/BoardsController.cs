@@ -192,6 +192,10 @@ public partial class BoardsController : ControllerBase
             foreach (var s in students)
             {
                 s.Status = 2;
+                // Students added to a board via CreateBoard are always institute (non-B2C).
+                // HasDefaultValue(true) makes EF treat B2c as ValueGeneratedOnAdd, so force-mark it.
+                s.B2c = false;
+                _context.Entry(s).Property(x => x.B2c).IsModified = true;
                 s.UpdatedAt = DateTime.UtcNow;
             }
             // For role-based (IsSingleRole) boards, RoleIndex must be set before card-label filtering.
