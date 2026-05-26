@@ -205,6 +205,9 @@ public partial class BoardsController : ControllerBase
                     {
                         s.RoleIndex = i + 1;
                         s.UpdatedAt = DateTime.UtcNow;
+                        // HasDefaultValue(0) on this column makes EF treat it as ValueGeneratedOnAdd,
+                        // which can silently skip it in UPDATE. Force-mark it so EF always sends it.
+                        _context.Entry(s).Property(x => x.RoleIndex).IsModified = true;
                     }
                 }
                 _logger.LogInformation("[BOARD-CREATE] IsSingleRole=true: RoleIndex assigned for {Count} student(s).", students.Count);
