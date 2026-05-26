@@ -194,6 +194,21 @@ public partial class BoardsController : ControllerBase
                 s.Status = 2;
                 s.UpdatedAt = DateTime.UtcNow;
             }
+            // For role-based (IsSingleRole) boards, RoleIndex must be set before card-label filtering.
+            // Use request.StudentIds order as the canonical 1-based assignment; only fill gaps (0 = unset).
+            if (request.IsSingleRole)
+            {
+                for (var i = 0; i < request.StudentIds.Count; i++)
+                {
+                    var s = students.FirstOrDefault(x => x.Id == request.StudentIds[i]);
+                    if (s != null && s.RoleIndex == 0)
+                    {
+                        s.RoleIndex = i + 1;
+                        s.UpdatedAt = DateTime.UtcNow;
+                    }
+                }
+                _logger.LogInformation("[BOARD-CREATE] IsSingleRole=true: RoleIndex assigned for {Count} student(s).", students.Count);
+            }
             await _context.SaveChangesAsync();
             _logger.LogInformation("[BOARD-CREATE] Set Status=2 for {Count} student(s). Starting board creation.", students.Count);
 
