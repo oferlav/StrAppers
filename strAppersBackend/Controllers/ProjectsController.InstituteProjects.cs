@@ -86,10 +86,22 @@ public partial class ProjectsController
         int instituteId,
         CancellationToken cancellationToken = default)
     {
-        // Only an explicit InstituteTemplates selection counts as a course assignment.
-        return await _context.InstituteTemplates
+        // Custom template takes priority.
+        var hasCustomTemplate = await _context.InstituteTemplates
             .AsNoTracking()
             .AnyAsync(t => t.InstituteId == instituteId && t.ProjectId == catalogProjectId, cancellationToken);
+        if (hasCustomTemplate)
+            return true;
+
+        // For catalog (global) projects, the built-in TrelloBoardJson IS the course.
+        // Modules cannot be changed before first activation, so this is always valid.
+        return await _context.Projects
+            .AsNoTracking()
+            .AnyAsync(
+                p => p.Id == catalogProjectId
+                     && p.TrelloBoardJson != null
+                     && p.TrelloBoardJson.Trim() != "",
+                cancellationToken);
     }
 
     private async Task<bool> InstituteProjectHasSyllabusForInstituteProjectRowAsync(
