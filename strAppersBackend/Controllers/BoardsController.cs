@@ -69,6 +69,24 @@ public partial class BoardsController : ControllerBase
         _testingConfig = testingConfig;
     }
 
+    // ===== BOARD CREATION DEBUG LOG =====
+    // Set _debugBoardCreation = true to capture full board creation log to temp file + email ofer@skill-in.com.
+    // Set to false to disable. Safe to deploy either way — failures in logging are silently ignored.
+    private static bool _debugBoardCreation = true; // ← TOGGLE ON/OFF
+
+    private static void DbgLog(System.Text.StringBuilder? sb, string msg)
+        => sb?.AppendLine($"[{DateTime.UtcNow:yyyy-MM-dd HH:mm:ss.fff}Z] {msg}");
+
+    private async Task FlushDebugLog(System.Text.StringBuilder? debugLog, string boardId)
+    {
+        if (debugLog == null) return;
+        var content = debugLog.ToString();
+        var fileName = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"BoardCreation_{boardId}_{DateTime.UtcNow:yyyyMMdd_HHmmss}.txt");
+        try { System.IO.File.WriteAllText(fileName, content); } catch { /* ignore */ }
+        try { await _smtpEmailService.SendPlainEmailAsync("ofer@skill-in.com", $"[BoardCreation Debug] BoardId={boardId}", content); } catch { /* ignore */ }
+    }
+    // =====================================
+
     /// <summary>
     /// Test simple Trello board creation
     /// </summary>
@@ -163,6 +181,10 @@ public partial class BoardsController : ControllerBase
     [HttpPost("create")]
     public async Task<ActionResult<CreateBoardResponse>> CreateBoard([FromBody] CreateBoardRequest request)
     {
+        // DEBUG LOG — must be outside try so catch block can access and flush it
+        System.Text.StringBuilder? debugLog = _debugBoardCreation ? new System.Text.StringBuilder() : null;
+        string debugBoardId = "unknown";
+        DbgLog(debugLog, $"=== CreateBoard START === ProjectId={request.ProjectId} InstituteProjectId={request.InstituteProjectId} IsSingleRole={request.IsSingleRole} Title={request.Title} DurationMinutes={request.DurationMinutes} StudentIds=[{string.Join(",", request.StudentIds)}]");
         try
         {
             _logger.LogInformation("Starting board creation for project {ProjectId} with {StudentCount} students",
@@ -180,6 +202,7 @@ public partial class BoardsController : ControllerBase
 
             _logger.LogInformation("Found {FoundCount} students out of {RequestedCount} requested",
                 students.Count, request.StudentIds.Count);
+            DbgLog(debugLog, $"Students validated: found={students.Count} requested={request.StudentIds.Count} names=[{string.Join(", ", students.Select(s => $"{s.FirstName} {s.LastName}"))}]");
 
             if (students.Count != request.StudentIds.Count)
             {
@@ -248,6 +271,7 @@ public partial class BoardsController : ControllerBase
             var effectiveTrelloBoardJson = instituteProject?.TrelloBoardJson ?? project.TrelloBoardJson;
             var effectiveTitle = instituteProject?.Title ?? project.Title;
             var effectiveDescription = instituteProject?.Description ?? project.Description;
+            DbgLog(debugLog, $"Project loaded: ProjectId={project.Id} Title={project.Title} InstituteProject={(instituteProject == null ? "null" : $"Id={instituteProject.Id} Title={instituteProject.Title} InstituteId={instituteProject.InstituteId}")} TrelloBoardJsonPresent={!string.IsNullOrWhiteSpace(effectiveTrelloBoardJson)} TrelloBoardJsonLen={effectiveTrelloBoardJson?.Length ?? 0}");
 
             // Get configuration values
             var projectLengthWeeks = _configuration.GetValue<int>("BusinessLogicConfig:ProjectLengthInWeeks", 12);
@@ -769,6 +793,8 @@ public partial class BoardsController : ControllerBase
                     _logger.LogInformation("SystemBoard created with ID: {SystemBoardId}, URL: {SystemBoardUrl}", trelloResponse.SystemBoardId, trelloResponse.SystemBoardUrl);
                 }
                 trelloBoardId = trelloResponse.BoardId;
+                debugBoardId = trelloBoardId ?? "unknown";
+                DbgLog(debugLog, $"Trello board created: BoardId={trelloBoardId} BoardUrl={trelloResponse.BoardUrl} SystemBoardId={trelloResponse.SystemBoardId ?? "null"}");
 
                 // When CreatePMEmptyBoard and UseDBProjectBoard: override Sprint 1..VisibleSprints on EmptyBoard with SystemBoard content (no merge)
                 if (useDBProjectBoard && !string.IsNullOrEmpty(trelloResponse.SystemBoardId))
@@ -2954,6 +2980,7 @@ public partial class BoardsController : ControllerBase
                 CreatedAt = DateTime.UtcNow,
                 UpdatedAt = DateTime.UtcNow
             };
+            DbgLog(debugLog, $"ProjectBoard object created: Id={trelloBoardId} ProjectId={request.ProjectId} InstituteId={instituteProject?.InstituteId} InstituteProjectId={instituteProject?.Id} IsSingleRole={request.IsSingleRole} NextMeetingTime={nextMeetingTime:yyyy-MM-dd HH:mm:ss}Z AdminStudentId={adminStudent?.Id}");
 
             _logger.LogInformation("Creating ProjectBoard record for board: {BoardId}", trelloBoardId);
             _context.ProjectBoards.Add(projectBoard);
@@ -2969,16 +2996,19 @@ public partial class BoardsController : ControllerBase
             }
 
             _logger.LogInformation("Saving changes to database");
+            DbgLog(debugLog, $"SaveChangesAsync START — ProjectBoard + student BoardId updates");
             try
             {
                 await _context.SaveChangesAsync();
                 _logger.LogInformation("Database changes saved successfully");
+                DbgLog(debugLog, $"SaveChangesAsync OK — ProjectBoard saved, students updated with BoardId={trelloBoardId}");
                 // Do NOT delete the SystemBoard ProjectBoard record: EmptyBoard.SystemBoardId references it (FK).
                 // Deleting it would set EmptyBoard.SystemBoardId to NULL due to ON DELETE SET NULL.
             }
             catch (Exception saveEx)
             {
                 _logger.LogError(saveEx, "Error saving changes to database: {SaveException}", saveEx.Message);
+                DbgLog(debugLog, $"SaveChangesAsync FAILED: {saveEx.Message} | InnerException: {saveEx.InnerException?.Message}");
                 throw;
             }
 
@@ -3057,14 +3087,17 @@ public partial class BoardsController : ControllerBase
             }
             
             // Commit transaction BEFORE calling Teams endpoint so TeamsController can see the ProjectBoard
+            DbgLog(debugLog, $"Transaction CommitAsync START");
             try
             {
                 await transaction.CommitAsync();
                 _logger.LogInformation("Transaction committed successfully - ProjectBoard is now visible to other endpoints");
+                DbgLog(debugLog, $"Transaction CommitAsync OK — ProjectBoard visible in DB");
             }
             catch (Exception commitEx)
             {
                 _logger.LogError(commitEx, "Error committing transaction: {CommitException}", commitEx.Message);
+                DbgLog(debugLog, $"Transaction CommitAsync FAILED: {commitEx.Message}");
                 throw;
             }
 
@@ -3121,34 +3154,48 @@ public partial class BoardsController : ControllerBase
                         });
                         var content = new StringContent(jsonContent, System.Text.Encoding.UTF8, "application/json");
                         
-                        _logger.LogInformation("Calling create-meeting-smtp-for-board-auth for board {BoardId} with {AttendeeCount} attendees", 
+                        _logger.LogInformation("Calling create-meeting-smtp-for-board-auth for board {BoardId} with {AttendeeCount} attendees",
                             trelloBoardId, attendeeEmails.Count);
-                        
+                        DbgLog(debugLog, $"Teams API call START: boardId={trelloBoardId} attendees=[{string.Join(",", attendeeEmails)}] dateTime={nextMeetingTime:yyyy-MM-dd HH:mm:ss}Z title={teamsMeetingRequest.Title}");
+
                         var response = await httpClient.PostAsync("/api/Teams/use/create-meeting-smtp-for-board-auth", content);
                         var responseContent = await response.Content.ReadAsStringAsync();
-                        
+                        DbgLog(debugLog, $"Teams API response: StatusCode={(int)response.StatusCode} ({response.StatusCode}) Content={responseContent}");
+
                         if (response.IsSuccessStatusCode)
                         {
                             var result = JsonSerializer.Deserialize<JsonElement>(responseContent);
-                            if (result.TryGetProperty("actualMeetingUrl", out var actualUrlElement))
+                            // Try camelCase first (API default), fall back to PascalCase
+                            string? meetingUrlFromResponse = null;
+                            if (result.TryGetProperty("actualMeetingUrl", out var elem1) && elem1.ValueKind == JsonValueKind.String)
+                                meetingUrlFromResponse = elem1.GetString();
+                            else if (result.TryGetProperty("ActualMeetingUrl", out var elem2) && elem2.ValueKind == JsonValueKind.String)
+                                meetingUrlFromResponse = elem2.GetString();
+
+                            DbgLog(debugLog, $"Teams response parsed: actualMeetingUrl found={meetingUrlFromResponse != null} value={meetingUrlFromResponse ?? "(null)"}");
+
+                            if (!string.IsNullOrEmpty(meetingUrlFromResponse))
                             {
-                                meetingUrl = actualUrlElement.GetString();
+                                meetingUrl = meetingUrlFromResponse;
                                 _logger.LogInformation("Teams meeting created successfully via create-meeting-smtp-for-board-auth: {MeetingUrl}", meetingUrl);
-                                
+
                                 // Update ProjectBoard with the actual meeting URL (transaction already committed)
+                                // Note: TeamsController already saved NextMeetingUrl; this is a redundant confirm from BoardsController's tracked entity
                                 projectBoard.NextMeetingUrl = meetingUrl;
                                 projectBoard.NextMeetingTeacherAttendance = false;
                                 await _context.SaveChangesAsync();
                                 _logger.LogInformation("Updated ProjectBoard with meeting URL: {MeetingUrl}", meetingUrl);
+                                DbgLog(debugLog, $"ProjectBoard.NextMeetingUrl saved OK: {meetingUrl}");
                             }
                             else
                             {
                                 _logger.LogWarning("Teams meeting created but no actualMeetingUrl in response. Full response: {Response}", responseContent);
+                                DbgLog(debugLog, $"WARNING: actualMeetingUrl not found in Teams response. TeamsController may have still saved it directly.");
                             }
                         }
                         else
                         {
-                            _logger.LogWarning("Teams meeting creation failed via create-meeting-smtp-for-board-auth: {StatusCode} - {Content}. Board creation will continue without meeting.", 
+                            _logger.LogWarning("Teams meeting creation failed via create-meeting-smtp-for-board-auth: {StatusCode} - {Content}. Board creation will continue without meeting.",
                                 response.StatusCode, responseContent);
                         }
                     }
@@ -3192,13 +3239,21 @@ public partial class BoardsController : ControllerBase
             _logger.LogInformation("Successfully created board {BoardId} for project {ProjectId}", trelloBoardId, request.ProjectId);
 
             var message = (backendRepositoryUrl != null || frontendRepositoryUrl != null)
-                ? "Board and repositories created successfully!" 
+                ? "Board and repositories created successfully!"
                 : "Board created successfully! (GitHub repository creation was skipped or failed)";
 
             var squadSnap = await _context.ProjectBoards.AsNoTracking()
                 .Where(b => b.Id == trelloBoardId)
                 .Select(b => b.SquadName)
                 .FirstOrDefaultAsync();
+
+            // Re-read NextMeetingUrl from DB to confirm it was saved (by either BoardsController or TeamsController)
+            var savedNextMeetingUrl = await _context.ProjectBoards.AsNoTracking()
+                .Where(b => b.Id == trelloBoardId)
+                .Select(b => b.NextMeetingUrl)
+                .FirstOrDefaultAsync();
+            DbgLog(debugLog, $"=== CreateBoard SUCCESS === BoardId={trelloBoardId} SquadName={squadSnap} NextMeetingUrl(from DB)={savedNextMeetingUrl ?? "(null)"} meetingUrl(local)={meetingUrl ?? "(null)"}");
+            await FlushDebugLog(debugLog, debugBoardId);
 
             return Ok(new CreateBoardResponse
             {
@@ -3222,8 +3277,10 @@ public partial class BoardsController : ControllerBase
         catch (Exception ex)
         {
             var innerException = ex.InnerException?.Message ?? "No inner exception";
-            _logger.LogError(ex, "Error creating board for project {ProjectId}. Exception: {ExceptionMessage}. Inner Exception: {InnerException}", 
+            _logger.LogError(ex, "Error creating board for project {ProjectId}. Exception: {ExceptionMessage}. Inner Exception: {InnerException}",
                 request.ProjectId, ex.Message, innerException);
+            DbgLog(debugLog, $"=== CreateBoard EXCEPTION === {ex.GetType().Name}: {ex.Message} | InnerException: {innerException}\n{ex.StackTrace}");
+            await FlushDebugLog(debugLog, debugBoardId);
             return StatusCode(500, $"An error occurred while creating the board: {ex.Message}. Inner Exception: {innerException}");
         }
     }
