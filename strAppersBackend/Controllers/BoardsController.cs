@@ -2950,6 +2950,7 @@ public partial class BoardsController : ControllerBase
                 VisableModuleDesign = visableModuleDesign,
                 IsSingleRole = request.IsSingleRole,
                 InstituteId = instituteProject?.InstituteId,
+                InstituteProjectId = instituteProject?.Id,
                 CreatedAt = DateTime.UtcNow,
                 UpdatedAt = DateTime.UtcNow
             };

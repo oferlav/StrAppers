@@ -320,6 +320,13 @@ namespace strAppersBackend.Models
         [Column("IsSingleRole")]
         public bool IsSingleRole { get; set; } = false;
 
+        /// <summary>
+        /// When set, this board was provisioned from an institute-specific project template.
+        /// Sprint merges use InstituteProject.TrelloBoardJson instead of Project.TrelloBoardJson.
+        /// </summary>
+        [Column("InstituteProjectId")]
+        public int? InstituteProjectId { get; set; }
+
         // Navigation properties
         /// <summary>
         /// Navigation property to the associated project
@@ -350,6 +357,12 @@ namespace strAppersBackend.Models
         /// </summary>
         [ForeignKey(nameof(SystemBoardId))]
         public virtual ProjectBoard? SystemBoard { get; set; }
+
+        /// <summary>
+        /// Navigation property to the institute project this board was built from.
+        /// </summary>
+        [ForeignKey(nameof(InstituteProjectId))]
+        public virtual InstituteProject? InstituteProject { get; set; }
 
         /// <summary>
         /// Sprint merge state records (one per sprint when merged).

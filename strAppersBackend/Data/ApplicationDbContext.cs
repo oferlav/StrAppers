@@ -821,7 +821,8 @@ public class ApplicationDbContext : DbContext
             entity.Property(e => e.SquadName).HasColumnName("SquadName").HasMaxLength(100);
             entity.Property(e => e.VisableModuleDesign).HasColumnName("VisableModuleDesign").HasDefaultValue(false);
             entity.Property(e => e.IsSingleRole).HasColumnName("IsSingleRole").HasDefaultValue(false);
-            
+            entity.Property(e => e.InstituteProjectId).HasColumnName("InstituteProjectId");
+
             // Foreign key relationships
             entity.HasOne(e => e.Project)
                   .WithMany()
@@ -853,9 +854,15 @@ public class ApplicationDbContext : DbContext
                   .HasPrincipalKey(pb => pb.Id)
                   .OnDelete(DeleteBehavior.SetNull);
 
+            entity.HasOne(e => e.InstituteProject)
+                  .WithMany()
+                  .HasForeignKey(e => e.InstituteProjectId)
+                  .OnDelete(DeleteBehavior.SetNull);
+
             // Indexes for better performance
             entity.HasIndex(e => e.ProjectId);
             entity.HasIndex(e => e.InstituteId);
+            entity.HasIndex(e => e.InstituteProjectId);
             entity.HasIndex(e => e.CreatedAt);
             entity.HasIndex(e => e.StatusId);
             entity.HasIndex(e => e.SystemBoardId);

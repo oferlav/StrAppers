@@ -52,17 +52,40 @@ namespace strAppersBackend.Services
             {
                 var listName = $"Sprint {sprintNumber}";
 
-                // Load template first: do not add a sprint that isn't in the template (avoids empty sprints).
-                var project = await _context.Projects.AsNoTracking().FirstOrDefaultAsync(p => p.Id == projectId);
-                if (project == null || string.IsNullOrWhiteSpace(project.TrelloBoardJson))
+                // Load template: prefer InstituteProject.TrelloBoardJson when the board was provisioned
+                // from an institute project (role-based course), fall back to Projects.TrelloBoardJson.
+                var boardInstituteProjectId = await _context.ProjectBoards
+                    .AsNoTracking()
+                    .Where(pb => pb.Id == boardId)
+                    .Select(pb => pb.InstituteProjectId)
+                    .FirstOrDefaultAsync();
+
+                string? effectiveTrelloBoardJson = null;
+                if (boardInstituteProjectId.HasValue)
                 {
-                    _logger.LogInformation("[MERGE-SPRINT] Add mode: project {ProjectId} has no TrelloBoardJson; skipping sprint {SprintNumber}.", projectId, sprintNumber);
-                    return (false, "Project has no TrelloBoardJson; cannot add sprint.", 0);
+                    effectiveTrelloBoardJson = await _context.InstituteProjects
+                        .AsNoTracking()
+                        .Where(ip => ip.Id == boardInstituteProjectId.Value)
+                        .Select(ip => ip.TrelloBoardJson)
+                        .FirstOrDefaultAsync();
+                    if (!string.IsNullOrWhiteSpace(effectiveTrelloBoardJson))
+                        _logger.LogInformation("[MERGE-SPRINT] Add mode: using InstituteProject {IpId} TrelloBoardJson for board {BoardId}.", boardInstituteProjectId.Value, boardId);
+                }
+                if (string.IsNullOrWhiteSpace(effectiveTrelloBoardJson))
+                {
+                    var project = await _context.Projects.AsNoTracking().FirstOrDefaultAsync(p => p.Id == projectId);
+                    effectiveTrelloBoardJson = project?.TrelloBoardJson;
+                }
+
+                if (string.IsNullOrWhiteSpace(effectiveTrelloBoardJson))
+                {
+                    _logger.LogInformation("[MERGE-SPRINT] Add mode: no TrelloBoardJson found for board {BoardId} / project {ProjectId}; skipping sprint {SprintNumber}.", boardId, projectId, sprintNumber);
+                    return (false, "No TrelloBoardJson available; cannot add sprint.", 0);
                 }
                 TrelloProjectCreationRequest? trelloRequest = null;
                 try
                 {
-                    trelloRequest = JsonSerializer.Deserialize<TrelloProjectCreationRequest>(project.TrelloBoardJson);
+                    trelloRequest = JsonSerializer.Deserialize<TrelloProjectCreationRequest>(effectiveTrelloBoardJson);
                 }
                 catch (Exception exJson)
                 {
