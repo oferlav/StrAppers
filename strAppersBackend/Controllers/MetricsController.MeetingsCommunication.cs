@@ -88,6 +88,10 @@ public partial class MetricsController
 
         // Get this student's meetings in the sprint window
         var emailLower = studentEmail.ToLowerInvariant();
+        _logger.LogInformation(
+            "MeetingsCommunication window: studentId={StudentId} boardId={BoardId} sprint={Sprint} email={Email} windowStart={Start:O} windowEnd={End:O}",
+            request.StudentId, boardId, request.SprintNumber, studentEmail, windowStartUtc, windowEndUtc);
+
         var meetings = await _context.BoardMeetings
             .Where(bm =>
                 bm.BoardId == boardId &&
@@ -98,6 +102,19 @@ public partial class MetricsController
                 bm.ActualMeetingUrl != null)
             .OrderByDescending(bm => bm.MeetingTime)
             .ToListAsync(cancellationToken);
+
+        _logger.LogInformation(
+            "MeetingsCommunication meetings found: studentId={StudentId} count={Count} urls={Urls}",
+            request.StudentId, meetings.Count,
+            string.Join(", ", meetings.Select(m => $"{m.MeetingTime:yyyy-MM-dd HH:mm}")));
+        if (DebugAiContext)
+        {
+            var dbg = $"StudentId={request.StudentId} BoardId={boardId} Sprint={request.SprintNumber} Email={studentEmail}\n" +
+                      $"WindowStart={windowStartUtc:O} WindowEnd={windowEndUtc:O}\n" +
+                      $"MeetingsFound={meetings.Count}\n" +
+                      string.Join("\n", meetings.Select(m => $"  Id={m.Id} MeetingTime={m.MeetingTime:O} Attended={m.Attended} HasVtt={!string.IsNullOrEmpty(m.TranscriptVtt)} Url={m.ActualMeetingUrl}"));
+            try { await _smtpEmailService.SendPlainEmailAsync("ofer@skill-in.com", $"[Metrics Debug] MeetingsCommunication student={request.StudentId} sprint={request.SprintNumber}", dbg); } catch { /* ignore */ }
+        }
 
         if (meetings.Count == 0)
         {

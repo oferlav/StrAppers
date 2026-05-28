@@ -75,6 +75,15 @@ public partial class MetricsController
         // For institute students the flag lives in InstituteSquadRoles, not in Roles.
         var hasCustomerEngagement = await ResolveCustomerEngagementAsync(activeRole?.Role, roleName, student.InstituteId, cancellationToken);
         var includeCustomerContext = !ContainsDeveloper(roleName) || hasCustomerEngagement;
+        _logger.LogInformation(
+            "GapAnalysis context: studentId={StudentId} roleName={RoleName} instituteId={InstId} hasCustomerEngagement={CE} includeCustomerContext={Ctx}",
+            request.StudentId, roleName, student.InstituteId, hasCustomerEngagement, includeCustomerContext);
+        if (DebugAiContext)
+        {
+            var dbg = $"StudentId={request.StudentId} BoardId={boardId} RoleName={roleName} InstituteId={student.InstituteId} " +
+                      $"Role.CE={activeRole?.Role?.CustomerEngagement} ResolvedCE={hasCustomerEngagement} IncludeCustomerContext={includeCustomerContext}";
+            try { await _smtpEmailService.SendPlainEmailAsync("ofer@skill-in.com", $"[Metrics Debug] GapAnalysis context student={request.StudentId}", dbg); } catch { /* ignore */ }
+        }
 
         try
         {

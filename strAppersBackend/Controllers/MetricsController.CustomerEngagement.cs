@@ -58,7 +58,17 @@ public partial class MetricsController
         var activeRole = student.StudentRoles?.FirstOrDefault(sr => sr.IsActive);
         var roleName = activeRole?.Role?.Name?.Trim() ?? "Team Member";
         var hasCustomerEngagement = await ResolveCustomerEngagementAsync(activeRole?.Role, roleName, student.InstituteId, cancellationToken);
-        if (!hasCustomerEngagement && ContainsDeveloper(roleName))
+        var isDeveloper = ContainsDeveloper(roleName);
+        _logger.LogInformation(
+            "CustomerEngagement gate: studentId={StudentId} roleName={RoleName} instituteId={InstId} hasCustomerEngagement={CE} isDeveloper={Dev} → willSkip={Skip}",
+            request.StudentId, roleName, student.InstituteId, hasCustomerEngagement, isDeveloper, !hasCustomerEngagement && isDeveloper);
+        if (DebugAiContext)
+        {
+            var dbg = $"StudentId={request.StudentId} BoardId={boardId} RoleName={roleName} InstituteId={student.InstituteId} " +
+                      $"Role.CE={activeRole?.Role?.CustomerEngagement} ResolvedCE={hasCustomerEngagement} IsDeveloper={isDeveloper} WillSkip={!hasCustomerEngagement && isDeveloper}";
+            try { await _smtpEmailService.SendPlainEmailAsync("ofer@skill-in.com", $"[Metrics Debug] CustomerEngagement gate student={request.StudentId}", dbg); } catch { /* ignore */ }
+        }
+        if (!hasCustomerEngagement && isDeveloper)
             return Ok(new { success = true, metricId = CustomerEngagementMetricId, skippedLlm = true, reviewContent = (string?)null, message = "Developer role without CustomerEngagement enabled; skipping." });
 
         var board = await _context.ProjectBoards.AsNoTracking()

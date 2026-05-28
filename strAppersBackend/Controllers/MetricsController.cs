@@ -390,6 +390,8 @@ public partial class MetricsController : ControllerBase
             : $"{sprintNumber}-{(isBackend ? "B" : "F")}{idxSuffix}";
 
         var commits = await _githubService.GetRecentCommitsOnBranchAsync(owner, repo, branch, 1, token);
+        _logger.LogInformation("Adherence branch check: {Repo} branch={Branch} commitsFound={Count}",
+            $"{owner}/{repo}", branch, commits.Count);
         return commits.Count > 0;
     }
 
@@ -522,18 +524,41 @@ public partial class MetricsController : ControllerBase
         int? studentInstituteId,
         CancellationToken cancellationToken)
     {
-        if (role?.CustomerEngagement == true) return true;
+        if (role?.CustomerEngagement == true)
+        {
+            _logger.LogInformation("ResolveCustomerEngagement: roleName={RoleName} instituteId={InstId} → true (Role flag)", roleName, studentInstituteId);
+            return true;
+        }
+
         if (studentInstituteId is > 1)
         {
-            var ce = await _context.InstituteSquadRoles
+            var squadRole = await _context.InstituteSquadRoles
                 .AsNoTracking()
                 .Join(_context.InstituteSquads.AsNoTracking().Where(s => s.InstituteId == studentInstituteId.Value),
                     r => r.SquadId, s => s.Id, (r, s) => r)
                 .Where(r => r.Name == roleName)
-                .Select(r => (bool?)r.CustomerEngagement)
+                .Select(r => new { r.Id, r.Name, r.CustomerEngagement, r.SquadId })
                 .FirstOrDefaultAsync(cancellationToken);
-            if (ce.HasValue) return ce.Value;
+
+            if (squadRole != null)
+            {
+                _logger.LogInformation(
+                    "ResolveCustomerEngagement: roleName={RoleName} instituteId={InstId} squadRoleId={SrId} squadId={SqId} → CustomerEngagement={CE}",
+                    roleName, studentInstituteId, squadRole.Id, squadRole.SquadId, squadRole.CustomerEngagement);
+                return squadRole.CustomerEngagement;
+            }
+
+            _logger.LogWarning(
+                "ResolveCustomerEngagement: roleName={RoleName} instituteId={InstId} — no matching InstituteSquadRole found → false",
+                roleName, studentInstituteId);
         }
+        else
+        {
+            _logger.LogInformation(
+                "ResolveCustomerEngagement: roleName={RoleName} instituteId={InstId} — not an institute student, Role.CE={RoleCE} → false",
+                roleName, studentInstituteId, role?.CustomerEngagement);
+        }
+
         return false;
     }
 
