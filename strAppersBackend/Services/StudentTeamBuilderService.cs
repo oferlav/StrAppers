@@ -231,7 +231,7 @@ namespace strAppersBackend.Services
                             _logger.LogInformation("[INSTITUTE-TEAM-BUILDER] Assigned RoleIndex 1..{Count} for IpId {IpId}.", team.Count, ipId);
                         }
 
-                        var boardCreated = await CallCreateBoardAsync(ip.BaseProjectId.Value, ip.Id, team, isSingleRole);
+                        var boardCreated = await CallCreateBoardAsync(ip.BaseProjectId.Value, ip.Id, team, isSingleRole, ip.Title);
                         if (boardCreated.Success)
                         {
                             created++;
@@ -361,7 +361,9 @@ namespace strAppersBackend.Services
             int baseProjectId,
             int instituteProjectId,
             List<Student> team,
-            bool isSingleRole)
+            bool isSingleRole,
+            string? title = null,
+            int durationMinutes = 60)
         {
             var apiBaseUrl = (_configuration["ApiBaseUrl"] ?? "http://localhost:5000").TrimEnd('/');
             var endpoint = $"{apiBaseUrl}/api/boards/use/create";
@@ -371,7 +373,9 @@ namespace strAppersBackend.Services
                 projectId = baseProjectId,
                 studentIds = team.Select(s => s.Id).ToList(),
                 instituteProjectId,
-                isSingleRole
+                isSingleRole,
+                title,
+                durationMinutes
             };
 
             try
