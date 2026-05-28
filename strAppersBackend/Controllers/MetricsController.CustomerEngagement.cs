@@ -57,8 +57,9 @@ public partial class MetricsController
 
         var activeRole = student.StudentRoles?.FirstOrDefault(sr => sr.IsActive);
         var roleName = activeRole?.Role?.Name?.Trim() ?? "Team Member";
-        if (ContainsDeveloper(roleName))
-            return BadRequest(new { success = false, message = "Customer engagement is only evaluated for non-Developer roles." });
+        var hasCustomerEngagement = activeRole?.Role?.CustomerEngagement ?? false;
+        if (!hasCustomerEngagement && ContainsDeveloper(roleName))
+            return Ok(new { success = true, metricId = CustomerEngagementMetricId, skippedLlm = true, reviewContent = (string?)null, message = "Developer role without CustomerEngagement enabled; skipping." });
 
         var board = await _context.ProjectBoards.AsNoTracking()
             .FirstOrDefaultAsync(b => b.Id == boardId, cancellationToken);

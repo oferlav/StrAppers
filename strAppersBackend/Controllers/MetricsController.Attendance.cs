@@ -119,13 +119,16 @@ public partial class MetricsController
         }
 
         var emailLower = email.ToLowerInvariant();
+        // MeetingTime is stored as timestamp without time zone; strip UTC kind so Npgsql sends it as timestamp, not timestamptz.
+        var windowStartUnspec = DateTime.SpecifyKind(windowStartUtc, DateTimeKind.Unspecified);
+        var windowEndUnspec = DateTime.SpecifyKind(windowEndInclusiveUtc, DateTimeKind.Unspecified);
         var meetings = await _context.BoardMeetings.AsNoTracking()
             .Where(bm =>
                 bm.BoardId == boardIdTrim &&
                 bm.StudentEmail != null &&
                 bm.StudentEmail.ToLower() == emailLower &&
-                bm.MeetingTime >= windowStartUtc &&
-                bm.MeetingTime <= windowEndInclusiveUtc)
+                bm.MeetingTime >= windowStartUnspec &&
+                bm.MeetingTime <= windowEndUnspec)
             .ToListAsync(cancellationToken);
 
         var total = meetings.Count;

@@ -67,13 +67,20 @@ public partial class MetricsController
             ? roleName
             : $"{roleName} — {activeRole!.Role!.Description!.Trim()}";
 
+        // On single-role boards the Trello card label includes the role index (e.g. "Full Stack Developer 1").
+        var roleLabel = board.IsSingleRole && student.RoleIndex > 0
+            ? $"{roleName} {student.RoleIndex}"
+            : ResolveTrelloSprintCardLabel(activeRole?.Role, fullStackTrackLabel: null);
+        // Include customer context for non-developer roles (B2C behaviour) or any role with CustomerEngagement=true.
+        var includeCustomerContext = !ContainsDeveloper(roleName) || (activeRole?.Role?.CustomerEngagement ?? false);
+
         try
         {
             if (request.Test)
             {
                 if (IsFullStackRole(roleName))
                 {
-                    var fsLabelsTest = await _trelloService.ResolveSprintLabelsAsync(boardId, request.SprintNumber, roleName);
+                    var fsLabelsTest = await _trelloService.ResolveSprintLabelsAsync(boardId, request.SprintNumber, roleLabel);
                     if (fsLabelsTest.Length == 1)
                     {
                         // Board has a Full Stack card — treat as single-track
@@ -81,7 +88,7 @@ public partial class MetricsController
                             (ContainsDeveloper(roleName) && !IsFrontendDeveloperRole(roleName));
                         var singleFsPrompts = await BuildGapAnalysisPromptsForTrackAsync(
                             boardId, board, student.Id, request.SprintNumber, fsLabelsTest[0], roleDesc, roleName,
-                            isBackend: backendFirstFsTest, cancellationToken);
+                            isBackend: backendFirstFsTest, includeCustomerContext, cancellationToken);
                         return Ok(new
                         {
                             success = true,
@@ -95,9 +102,9 @@ public partial class MetricsController
                     }
                     // Fall back to two-track (BE + FE)
                     var bePrompts = await BuildGapAnalysisPromptsForTrackAsync(
-                        boardId, board, student.Id, request.SprintNumber, "Backend Developer", $"{roleDesc} (backend repository)", roleName, isBackend: true, cancellationToken);
+                        boardId, board, student.Id, request.SprintNumber, "Backend Developer", $"{roleDesc} (backend repository)", roleName, isBackend: true, includeCustomerContext, cancellationToken);
                     var fePrompts = await BuildGapAnalysisPromptsForTrackAsync(
-                        boardId, board, student.Id, request.SprintNumber, "Frontend Developer", $"{roleDesc} (frontend repository)", roleName, isBackend: false, cancellationToken);
+                        boardId, board, student.Id, request.SprintNumber, "Frontend Developer", $"{roleDesc} (frontend repository)", roleName, isBackend: false, includeCustomerContext, cancellationToken);
                     return Ok(new
                     {
                         success = true,
@@ -121,12 +128,12 @@ public partial class MetricsController
                     });
                 }
 
-                var trelloLabelTest = ResolveTrelloSprintCardLabel(activeRole?.Role, fullStackTrackLabel: null);
+                var trelloLabelTest = roleLabel;
                 var backendFirstTest = IsBackendDeveloperRole(roleName) ||
                     (ContainsDeveloper(roleName) && !IsFrontendDeveloperRole(roleName));
                 var singlePrompts = await BuildGapAnalysisPromptsForTrackAsync(
                     boardId, board, student.Id, request.SprintNumber, trelloLabelTest, roleDesc, roleName,
-                    isBackend: backendFirstTest,
+                    isBackend: backendFirstTest, includeCustomerContext,
                     cancellationToken);
                 return Ok(new
                 {
@@ -142,7 +149,7 @@ public partial class MetricsController
 
             if (IsFullStackRole(roleName))
             {
-                var fsLabels = await _trelloService.ResolveSprintLabelsAsync(boardId, request.SprintNumber, roleName);
+                var fsLabels = await _trelloService.ResolveSprintLabelsAsync(boardId, request.SprintNumber, roleLabel);
                 if (fsLabels.Length == 1)
                 {
                     // Board has a Full Stack card — single track analysis
@@ -150,7 +157,7 @@ public partial class MetricsController
                         (ContainsDeveloper(roleName) && !IsFrontendDeveloperRole(roleName));
                     var fsTrackResult = await RunGapAnalysisForTrackAsync(
                         boardId, board, student.Id, request.SprintNumber, fsLabels[0], roleDesc, roleName,
-                        isBackend: backendFirstFs, cancellationToken);
+                        isBackend: backendFirstFs, includeCustomerContext, cancellationToken);
 
                     if (!fsTrackResult.ParsedOk)
                     {
@@ -179,7 +186,7 @@ public partial class MetricsController
 
                 // Two-track (BE + FE) — existing behavior
                 var be = await RunGapAnalysisForTrackAsync(
-                    boardId, board, student.Id, request.SprintNumber, "Backend Developer", $"{roleDesc} (backend repository)", roleName, isBackend: true, cancellationToken);
+                    boardId, board, student.Id, request.SprintNumber, "Backend Developer", $"{roleDesc} (backend repository)", roleName, isBackend: true, includeCustomerContext, cancellationToken);
 
                 if (!be.ParsedOk)
                 {
@@ -197,7 +204,7 @@ public partial class MetricsController
                 await UpsertCacheMetricsAsync(boardId, student.Id, request.SprintNumber, GapAnalysisMetricId, beSection, beGraphB64, cancellationToken);
 
                 var fe = await RunGapAnalysisForTrackAsync(
-                    boardId, board, student.Id, request.SprintNumber, "Frontend Developer", $"{roleDesc} (frontend repository)", roleName, isBackend: false, cancellationToken);
+                    boardId, board, student.Id, request.SprintNumber, "Frontend Developer", $"{roleDesc} (frontend repository)", roleName, isBackend: false, includeCustomerContext, cancellationToken);
 
                 if (!fe.ParsedOk)
                 {
@@ -236,12 +243,12 @@ public partial class MetricsController
                 });
             }
 
-            var trelloLabel = ResolveTrelloSprintCardLabel(activeRole?.Role, fullStackTrackLabel: null);
+            var trelloLabel = roleLabel;
             var backendFirst = IsBackendDeveloperRole(roleName) ||
                 (ContainsDeveloper(roleName) && !IsFrontendDeveloperRole(roleName));
             var single = await RunGapAnalysisForTrackAsync(
                 boardId, board, student.Id, request.SprintNumber, trelloLabel, roleDesc, roleName,
-                isBackend: backendFirst,
+                isBackend: backendFirst, includeCustomerContext,
                 cancellationToken);
 
             if (!single.ParsedOk)
@@ -309,9 +316,10 @@ public partial class MetricsController
         string expertRoleDescription,
         string originalRoleName,
         bool isBackend,
+        bool includeCustomerContext,
         CancellationToken cancellationToken)
     {
-        var contextMd = await BuildGapAnalysisContextAsync(boardId, board, studentId, sprintNumber, trelloRoleLabel, originalRoleName, cancellationToken);
+        var contextMd = await BuildGapAnalysisContextAsync(boardId, board, studentId, sprintNumber, trelloRoleLabel, originalRoleName, includeCustomerContext, cancellationToken);
         var artifactsMd = await BuildGapAnalysisArtifactsAsync(boardId, board, studentId, sprintNumber, trelloRoleLabel, originalRoleName, isBackend, cancellationToken);
 
         var systemTemplate = LoadGapAnalysisSystemPrompt();
@@ -344,10 +352,11 @@ public partial class MetricsController
         string expertRoleDescription,
         string originalRoleName,
         bool isBackend,
+        bool includeCustomerContext,
         CancellationToken cancellationToken)
     {
         var prompts = await BuildGapAnalysisPromptsForTrackAsync(
-            boardId, board, studentId, sprintNumber, trelloRoleLabel, expertRoleDescription, originalRoleName, isBackend, cancellationToken);
+            boardId, board, studentId, sprintNumber, trelloRoleLabel, expertRoleDescription, originalRoleName, isBackend, includeCustomerContext, cancellationToken);
         var systemPrompt = prompts.SystemPrompt;
         var userPrompt = prompts.UserPrompt;
 
@@ -447,6 +456,7 @@ public partial class MetricsController
         int sprintNumber,
         string trelloRoleLabel,
         string originalRoleName,
+        bool includeCustomerContext,
         CancellationToken cancellationToken)
     {
         var sb = new StringBuilder();
@@ -532,7 +542,7 @@ public partial class MetricsController
             }
         }
 
-        if (!ContainsDeveloper(originalRoleName))
+        if (includeCustomerContext)
         {
             var (_, effectiveCustomerPastStory, _) = await strAppersBackend.Utilities.ProjectContextHelper.GetEffectiveProjectDataAsync(
                 _context, board.ProjectId, board.InstituteProjectId, cancellationToken);

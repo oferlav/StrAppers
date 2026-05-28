@@ -99,6 +99,11 @@ public partial class MetricsController : ControllerBase
         var roleName = activeRole?.Role?.Name?.Trim() ?? "Team Member";
         var fullStackRole = IsFullStackRole(roleName);
 
+        // On single-role boards the Trello card label includes the role index (e.g. "Full Stack Developer 1").
+        var roleLabel = board.IsSingleRole && student.RoleIndex > 0
+            ? $"{roleName} {student.RoleIndex}"
+            : roleName;
+
         string? cardId;
         string? sprintBackendCardId = null;
         string? sprintFrontendCardId = null;
@@ -108,7 +113,7 @@ public partial class MetricsController : ControllerBase
         // For Full Stack: check if the board has a Full Stack sprint card first; if not, fall back to Backend Developer + Frontend Developer.
         if (fullStackRole)
         {
-            var fsLabels = await _trelloService.ResolveSprintLabelsAsync(boardId, request.SprintNumber, roleName);
+            var fsLabels = await _trelloService.ResolveSprintLabelsAsync(boardId, request.SprintNumber, roleLabel);
             if (fsLabels.Length == 1)
             {
                 // Board has a Full Stack card — use it as the single card
@@ -149,7 +154,7 @@ public partial class MetricsController : ControllerBase
         }
         else
         {
-            cardId = await _trelloService.GetSprintRoleCardIdAsync(boardId, request.SprintNumber, roleName);
+            cardId = await _trelloService.GetSprintRoleCardIdAsync(boardId, request.SprintNumber, roleLabel);
             if (string.IsNullOrEmpty(cardId))
             {
                 return Ok(new
@@ -157,7 +162,7 @@ public partial class MetricsController : ControllerBase
                     success = true,
                     metricId = AdherenceMetricId,
                     reviewContent = "",
-                    message = $"No sprint card found in Sprint {request.SprintNumber} with label matching role \"{roleName}\".",
+                    message = $"No sprint card found in Sprint {request.SprintNumber} with label matching role \"{roleLabel}\".",
                     requiredSkillData = false,
                     requiredResourceData = false
                 });
