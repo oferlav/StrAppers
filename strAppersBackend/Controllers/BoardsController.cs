@@ -70,9 +70,9 @@ public partial class BoardsController : ControllerBase
     }
 
     // ===== BOARD CREATION DEBUG LOG =====
-    // Set _debugBoardCreation = true to capture full board creation log to temp file + email ofer@skill-in.com.
-    // Set to false to disable. Safe to deploy either way — failures in logging are silently ignored.
-    private static bool _debugBoardCreation = true; // ← TOGGLE ON/OFF
+    // Toggle via appsettings.json: "Debug": { "BoardCreation": true }
+    // Or Azure App Service env var: Debug__BoardCreation=true   (default: false)
+    private bool DebugBoardCreation => _configuration.GetValue<bool>("Debug:BoardCreation", false);
 
     private static void DbgLog(System.Text.StringBuilder? sb, string msg)
         => sb?.AppendLine($"[{DateTime.UtcNow:yyyy-MM-dd HH:mm:ss.fff}Z] {msg}");
@@ -182,7 +182,7 @@ public partial class BoardsController : ControllerBase
     public async Task<ActionResult<CreateBoardResponse>> CreateBoard([FromBody] CreateBoardRequest request)
     {
         // DEBUG LOG — must be outside try so catch block can access and flush it
-        System.Text.StringBuilder? debugLog = _debugBoardCreation ? new System.Text.StringBuilder() : null;
+        System.Text.StringBuilder? debugLog = DebugBoardCreation ? new System.Text.StringBuilder() : null;
         string debugBoardId = "unknown";
         DbgLog(debugLog, $"=== CreateBoard START === ProjectId={request.ProjectId} InstituteProjectId={request.InstituteProjectId} IsSingleRole={request.IsSingleRole} Title={request.Title} DurationMinutes={request.DurationMinutes} StudentIds=[{string.Join(",", request.StudentIds)}]");
         try
