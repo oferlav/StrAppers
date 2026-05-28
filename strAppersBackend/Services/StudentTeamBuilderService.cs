@@ -247,13 +247,9 @@ namespace strAppersBackend.Services
                             var msg = $"Institute {instituteId}, IpId {ipId}: CreateBoard failed — {boardCreated.Error}";
                             messages.Add(msg);
                             _logger.LogWarning("[INSTITUTE-TEAM-BUILDER] {Message}", msg);
-
-                            // Revert RoleIndex on failure
-                            if (isSingleRole)
-                            {
-                                foreach (var s in team) { s.RoleIndex = 0; s.UpdatedAt = DateTime.UtcNow; }
-                                await _context.SaveChangesAsync();
-                            }
+                            // Note: RoleIndex is NOT reverted on failure. The HTTP call to BoardsController
+                            // can time out (Azure 230s request limit) while the board is still being created
+                            // server-side. Reverting would clobber a valid assignment.
                         }
                     }
                 }
