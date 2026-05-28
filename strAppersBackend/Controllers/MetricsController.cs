@@ -319,12 +319,52 @@ public partial class MetricsController : ControllerBase
 
             if (IsFullStackRole(rn))
             {
-                var bOk = await BranchHasAnyCommitAsync(backendUrl, sprintNumber, isBackend: true, token, roleIndex);
-                var fOk = await BranchHasAnyCommitAsync(frontendUrl, sprintNumber, isBackend: false, token, roleIndex);
-                if (!bOk)
-                    lines.Add("Backend work was not completed or was not committed for this sprint.");
-                if (!fOk)
-                    lines.Add("Frontend work was not completed or was not committed for this sprint.");
+                bool checkBackend = true;
+                bool checkFrontend = true;
+
+                // Role-based (single-role) boards: read the CardId custom field from the Trello sprint card
+                // to determine which track(s) the student was assigned to this sprint (e.g. "1-B" → backend only, "2-F" → frontend only).
+                // B2C boards (!board.IsSingleRole) keep the existing behaviour: always check both tracks.
+                if (board.IsSingleRole)
+                {
+                    var cardLabel = roleIndex > 0 ? $"{rn} {roleIndex}" : rn;
+                    var trelloCardId = await _trelloService.GetSprintCardCustomFieldValueAsync(boardId, sprintNumber, cardLabel, "CardId");
+
+                    _logger.LogInformation(
+                        "Adherence FullStack CardId scope: boardId={BoardId} sprint={Sprint} roleLabel={Label} cardIdValue={CardIdValue}",
+                        boardId, sprintNumber, cardLabel, trelloCardId ?? "(null)");
+
+                    if (DebugAiContext)
+                    {
+                        var dbg = $"BoardId={boardId} Sprint={sprintNumber} RoleLabel={cardLabel} CardIdValue={trelloCardId ?? "(null)"} StudentId={studentId}";
+                        try { await _smtpEmailService.SendPlainEmailAsync("ofer@skill-in.com", $"[Metrics Debug] Adherence FullStack CardId student={studentId}", dbg); } catch { /* ignore */ }
+                    }
+
+                    if (!string.IsNullOrWhiteSpace(trelloCardId))
+                    {
+                        var hasB = trelloCardId.Contains('B', StringComparison.OrdinalIgnoreCase);
+                        var hasF = trelloCardId.Contains('F', StringComparison.OrdinalIgnoreCase);
+                        if (hasB || hasF)
+                        {
+                            checkBackend = hasB;
+                            checkFrontend = hasF;
+                        }
+                        // If neither B nor F (unexpected format), fall back to checking both tracks
+                    }
+                }
+
+                if (checkBackend)
+                {
+                    var bOk = await BranchHasAnyCommitAsync(backendUrl, sprintNumber, isBackend: true, token, roleIndex);
+                    if (!bOk)
+                        lines.Add("Backend work was not completed or was not committed for this sprint.");
+                }
+                if (checkFrontend)
+                {
+                    var fOk = await BranchHasAnyCommitAsync(frontendUrl, sprintNumber, isBackend: false, token, roleIndex);
+                    if (!fOk)
+                        lines.Add("Frontend work was not completed or was not committed for this sprint.");
+                }
                 return;
             }
 
