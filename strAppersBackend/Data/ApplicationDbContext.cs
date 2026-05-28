@@ -1445,7 +1445,7 @@ public class ApplicationDbContext : DbContext
             entity.Property(e => e.AssistMe).HasDefaultValue(false);
             entity.Property(e => e.NextMeetingTime).HasColumnName("NextMeetingTime").HasColumnType("timestamp with time zone");
             entity.Property(e => e.NextMeetingUrl).HasColumnName("NextMeetingUrl").HasMaxLength(1000);
-            entity.Property(e => e.RoleIndex).HasDefaultValue(0);
+            entity.Property(e => e.RoleIndex).HasDefaultValue(0).ValueGeneratedNever();
 
             entity.HasOne(e => e.SubscriptionType)
                   .WithMany(s => s.Students)

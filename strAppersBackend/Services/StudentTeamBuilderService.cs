@@ -220,6 +220,7 @@ namespace strAppersBackend.Services
                             {
                                 team[i].RoleIndex = i + 1;
                                 team[i].UpdatedAt = DateTime.UtcNow;
+                                _context.Entry(team[i]).Property(x => x.RoleIndex).IsModified = true;
                             }
                             try { await _context.SaveChangesAsync(); }
                             catch (Exception ex)
