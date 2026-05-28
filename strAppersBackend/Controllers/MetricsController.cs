@@ -27,6 +27,9 @@ public partial class MetricsController : ControllerBase
     private readonly IHttpClientFactory _httpClientFactory;
     private readonly PromptConfig _promptConfig;
     private readonly IMicrosoftGraphService _graphService;
+    private readonly ISmtpEmailService _smtpEmailService;
+
+    private bool DebugAiContext => _configuration.GetValue<bool>("Debug:AiContext", false);
 
     public MetricsController(
         ApplicationDbContext context,
@@ -37,7 +40,8 @@ public partial class MetricsController : ControllerBase
         IChatCompletionService chatCompletionService,
         IHttpClientFactory httpClientFactory,
         IOptions<PromptConfig> promptConfig,
-        IMicrosoftGraphService graphService)
+        IMicrosoftGraphService graphService,
+        ISmtpEmailService smtpEmailService)
     {
         _context = context;
         _trelloService = trelloService;
@@ -48,6 +52,7 @@ public partial class MetricsController : ControllerBase
         _httpClientFactory = httpClientFactory;
         _promptConfig = promptConfig.Value;
         _graphService = graphService;
+        _smtpEmailService = smtpEmailService;
     }
 
     public class AdherenceRequest

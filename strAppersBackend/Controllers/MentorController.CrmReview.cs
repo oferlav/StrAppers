@@ -124,6 +124,7 @@ public partial class MentorController
                     _context,
                     moduleInt,
                     board.ProjectId,
+                    board.InstituteProjectId,
                     cancellationToken);
                 contextMd.AppendLine("### Project module (database)");
                 if (pm == null)
@@ -193,11 +194,11 @@ public partial class MentorController
                 request.SprintNumber,
                 cancellationToken);
 
-            var project = await _context.Projects.AsNoTracking()
-                .FirstOrDefaultAsync(p => p.Id == board.ProjectId, cancellationToken);
-            var customerPastStory = string.IsNullOrWhiteSpace(project?.CustomerPastStory)
+            var (_, effectiveCustomerPastStory, _) = await strAppersBackend.Utilities.ProjectContextHelper.GetEffectiveProjectDataAsync(
+                _context, board.ProjectId, board.InstituteProjectId, cancellationToken);
+            var customerPastStory = string.IsNullOrWhiteSpace(effectiveCustomerPastStory)
                 ? "(Not set on this project.)"
-                : project!.CustomerPastStory!.Trim();
+                : effectiveCustomerPastStory.Trim();
 
             var stakeholderRows = await _context.Stakeholders
                 .AsNoTracking()

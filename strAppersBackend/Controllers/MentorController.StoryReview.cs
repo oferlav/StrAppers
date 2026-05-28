@@ -1,4 +1,4 @@
-using System.Text;
+﻿using System.Text;
 using System.Text.Json;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
@@ -85,9 +85,9 @@ public partial class MentorController
 
             if (int.TryParse(moduleIdStr.Trim(), out var moduleInt))
             {
-                var pmRow = await _context.ProjectModules.AsNoTracking()
-                    .FirstOrDefaultAsync(m => m.Id == moduleInt && m.ProjectId == board.ProjectId, cancellationToken);
-                contextMd.AppendLine("### [INTERNAL] Product scope text (reasoning only; never cite as “module” or “database” to the student)");
+                var pmRow = await strAppersBackend.Utilities.ProjectModuleLookup.FindByBoardScopeAsync(
+                    _context, moduleInt, board.ProjectId, board.InstituteProjectId, cancellationToken);
+                contextMd.AppendLine("### [INTERNAL] Product scope text (reasoning only; never cite as \"module\" or \"database\" to the student)");
                 if (pmRow == null)
                 {
                     contextMd.AppendLine($"No matching scope row for module id {moduleInt} in this project.");
@@ -147,11 +147,11 @@ public partial class MentorController
             else if (mentorCtxEl.TryGetProperty("userPrompt", out var up2))
                 workspaceUserPrompt = up2.GetString() ?? "";
 
-            var project = await _context.Projects.AsNoTracking()
-                .FirstOrDefaultAsync(p => p.Id == board.ProjectId, cancellationToken);
-            var customerPastStory = string.IsNullOrWhiteSpace(project?.CustomerPastStory)
+            var (_, effectiveCustomerPastStory, _) = await strAppersBackend.Utilities.ProjectContextHelper.GetEffectiveProjectDataAsync(
+                _context, board.ProjectId, board.InstituteProjectId, cancellationToken);
+            var customerPastStory = string.IsNullOrWhiteSpace(effectiveCustomerPastStory)
                 ? "(Not set on this project.)"
-                : project!.CustomerPastStory!.Trim();
+                : effectiveCustomerPastStory.Trim();
 
             var reviewInstructions = LoadMentorPromptFile("StoryReviewSystem")?.Trim()
                 ?? "Review the user story card and customer chat; use MENTOR WORKSPACE (sprint tasks) as context for planned vs story coverage. Do not name internal scope/backstory.";
@@ -178,7 +178,7 @@ public partial class MentorController
             userMessage.AppendLine("=== [INTERNAL] Additional customer/product backstory (reasoning only — do not mention, title, or summarize for the student) ===");
             userMessage.AppendLine(customerPastStory);
             userMessage.AppendLine();
-            userMessage.AppendLine("Write the review now: primary focus is the **user story card** and the **customer conversation**, informed by **MENTOR WORKSPACE** (sprint tasks — what the team committed to this sprint). Do not output sections about “module description,” “database,” or “customer past story” as labeled topics.");
+            userMessage.AppendLine("Write the review now: primary focus is the **user story card** and the **customer conversation**, informed by **MENTOR WORKSPACE** (sprint tasks — what the team committed to this sprint). Do not output sections about \"module description,\" \"database,\" or \"customer past story\" as labeled topics.");
 
             var userPromptFinal = userMessage.ToString();
 

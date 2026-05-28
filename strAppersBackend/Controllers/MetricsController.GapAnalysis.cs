@@ -429,6 +429,7 @@ public partial class MetricsController
             _context,
             moduleId,
             board.ProjectId,
+            board.InstituteProjectId,
             cancellationToken);
         if (pm == null)
             return;
@@ -533,11 +534,12 @@ public partial class MetricsController
 
         if (!ContainsDeveloper(originalRoleName))
         {
-            var project = await _context.Projects.AsNoTracking().FirstOrDefaultAsync(p => p.Id == board.ProjectId, cancellationToken);
-            if (project != null && !string.IsNullOrWhiteSpace(project.CustomerPastStory))
+            var (_, effectiveCustomerPastStory, _) = await strAppersBackend.Utilities.ProjectContextHelper.GetEffectiveProjectDataAsync(
+                _context, board.ProjectId, board.InstituteProjectId, cancellationToken);
+            if (!string.IsNullOrWhiteSpace(effectiveCustomerPastStory))
             {
                 sb.AppendLine("### Customer background (project)");
-                sb.AppendLine(project.CustomerPastStory.Trim());
+                sb.AppendLine(effectiveCustomerPastStory.Trim());
                 sb.AppendLine();
             }
 

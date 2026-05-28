@@ -71,6 +71,7 @@ public partial class MentorController
                     _context,
                     moduleInt,
                     board.ProjectId,
+                    board.InstituteProjectId,
                     cancellationToken);
                 contextMd.AppendLine("### Project module (database)");
                 if (pm == null)

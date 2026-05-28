@@ -34,6 +34,9 @@ namespace strAppersBackend.Controllers
         private readonly IOptions<TestingConfig> _testingConfig;
         private readonly IServiceScopeFactory _serviceScopeFactory;
         private readonly IAzureBlobStorageService _azureBlobStorage;
+        private readonly ISmtpEmailService _smtpEmailService;
+
+        private bool DebugAiContext => _configuration.GetValue<bool>("Debug:AiContext", false);
 
         public MentorController(
             ApplicationDbContext context,
@@ -51,7 +54,8 @@ namespace strAppersBackend.Controllers
             IOptions<DeploymentsConfig> deploymentsConfig,
             IOptions<TestingConfig> testingConfig,
             IServiceScopeFactory serviceScopeFactory,
-            IAzureBlobStorageService azureBlobStorage)
+            IAzureBlobStorageService azureBlobStorage,
+            ISmtpEmailService smtpEmailService)
         {
             _context = context;
             _logger = logger;
@@ -69,6 +73,7 @@ namespace strAppersBackend.Controllers
             _testingConfig = testingConfig;
             _serviceScopeFactory = serviceScopeFactory;
             _azureBlobStorage = azureBlobStorage;
+            _smtpEmailService = smtpEmailService;
         }
 
         /// <summary>When DebugSystemPrompt is true, returns a source marker for logging; otherwise empty.</summary>
@@ -285,6 +290,8 @@ namespace strAppersBackend.Controllers
                     return BadRequest(new { Success = false, Message = $"Project not found for student {studentId}" });
                 }
 
+                var boardInstituteProjectId = student.ProjectBoard?.InstituteProjectId;
+
                 // Get Trello board lists to find the sprint list
                 var listsResult = await GetBoardListsAsync(student.BoardId);
                 
@@ -461,17 +468,17 @@ namespace strAppersBackend.Controllers
                                 // Try to parse as integer
                                 if (int.TryParse(moduleIdStr, out int moduleId))
                                 {
-                                    _logger.LogDebug("Looking up module with ID {ModuleId} for project {ProjectId}", moduleId, project.Id);
-                                    
-                                    var module = await _context.ProjectModules
-                                        .FirstOrDefaultAsync(pm => pm.Id == moduleId && pm.ProjectId == project.Id);
-                                    
+                                    _logger.LogDebug("Looking up module with ID {ModuleId} for project {ProjectId} (InstituteProjectId={IpId})", moduleId, project.Id, boardInstituteProjectId?.ToString() ?? "null");
+
+                                    var module = await strAppersBackend.Utilities.ProjectModuleLookup.FindByBoardScopeAsync(
+                                        _context, moduleId, project.Id, boardInstituteProjectId);
+
                                     if (module != null)
                                     {
                                         if (!string.IsNullOrEmpty(module.Description))
                                         {
                                             moduleDescriptions[moduleIdStr] = module.Description;
-                                            _logger.LogDebug("Found module description for ModuleId {ModuleId}: {Description}", 
+                                            _logger.LogDebug("Found module description for ModuleId {ModuleId}: {Description}",
                                                 moduleId, module.Description.Substring(0, Math.Min(50, module.Description.Length)));
                                         }
                                         else
@@ -481,7 +488,7 @@ namespace strAppersBackend.Controllers
                                     }
                                     else
                                     {
-                                        _logger.LogWarning("Module {ModuleId} not found for project {ProjectId}", moduleId, project.Id);
+                                        _logger.LogWarning("Module {ModuleId} not found for project {ProjectId} (InstituteProjectId={IpId})", moduleId, project.Id, boardInstituteProjectId?.ToString() ?? "null");
                                     }
                                 }
                                 else
@@ -683,6 +690,9 @@ namespace strAppersBackend.Controllers
                     ""                                     // {11} - User question (empty for context gathering)
                 );
 
+                var (effectiveProjectDescription, _, _) = await strAppersBackend.Utilities.ProjectContextHelper.GetEffectiveProjectDataAsync(
+                    _context, project.Id, boardInstituteProjectId);
+
                 return Ok(new
                 {
                     Success = true,
@@ -690,7 +700,7 @@ namespace strAppersBackend.Controllers
                     {
                         StudentId = studentId,
                         SprintId = sprintId,
-                        ProjectDescription = project.Description,
+                        ProjectDescription = effectiveProjectDescription ?? project.Description,
                         UserProfile = new
                         {
                             FirstName = student.FirstName,
@@ -2856,7 +2866,8 @@ This is a ROLE COURSE (Track D). Every squad-based assumption in the context abo
                                 scopedDeploymentsConfig,
                                 scopedTestingConfig,
                                 scope.ServiceProvider.GetRequiredService<IServiceScopeFactory>(),
-                                scope.ServiceProvider.GetRequiredService<IAzureBlobStorageService>());
+                                scope.ServiceProvider.GetRequiredService<IAzureBlobStorageService>(),
+                                scope.ServiceProvider.GetRequiredService<ISmtpEmailService>());
                             await tempController.ValidateBackendInternal(capturedBoardId, capturedBranch, fromRailwayWebhook: true);
                             scopedLogger.LogInformation("[RAILWAY WEBHOOK] BuildValidation updated for BoardId={BoardId}, Branch={Branch}", capturedBoardId, capturedBranch);
                         }
@@ -6495,6 +6506,7 @@ This is a ROLE COURSE (Track D). Every squad-based assumption in the context abo
                 }
 
                 // Get module descriptions
+                var internalBoardInstituteProjectId = student.ProjectBoard?.InstituteProjectId;
                 var moduleDescriptions = new Dictionary<string, string>();
                 foreach (var task in userTasks)
                 {
@@ -6519,8 +6531,8 @@ This is a ROLE COURSE (Track D). Every squad-based assumption in the context abo
                                 moduleIdStr = moduleIdStr.Trim().Trim('"').Trim('\'').Trim();
                                 if (int.TryParse(moduleIdStr, out int moduleId))
                                 {
-                                    var module = await _context.ProjectModules
-                                        .FirstOrDefaultAsync(pm => pm.Id == moduleId && pm.ProjectId == project.Id);
+                                    var module = await strAppersBackend.Utilities.ProjectModuleLookup.FindByBoardScopeAsync(
+                                        _context, moduleId, project.Id, internalBoardInstituteProjectId);
 
                                     if (module != null && !string.IsNullOrEmpty(module.Description))
                                     {
@@ -10666,7 +10678,8 @@ APPROVAL: no    (request changes before merge)";
                                                         scopedDeploymentsConfig,
                                                         scopedTestingConfig,
                                                         scope.ServiceProvider.GetRequiredService<IServiceScopeFactory>(),
-                                                        scope.ServiceProvider.GetRequiredService<IAzureBlobStorageService>());
+                                                        scope.ServiceProvider.GetRequiredService<IAzureBlobStorageService>(),
+                                                        scope.ServiceProvider.GetRequiredService<ISmtpEmailService>());
                                                     
                                                     // Call ProcessValidationAsync with scoped services (isWebhook=true for webhook-initiated)
                                                     var (success, feedback, errorMessage) = await tempController.ProcessValidationAsync(

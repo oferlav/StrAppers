@@ -204,12 +204,12 @@ public partial class MetricsController
     {
         var sb = new StringBuilder();
 
-        var project = await _context.Projects.AsNoTracking()
-            .FirstOrDefaultAsync(p => p.Id == board.ProjectId, cancellationToken);
-        if (project != null && !string.IsNullOrWhiteSpace(project.CustomerPastStory))
+        var (_, effectiveCustomerPastStory, _) = await strAppersBackend.Utilities.ProjectContextHelper.GetEffectiveProjectDataAsync(
+            _context, board.ProjectId, board.InstituteProjectId, cancellationToken);
+        if (!string.IsNullOrWhiteSpace(effectiveCustomerPastStory))
         {
             sb.AppendLine("### Customer background (project)");
-            sb.AppendLine(project.CustomerPastStory.Trim());
+            sb.AppendLine(effectiveCustomerPastStory.Trim());
             sb.AppendLine();
         }
         else
