@@ -88,16 +88,13 @@ public partial class MetricsController
 
         // Get this student's meetings in the sprint window
         var emailLower = studentEmail.ToLowerInvariant();
-        // MeetingTime is stored as timestamp without time zone; strip UTC kind so Npgsql sends it as timestamp, not timestamptz.
-        var windowStartUnspec = DateTime.SpecifyKind(windowStartUtc, DateTimeKind.Unspecified);
-        var windowEndUnspec = DateTime.SpecifyKind(windowEndUtc, DateTimeKind.Unspecified);
         var meetings = await _context.BoardMeetings
             .Where(bm =>
                 bm.BoardId == boardId &&
                 bm.StudentEmail != null &&
                 bm.StudentEmail.ToLower() == emailLower &&
-                bm.MeetingTime >= windowStartUnspec &&
-                bm.MeetingTime <= windowEndUnspec &&
+                bm.MeetingTime >= windowStartUtc &&
+                bm.MeetingTime <= windowEndUtc &&
                 bm.ActualMeetingUrl != null)
             .OrderByDescending(bm => bm.MeetingTime)
             .ToListAsync(cancellationToken);

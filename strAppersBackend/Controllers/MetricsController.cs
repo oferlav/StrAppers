@@ -208,6 +208,9 @@ public partial class MetricsController : ControllerBase
 
         if (fullStackRole)
         {
+            // When there is a single Full Stack card, sprintFrontendCardId is null internally (one card covers both tracks).
+            // Surface the card ID for both slots so callers know both tracks were evaluated against the same card.
+            var reportedFrontendCardId = sprintFrontendCardId ?? sprintBackendCardId;
             return Ok(new
             {
                 success = true,
@@ -217,7 +220,7 @@ public partial class MetricsController : ControllerBase
                 requiredResourceData = requiredResource,
                 sprintRoleCardId = cardId,
                 sprintRoleBackendCardId = sprintBackendCardId,
-                sprintRoleFrontendCardId = sprintFrontendCardId
+                sprintRoleFrontendCardId = reportedFrontendCardId
             });
         }
 
