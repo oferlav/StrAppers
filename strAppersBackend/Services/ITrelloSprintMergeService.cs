@@ -12,7 +12,7 @@ namespace strAppersBackend.Services
         /// <param name="boardId">Live board Trello ID.</param>
         /// <param name="sprintNumber">Sprint number (e.g. 1 for Sprint1).</param>
         /// <param name="merge">When true, merge live and system sprint via AI; when false, use system sprint only.</param>
-        /// <returns>Success, error message if failed, and cards count on success.</returns>
-        Task<(bool Success, string? Error, int CardsCount)> ExecuteMergeSprintAsync(int projectId, string boardId, int sprintNumber, bool merge);
+        /// <returns>Success, error message if failed, cards count on success, and whether a new Trello list was actually created.</returns>
+        Task<(bool Success, string? Error, int CardsCount, bool ListCreated)> ExecuteMergeSprintAsync(int projectId, string boardId, int sprintNumber, bool merge);
     }
 }

@@ -1,4 +1,4 @@
-using Microsoft.EntityFrameworkCore;
+﻿using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using System.Text.Json;
 using strAppersBackend.Data;
@@ -35,14 +35,14 @@ namespace strAppersBackend.Services
         }
 
         /// <inheritdoc />
-        public async Task<(bool Success, string? Error, int CardsCount)> ExecuteMergeSprintAsync(int projectId, string boardId, int sprintNumber, bool merge)
+        public async Task<(bool Success, string? Error, int CardsCount, bool ListCreated)> ExecuteMergeSprintAsync(int projectId, string boardId, int sprintNumber, bool merge)
         {
             if (projectId <= 0)
-                return (false, "ProjectId is required and must be greater than 0.", 0);
+                return (false, "ProjectId is required and must be greater than 0.", 0, false);
             if (string.IsNullOrWhiteSpace(boardId))
-                return (false, "BoardId is required.", 0);
+                return (false, "BoardId is required.", 0, false);
             if (sprintNumber <= 0)
-                return (false, "SprintNumber is required and must be greater than 0.", 0);
+                return (false, "SprintNumber is required and must be greater than 0.", 0, false);
 
             var mergeType = string.Equals(_trelloConfig.MergeType, "Add", StringComparison.OrdinalIgnoreCase) ? "Add" : "Merge";
 
@@ -80,7 +80,7 @@ namespace strAppersBackend.Services
                 if (string.IsNullOrWhiteSpace(effectiveTrelloBoardJson))
                 {
                     _logger.LogInformation("[MERGE-SPRINT] Add mode: no TrelloBoardJson found for board {BoardId} / project {ProjectId}; skipping sprint {SprintNumber}.", boardId, projectId, sprintNumber);
-                    return (false, "No TrelloBoardJson available; cannot add sprint.", 0);
+                    return (false, "No TrelloBoardJson available; cannot add sprint.", 0, false);
                 }
                 TrelloProjectCreationRequest? trelloRequest = null;
                 try
@@ -90,12 +90,12 @@ namespace strAppersBackend.Services
                 catch (Exception exJson)
                 {
                     _logger.LogWarning(exJson, "[MERGE-SPRINT] Add mode: could not deserialize TrelloBoardJson for project {ProjectId}.", projectId);
-                    return (false, "Invalid TrelloBoardJson; cannot add sprint.", 0);
+                    return (false, "Invalid TrelloBoardJson; cannot add sprint.", 0, false);
                 }
                 if (!TemplateHasSprint(trelloRequest, listName))
                 {
                     _logger.LogInformation("[MERGE-SPRINT] Add mode: template has no list/cards for '{ListName}'; stopping (no empty sprints).", listName);
-                    return (false, $"Sprint {sprintNumber} not in template; no more sprints to add.", 0);
+                    return (false, $"Sprint {sprintNumber} not in template; no more sprints to add.", 0, false);
                 }
 
                 var listsWithPos = await _trelloService.GetBoardListsWithPositionsAsync(boardId);
@@ -113,6 +113,7 @@ namespace strAppersBackend.Services
                 if (!addModeDueDateUtc.HasValue)
                     addModeDueDateUtc = DateTime.UtcNow.Date.AddDays((sprintNumber * sprintLengthWeeks * 7) - 1);
 
+                var listCreated = string.IsNullOrEmpty(existingList.Id);
                 string? newListId;
                 int cardsCreated;
                 if (!string.IsNullOrEmpty(existingList.Id))
@@ -144,7 +145,7 @@ namespace strAppersBackend.Services
                     }
                     newListId = await _trelloService.AddListToBoardAsync(boardId, listName, posAfterPrevSprint);
                     if (string.IsNullOrEmpty(newListId))
-                        return (false, $"Failed to add list '{listName}' to board.", 0);
+                        return (false, $"Failed to add list '{listName}' to board.", 0, false);
 
                     cardsCreated = 0;
                     if (trelloRequest != null)
@@ -211,12 +212,12 @@ namespace strAppersBackend.Services
 
                     await _context.SaveChangesAsync();
                     _logger.LogInformation("[MERGE-SPRINT] Add mode: added list '{ListName}' for BoardId={BoardId}, SprintNumber={SprintNumber}, next sprint row {NextSprint} created/updated={AddNext}, {CardsCreated} cards.", listName, boardId, sprintNumber, nextSprintNum, addNextRow, cardsCreated);
-                    return (true, null, cardsCreated);
+                    return (true, null, cardsCreated, listCreated);
                 }
                 catch (Exception exDb)
                 {
                     _logger.LogError(exDb, "[MERGE-SPRINT] Add mode: failed to upsert ProjectBoardSprintMerge for BoardId={BoardId}, SprintNumber={SprintNumber}", boardId, sprintNumber);
-                    return (false, exDb.Message, 0);
+                    return (false, exDb.Message, 0, false);
                 }
             }
 
@@ -224,10 +225,10 @@ namespace strAppersBackend.Services
             var projectBoard = await _context.ProjectBoards
                 .FirstOrDefaultAsync(pb => pb.Id == boardId && pb.ProjectId == projectId);
             if (projectBoard == null)
-                return (false, $"Board {boardId} not found for project {projectId}.", 0);
+                return (false, $"Board {boardId} not found for project {projectId}.", 0, false);
             var systemBoardId = projectBoard.SystemBoardId;
             if (string.IsNullOrWhiteSpace(systemBoardId))
-                return (false, "This board has no linked SystemBoard. Merge-sprint requires a SystemBoard (CreatePMEmptyBoard).", 0);
+                return (false, "This board has no linked SystemBoard. Merge-sprint requires a SystemBoard (CreatePMEmptyBoard).", 0, false);
 
             var sprintNameNoSpace = $"Sprint{sprintNumber}";
             var sprintNameWithSpace = $"Sprint {sprintNumber}";
@@ -235,12 +236,12 @@ namespace strAppersBackend.Services
             var systemSprint = await _trelloService.GetSprintFromBoardAsync(systemBoardId, sprintNameNoSpace)
                 ?? await _trelloService.GetSprintFromBoardAsync(systemBoardId, sprintNameWithSpace);
             if (systemSprint == null || systemSprint.Cards == null || systemSprint.Cards.Count == 0)
-                return (false, $"Sprint {sprintNumber} not found on SystemBoard or has no cards.", 0);
+                return (false, $"Sprint {sprintNumber} not found on SystemBoard or has no cards.", 0, false);
 
             var liveSprint = await _trelloService.GetSprintFromBoardAsync(boardId, sprintNameNoSpace)
                 ?? await _trelloService.GetSprintFromBoardAsync(boardId, sprintNameWithSpace);
             if (liveSprint == null)
-                return (false, $"Sprint list {sprintNumber} not found on live board.", 0);
+                return (false, $"Sprint list {sprintNumber} not found on live board.", 0, false);
 
             List<SprintSnapshotCard> cardsToApply;
             if (!merge)
@@ -263,7 +264,7 @@ namespace strAppersBackend.Services
 
                 var mergedJson = await _aiService.GenerateTextResponseAsync(prompt);
                 if (string.IsNullOrWhiteSpace(mergedJson))
-                    return (false, "AI did not return a merged sprint.", 0);
+                    return (false, "AI did not return a merged sprint.", 0, false);
 
                 var cleaned = mergedJson.Trim();
                 if (cleaned.StartsWith("```"))
@@ -279,16 +280,16 @@ namespace strAppersBackend.Services
                 }
                 catch
                 {
-                    return (false, "AI response could not be parsed as sprint cards JSON.", 0);
+                    return (false, "AI response could not be parsed as sprint cards JSON.", 0, false);
                 }
                 if (mergedCards == null || mergedCards.Count == 0)
-                    return (false, "Merged sprint had no cards.", 0);
+                    return (false, "Merged sprint had no cards.", 0, false);
                 cardsToApply = mergedCards;
             }
 
             var (overrideSuccess, overrideError) = await _trelloService.OverrideSprintOnBoardAsync(boardId, liveSprint.ListId, cardsToApply);
             if (!overrideSuccess)
-                return (false, overrideError ?? "Failed to override sprint on board.", 0);
+                return (false, overrideError ?? "Failed to override sprint on board.", 0, false);
 
             // DueDate for row N = this sprint's own first card DueDate (trigger for merging N+1 is row N.DueDate has passed).
             var dueDateRaw = cardsToApply.Count > 0 ? cardsToApply[0].DueDate : null;
@@ -380,7 +381,7 @@ namespace strAppersBackend.Services
                 }
             }
 
-            return (true, null, cardsToApply.Count);
+            return (true, null, cardsToApply.Count, false);
         }
 
         /// <summary>Returns true if the template has a list or any cards for the given sprint list name (e.g. "Sprint 2").</summary>
@@ -403,3 +404,4 @@ namespace strAppersBackend.Services
         }
     }
 }
+

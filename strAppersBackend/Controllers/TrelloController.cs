@@ -525,7 +525,7 @@ public class TrelloController : ControllerBase
                 if (request.SprintNumber <= 0)
                     return BadRequest(new { Success = false, Message = "SprintNumber is required and must be greater than 0." });
 
-                var (success, error, cardsCount) = await _sprintMergeService.ExecuteMergeSprintAsync(request.ProjectId, request.BoardId, request.SprintNumber, request.Merge);
+                var (success, error, cardsCount, _) = await _sprintMergeService.ExecuteMergeSprintAsync(request.ProjectId, request.BoardId, request.SprintNumber, request.Merge);
                 if (!success)
                 {
                     if (error != null && (error.Contains("not found") || error.Contains("BoardId is required")))

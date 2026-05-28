@@ -11,6 +11,7 @@ namespace strAppersBackend.Services
     {
         private readonly ApplicationDbContext _context;
         private readonly ITrelloSprintMergeService _sprintMergeService;
+        private readonly ISprintAssessmentService _sprintAssessmentService;
         private readonly IHttpClientFactory _httpClientFactory;
         private readonly IConfiguration _configuration;
         private readonly ILogger<StudentTeamBuilderService> _logger;
@@ -18,12 +19,14 @@ namespace strAppersBackend.Services
         public StudentTeamBuilderService(
             ApplicationDbContext context,
             ITrelloSprintMergeService sprintMergeService,
+            ISprintAssessmentService sprintAssessmentService,
             IHttpClientFactory httpClientFactory,
             IConfiguration configuration,
             ILogger<StudentTeamBuilderService> logger)
         {
             _context = context;
             _sprintMergeService = sprintMergeService;
+            _sprintAssessmentService = sprintAssessmentService;
             _httpClientFactory = httpClientFactory;
             _configuration = configuration;
             _logger = logger;
@@ -81,11 +84,27 @@ namespace strAppersBackend.Services
 
                 foreach (var mergeRow in dueSprints)
                 {
-                    var (success, error, _) = await _sprintMergeService.ExecuteMergeSprintAsync(projectId, boardId, mergeRow.SprintNumber, merge: true);
+                    var (success, error, _, listCreated) = await _sprintMergeService.ExecuteMergeSprintAsync(projectId, boardId, mergeRow.SprintNumber, merge: true);
                     if (success)
                     {
                         mergedCount++;
-                        _logger.LogInformation("[STUDENT-TEAM-BUILDER] Merged BoardId={BoardId}, SprintNumber={SprintNumber}.", boardId, mergeRow.SprintNumber);
+                        _logger.LogInformation("[STUDENT-TEAM-BUILDER] Merged BoardId={BoardId}, SprintNumber={SprintNumber}, ListCreated={ListCreated}.", boardId, mergeRow.SprintNumber, listCreated);
+                        if (listCreated)
+                        {
+                            var completedSprint = mergeRow.SprintNumber - 1;
+                            var capturedBoardId = boardId;
+                            _ = Task.Run(async () =>
+                            {
+                                try
+                                {
+                                    await _sprintAssessmentService.RunForBoardSprintAsync(capturedBoardId, completedSprint);
+                                }
+                                catch (Exception ex)
+                                {
+                                    _logger.LogError(ex, "[STUDENT-TEAM-BUILDER] Background assessment failed for BoardId={BoardId}, Sprint={Sprint}", capturedBoardId, completedSprint);
+                                }
+                            });
+                        }
                     }
                     else
                     {
