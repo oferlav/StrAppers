@@ -223,6 +223,7 @@ public partial class BoardsController : ControllerBase
             }
             // For role-based (IsSingleRole) boards, RoleIndex must be set before card-label filtering.
             // Use request.StudentIds order as the canonical 1-based assignment; only fill gaps (0 = unset).
+            DbgLog(debugLog, $"IsSingleRole={request.IsSingleRole} — RoleIndex from DB: [{string.Join(", ", students.Select(s => $"id={s.Id} ri={s.RoleIndex}"))}]");
             if (request.IsSingleRole)
             {
                 for (var i = 0; i < request.StudentIds.Count; i++)
@@ -235,11 +236,36 @@ public partial class BoardsController : ControllerBase
                         // HasDefaultValue(0) on this column makes EF treat it as ValueGeneratedOnAdd,
                         // which can silently skip it in UPDATE. Force-mark it so EF always sends it.
                         _context.Entry(s).Property(x => x.RoleIndex).IsModified = true;
+                        DbgLog(debugLog, $"RoleIndex SET: studentId={s.Id} → {s.RoleIndex} IsModified={_context.Entry(s).Property(x => x.RoleIndex).IsModified}");
+                    }
+                    else if (s != null)
+                    {
+                        DbgLog(debugLog, $"RoleIndex SKIPPED: studentId={s.Id} already has RoleIndex={s.RoleIndex}");
                     }
                 }
-                _logger.LogInformation("[BOARD-CREATE] IsSingleRole=true: RoleIndex assigned for {Count} student(s).", students.Count);
             }
-            await _context.SaveChangesAsync();
+            try
+            {
+                await _context.SaveChangesAsync();
+                DbgLog(debugLog, $"SaveChangesAsync #1 OK — Status/B2c/RoleIndex saved");
+            }
+            catch (Exception ex)
+            {
+                DbgLog(debugLog, $"SaveChangesAsync #1 FAILED: {ex.Message}");
+                throw;
+            }
+
+            // Verify RoleIndex actually landed in DB
+            if (request.IsSingleRole)
+            {
+                var verify = await _context.Students
+                    .Where(s => request.StudentIds.Contains(s.Id))
+                    .AsNoTracking()
+                    .Select(s => new { s.Id, s.RoleIndex })
+                    .ToListAsync();
+                DbgLog(debugLog, $"RoleIndex DB verify (after SaveChangesAsync #1): [{string.Join(", ", verify.Select(s => $"id={s.Id} ri={s.RoleIndex}"))}]");
+            }
+
             _logger.LogInformation("[BOARD-CREATE] Set Status=2 for {Count} student(s). Starting board creation.", students.Count);
 
             using var transaction = await _context.Database.BeginTransactionAsync();
