@@ -57,7 +57,7 @@ public partial class MetricsController
 
         var activeRole = student.StudentRoles?.FirstOrDefault(sr => sr.IsActive);
         var roleName = activeRole?.Role?.Name?.Trim() ?? "Team Member";
-        var hasCustomerEngagement = activeRole?.Role?.CustomerEngagement ?? false;
+        var hasCustomerEngagement = await ResolveCustomerEngagementAsync(activeRole?.Role, roleName, student.InstituteId, cancellationToken);
         if (!hasCustomerEngagement && ContainsDeveloper(roleName))
             return Ok(new { success = true, metricId = CustomerEngagementMetricId, skippedLlm = true, reviewContent = (string?)null, message = "Developer role without CustomerEngagement enabled; skipping." });
 

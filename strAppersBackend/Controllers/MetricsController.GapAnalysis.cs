@@ -72,7 +72,9 @@ public partial class MetricsController
             ? $"{roleName} {student.RoleIndex}"
             : ResolveTrelloSprintCardLabel(activeRole?.Role, fullStackTrackLabel: null);
         // Include customer context for non-developer roles (B2C behaviour) or any role with CustomerEngagement=true.
-        var includeCustomerContext = !ContainsDeveloper(roleName) || (activeRole?.Role?.CustomerEngagement ?? false);
+        // For institute students the flag lives in InstituteSquadRoles, not in Roles.
+        var hasCustomerEngagement = await ResolveCustomerEngagementAsync(activeRole?.Role, roleName, student.InstituteId, cancellationToken);
+        var includeCustomerContext = !ContainsDeveloper(roleName) || hasCustomerEngagement;
 
         try
         {
