@@ -426,7 +426,7 @@ public partial class BoardsController
             {
                 if (nowUtc >= startM && nowUtc <= endM)
                 {
-                    return (n, FormatSprintLabel(n, startM, endM));
+                    return (n, $"Sprint {n}");
                 }
             }
 
@@ -434,7 +434,7 @@ public partial class BoardsController
             {
                 if (nowUtc >= startP && nowUtc <= endP)
                 {
-                    return (n, FormatSprintLabel(n, startP, endP));
+                    return (n, $"Sprint {n}");
                 }
             }
         }
@@ -445,7 +445,7 @@ public partial class BoardsController
             mergesByN.TryGetValue(n, out var merge);
             DateTime? startUtc = null;
             if (merge != null &&
-                SprintPlanDateResolver.TryGetInclusiveUtcRangeFromSprintMerge(merge, n, sprintLengthWeeks, out var sm, out var em))
+                SprintPlanDateResolver.TryGetInclusiveUtcRangeFromSprintMerge(merge, n, sprintLengthWeeks, out var sm, out _))
             {
                 startUtc = sm;
             }
@@ -456,13 +456,13 @@ public partial class BoardsController
 
             if (startUtc.HasValue && nowUtc < startUtc.Value)
             {
-                return (n, $"Sprint {n} (upcoming)");
+                return (n, $"Sprint {n}");
             }
         }
 
         if (maxFromMerges > 0)
         {
-            return (maxFromMerges, $"Last merged sprint · Sprint {maxFromMerges}");
+            return (maxFromMerges, $"Sprint {maxFromMerges}");
         }
 
         return (null, null);
