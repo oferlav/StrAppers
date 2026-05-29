@@ -4149,16 +4149,23 @@ public partial class BoardsController : ControllerBase
             var roleName = student.StudentRoles?.FirstOrDefault(sr => sr.IsActive)?.Role?.Name
                 ?? student.StudentRoles?.FirstOrDefault()?.Role?.Name ?? "Team Member";
 
-            // Resolve Full Stack to actual label used on this board/sprint
-            if (roleName.Contains("full stack", StringComparison.OrdinalIgnoreCase) ||
-                roleName.Contains("fullstack", StringComparison.OrdinalIgnoreCase))
+            // On single-role boards the Trello card label includes the role index (e.g. "Full Stack Developer 1").
+            var board = await _context.ProjectBoards.AsNoTracking().FirstOrDefaultAsync(b => b.Id == boardId.Trim());
+            var roleLabel = board?.IsSingleRole == true && student.RoleIndex > 0
+                ? $"{roleName} {student.RoleIndex}"
+                : roleName;
+
+            // For non-indexed Full Stack roles, resolve to the actual label used on this board/sprint
+            if (string.Equals(roleLabel, roleName, StringComparison.Ordinal) &&
+                (roleName.Contains("full stack", StringComparison.OrdinalIgnoreCase) ||
+                 roleName.Contains("fullstack", StringComparison.OrdinalIgnoreCase)))
             {
                 var fsLabels = await _trelloService.ResolveSprintLabelsAsync(boardId.Trim(), sprintNumber, roleName);
-                roleName = fsLabels[0];
+                roleLabel = fsLabels[0];
             }
 
             // Get module DB id from the sprint card's ModuleId custom field
-            var moduleIdStr = await _trelloService.GetModuleIdFromSprintCardAsync(boardId.Trim(), sprintNumber, roleName);
+            var moduleIdStr = await _trelloService.GetModuleIdFromSprintCardAsync(boardId.Trim(), sprintNumber, roleLabel);
             if (!int.TryParse(moduleIdStr, out var moduleId))
                 return NotFound(new { Success = false, Message = "No module assigned to this sprint for this role." });
 
