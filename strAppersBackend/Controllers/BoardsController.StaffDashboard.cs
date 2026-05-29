@@ -313,6 +313,64 @@ public partial class BoardsController
         }
     }
 
+    /// <summary>
+    /// Distinct roles present in InstituteSquadRoles for the given institute, matched to main Roles by name.
+    /// Route: GET /api/Boards/use/institute-squad-roles?instituteId={id}
+    /// </summary>
+    [HttpGet("institute-squad-roles")]
+    public async Task<ActionResult<List<object>>> GetInstituteSquadRoles([FromQuery] int? instituteId, CancellationToken cancellationToken)
+    {
+        try
+        {
+            if (!instituteId.HasValue || instituteId.Value <= 0)
+                return Ok(Array.Empty<object>());
+
+            var squadIds = await _context.InstituteSquads
+                .AsNoTracking()
+                .Where(sq => sq.InstituteId == instituteId.Value && sq.IsActive)
+                .Select(sq => sq.Id)
+                .ToListAsync(cancellationToken);
+
+            if (squadIds.Count == 0)
+                return Ok(Array.Empty<object>());
+
+            var squadRoleNames = await _context.InstituteSquadRoles
+                .AsNoTracking()
+                .Where(sr => squadIds.Contains(sr.SquadId) && sr.IsActive)
+                .Select(sr => sr.Name)
+                .Distinct()
+                .ToListAsync(cancellationToken);
+
+            if (squadRoleNames.Count == 0)
+                return Ok(Array.Empty<object>());
+
+            var namesToMatch = squadRoleNames.Select(n => n.ToLowerInvariant()).ToList();
+            var matchedRoles = await _context.Roles
+                .AsNoTracking()
+                .Where(r => namesToMatch.Contains(r.Name.ToLower()))
+                .ToListAsync(cancellationToken);
+
+            var result = squadRoleNames
+                .Select(sn => new
+                {
+                    squadName = sn,
+                    role = matchedRoles.FirstOrDefault(r => string.Equals(r.Name, sn, StringComparison.OrdinalIgnoreCase)),
+                })
+                .Where(x => x.role != null)
+                .DistinctBy(x => x.role!.Id)
+                .OrderBy(x => x.squadName)
+                .Select(x => (object)new { id = x.role!.Id, name = x.squadName })
+                .ToList();
+
+            return Ok(result);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error building institute-squad-roles payload");
+            return StatusCode(500, new { Success = false, Message = ex.Message });
+        }
+    }
+
     /// <summary>End of the highest-numbered sprint window (merge row preferred, else plan).</summary>
     private static DateTime? ComputeLastSprintEndUtc(ProjectBoard pb, int sprintLengthWeeks)
     {
