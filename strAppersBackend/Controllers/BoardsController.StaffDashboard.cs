@@ -151,8 +151,8 @@ public partial class BoardsController
             var observedSprints = new HashSet<int>();
             foreach (var b in boardsToProcess)
             {
-                foreach (var m in b.SprintMerges)
-                    observedSprints.Add(m.SprintNumber);
+                foreach (var n in GetRealMergedSprintNumbers(b))
+                    observedSprints.Add(n);
             }
 
             if (boardsToProcess.Count == 0)
@@ -212,7 +212,7 @@ public partial class BoardsController
                     NextMeetingTeacherAttendance = pb.NextMeetingTeacherAttendance,
                     CurrentSprintNumber = currentN,
                     CurrentSprintLabel = label,
-                    MergedSprintNumbers = pb.SprintMerges.Select(m => m.SprintNumber).Distinct().OrderBy(n => n).ToList(),
+                    MergedSprintNumbers = GetRealMergedSprintNumbers(pb),
                     LastSprintEndUtc = ComputeLastSprintEndUtc(pb, sprintLengthWeeks),
                     Students = studentDtos,
                 });
@@ -371,11 +371,25 @@ public partial class BoardsController
         }
     }
 
+    /// <summary>
+    /// Sprint numbers that have real Trello data: all merge rows EXCEPT the last (highest-numbered) one,
+    /// which is always pre-created for the upcoming sprint before any data exists.
+    /// </summary>
+    private static List<int> GetRealMergedSprintNumbers(ProjectBoard pb) =>
+        pb.SprintMerges
+            .Select(m => m.SprintNumber)
+            .Distinct()
+            .OrderBy(n => n)
+            .ToList()
+            .SkipLast(1)
+            .ToList();
+
     /// <summary>End of the highest-numbered sprint window (merge row preferred, else plan).</summary>
     private static DateTime? ComputeLastSprintEndUtc(ProjectBoard pb, int sprintLengthWeeks)
     {
         var mergesByN = pb.SprintMerges.ToDictionary(m => m.SprintNumber, m => m);
-        var maxFromMerges = mergesByN.Count > 0 ? mergesByN.Keys.Max() : 0;
+        var realNums = GetRealMergedSprintNumbers(pb);
+        var maxFromMerges = realNums.Count > 0 ? realNums.Max() : 0;
         var maxFromPlan = TryReadTotalSprints(pb.SprintPlan);
         var maxS = Math.Max(Math.Max(maxFromMerges, maxFromPlan), 1);
         maxS = Math.Min(maxS, 36);
@@ -398,7 +412,8 @@ public partial class BoardsController
     private static (int? sprintNumber, string? label) ResolveCurrentSprint(ProjectBoard pb, int sprintLengthWeeks, DateTime nowUtc)
     {
         var mergesByN = pb.SprintMerges.ToDictionary(m => m.SprintNumber, m => m);
-        var maxFromMerges = mergesByN.Count > 0 ? mergesByN.Keys.Max() : 0;
+        var realNums = GetRealMergedSprintNumbers(pb);
+        var maxFromMerges = realNums.Count > 0 ? realNums.Max() : 0;
         var maxFromPlan = TryReadTotalSprints(pb.SprintPlan);
         var maxS = Math.Max(Math.Max(maxFromMerges, maxFromPlan), 1);
         maxS = Math.Min(maxS, 36);
