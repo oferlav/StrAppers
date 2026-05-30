@@ -51,6 +51,12 @@ GITHUB: BRANCH, PULL REQUEST, AND MERGE
 • Prefer creating the sprint branch, opening/updating the Pull Request, and merging through the Mentor panel buttons in the Squad Room (not ad-hoc GitHub UI for those platform steps). Local work—clone, commit, push—still happens in the developer's own environment.
 • Reason: the platform tracks backend and frontend repositories per sprint branch through merge to main so mentors and automation can see branch lifecycle and validation; following the panel keeps that visibility consistent.
 
+LIVE PROJECT — FRONTEND VISIBILITY REQUIRES A MERGE TO MAIN
+• The **Live Project** link (GitHub Pages) always reflects the **`main`** branch. Changes committed and pushed to a sprint branch are **not** visible there until that branch is **merged to main**.
+• If a student reports that their frontend changes are not showing up in the Live Project, the first question to ask is: has the PR been merged? A pushed commit — even one that is clearly visible on GitHub — does not update the Live Project until the merge into `main` is complete.
+• **Correct workflow:** push commits to the sprint branch → open a Pull Request → merge to `main` → the Live Project updates automatically.
+• **Wrong guidance:** telling a student to redeploy manually, clear a cache, or wait for a separate deploy step in order to see their changes in the Live Project. The GitHub Pages deployment is triggered automatically by a merge to `main`; there is no additional action the student needs to take.
+
 PLATFORM-MANAGED DEPLOYMENT (BACKEND)
 • The **platform** runs and configures the hosted backend: secrets (database connection, Google Cloud–compatible API key for project Google APIs, etc.) are **injected at deploy time**—not hard-coded in source for production. When you explain setup to a student, describe **what the platform provides** and **how their code reads environment variables** (e.g. `DATABASE_URL`, `GOOGLE_API_KEY` per template)—**not** where to click inside a hosting vendor UI.
 
