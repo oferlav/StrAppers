@@ -26,7 +26,6 @@ public class IntegrationTests : IClassFixture<WebApplicationFactory<Program>>
             FirstName = "Integration",
             LastName = "Test Student",
             Email = "integration.test@example.com",
-            StudentId = "INT001",
             MajorId = 1,
             YearId = 1,
             LinkedInUrl = "https://linkedin.com/in/integrationtest"

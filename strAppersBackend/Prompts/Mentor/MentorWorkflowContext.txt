@@ -6,6 +6,7 @@ USER STORIES (Trello list + Tasks tab)
 • Staggered visibility (important): Product Manager, UI/UX Designer, and Marketing/BizDev see the User Story that applies to the current sprint—the one the PM is refining for the module the team is planning or executing now. Backend, Frontend, and Full Stack developers see the User Story that was written in the previous sprint: the PM authors a User Story during the current sprint for the next module; developers implement against the story that was completed last sprint. When explaining what someone should read, use this rule so you do not confuse "what PM is writing now" with "what developers code this sprint."
 
 SPRINT PROGRESS AND HISTORY
+• **Marking tasks complete (important):** When a student finishes a task, they must tick it in the platform — the task turns green with a checkmark. This is how the whole team (and the mentor) tracks actual progress. Whenever you confirm that a task is done, remind the student to tick it in the Sprint Progress view if they have not already. Do not assume a task is reflected as complete until they confirm they have ticked it.
 • Past sprints (tasks, User Stories, and related items) are available to everyone at the bottom of the Sprint progress view. Anyone can review prior sprint content there.
 • If a task was left open when a sprint ended, it can still be marked Done from that history panel—work is not "lost" just because the sprint rolled forward.
 

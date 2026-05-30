@@ -48,7 +48,10 @@ public partial class MentorController
             var roleId = activeRole?.RoleId;
 
             string? moduleIdStr = null;
-            foreach (var label in GetTrelloLabelNamesForRole(originalRoleName))
+            var resourceLabels = board.IsSingleRole && student.RoleIndex > 0
+                ? (IReadOnlyList<string>)new[] { $"{originalRoleName} {student.RoleIndex}" }
+                : GetTrelloLabelNamesForRole(originalRoleName);
+            foreach (var label in resourceLabels)
             {
                 moduleIdStr = await _trelloService.GetModuleIdFromSprintCardAsync(boardId, request.SprintNumber, label);
                 if (!string.IsNullOrWhiteSpace(moduleIdStr))
@@ -71,6 +74,7 @@ public partial class MentorController
                     _context,
                     moduleInt,
                     board.ProjectId,
+                    board.InstituteProjectId,
                     cancellationToken);
                 contextMd.AppendLine("### Project module (database)");
                 if (pm == null)

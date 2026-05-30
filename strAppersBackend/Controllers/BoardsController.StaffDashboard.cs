@@ -151,8 +151,8 @@ public partial class BoardsController
             var observedSprints = new HashSet<int>();
             foreach (var b in boardsToProcess)
             {
-                foreach (var m in b.SprintMerges)
-                    observedSprints.Add(m.SprintNumber);
+                foreach (var n in GetRealMergedSprintNumbers(b))
+                    observedSprints.Add(n);
             }
 
             if (boardsToProcess.Count == 0)
@@ -212,7 +212,7 @@ public partial class BoardsController
                     NextMeetingTeacherAttendance = pb.NextMeetingTeacherAttendance,
                     CurrentSprintNumber = currentN,
                     CurrentSprintLabel = label,
-                    MergedSprintNumbers = pb.SprintMerges.Select(m => m.SprintNumber).Distinct().OrderBy(n => n).ToList(),
+                    MergedSprintNumbers = GetRealMergedSprintNumbers(pb),
                     LastSprintEndUtc = ComputeLastSprintEndUtc(pb, sprintLengthWeeks),
                     Students = studentDtos,
                 });
@@ -313,11 +313,83 @@ public partial class BoardsController
         }
     }
 
+    /// <summary>
+    /// Distinct roles present in InstituteSquadRoles for the given institute, matched to main Roles by name.
+    /// Route: GET /api/Boards/use/institute-squad-roles?instituteId={id}
+    /// </summary>
+    [HttpGet("institute-squad-roles")]
+    public async Task<ActionResult<List<object>>> GetInstituteSquadRoles([FromQuery] int? instituteId, CancellationToken cancellationToken)
+    {
+        try
+        {
+            if (!instituteId.HasValue || instituteId.Value <= 0)
+                return Ok(Array.Empty<object>());
+
+            var squadIds = await _context.InstituteSquads
+                .AsNoTracking()
+                .Where(sq => sq.InstituteId == instituteId.Value && sq.IsActive)
+                .Select(sq => sq.Id)
+                .ToListAsync(cancellationToken);
+
+            if (squadIds.Count == 0)
+                return Ok(Array.Empty<object>());
+
+            var squadRoleNames = await _context.InstituteSquadRoles
+                .AsNoTracking()
+                .Where(sr => squadIds.Contains(sr.SquadId) && sr.IsActive)
+                .Select(sr => sr.Name)
+                .Distinct()
+                .ToListAsync(cancellationToken);
+
+            if (squadRoleNames.Count == 0)
+                return Ok(Array.Empty<object>());
+
+            var namesToMatch = squadRoleNames.Select(n => n.ToLowerInvariant()).ToList();
+            var matchedRoles = await _context.Roles
+                .AsNoTracking()
+                .Where(r => namesToMatch.Contains(r.Name.ToLower()))
+                .ToListAsync(cancellationToken);
+
+            var result = squadRoleNames
+                .Select(sn => new
+                {
+                    squadName = sn,
+                    role = matchedRoles.FirstOrDefault(r => string.Equals(r.Name, sn, StringComparison.OrdinalIgnoreCase)),
+                })
+                .Where(x => x.role != null)
+                .DistinctBy(x => x.role!.Id)
+                .OrderBy(x => x.squadName)
+                .Select(x => (object)new { id = x.role!.Id, name = x.squadName })
+                .ToList();
+
+            return Ok(result);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error building institute-squad-roles payload");
+            return StatusCode(500, new { Success = false, Message = ex.Message });
+        }
+    }
+
+    /// <summary>
+    /// Sprint numbers that have real Trello data: all merge rows EXCEPT the last (highest-numbered) one,
+    /// which is always pre-created for the upcoming sprint before any data exists.
+    /// </summary>
+    private static List<int> GetRealMergedSprintNumbers(ProjectBoard pb) =>
+        pb.SprintMerges
+            .Select(m => m.SprintNumber)
+            .Distinct()
+            .OrderBy(n => n)
+            .ToList()
+            .SkipLast(1)
+            .ToList();
+
     /// <summary>End of the highest-numbered sprint window (merge row preferred, else plan).</summary>
     private static DateTime? ComputeLastSprintEndUtc(ProjectBoard pb, int sprintLengthWeeks)
     {
         var mergesByN = pb.SprintMerges.ToDictionary(m => m.SprintNumber, m => m);
-        var maxFromMerges = mergesByN.Count > 0 ? mergesByN.Keys.Max() : 0;
+        var realNums = GetRealMergedSprintNumbers(pb);
+        var maxFromMerges = realNums.Count > 0 ? realNums.Max() : 0;
         var maxFromPlan = TryReadTotalSprints(pb.SprintPlan);
         var maxS = Math.Max(Math.Max(maxFromMerges, maxFromPlan), 1);
         maxS = Math.Min(maxS, 36);
@@ -340,7 +412,8 @@ public partial class BoardsController
     private static (int? sprintNumber, string? label) ResolveCurrentSprint(ProjectBoard pb, int sprintLengthWeeks, DateTime nowUtc)
     {
         var mergesByN = pb.SprintMerges.ToDictionary(m => m.SprintNumber, m => m);
-        var maxFromMerges = mergesByN.Count > 0 ? mergesByN.Keys.Max() : 0;
+        var realNums = GetRealMergedSprintNumbers(pb);
+        var maxFromMerges = realNums.Count > 0 ? realNums.Max() : 0;
         var maxFromPlan = TryReadTotalSprints(pb.SprintPlan);
         var maxS = Math.Max(Math.Max(maxFromMerges, maxFromPlan), 1);
         maxS = Math.Min(maxS, 36);
@@ -353,7 +426,7 @@ public partial class BoardsController
             {
                 if (nowUtc >= startM && nowUtc <= endM)
                 {
-                    return (n, FormatSprintLabel(n, startM, endM));
+                    return (n, $"Sprint {n}");
                 }
             }
 
@@ -361,7 +434,7 @@ public partial class BoardsController
             {
                 if (nowUtc >= startP && nowUtc <= endP)
                 {
-                    return (n, FormatSprintLabel(n, startP, endP));
+                    return (n, $"Sprint {n}");
                 }
             }
         }
@@ -372,7 +445,7 @@ public partial class BoardsController
             mergesByN.TryGetValue(n, out var merge);
             DateTime? startUtc = null;
             if (merge != null &&
-                SprintPlanDateResolver.TryGetInclusiveUtcRangeFromSprintMerge(merge, n, sprintLengthWeeks, out var sm, out var em))
+                SprintPlanDateResolver.TryGetInclusiveUtcRangeFromSprintMerge(merge, n, sprintLengthWeeks, out var sm, out _))
             {
                 startUtc = sm;
             }
@@ -383,13 +456,13 @@ public partial class BoardsController
 
             if (startUtc.HasValue && nowUtc < startUtc.Value)
             {
-                return (n, $"Sprint {n} (upcoming)");
+                return (n, $"Sprint {n}");
             }
         }
 
         if (maxFromMerges > 0)
         {
-            return (maxFromMerges, $"Last merged sprint · Sprint {maxFromMerges}");
+            return (maxFromMerges, $"Sprint {maxFromMerges}");
         }
 
         return (null, null);

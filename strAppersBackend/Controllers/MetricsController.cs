@@ -27,6 +27,9 @@ public partial class MetricsController : ControllerBase
     private readonly IHttpClientFactory _httpClientFactory;
     private readonly PromptConfig _promptConfig;
     private readonly IMicrosoftGraphService _graphService;
+    private readonly ISmtpEmailService _smtpEmailService;
+
+    private bool DebugAiContext => _configuration.GetValue<bool>("Debug:AiContext", false);
 
     public MetricsController(
         ApplicationDbContext context,
@@ -37,7 +40,8 @@ public partial class MetricsController : ControllerBase
         IChatCompletionService chatCompletionService,
         IHttpClientFactory httpClientFactory,
         IOptions<PromptConfig> promptConfig,
-        IMicrosoftGraphService graphService)
+        IMicrosoftGraphService graphService,
+        ISmtpEmailService smtpEmailService)
     {
         _context = context;
         _trelloService = trelloService;
@@ -48,6 +52,7 @@ public partial class MetricsController : ControllerBase
         _httpClientFactory = httpClientFactory;
         _promptConfig = promptConfig.Value;
         _graphService = graphService;
+        _smtpEmailService = smtpEmailService;
     }
 
     public class AdherenceRequest
@@ -94,6 +99,11 @@ public partial class MetricsController : ControllerBase
         var roleName = activeRole?.Role?.Name?.Trim() ?? "Team Member";
         var fullStackRole = IsFullStackRole(roleName);
 
+        // On single-role boards the Trello card label includes the role index (e.g. "Full Stack Developer 1").
+        var roleLabel = board.IsSingleRole && student.RoleIndex > 0
+            ? $"{roleName} {student.RoleIndex}"
+            : roleName;
+
         string? cardId;
         string? sprintBackendCardId = null;
         string? sprintFrontendCardId = null;
@@ -103,7 +113,7 @@ public partial class MetricsController : ControllerBase
         // For Full Stack: check if the board has a Full Stack sprint card first; if not, fall back to Backend Developer + Frontend Developer.
         if (fullStackRole)
         {
-            var fsLabels = await _trelloService.ResolveSprintLabelsAsync(boardId, request.SprintNumber, roleName);
+            var fsLabels = await _trelloService.ResolveSprintLabelsAsync(boardId, request.SprintNumber, roleLabel);
             if (fsLabels.Length == 1)
             {
                 // Board has a Full Stack card — use it as the single card
@@ -144,7 +154,7 @@ public partial class MetricsController : ControllerBase
         }
         else
         {
-            cardId = await _trelloService.GetSprintRoleCardIdAsync(boardId, request.SprintNumber, roleName);
+            cardId = await _trelloService.GetSprintRoleCardIdAsync(boardId, request.SprintNumber, roleLabel);
             if (string.IsNullOrEmpty(cardId))
             {
                 return Ok(new
@@ -152,7 +162,7 @@ public partial class MetricsController : ControllerBase
                     success = true,
                     metricId = AdherenceMetricId,
                     reviewContent = "",
-                    message = $"No sprint card found in Sprint {request.SprintNumber} with label matching role \"{roleName}\".",
+                    message = $"No sprint card found in Sprint {request.SprintNumber} with label matching role \"{roleLabel}\".",
                     requiredSkillData = false,
                     requiredResourceData = false
                 });
@@ -198,6 +208,9 @@ public partial class MetricsController : ControllerBase
 
         if (fullStackRole)
         {
+            // When there is a single Full Stack card, sprintFrontendCardId is null internally (one card covers both tracks).
+            // Surface the card ID for both slots so callers know both tracks were evaluated against the same card.
+            var reportedFrontendCardId = sprintFrontendCardId ?? sprintBackendCardId;
             return Ok(new
             {
                 success = true,
@@ -207,7 +220,7 @@ public partial class MetricsController : ControllerBase
                 requiredResourceData = requiredResource,
                 sprintRoleCardId = cardId,
                 sprintRoleBackendCardId = sprintBackendCardId,
-                sprintRoleFrontendCardId = sprintFrontendCardId
+                sprintRoleFrontendCardId = reportedFrontendCardId
             });
         }
 
@@ -306,12 +319,52 @@ public partial class MetricsController : ControllerBase
 
             if (IsFullStackRole(rn))
             {
-                var bOk = await BranchHasAnyCommitAsync(backendUrl, sprintNumber, isBackend: true, token, roleIndex);
-                var fOk = await BranchHasAnyCommitAsync(frontendUrl, sprintNumber, isBackend: false, token, roleIndex);
-                if (!bOk)
-                    lines.Add("Backend work was not completed or was not committed for this sprint.");
-                if (!fOk)
-                    lines.Add("Frontend work was not completed or was not committed for this sprint.");
+                bool checkBackend = true;
+                bool checkFrontend = true;
+
+                // Role-based (single-role) boards: read the CardId custom field from the Trello sprint card
+                // to determine which track(s) the student was assigned to this sprint (e.g. "1-B" → backend only, "2-F" → frontend only).
+                // B2C boards (!board.IsSingleRole) keep the existing behaviour: always check both tracks.
+                if (board.IsSingleRole)
+                {
+                    var cardLabel = roleIndex > 0 ? $"{rn} {roleIndex}" : rn;
+                    var trelloCardId = await _trelloService.GetSprintCardCustomFieldValueAsync(boardId, sprintNumber, cardLabel, "CardId");
+
+                    _logger.LogInformation(
+                        "Adherence FullStack CardId scope: boardId={BoardId} sprint={Sprint} roleLabel={Label} cardIdValue={CardIdValue}",
+                        boardId, sprintNumber, cardLabel, trelloCardId ?? "(null)");
+
+                    if (DebugAiContext)
+                    {
+                        var dbg = $"BoardId={boardId} Sprint={sprintNumber} RoleLabel={cardLabel} CardIdValue={trelloCardId ?? "(null)"} StudentId={studentId}";
+                        try { await _smtpEmailService.SendPlainEmailAsync("ofer@skill-in.com", $"[Metrics Debug] Adherence FullStack CardId student={studentId}", dbg); } catch { /* ignore */ }
+                    }
+
+                    if (!string.IsNullOrWhiteSpace(trelloCardId))
+                    {
+                        var hasB = trelloCardId.Contains('B', StringComparison.OrdinalIgnoreCase);
+                        var hasF = trelloCardId.Contains('F', StringComparison.OrdinalIgnoreCase);
+                        if (hasB || hasF)
+                        {
+                            checkBackend = hasB;
+                            checkFrontend = hasF;
+                        }
+                        // If neither B nor F (unexpected format), fall back to checking both tracks
+                    }
+                }
+
+                if (checkBackend)
+                {
+                    var bOk = await BranchHasAnyCommitAsync(backendUrl, sprintNumber, isBackend: true, token, roleIndex);
+                    if (!bOk)
+                        lines.Add("Backend work was not completed or was not committed for this sprint.");
+                }
+                if (checkFrontend)
+                {
+                    var fOk = await BranchHasAnyCommitAsync(frontendUrl, sprintNumber, isBackend: false, token, roleIndex);
+                    if (!fOk)
+                        lines.Add("Frontend work was not completed or was not committed for this sprint.");
+                }
                 return;
             }
 
@@ -377,6 +430,8 @@ public partial class MetricsController : ControllerBase
             : $"{sprintNumber}-{(isBackend ? "B" : "F")}{idxSuffix}";
 
         var commits = await _githubService.GetRecentCommitsOnBranchAsync(owner, repo, branch, 1, token);
+        _logger.LogInformation("Adherence branch check: {Repo} branch={Branch} commitsFound={Count}",
+            $"{owner}/{repo}", branch, commits.Count);
         return commits.Count > 0;
     }
 
@@ -496,6 +551,55 @@ public partial class MetricsController : ControllerBase
     {
         if (string.IsNullOrWhiteSpace(text)) return 0;
         return Regex.Matches(text.Trim(), @"\b\w+\b", RegexOptions.None).Count;
+    }
+
+    /// <summary>
+    /// Resolves the effective CustomerEngagement flag for a student/role.
+    /// For institute students (InstituteId > 1) the flag is read from <see cref="InstituteSquadRoles"/>
+    /// because each squad can override the base role definition. B2C students fall back to <see cref="Role.CustomerEngagement"/>.
+    /// </summary>
+    private async Task<bool> ResolveCustomerEngagementAsync(
+        Role? role,
+        string roleName,
+        int? studentInstituteId,
+        CancellationToken cancellationToken)
+    {
+        if (role?.CustomerEngagement == true)
+        {
+            _logger.LogInformation("ResolveCustomerEngagement: roleName={RoleName} instituteId={InstId} → true (Role flag)", roleName, studentInstituteId);
+            return true;
+        }
+
+        if (studentInstituteId is > 1)
+        {
+            var squadRole = await _context.InstituteSquadRoles
+                .AsNoTracking()
+                .Join(_context.InstituteSquads.AsNoTracking().Where(s => s.InstituteId == studentInstituteId.Value),
+                    r => r.SquadId, s => s.Id, (r, s) => r)
+                .Where(r => r.Name == roleName)
+                .Select(r => new { r.Id, r.Name, r.CustomerEngagement, r.SquadId })
+                .FirstOrDefaultAsync(cancellationToken);
+
+            if (squadRole != null)
+            {
+                _logger.LogInformation(
+                    "ResolveCustomerEngagement: roleName={RoleName} instituteId={InstId} squadRoleId={SrId} squadId={SqId} → CustomerEngagement={CE}",
+                    roleName, studentInstituteId, squadRole.Id, squadRole.SquadId, squadRole.CustomerEngagement);
+                return squadRole.CustomerEngagement;
+            }
+
+            _logger.LogWarning(
+                "ResolveCustomerEngagement: roleName={RoleName} instituteId={InstId} — no matching InstituteSquadRole found → false",
+                roleName, studentInstituteId);
+        }
+        else
+        {
+            _logger.LogInformation(
+                "ResolveCustomerEngagement: roleName={RoleName} instituteId={InstId} — not an institute student, Role.CE={RoleCE} → false",
+                roleName, studentInstituteId, role?.CustomerEngagement);
+        }
+
+        return false;
     }
 
     /// <param name="graph2Base64">Optional second chart (e.g. frontend track). Ignored when null in append mode.</param>

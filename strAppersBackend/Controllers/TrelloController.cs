@@ -525,7 +525,7 @@ public class TrelloController : ControllerBase
                 if (request.SprintNumber <= 0)
                     return BadRequest(new { Success = false, Message = "SprintNumber is required and must be greater than 0." });
 
-                var (success, error, cardsCount) = await _sprintMergeService.ExecuteMergeSprintAsync(request.ProjectId, request.BoardId, request.SprintNumber, request.Merge);
+                var (success, error, cardsCount, _) = await _sprintMergeService.ExecuteMergeSprintAsync(request.ProjectId, request.BoardId, request.SprintNumber, request.Merge);
                 if (!success)
                 {
                     if (error != null && (error.Contains("not found") || error.Contains("BoardId is required")))
@@ -564,13 +564,17 @@ public class TrelloController : ControllerBase
             try
             {
                 var (mergedCount, errorCount, errors) = await _studentTeamBuilderService.RunDueSprintMergesAsync();
+                var (boardsCreated, boardsSkipped, teamMessages) = await _studentTeamBuilderService.RunInstituteTeamBuildingAsync();
                 return Ok(new
                 {
                     Success = true,
-                    Message = $"Due sprint merges completed. Merged: {mergedCount}, Errors: {errorCount}.",
+                    Message = $"Due sprint merges completed. Merged: {mergedCount}, Errors: {errorCount}. Institute boards created: {boardsCreated}, skipped: {boardsSkipped}.",
                     MergedCount = mergedCount,
                     ErrorCount = errorCount,
-                    Errors = errors
+                    Errors = errors,
+                    InstituteBoardsCreated = boardsCreated,
+                    InstituteBoardsSkipped = boardsSkipped,
+                    InstituteMessages = teamMessages
                 });
             }
             catch (Exception ex)

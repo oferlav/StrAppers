@@ -786,10 +786,16 @@ namespace strAppersBackend.Services
         /// <summary>
         /// Creates all cards on a board with full content
         /// </summary>
-        private async Task CreateCardsOnBoardAsync(string trelloBoardId, TrelloProjectCreationRequest request, 
-            Dictionary<string, string> roleLabelIds, Dictionary<string, string> listIds, 
+        private async Task CreateCardsOnBoardAsync(string trelloBoardId, TrelloProjectCreationRequest request,
+            Dictionary<string, string> roleLabelIds, Dictionary<string, string> listIds,
             Dictionary<string, string> customFieldIds, List<string> errors)
         {
+            _logger.LogInformation("[BOARD-CARDS] CreateCardsOnBoardAsync: boardId={BoardId}, totalCards={Total}, listIds=[{Lists}]",
+                trelloBoardId, request.SprintPlan?.Cards?.Count ?? 0,
+                string.Join(", ", listIds.Keys));
+            var cardCreatedCount = 0;
+            var cardSkippedCount = 0;
+            var cardsByList = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
             // Create cards (tasks)
             foreach (var card in request.SprintPlan.Cards)
                 {
@@ -797,7 +803,10 @@ namespace strAppersBackend.Services
                     {
                         if (!listIds.ContainsKey(card.ListName))
                         {
-                            errors.Add($"List not found for card: {card.Name}");
+                            _logger.LogWarning("[BOARD-CARDS] List not found for card '{CardName}': ListName='{ListName}'. Available lists: [{Lists}]",
+                                card.Name, card.ListName, string.Join(", ", listIds.Keys));
+                            errors.Add($"List not found for card: {card.Name} (ListName='{card.ListName}')");
+                            cardSkippedCount++;
                             continue;
                         }
 
@@ -816,9 +825,13 @@ namespace strAppersBackend.Services
                         }
 
                         var createCardResponse = await _httpClient.PostAsync(createCardUrl, null);
-                        
+
                         if (createCardResponse.IsSuccessStatusCode)
                         {
+                            cardCreatedCount++;
+                            if (!cardsByList.TryGetValue(card.ListName, out var listCardNames))
+                                cardsByList[card.ListName] = listCardNames = new List<string>();
+                            listCardNames.Add(card.Name);
                             var cardJson = await createCardResponse.Content.ReadAsStringAsync();
                             var cardData = JsonSerializer.Deserialize<JsonElement>(cardJson);
                             var cardId = cardData.GetProperty("id").GetString();
@@ -912,25 +925,40 @@ namespace strAppersBackend.Services
                     {
                         _logger.LogError(ex, "Error creating card {CardName}", card.Name);
                         errors.Add($"Error creating card {card.Name}: {ex.Message}");
+                        cardSkippedCount++;
                     }
                 }
+            _logger.LogInformation("[BOARD-CARDS] CreateCardsOnBoardAsync complete: created={Created}, skipped={Skipped}, errors={ErrorCount}",
+                cardCreatedCount, cardSkippedCount, errors.Count);
+            foreach (var kv in cardsByList)
+                _logger.LogInformation("[BOARD-CARDS] List '{ListName}': {Count} card(s) — {Names}",
+                    kv.Key, kv.Value.Count, string.Join(", ", kv.Value));
         }
 
         /// <summary>
         /// Creates simplified cards on EmptyBoard based on SprintPlan structure
         /// Sprint1 stays exactly the same, other sprints are simplified
         /// </summary>
-        private async Task CreateEmptyBoardCardsAsync(string emptyBoardId, TrelloProjectCreationRequest request, 
-            string systemBoardId, Dictionary<string, string> roleLabelIds, Dictionary<string, string> listIds, 
+        private async Task CreateEmptyBoardCardsAsync(string emptyBoardId, TrelloProjectCreationRequest request,
+            string systemBoardId, Dictionary<string, string> roleLabelIds, Dictionary<string, string> listIds,
             Dictionary<string, string> customFieldIds, List<string> errors)
         {
+            _logger.LogInformation("[BOARD-EMPTY] CreateEmptyBoardCardsAsync: emptyBoardId={BoardId}, totalCards={Total}, listIds=[{Lists}]",
+                emptyBoardId, request.SprintPlan?.Cards?.Count ?? 0,
+                string.Join(", ", listIds.Keys));
+            var emptyCreated = 0;
+            var emptySkipped = 0;
+            var sprint1Created = 0;
             foreach (var card in request.SprintPlan.Cards)
             {
                 try
                 {
                     if (!listIds.ContainsKey(card.ListName))
                     {
-                        errors.Add($"List not found for card: {card.Name}");
+                        _logger.LogWarning("[BOARD-EMPTY] List not found for card '{CardName}': ListName='{ListName}'. Available lists: [{Lists}]",
+                            card.Name, card.ListName, string.Join(", ", listIds.Keys));
+                        errors.Add($"List not found for card: {card.Name} (ListName='{card.ListName}')");
+                        emptySkipped++;
                         continue;
                     }
                     
@@ -978,10 +1006,12 @@ namespace strAppersBackend.Services
                     
                     if (createCardResponse.IsSuccessStatusCode)
                     {
+                        emptyCreated++;
+                        if (isSprint1) sprint1Created++;
                         var cardJson = await createCardResponse.Content.ReadAsStringAsync();
                         var cardData = JsonSerializer.Deserialize<JsonElement>(cardJson);
                         var emptyCardId = cardData.GetProperty("id").GetString();
-                        
+
                         // Create checklist (with rate-limit retry)
                         try
                         {
@@ -1033,14 +1063,18 @@ namespace strAppersBackend.Services
                         var errorContent = await createCardResponse.Content.ReadAsStringAsync();
                         _logger.LogWarning("Failed to create empty board card {CardName}: {Error}", card.Name, errorContent);
                         errors.Add($"Failed to create empty board card: {card.Name}");
+                        emptySkipped++;
                     }
                 }
                 catch (Exception ex)
                 {
                     _logger.LogError(ex, "Error creating empty board card {CardName}", card.Name);
                     errors.Add($"Error creating empty board card {card.Name}: {ex.Message}");
+                    emptySkipped++;
                 }
             }
+            _logger.LogInformation("[BOARD-EMPTY] CreateEmptyBoardCardsAsync complete: created={Created}, sprint1Cards={Sprint1}, skipped={Skipped}, errors={ErrorCount}",
+                emptyCreated, sprint1Created, emptySkipped, errors.Count);
         }
 
         public async Task<object> GetProjectStatsAsync(string trelloBoardId)
@@ -3109,6 +3143,8 @@ namespace strAppersBackend.Services
                         });
                     }
                 }
+                _logger.LogInformation("[GET-SPRINT] GetSprintFromBoardAsync: boardId={BoardId}, sprint='{Sprint}', cards={Count}",
+                    boardId, sprintListName, cards.Count);
                 return new SprintSnapshot { ListId = listId, ListName = listName ?? sprintListName, Cards = cards };
             }
             catch (Exception ex)
@@ -3122,24 +3158,32 @@ namespace strAppersBackend.Services
         public async Task<(bool Success, string? Error)> OverrideSprintOnBoardAsync(string boardId, string listId, IReadOnlyList<SprintSnapshotCard> cards)
         {
             var errors = new List<string>();
+            _logger.LogInformation("[OVERRIDE-SPRINT] OverrideSprintOnBoardAsync: boardId={BoardId}, listId={ListId}, incomingCards={Count}",
+                boardId, listId, cards.Count);
             try
             {
+                // Fetch existing cards BEFORE creating new ones — we only archive after new creation succeeds
                 var listCardsUrl = $"https://api.trello.com/1/lists/{listId}/cards?key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
                 var listCardsResponse = await _httpClient.GetAsync(listCardsUrl);
+                var existingCardIds = new List<string>();
                 if (listCardsResponse.IsSuccessStatusCode)
                 {
                     var listCardsJson = await listCardsResponse.Content.ReadAsStringAsync();
                     var existingCards = JsonSerializer.Deserialize<JsonElement[]>(listCardsJson);
                     if (existingCards != null)
                     {
+                        _logger.LogInformation("[OVERRIDE-SPRINT] Found {ExistingCount} existing cards in list {ListId} (will archive after new cards are created).", existingCards.Length, listId);
                         foreach (var ec in existingCards)
                         {
-                            var cardId = ec.TryGetProperty("id", out var idProp) ? idProp.GetString() : null;
-                            if (string.IsNullOrEmpty(cardId)) continue;
-                            var closeUrl = $"https://api.trello.com/1/cards/{cardId}?closed=true&key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
-                            await _httpClient.PutAsync(closeUrl, null);
+                            var cid = ec.TryGetProperty("id", out var idProp) ? idProp.GetString() : null;
+                            if (!string.IsNullOrEmpty(cid)) existingCardIds.Add(cid);
                         }
                     }
+                }
+                else
+                {
+                    var body = await listCardsResponse.Content.ReadAsStringAsync();
+                    _logger.LogWarning("[OVERRIDE-SPRINT] Failed to fetch existing cards for list {ListId}: {Status} {Body}", listId, listCardsResponse.StatusCode, body);
                 }
                 var labelsUrl = $"https://api.trello.com/1/boards/{boardId}/labels?key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
                 var roleLabelIds = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
@@ -3178,6 +3222,7 @@ namespace strAppersBackend.Services
                         }
                     }
                 }
+                var overrideCreated = 0;
                 foreach (var card in cards)
                 {
                     var createCardUrl = $"https://api.trello.com/1/cards?name={Uri.EscapeDataString(card.Name)}&desc={Uri.EscapeDataString(NormalizeDescriptionNewlinesForTrello(card.Description ?? ""))}&idList={listId}&key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
@@ -3185,13 +3230,15 @@ namespace strAppersBackend.Services
                         createCardUrl += $"&due={card.DueDate.Value:yyyy-MM-dd}";
                     if (!string.IsNullOrEmpty(card.RoleName) && roleLabelIds.TryGetValue(card.RoleName, out var labelId))
                         createCardUrl += $"&idLabels={labelId}";
-                    var createResponse = await _httpClient.PostAsync(createCardUrl, null);
+                    var createResponse = await SendWithRateLimitRetryAsync(() => _httpClient.PostAsync(createCardUrl, null));
                     if (!createResponse.IsSuccessStatusCode)
                     {
                         var err = await createResponse.Content.ReadAsStringAsync();
+                        _logger.LogWarning("[OVERRIDE-SPRINT] Failed to create card '{CardName}': {Error}", card.Name, err);
                         errors.Add($"Failed to create card '{card.Name}': {err}");
                         continue;
                     }
+                    overrideCreated++;
                     var cardJson = await createResponse.Content.ReadAsStringAsync();
                     var cardData = JsonSerializer.Deserialize<JsonElement>(cardJson);
                     var newCardId = cardData.GetProperty("id").GetString();
@@ -3217,6 +3264,27 @@ namespace strAppersBackend.Services
                     if (!string.IsNullOrEmpty(card.CardId) && !string.IsNullOrEmpty(cardIdFieldId))
                         await SetCustomFieldValueAsync(newCardId, cardIdFieldId, "text", card.CardId, errors);
                 }
+                _logger.LogInformation("[OVERRIDE-SPRINT] New card creation complete: created={Created}/{Total}, errors={ErrorCount}",
+                    overrideCreated, cards.Count, errors.Count);
+
+                if (overrideCreated == 0 && cards.Count > 0)
+                {
+                    // No new cards created at all — do NOT archive existing cards, leave Sprint intact
+                    _logger.LogWarning("[OVERRIDE-SPRINT] Zero cards created; skipping archive of {Count} existing card(s) to avoid empty Sprint.", existingCardIds.Count);
+                    return (false, errors.Count > 0 ? string.Join("; ", errors) : "No cards created");
+                }
+
+                // Archive old cards only after new ones were successfully created
+                var archivedCount = 0;
+                foreach (var cid in existingCardIds)
+                {
+                    var closeUrl = $"https://api.trello.com/1/cards/{cid}?closed=true&key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
+                    var archiveResp = await SendWithRateLimitRetryAsync(() => _httpClient.PutAsync(closeUrl, null));
+                    if (archiveResp.IsSuccessStatusCode) archivedCount++;
+                }
+                _logger.LogInformation("[OVERRIDE-SPRINT] Archived {Archived}/{Total} old cards after creating {Created} new cards.",
+                    archivedCount, existingCardIds.Count, overrideCreated);
+
                 if (errors.Count > 0)
                     return (false, string.Join("; ", errors));
                 return (true, null);

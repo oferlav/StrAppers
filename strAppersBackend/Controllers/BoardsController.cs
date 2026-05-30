@@ -69,6 +69,24 @@ public partial class BoardsController : ControllerBase
         _testingConfig = testingConfig;
     }
 
+    // ===== BOARD CREATION DEBUG LOG =====
+    // Toggle via appsettings.json: "Debug": { "BoardCreation": true }
+    // Or Azure App Service env var: Debug__BoardCreation=true   (default: false)
+    private bool DebugBoardCreation => _configuration.GetValue<bool>("Debug:BoardCreation", false);
+
+    private static void DbgLog(System.Text.StringBuilder? sb, string msg)
+        => sb?.AppendLine($"[{DateTime.UtcNow:yyyy-MM-dd HH:mm:ss.fff}Z] {msg}");
+
+    private async Task FlushDebugLog(System.Text.StringBuilder? debugLog, string boardId)
+    {
+        if (debugLog == null) return;
+        var content = debugLog.ToString();
+        var fileName = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"BoardCreation_{boardId}_{DateTime.UtcNow:yyyyMMdd_HHmmss}.txt");
+        try { System.IO.File.WriteAllText(fileName, content); } catch { /* ignore */ }
+        try { await _smtpEmailService.SendPlainEmailAsync("ofer@skill-in.com", $"[BoardCreation Debug] BoardId={boardId}", content); } catch { /* ignore */ }
+    }
+    // =====================================
+
     /// <summary>
     /// Test simple Trello board creation
     /// </summary>
@@ -163,10 +181,92 @@ public partial class BoardsController : ControllerBase
     [HttpPost("create")]
     public async Task<ActionResult<CreateBoardResponse>> CreateBoard([FromBody] CreateBoardRequest request)
     {
+        // DEBUG LOG — must be outside try so catch block can access and flush it
+        System.Text.StringBuilder? debugLog = DebugBoardCreation ? new System.Text.StringBuilder() : null;
+        string debugBoardId = "unknown";
+        DbgLog(debugLog, $"=== CreateBoard START === ProjectId={request.ProjectId} InstituteProjectId={request.InstituteProjectId} IsSingleRole={request.IsSingleRole} Title={request.Title} DurationMinutes={request.DurationMinutes} StudentIds=[{string.Join(",", request.StudentIds)}]");
         try
         {
-            _logger.LogInformation("Starting board creation for project {ProjectId} with {StudentCount} students", 
+            _logger.LogInformation("Starting board creation for project {ProjectId} with {StudentCount} students",
                 request.ProjectId, request.StudentIds.Count);
+
+            // Load and validate students BEFORE the transaction so Status=2 commits immediately
+            // and is visible to other DB connections (the transaction only commits at the very end)
+            _logger.LogInformation("Validating students: {StudentIds}", string.Join(",", request.StudentIds));
+            var students = await _context.Students
+                .Include(s => s.StudentRoles)
+                .ThenInclude(sr => sr.Role)
+                .Include(s => s.ProgrammingLanguage)
+                .Where(s => request.StudentIds.Contains(s.Id) && s.IsAvailable)
+                .ToListAsync();
+
+            _logger.LogInformation("Found {FoundCount} students out of {RequestedCount} requested",
+                students.Count, request.StudentIds.Count);
+            DbgLog(debugLog, $"Students validated: found={students.Count} requested={request.StudentIds.Count} names=[{string.Join(", ", students.Select(s => $"{s.FirstName} {s.LastName}"))}]");
+
+            if (students.Count != request.StudentIds.Count)
+            {
+                _logger.LogWarning("Student validation failed. Found {FoundCount}, requested {RequestedCount}",
+                    students.Count, request.StudentIds.Count);
+                return BadRequest("One or more students not found or not available.");
+            }
+
+            // Set Status=2 and auto-commit (no transaction yet) so it is immediately visible externally
+            foreach (var s in students)
+            {
+                s.Status = 2;
+                // Students added to a board via CreateBoard are always institute (non-B2C).
+                // HasDefaultValue(true) makes EF treat B2c as ValueGeneratedOnAdd, so force-mark it.
+                s.B2c = false;
+                _context.Entry(s).Property(x => x.B2c).IsModified = true;
+                s.UpdatedAt = DateTime.UtcNow;
+            }
+            // For role-based (IsSingleRole) boards, RoleIndex must be set before card-label filtering.
+            // Use request.StudentIds order as the canonical 1-based assignment; only fill gaps (0 = unset).
+            DbgLog(debugLog, $"IsSingleRole={request.IsSingleRole} — RoleIndex from DB: [{string.Join(", ", students.Select(s => $"id={s.Id} ri={s.RoleIndex}"))}]");
+            if (request.IsSingleRole)
+            {
+                for (var i = 0; i < request.StudentIds.Count; i++)
+                {
+                    var s = students.FirstOrDefault(x => x.Id == request.StudentIds[i]);
+                    if (s != null && s.RoleIndex == 0)
+                    {
+                        s.RoleIndex = i + 1;
+                        s.UpdatedAt = DateTime.UtcNow;
+                        // HasDefaultValue(0) on this column makes EF treat it as ValueGeneratedOnAdd,
+                        // which can silently skip it in UPDATE. Force-mark it so EF always sends it.
+                        _context.Entry(s).Property(x => x.RoleIndex).IsModified = true;
+                        DbgLog(debugLog, $"RoleIndex SET: studentId={s.Id} → {s.RoleIndex} IsModified={_context.Entry(s).Property(x => x.RoleIndex).IsModified}");
+                    }
+                    else if (s != null)
+                    {
+                        DbgLog(debugLog, $"RoleIndex SKIPPED: studentId={s.Id} already has RoleIndex={s.RoleIndex}");
+                    }
+                }
+            }
+            try
+            {
+                await _context.SaveChangesAsync();
+                DbgLog(debugLog, $"SaveChangesAsync #1 OK — Status/B2c/RoleIndex saved");
+            }
+            catch (Exception ex)
+            {
+                DbgLog(debugLog, $"SaveChangesAsync #1 FAILED: {ex.Message}");
+                throw;
+            }
+
+            // Verify RoleIndex actually landed in DB
+            if (request.IsSingleRole)
+            {
+                var verify = await _context.Students
+                    .Where(s => request.StudentIds.Contains(s.Id))
+                    .AsNoTracking()
+                    .Select(s => new { s.Id, s.RoleIndex })
+                    .ToListAsync();
+                DbgLog(debugLog, $"RoleIndex DB verify (after SaveChangesAsync #1): [{string.Join(", ", verify.Select(s => $"id={s.Id} ri={s.RoleIndex}"))}]");
+            }
+
+            _logger.LogInformation("[BOARD-CREATE] Set Status=2 for {Count} student(s). Starting board creation.", students.Count);
 
             using var transaction = await _context.Database.BeginTransactionAsync();
 
@@ -183,24 +283,21 @@ public partial class BoardsController : ControllerBase
             }
             _logger.LogInformation("Project found: {ProjectTitle}", project.Title);
 
-            // Validate students exist and are available
-            _logger.LogInformation("Validating students: {StudentIds}", string.Join(",", request.StudentIds));
-            var students = await _context.Students
-                .Include(s => s.StudentRoles)
-                .ThenInclude(sr => sr.Role)
-                .Include(s => s.ProgrammingLanguage)  // Include ProgrammingLanguage for backend code generation
-                .Where(s => request.StudentIds.Contains(s.Id) && s.IsAvailable)
-                .ToListAsync();
-
-            _logger.LogInformation("Found {FoundCount} students out of {RequestedCount} requested", 
-                students.Count, request.StudentIds.Count);
-
-            if (students.Count != request.StudentIds.Count)
+            // When InstituteProjectId is provided, load the institute project and use its JSON/metadata
+            InstituteProject? instituteProject = null;
+            if (request.InstituteProjectId.HasValue)
             {
-                _logger.LogWarning("Student validation failed. Found {FoundCount}, requested {RequestedCount}", 
-                    students.Count, request.StudentIds.Count);
-                return BadRequest("One or more students not found or not available.");
+                instituteProject = await _context.InstituteProjects
+                    .Include(ip => ip.Organization)
+                    .FirstOrDefaultAsync(ip => ip.Id == request.InstituteProjectId.Value);
+                if (instituteProject == null)
+                    return NotFound($"Institute project {request.InstituteProjectId} not found.");
+                _logger.LogInformation("[INSTITUTE-BOARD] Using InstituteProject {IpId} '{Title}' for board creation.", instituteProject.Id, instituteProject.Title);
             }
+            var effectiveTrelloBoardJson = instituteProject?.TrelloBoardJson ?? project.TrelloBoardJson;
+            var effectiveTitle = instituteProject?.Title ?? project.Title;
+            var effectiveDescription = instituteProject?.Description ?? project.Description;
+            DbgLog(debugLog, $"Project loaded: ProjectId={project.Id} Title={project.Title} InstituteProject={(instituteProject == null ? "null" : $"Id={instituteProject.Id} Title={instituteProject.Title} InstituteId={instituteProject.InstituteId}")} TrelloBoardJsonPresent={!string.IsNullOrWhiteSpace(effectiveTrelloBoardJson)} TrelloBoardJsonLen={effectiveTrelloBoardJson?.Length ?? 0}");
 
             // Get configuration values
             var projectLengthWeeks = _configuration.GetValue<int>("BusinessLogicConfig:ProjectLengthInWeeks", 12);
@@ -224,18 +321,24 @@ public partial class BoardsController : ControllerBase
             TrelloProjectCreationRequest? trelloRequest = null;
             object? sprintPlanForStorage = null;
             var useSavedTrelloJson = false;
-            if (useDBProjectBoard && !string.IsNullOrWhiteSpace(project.TrelloBoardJson))
+            _logger.LogInformation("[BOARD-CREATE] UseDBProjectBoard={UseDB}, EffectiveTrelloBoardJson present={HasJson}, Length={JsonLen}",
+                useDBProjectBoard,
+                !string.IsNullOrWhiteSpace(effectiveTrelloBoardJson),
+                effectiveTrelloBoardJson?.Length ?? 0);
+            if (useDBProjectBoard && !string.IsNullOrWhiteSpace(effectiveTrelloBoardJson))
             {
                 try
                 {
-                    var saved = System.Text.Json.JsonSerializer.Deserialize<TrelloProjectCreationRequest>(project.TrelloBoardJson);
+                    var saved = System.Text.Json.JsonSerializer.Deserialize<TrelloProjectCreationRequest>(effectiveTrelloBoardJson);
+                    _logger.LogInformation("[BOARD-CREATE] Deserialized TrelloBoardJson: saved={Saved}, SprintPlan={HasPlan}, CardCount={CardCount}",
+                        saved != null, saved?.SprintPlan != null, saved?.SprintPlan?.Cards?.Count ?? 0);
                     if (saved != null && saved.SprintPlan != null)
                     {
                         useSavedTrelloJson = true;
                         trelloRequest = saved;
                         trelloRequest.ProjectId = request.ProjectId;
-                        trelloRequest.ProjectTitle = project.Title ?? trelloRequest.ProjectTitle;
-                        trelloRequest.ProjectDescription = project.Description ?? trelloRequest.ProjectDescription;
+                        trelloRequest.ProjectTitle = effectiveTitle ?? trelloRequest.ProjectTitle;
+                        trelloRequest.ProjectDescription = effectiveDescription ?? trelloRequest.ProjectDescription;
                         trelloRequest.StudentEmails = students.Select(s => s.Email).ToList();
                         trelloRequest.ProjectLengthWeeks = projectLengthWeeks;
                         trelloRequest.SprintLengthWeeks = sprintLengthWeeks;
@@ -260,6 +363,17 @@ public partial class BoardsController : ControllerBase
                         {
                             teamRoleNames.Add("Frontend Developer");
                             teamRoleNames.Add("Backend Developer");
+                        }
+                        // For role-based (IsSingleRole) courses, template cards use "{RoleName} {RoleIndex}" labels
+                        // (e.g. "Full Stack Developer 4"). Add all indexed variants so the filter passes them through.
+                        if (request.IsSingleRole)
+                        {
+                            foreach (var s in students)
+                            {
+                                var sRoleName = s.StudentRoles?.FirstOrDefault(sr => sr.IsActive)?.Role?.Name;
+                                if (!string.IsNullOrEmpty(sRoleName) && s.RoleIndex > 0)
+                                    teamRoleNames.Add($"{sRoleName} {s.RoleIndex}");
+                            }
                         }
                         if (trelloRequest.SprintPlan?.Cards != null && teamRoleNames.Count > 0)
                         {
@@ -705,6 +819,8 @@ public partial class BoardsController : ControllerBase
                     _logger.LogInformation("SystemBoard created with ID: {SystemBoardId}, URL: {SystemBoardUrl}", trelloResponse.SystemBoardId, trelloResponse.SystemBoardUrl);
                 }
                 trelloBoardId = trelloResponse.BoardId;
+                debugBoardId = trelloBoardId ?? "unknown";
+                DbgLog(debugLog, $"Trello board created: BoardId={trelloBoardId} BoardUrl={trelloResponse.BoardUrl} SystemBoardId={trelloResponse.SystemBoardId ?? "null"}");
 
                 // When CreatePMEmptyBoard and UseDBProjectBoard: override Sprint 1..VisibleSprints on EmptyBoard with SystemBoard content (no merge)
                 if (useDBProjectBoard && !string.IsNullOrEmpty(trelloResponse.SystemBoardId))
@@ -2884,9 +3000,13 @@ public partial class BoardsController : ControllerBase
                 NeonProjectId = createdNeonProjectId, // Save the Neon project ID (project-per-tenant isolation)
                 NeonBranchId = createdBranchId, // Save the Neon branch ID for this database (ensures isolation)
                 VisableModuleDesign = visableModuleDesign,
+                IsSingleRole = request.IsSingleRole,
+                InstituteId = instituteProject?.InstituteId,
+                InstituteProjectId = instituteProject?.Id,
                 CreatedAt = DateTime.UtcNow,
                 UpdatedAt = DateTime.UtcNow
             };
+            DbgLog(debugLog, $"ProjectBoard object created: Id={trelloBoardId} ProjectId={request.ProjectId} InstituteId={instituteProject?.InstituteId} InstituteProjectId={instituteProject?.Id} IsSingleRole={request.IsSingleRole} NextMeetingTime={nextMeetingTime:yyyy-MM-dd HH:mm:ss}Z AdminStudentId={adminStudent?.Id}");
 
             _logger.LogInformation("Creating ProjectBoard record for board: {BoardId}", trelloBoardId);
             _context.ProjectBoards.Add(projectBoard);
@@ -2902,16 +3022,19 @@ public partial class BoardsController : ControllerBase
             }
 
             _logger.LogInformation("Saving changes to database");
+            DbgLog(debugLog, $"SaveChangesAsync START — ProjectBoard + student BoardId updates");
             try
             {
                 await _context.SaveChangesAsync();
                 _logger.LogInformation("Database changes saved successfully");
+                DbgLog(debugLog, $"SaveChangesAsync OK — ProjectBoard saved, students updated with BoardId={trelloBoardId}");
                 // Do NOT delete the SystemBoard ProjectBoard record: EmptyBoard.SystemBoardId references it (FK).
                 // Deleting it would set EmptyBoard.SystemBoardId to NULL due to ON DELETE SET NULL.
             }
             catch (Exception saveEx)
             {
                 _logger.LogError(saveEx, "Error saving changes to database: {SaveException}", saveEx.Message);
+                DbgLog(debugLog, $"SaveChangesAsync FAILED: {saveEx.Message} | InnerException: {saveEx.InnerException?.Message}");
                 throw;
             }
 
@@ -2990,14 +3113,17 @@ public partial class BoardsController : ControllerBase
             }
             
             // Commit transaction BEFORE calling Teams endpoint so TeamsController can see the ProjectBoard
+            DbgLog(debugLog, $"Transaction CommitAsync START");
             try
             {
                 await transaction.CommitAsync();
                 _logger.LogInformation("Transaction committed successfully - ProjectBoard is now visible to other endpoints");
+                DbgLog(debugLog, $"Transaction CommitAsync OK — ProjectBoard visible in DB");
             }
             catch (Exception commitEx)
             {
                 _logger.LogError(commitEx, "Error committing transaction: {CommitException}", commitEx.Message);
+                DbgLog(debugLog, $"Transaction CommitAsync FAILED: {commitEx.Message}");
                 throw;
             }
 
@@ -3054,34 +3180,48 @@ public partial class BoardsController : ControllerBase
                         });
                         var content = new StringContent(jsonContent, System.Text.Encoding.UTF8, "application/json");
                         
-                        _logger.LogInformation("Calling create-meeting-smtp-for-board-auth for board {BoardId} with {AttendeeCount} attendees", 
+                        _logger.LogInformation("Calling create-meeting-smtp-for-board-auth for board {BoardId} with {AttendeeCount} attendees",
                             trelloBoardId, attendeeEmails.Count);
-                        
+                        DbgLog(debugLog, $"Teams API call START: boardId={trelloBoardId} attendees=[{string.Join(",", attendeeEmails)}] dateTime={nextMeetingTime:yyyy-MM-dd HH:mm:ss}Z title={teamsMeetingRequest.Title}");
+
                         var response = await httpClient.PostAsync("/api/Teams/use/create-meeting-smtp-for-board-auth", content);
                         var responseContent = await response.Content.ReadAsStringAsync();
-                        
+                        DbgLog(debugLog, $"Teams API response: StatusCode={(int)response.StatusCode} ({response.StatusCode}) Content={responseContent}");
+
                         if (response.IsSuccessStatusCode)
                         {
                             var result = JsonSerializer.Deserialize<JsonElement>(responseContent);
-                            if (result.TryGetProperty("actualMeetingUrl", out var actualUrlElement))
+                            // Try camelCase first (API default), fall back to PascalCase
+                            string? meetingUrlFromResponse = null;
+                            if (result.TryGetProperty("actualMeetingUrl", out var elem1) && elem1.ValueKind == JsonValueKind.String)
+                                meetingUrlFromResponse = elem1.GetString();
+                            else if (result.TryGetProperty("ActualMeetingUrl", out var elem2) && elem2.ValueKind == JsonValueKind.String)
+                                meetingUrlFromResponse = elem2.GetString();
+
+                            DbgLog(debugLog, $"Teams response parsed: actualMeetingUrl found={meetingUrlFromResponse != null} value={meetingUrlFromResponse ?? "(null)"}");
+
+                            if (!string.IsNullOrEmpty(meetingUrlFromResponse))
                             {
-                                meetingUrl = actualUrlElement.GetString();
+                                meetingUrl = meetingUrlFromResponse;
                                 _logger.LogInformation("Teams meeting created successfully via create-meeting-smtp-for-board-auth: {MeetingUrl}", meetingUrl);
-                                
+
                                 // Update ProjectBoard with the actual meeting URL (transaction already committed)
+                                // Note: TeamsController already saved NextMeetingUrl; this is a redundant confirm from BoardsController's tracked entity
                                 projectBoard.NextMeetingUrl = meetingUrl;
                                 projectBoard.NextMeetingTeacherAttendance = false;
                                 await _context.SaveChangesAsync();
                                 _logger.LogInformation("Updated ProjectBoard with meeting URL: {MeetingUrl}", meetingUrl);
+                                DbgLog(debugLog, $"ProjectBoard.NextMeetingUrl saved OK: {meetingUrl}");
                             }
                             else
                             {
                                 _logger.LogWarning("Teams meeting created but no actualMeetingUrl in response. Full response: {Response}", responseContent);
+                                DbgLog(debugLog, $"WARNING: actualMeetingUrl not found in Teams response. TeamsController may have still saved it directly.");
                             }
                         }
                         else
                         {
-                            _logger.LogWarning("Teams meeting creation failed via create-meeting-smtp-for-board-auth: {StatusCode} - {Content}. Board creation will continue without meeting.", 
+                            _logger.LogWarning("Teams meeting creation failed via create-meeting-smtp-for-board-auth: {StatusCode} - {Content}. Board creation will continue without meeting.",
                                 response.StatusCode, responseContent);
                         }
                     }
@@ -3125,13 +3265,21 @@ public partial class BoardsController : ControllerBase
             _logger.LogInformation("Successfully created board {BoardId} for project {ProjectId}", trelloBoardId, request.ProjectId);
 
             var message = (backendRepositoryUrl != null || frontendRepositoryUrl != null)
-                ? "Board and repositories created successfully!" 
+                ? "Board and repositories created successfully!"
                 : "Board created successfully! (GitHub repository creation was skipped or failed)";
 
             var squadSnap = await _context.ProjectBoards.AsNoTracking()
                 .Where(b => b.Id == trelloBoardId)
                 .Select(b => b.SquadName)
                 .FirstOrDefaultAsync();
+
+            // Re-read NextMeetingUrl from DB to confirm it was saved (by either BoardsController or TeamsController)
+            var savedNextMeetingUrl = await _context.ProjectBoards.AsNoTracking()
+                .Where(b => b.Id == trelloBoardId)
+                .Select(b => b.NextMeetingUrl)
+                .FirstOrDefaultAsync();
+            DbgLog(debugLog, $"=== CreateBoard SUCCESS === BoardId={trelloBoardId} SquadName={squadSnap} NextMeetingUrl(from DB)={savedNextMeetingUrl ?? "(null)"} meetingUrl(local)={meetingUrl ?? "(null)"}");
+            await FlushDebugLog(debugLog, debugBoardId);
 
             return Ok(new CreateBoardResponse
             {
@@ -3155,8 +3303,10 @@ public partial class BoardsController : ControllerBase
         catch (Exception ex)
         {
             var innerException = ex.InnerException?.Message ?? "No inner exception";
-            _logger.LogError(ex, "Error creating board for project {ProjectId}. Exception: {ExceptionMessage}. Inner Exception: {InnerException}", 
+            _logger.LogError(ex, "Error creating board for project {ProjectId}. Exception: {ExceptionMessage}. Inner Exception: {InnerException}",
                 request.ProjectId, ex.Message, innerException);
+            DbgLog(debugLog, $"=== CreateBoard EXCEPTION === {ex.GetType().Name}: {ex.Message} | InnerException: {innerException}\n{ex.StackTrace}");
+            await FlushDebugLog(debugLog, debugBoardId);
             return StatusCode(500, $"An error occurred while creating the board: {ex.Message}. Inner Exception: {innerException}");
         }
     }
@@ -3999,16 +4149,23 @@ public partial class BoardsController : ControllerBase
             var roleName = student.StudentRoles?.FirstOrDefault(sr => sr.IsActive)?.Role?.Name
                 ?? student.StudentRoles?.FirstOrDefault()?.Role?.Name ?? "Team Member";
 
-            // Resolve Full Stack to actual label used on this board/sprint
-            if (roleName.Contains("full stack", StringComparison.OrdinalIgnoreCase) ||
-                roleName.Contains("fullstack", StringComparison.OrdinalIgnoreCase))
+            // On single-role boards the Trello card label includes the role index (e.g. "Full Stack Developer 1").
+            var board = await _context.ProjectBoards.AsNoTracking().FirstOrDefaultAsync(b => b.Id == boardId.Trim());
+            var roleLabel = board?.IsSingleRole == true && student.RoleIndex > 0
+                ? $"{roleName} {student.RoleIndex}"
+                : roleName;
+
+            // For non-indexed Full Stack roles, resolve to the actual label used on this board/sprint
+            if (string.Equals(roleLabel, roleName, StringComparison.Ordinal) &&
+                (roleName.Contains("full stack", StringComparison.OrdinalIgnoreCase) ||
+                 roleName.Contains("fullstack", StringComparison.OrdinalIgnoreCase)))
             {
                 var fsLabels = await _trelloService.ResolveSprintLabelsAsync(boardId.Trim(), sprintNumber, roleName);
-                roleName = fsLabels[0];
+                roleLabel = fsLabels[0];
             }
 
             // Get module DB id from the sprint card's ModuleId custom field
-            var moduleIdStr = await _trelloService.GetModuleIdFromSprintCardAsync(boardId.Trim(), sprintNumber, roleName);
+            var moduleIdStr = await _trelloService.GetModuleIdFromSprintCardAsync(boardId.Trim(), sprintNumber, roleLabel);
             if (!int.TryParse(moduleIdStr, out var moduleId))
                 return NotFound(new { Success = false, Message = "No module assigned to this sprint for this role." });
 
@@ -8141,6 +8298,10 @@ public class CreateBoardRequest
     public string? Title { get; set; }
     public string? DateTime { get; set; } // Format: "2024-01-15T14:30:00Z"
     public int? DurationMinutes { get; set; }
+    /// <summary>When set, board JSON and metadata are sourced from this InstituteProject row instead of the catalog Project.</summary>
+    public int? InstituteProjectId { get; set; }
+    /// <summary>When true, marks the board as role-based; each student gets a unique RoleIndex suffix on branch names.</summary>
+    public bool IsSingleRole { get; set; }
 }
 
 public class CreateBoardResponse

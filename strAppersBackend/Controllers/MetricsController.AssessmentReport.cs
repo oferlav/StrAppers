@@ -284,6 +284,72 @@ public partial class MetricsController
         };
     }
 
+    /// <summary>
+    /// On-demand: run all configured metric endpoints for a single student + sprint.
+    /// Used by the staff dashboard when a sprint has no cached assessment data yet.
+    /// Route: POST /api/Metrics/use/run-student-sprint
+    /// </summary>
+    [HttpPost("use/run-student-sprint")]
+    public async Task<ActionResult> RunStudentSprintAssessment([FromBody] RunStudentSprintRequest? request, CancellationToken cancellationToken)
+    {
+        if (request == null || string.IsNullOrWhiteSpace(request.BoardId) || request.StudentId <= 0 || request.SprintNumber < 0)
+            return BadRequest(new { success = false, message = "BoardId, StudentId (> 0), and SprintNumber (>= 0) are required." });
+
+        var boardId = request.BoardId.Trim();
+
+        var student = await _context.Students.AsNoTracking()
+            .FirstOrDefaultAsync(s => s.Id == request.StudentId, cancellationToken);
+        if (student == null)
+            return NotFound(new { success = false, message = $"Student {request.StudentId} not found." });
+        if (!string.Equals(student.BoardId?.Trim(), boardId, StringComparison.OrdinalIgnoreCase))
+            return BadRequest(new { success = false, message = "Student is not assigned to this board." });
+
+        var metrics = await _context.Metrics.AsNoTracking()
+            .Where(m => m.Endpoint != null && m.Endpoint != "")
+            .ToListAsync(cancellationToken);
+
+        var errors = new List<string>();
+        foreach (var metric in metrics)
+        {
+            try
+            {
+                switch (metric.Id)
+                {
+                    case 1:
+                        await Adherence(new AdherenceRequest { BoardId = boardId, StudentId = request.StudentId, SprintNumber = request.SprintNumber }, cancellationToken);
+                        break;
+                    case 2:
+                        await GapAnalysis(new GapAnalysisRequest { BoardId = boardId, StudentId = request.StudentId, SprintNumber = request.SprintNumber }, cancellationToken);
+                        break;
+                    case 5:
+                        await Attendance(boardId, request.SprintNumber, request.StudentId, cancellationToken);
+                        break;
+                    case 7:
+                        await CustomerEngagement(new CustomerEngagementRequest { BoardId = boardId, StudentId = request.StudentId, SprintNumber = request.SprintNumber }, cancellationToken);
+                        break;
+                    case 8:
+                        await MeetingsCommunication(new MeetingsCommunicationRequest { BoardId = boardId, StudentId = request.StudentId, SprintNumber = request.SprintNumber }, cancellationToken);
+                        break;
+                }
+                _logger.LogInformation("[RUN-STUDENT-SPRINT] Metric {MetricId} ({MetricName}) OK for student {StudentId}, sprint {Sprint}.", metric.Id, metric.Name, request.StudentId, request.SprintNumber);
+            }
+            catch (Exception ex)
+            {
+                errors.Add($"Metric {metric.Id} ({metric.Name}): {ex.Message}");
+                _logger.LogWarning(ex, "[RUN-STUDENT-SPRINT] Metric {MetricId} failed for student {StudentId}, sprint {Sprint}: {Error}", metric.Id, request.StudentId, request.SprintNumber, ex.Message);
+            }
+        }
+
+        return Ok(new { success = true, errors });
+    }
+
+    public sealed class RunStudentSprintRequest
+    {
+        public string BoardId { get; set; } = "";
+        public int StudentId { get; set; }
+        public int SprintNumber { get; set; }
+    }
+
     public sealed class SquadNameSearchResponseDto
     {
         public IReadOnlyList<SquadNameSearchItemDto> Items { get; set; } = Array.Empty<SquadNameSearchItemDto>();

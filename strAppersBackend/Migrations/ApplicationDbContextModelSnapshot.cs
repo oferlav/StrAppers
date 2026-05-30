@@ -2475,6 +2475,10 @@ namespace strAppersBackend.Migrations
                         .HasColumnType("integer")
                         .HasColumnName("InstituteId");
 
+                    b.Property<int?>("InstituteProjectId")
+                        .HasColumnType("integer")
+                        .HasColumnName("InstituteProjectId");
+
                     b.Property<bool>("IsSingleRole")
                         .ValueGeneratedOnAdd()
                         .HasColumnType("boolean")
@@ -2597,6 +2601,8 @@ namespace strAppersBackend.Migrations
                     b.HasIndex("CreatedAt");
 
                     b.HasIndex("InstituteId");
+
+                    b.HasIndex("InstituteProjectId");
 
                     b.HasIndex("ProjectId");
 
@@ -4450,6 +4456,11 @@ namespace strAppersBackend.Migrations
                         .HasForeignKey("InstituteId")
                         .OnDelete(DeleteBehavior.SetNull);
 
+                    b.HasOne("strAppersBackend.Models.InstituteProject", "InstituteProject")
+                        .WithMany()
+                        .HasForeignKey("InstituteProjectId")
+                        .OnDelete(DeleteBehavior.SetNull);
+
                     b.HasOne("strAppersBackend.Models.Project", "Project")
                         .WithMany()
                         .HasForeignKey("ProjectId")
@@ -4468,6 +4479,8 @@ namespace strAppersBackend.Migrations
                     b.Navigation("Admin");
 
                     b.Navigation("Institute");
+
+                    b.Navigation("InstituteProject");
 
                     b.Navigation("Project");
 

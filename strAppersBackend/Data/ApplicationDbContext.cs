@@ -367,6 +367,27 @@ public class ApplicationDbContext : DbContext
                   .HasForeignKey(e => e.ProjectPriority4)
                   .OnDelete(DeleteBehavior.SetNull);
 
+            // Institute project priorities (nullable FKs to InstituteProjects)
+            entity.HasOne(e => e.InstitutePriority1Project)
+                  .WithMany()
+                  .HasForeignKey(e => e.InstitutePriority1)
+                  .OnDelete(DeleteBehavior.SetNull);
+
+            entity.HasOne(e => e.InstitutePriority2Project)
+                  .WithMany()
+                  .HasForeignKey(e => e.InstitutePriority2)
+                  .OnDelete(DeleteBehavior.SetNull);
+
+            entity.HasOne(e => e.InstitutePriority3Project)
+                  .WithMany()
+                  .HasForeignKey(e => e.InstitutePriority3)
+                  .OnDelete(DeleteBehavior.SetNull);
+
+            entity.HasOne(e => e.InstitutePriority4Project)
+                  .WithMany()
+                  .HasForeignKey(e => e.InstitutePriority4)
+                  .OnDelete(DeleteBehavior.SetNull);
+
             // Foreign key relationship to ProjectBoard (Trello board)
             entity.HasOne(e => e.ProjectBoard)
                   .WithMany()
@@ -800,7 +821,8 @@ public class ApplicationDbContext : DbContext
             entity.Property(e => e.SquadName).HasColumnName("SquadName").HasMaxLength(100);
             entity.Property(e => e.VisableModuleDesign).HasColumnName("VisableModuleDesign").HasDefaultValue(false);
             entity.Property(e => e.IsSingleRole).HasColumnName("IsSingleRole").HasDefaultValue(false);
-            
+            entity.Property(e => e.InstituteProjectId).HasColumnName("InstituteProjectId");
+
             // Foreign key relationships
             entity.HasOne(e => e.Project)
                   .WithMany()
@@ -832,9 +854,15 @@ public class ApplicationDbContext : DbContext
                   .HasPrincipalKey(pb => pb.Id)
                   .OnDelete(DeleteBehavior.SetNull);
 
+            entity.HasOne(e => e.InstituteProject)
+                  .WithMany()
+                  .HasForeignKey(e => e.InstituteProjectId)
+                  .OnDelete(DeleteBehavior.SetNull);
+
             // Indexes for better performance
             entity.HasIndex(e => e.ProjectId);
             entity.HasIndex(e => e.InstituteId);
+            entity.HasIndex(e => e.InstituteProjectId);
             entity.HasIndex(e => e.CreatedAt);
             entity.HasIndex(e => e.StatusId);
             entity.HasIndex(e => e.SystemBoardId);
@@ -1417,7 +1445,7 @@ public class ApplicationDbContext : DbContext
             entity.Property(e => e.AssistMe).HasDefaultValue(false);
             entity.Property(e => e.NextMeetingTime).HasColumnName("NextMeetingTime").HasColumnType("timestamp with time zone");
             entity.Property(e => e.NextMeetingUrl).HasColumnName("NextMeetingUrl").HasMaxLength(1000);
-            entity.Property(e => e.RoleIndex).HasDefaultValue(0);
+            entity.Property(e => e.RoleIndex).HasDefaultValue(0).ValueGeneratedNever();
 
             entity.HasOne(e => e.SubscriptionType)
                   .WithMany(s => s.Students)
@@ -1463,13 +1491,13 @@ public class ApplicationDbContext : DbContext
                 new AIModel
                 {
                     Id = 2,
-                    Name = "claude-sonnet-4-5-20250929",
+                    Name = "claude-sonnet-4-6",
                     Provider = "Anthropic",
                     BaseUrl = "https://api.anthropic.com/v1",
                     ApiVersion = "2023-06-01",
-                    MaxTokens = 200000,
+                    MaxTokens = 64000,
                     DefaultTemperature = 0.3,
-                    Description = "Anthropic Claude Sonnet 4.5 model - powerful for complex tasks",
+                    Description = "Anthropic Claude Sonnet 4.6 model - powerful for complex tasks",
                     IsActive = true,
                     CreatedAt = DateTime.UtcNow
                 }

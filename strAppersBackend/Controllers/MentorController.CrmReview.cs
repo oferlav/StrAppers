@@ -97,7 +97,10 @@ public partial class MentorController
             var roleId = activeRole?.RoleId;
 
             string? moduleIdStr = null;
-            foreach (var label in GetTrelloLabelNamesForRole(originalRoleName))
+            var crmLabels = board.IsSingleRole && student.RoleIndex > 0
+                ? (IReadOnlyList<string>)new[] { $"{originalRoleName} {student.RoleIndex}" }
+                : GetTrelloLabelNamesForRole(originalRoleName);
+            foreach (var label in crmLabels)
             {
                 moduleIdStr = await _trelloService.GetModuleIdFromSprintCardAsync(boardId, request.SprintNumber, label);
                 if (!string.IsNullOrWhiteSpace(moduleIdStr))
@@ -124,6 +127,7 @@ public partial class MentorController
                     _context,
                     moduleInt,
                     board.ProjectId,
+                    board.InstituteProjectId,
                     cancellationToken);
                 contextMd.AppendLine("### Project module (database)");
                 if (pm == null)
@@ -193,11 +197,11 @@ public partial class MentorController
                 request.SprintNumber,
                 cancellationToken);
 
-            var project = await _context.Projects.AsNoTracking()
-                .FirstOrDefaultAsync(p => p.Id == board.ProjectId, cancellationToken);
-            var customerPastStory = string.IsNullOrWhiteSpace(project?.CustomerPastStory)
+            var (_, effectiveCustomerPastStory, _) = await strAppersBackend.Utilities.ProjectContextHelper.GetEffectiveProjectDataAsync(
+                _context, board.ProjectId, board.InstituteProjectId, cancellationToken);
+            var customerPastStory = string.IsNullOrWhiteSpace(effectiveCustomerPastStory)
                 ? "(Not set on this project.)"
-                : project!.CustomerPastStory!.Trim();
+                : effectiveCustomerPastStory.Trim();
 
             var stakeholderRows = await _context.Stakeholders
                 .AsNoTracking()

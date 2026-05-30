@@ -50,7 +50,8 @@ public partial class MentorController
                 boardId,
                 board.ProjectId,
                 request.StudentId,
-                request.SprintNumber);
+                request.SprintNumber,
+                board.InstituteProjectId);
 
             var systemPrompt = template.Replace("{{SPRINT_CONTEXT}}", sprintContext.Markdown.Trim(), StringComparison.Ordinal);
 
@@ -198,7 +199,8 @@ public partial class MentorController
         string boardId,
         int projectId,
         int studentId,
-        int sprintNumber)
+        int sprintNumber,
+        int? boardInstituteProjectId = null)
     {
         var sb = new StringBuilder();
         string? moduleIdStr = await _trelloService.GetModuleIdFromSprintCardAsync(boardId, sprintNumber, "UI/UX Designer")
@@ -221,6 +223,7 @@ public partial class MentorController
                 _context,
                 moduleInt,
                 projectId,
+                boardInstituteProjectId,
                 CancellationToken.None);
             sb.AppendLine("## Project module (database)");
             if (pm == null)

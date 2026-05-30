@@ -4,6 +4,7 @@ using Microsoft.Extensions.Options;
 using strAppersBackend.Data;
 using strAppersBackend.Models;
 using strAppersBackend.Services;
+using strAppersBackend.Utilities;
 using Microsoft.Extensions.Configuration;
 
 namespace strAppersBackend.Controllers
@@ -21,6 +22,9 @@ namespace strAppersBackend.Controllers
         private readonly TestingConfig _testingConfig;
         private readonly ILogger<CustomerController> _logger;
         private readonly IConfiguration _configuration;
+        private readonly ISmtpEmailService _smtpEmailService;
+
+        private bool DebugAiContext => _configuration.GetValue<bool>("Debug:AiContext", false);
 
         public CustomerController(
             ApplicationDbContext context,
@@ -28,7 +32,8 @@ namespace strAppersBackend.Controllers
             IOptions<PromptConfig> promptConfig,
             IOptions<TestingConfig> testingConfig,
             ILogger<CustomerController> logger,
-            IConfiguration configuration)
+            IConfiguration configuration,
+            ISmtpEmailService smtpEmailService)
         {
             _context = context;
             _chatCompletionService = chatCompletionService;
@@ -36,6 +41,7 @@ namespace strAppersBackend.Controllers
             _testingConfig = testingConfig.Value;
             _logger = logger;
             _configuration = configuration;
+            _smtpEmailService = smtpEmailService;
         }
 
         /// <summary>
@@ -87,13 +93,14 @@ namespace strAppersBackend.Controllers
                 if (projectBoard == null)
                     return NotFound(new { Success = false, Message = $"Board '{request.BoardId}' not found." });
                 var projectId = projectBoard.ProjectId;
+                var boardInstituteProjectId = projectBoard.InstituteProjectId;
                 var student = await _context.Students.AsNoTracking().FirstOrDefaultAsync(s => s.Id == request.StudentId);
                 if (student == null)
                     return NotFound(new { Success = false, Message = $"Student {request.StudentId} not found." });
                 if (student.ProjectId != projectId)
                     return BadRequest(new { Success = false, Message = $"Student {request.StudentId} is not assigned to the board's project." });
 
-                _logger.LogInformation("Customer respond: BoardId={BoardId}, ProjectId={ProjectId}, StudentId={StudentId}, SprintNumber={SprintNumber}, Model={Model}", request.BoardId, projectId, request.StudentId, request.SprintNumber, aiModelName);
+                _logger.LogInformation("Customer respond: BoardId={BoardId}, ProjectId={ProjectId}, InstituteProjectId={IpId}, StudentId={StudentId}, SprintNumber={SprintNumber}, Model={Model}", request.BoardId, projectId, boardInstituteProjectId?.ToString() ?? "null", request.StudentId, request.SprintNumber, aiModelName);
 
                 // Resolve model name: "default" (or empty) → Customer:AiModel config → first active DB model
                 var resolvedModelName = aiModelName;
@@ -116,18 +123,15 @@ namespace strAppersBackend.Controllers
                 var userQuestion = request.UserQuestion ?? "";
                 var sprintNumber = request.SprintNumber;
 
-                // General statement from Projects.Description
-                var project = await _context.Projects
-                    .AsNoTracking()
-                    .FirstOrDefaultAsync(p => p.Id == projectId);
-                var projectDescription = project?.Description ?? "(No project description.)";
+                // Pattern A: Description + CustomerPastStory — from InstituteProjects when boardInstituteProjectId is set, else Projects
+                var (effectiveDescription, effectiveCustomerPastStory, projectSource) =
+                    await ProjectContextHelper.GetEffectiveProjectDataAsync(_context, projectId, boardInstituteProjectId);
+                var projectDescription = effectiveDescription ?? "(No project description.)";
 
-                // Context from ProjectModules: ProjectId = @ProjectId and Sequence = (SprintNumber - 1)
+                // Pattern B: module rows by Sequence — from InstituteProjectModules when boardInstituteProjectId is set, else ProjectModules
                 var sequenceForSprint = sprintNumber - 1;
-                var modules = await _context.ProjectModules
-                    .Where(m => m.ProjectId == projectId && m.Sequence == sequenceForSprint)
-                    .OrderBy(m => m.Id)
-                    .ToListAsync();
+                var modules = await ProjectModuleLookup.FindManyBySequenceAsync(
+                    _context, sequenceForSprint, projectId, boardInstituteProjectId);
 
                 var contextText = modules.Count == 0
                     ? "(No module context for this project/sprint.)"
@@ -148,11 +152,27 @@ namespace strAppersBackend.Controllers
                     ? promptWithDescription.Replace(designContextPlaceholder, contextText, StringComparison.OrdinalIgnoreCase)
                     : $"{promptWithDescription}\n\n=== PROJECT OVERVIEW ===\n{projectDescription}\n\n=== PROJECT MODULE CONTEXT (Sprint {sprintNumber}, Sequence {sequenceForSprint}) ===\n{contextText}\n=== END CONTEXT ===";
 
-                // Append Customer Past Story (Projects.CustomerPastStory, linked by ProjectId) to context
-                var customerPastStory = string.IsNullOrWhiteSpace(project?.CustomerPastStory)
+                // Append Customer Past Story — from InstituteProjects when boardInstituteProjectId is set, else Projects
+                var customerPastStory = string.IsNullOrWhiteSpace(effectiveCustomerPastStory)
                     ? "(None.)"
-                    : project.CustomerPastStory.Trim();
+                    : effectiveCustomerPastStory.Trim();
                 enhancedSystemPrompt += $"\n\n=== CUSTOMER PAST STORY ===\n{customerPastStory}\n=== END CUSTOMER PAST STORY ===";
+
+                if (DebugAiContext)
+                {
+                    var firstModule = modules.Count > 0 ? modules[0] : null;
+                    var moduleSource = firstModule == null ? null
+                        : boardInstituteProjectId.HasValue
+                            ? $"InstituteProjectModules (InstituteProjectId={boardInstituteProjectId.Value})"
+                            : $"ProjectModules (ProjectId={projectId})";
+                    await AiContextDebugLogger.LogAndEmailAsync(
+                        _smtpEmailService,
+                        $"POST /api/Customer/use/respond/{aiModelName}",
+                        request.BoardId, request.StudentId, sprintNumber,
+                        boardInstituteProjectId, projectSource,
+                        effectiveDescription, effectiveCustomerPastStory,
+                        moduleSource, firstModule?.Id, firstModule?.Title);
+                }
 
                 // Chat history from CustomerChatHistory (StudentId = student Id, SprintId = SprintNumber), limited by ChatHistoryLength
                 var chatHistoryLength = _promptConfig.Customer.ChatHistoryLength;

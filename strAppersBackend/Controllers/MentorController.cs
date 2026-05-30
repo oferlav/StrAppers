@@ -34,6 +34,9 @@ namespace strAppersBackend.Controllers
         private readonly IOptions<TestingConfig> _testingConfig;
         private readonly IServiceScopeFactory _serviceScopeFactory;
         private readonly IAzureBlobStorageService _azureBlobStorage;
+        private readonly ISmtpEmailService _smtpEmailService;
+
+        private bool DebugAiContext => _configuration.GetValue<bool>("Debug:AiContext", false);
 
         public MentorController(
             ApplicationDbContext context,
@@ -51,7 +54,8 @@ namespace strAppersBackend.Controllers
             IOptions<DeploymentsConfig> deploymentsConfig,
             IOptions<TestingConfig> testingConfig,
             IServiceScopeFactory serviceScopeFactory,
-            IAzureBlobStorageService azureBlobStorage)
+            IAzureBlobStorageService azureBlobStorage,
+            ISmtpEmailService smtpEmailService)
         {
             _context = context;
             _logger = logger;
@@ -69,6 +73,7 @@ namespace strAppersBackend.Controllers
             _testingConfig = testingConfig;
             _serviceScopeFactory = serviceScopeFactory;
             _azureBlobStorage = azureBlobStorage;
+            _smtpEmailService = smtpEmailService;
         }
 
         /// <summary>When DebugSystemPrompt is true, returns a source marker for logging; otherwise empty.</summary>
@@ -285,6 +290,8 @@ namespace strAppersBackend.Controllers
                     return BadRequest(new { Success = false, Message = $"Project not found for student {studentId}" });
                 }
 
+                var boardInstituteProjectId = student.ProjectBoard?.InstituteProjectId;
+
                 // Get Trello board lists to find the sprint list
                 var listsResult = await GetBoardListsAsync(student.BoardId);
                 
@@ -348,9 +355,16 @@ namespace strAppersBackend.Controllers
                 }
 
                 // B. Fetch Current Trello Tasks for current sprint (filtered by role label(s); Full Stack Developer: check for FS card first, else Backend + Frontend labels)
-                var trelloLabelNames = IsFullStackStudentRoleName(roleName)
-                    ? await _trelloService.ResolveSprintLabelsAsync(student.BoardId, sprintId, roleName)
-                    : (IReadOnlyList<string>)GetTrelloLabelNamesForRole(roleName);
+                // For role-course boards the Trello card label includes the developer index (e.g. "Full Stack Developer 1")
+                // while the student's stored role name is the base name ("Full Stack Developer"). Build the exact label here.
+                var isSingleRoleBoard = student.ProjectBoard?.IsSingleRole ?? false;
+                IReadOnlyList<string> trelloLabelNames;
+                if (isSingleRoleBoard && student.RoleIndex > 0)
+                    trelloLabelNames = new[] { $"{roleName} {student.RoleIndex}" };
+                else
+                    trelloLabelNames = IsFullStackStudentRoleName(roleName)
+                        ? await _trelloService.ResolveSprintLabelsAsync(student.BoardId, sprintId, roleName)
+                        : (IReadOnlyList<string>)GetTrelloLabelNamesForRole(roleName);
                 var seenCardIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                 var mergedCards = new List<JsonElement>();
                 foreach (var labelName in trelloLabelNames)
@@ -430,6 +444,24 @@ namespace strAppersBackend.Controllers
                         }
                     }
 
+                if (userTasks.Count == 0)
+                {
+                    _logger.LogWarning("[Mentor] No tasks found for studentId={StudentId} role='{Role}' labelNames=[{LabelNames}] sprint={SprintId} sprintListId={SprintListId} boardId={BoardId}.",
+                        studentId, roleName, string.Join(",", trelloLabelNames), sprintId, sprintListId, student.BoardId);
+                    if (DebugAiContext)
+                        try { await _smtpEmailService.SendPlainEmailAsync("ofer@skill-in.com",
+                            $"[Mentor Debug] No tasks — studentId={studentId} sprint={sprintId}",
+                            $"StudentId:    {studentId}\nRole:         {roleName}\nLabelNames:   {string.Join(", ", trelloLabelNames)}\nSprintId:     {sprintId}\nSprintListId: {sprintListId}\nBoardId:      {student.BoardId}\n\nTrello returned 0 cards for this label+list combination."); } catch { /* ignore */ }
+                }
+                else
+                {
+                    _logger.LogInformation("[Mentor] Loaded {Count} task(s) for studentId={StudentId} role='{Role}' sprint={SprintId}.", userTasks.Count, studentId, roleName, sprintId);
+                    if (DebugAiContext)
+                        try { await _smtpEmailService.SendPlainEmailAsync("ofer@skill-in.com",
+                            $"[Mentor Debug] Tasks OK — studentId={studentId} sprint={sprintId} count={userTasks.Count}",
+                            $"StudentId:    {studentId}\nRole:         {roleName}\nLabelNames:   {string.Join(", ", trelloLabelNames)}\nSprintId:     {sprintId}\nSprintListId: {sprintListId}\nBoardId:      {student.BoardId}\nTasksLoaded:  {userTasks.Count}"); } catch { /* ignore */ }
+                }
+
                 // D. Fetch Project Module Description (for each task's ModuleId)
                 var moduleDescriptions = new Dictionary<string, string>();
                 foreach (var task in userTasks)
@@ -461,17 +493,17 @@ namespace strAppersBackend.Controllers
                                 // Try to parse as integer
                                 if (int.TryParse(moduleIdStr, out int moduleId))
                                 {
-                                    _logger.LogDebug("Looking up module with ID {ModuleId} for project {ProjectId}", moduleId, project.Id);
-                                    
-                                    var module = await _context.ProjectModules
-                                        .FirstOrDefaultAsync(pm => pm.Id == moduleId && pm.ProjectId == project.Id);
-                                    
+                                    _logger.LogDebug("Looking up module with ID {ModuleId} for project {ProjectId} (InstituteProjectId={IpId})", moduleId, project.Id, boardInstituteProjectId?.ToString() ?? "null");
+
+                                    var module = await strAppersBackend.Utilities.ProjectModuleLookup.FindByBoardScopeAsync(
+                                        _context, moduleId, project.Id, boardInstituteProjectId);
+
                                     if (module != null)
                                     {
                                         if (!string.IsNullOrEmpty(module.Description))
                                         {
                                             moduleDescriptions[moduleIdStr] = module.Description;
-                                            _logger.LogDebug("Found module description for ModuleId {ModuleId}: {Description}", 
+                                            _logger.LogDebug("Found module description for ModuleId {ModuleId}: {Description}",
                                                 moduleId, module.Description.Substring(0, Math.Min(50, module.Description.Length)));
                                         }
                                         else
@@ -481,7 +513,7 @@ namespace strAppersBackend.Controllers
                                     }
                                     else
                                     {
-                                        _logger.LogWarning("Module {ModuleId} not found for project {ProjectId}", moduleId, project.Id);
+                                        _logger.LogWarning("Module {ModuleId} not found for project {ProjectId} (InstituteProjectId={IpId})", moduleId, project.Id, boardInstituteProjectId?.ToString() ?? "null");
                                     }
                                 }
                                 else
@@ -602,7 +634,8 @@ namespace strAppersBackend.Controllers
                             Id = teamStudent.Id,
                             FirstName = teamStudent.FirstName,
                             LastName = teamStudent.LastName,
-                            RoleName = teamRole?.Role?.Name ?? "Team Member"
+                            RoleName = teamRole?.Role?.Name ?? "Team Member",
+                            RoleIndex = teamStudent.RoleIndex
                         });
                     }
                 }
@@ -617,9 +650,14 @@ namespace strAppersBackend.Controllers
 
                     if (!string.IsNullOrEmpty(memberRoleName))
                     {
-                        var memberLabelNames = IsFullStackStudentRoleName(memberRoleName)
-                            ? await _trelloService.ResolveSprintLabelsAsync(student.BoardId, sprintId, memberRoleName)
-                            : (IReadOnlyList<string>)GetTrelloLabelNamesForRole(memberRoleName);
+                        var memberRoleIndex = memberElement.TryGetProperty("RoleIndex", out var rIdxProp) ? rIdxProp.GetInt32() : 0;
+                        IReadOnlyList<string> memberLabelNames;
+                        if (isSingleRoleBoard && memberRoleIndex > 0)
+                            memberLabelNames = new[] { $"{memberRoleName} {memberRoleIndex}" };
+                        else
+                            memberLabelNames = IsFullStackStudentRoleName(memberRoleName)
+                                ? await _trelloService.ResolveSprintLabelsAsync(student.BoardId, sprintId, memberRoleName)
+                                : (IReadOnlyList<string>)GetTrelloLabelNamesForRole(memberRoleName);
                         var memberSeenIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                         foreach (var labelName in memberLabelNames)
                         {
@@ -683,6 +721,9 @@ namespace strAppersBackend.Controllers
                     ""                                     // {11} - User question (empty for context gathering)
                 );
 
+                var (effectiveProjectDescription, _, _) = await strAppersBackend.Utilities.ProjectContextHelper.GetEffectiveProjectDataAsync(
+                    _context, project.Id, boardInstituteProjectId);
+
                 return Ok(new
                 {
                     Success = true,
@@ -690,7 +731,7 @@ namespace strAppersBackend.Controllers
                     {
                         StudentId = studentId,
                         SprintId = sprintId,
-                        ProjectDescription = project.Description,
+                        ProjectDescription = effectiveProjectDescription ?? project.Description,
                         UserProfile = new
                         {
                             FirstName = student.FirstName,
@@ -717,6 +758,13 @@ namespace strAppersBackend.Controllers
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Error getting mentor context for StudentId: {StudentId}, SprintId: {SprintId}", studentId, sprintId);
+                if (DebugAiContext)
+                    try
+                    {
+                        var body = $"StudentId:  {studentId}\nSprintId:   {sprintId}\nException:  {ex.GetType().Name}\nMessage:    {ex.Message}\n\nStackTrace:\n{ex.StackTrace}";
+                        await _smtpEmailService.SendPlainEmailAsync("ofer@skill-in.com", $"[Mentor Context Error] StudentId={studentId} {ex.GetType().Name}", body);
+                    }
+                    catch { /* ignore */ }
                 return StatusCode(500, new { Success = false, Message = $"An error occurred: {ex.Message}" });
             }
         }
@@ -1300,7 +1348,7 @@ namespace strAppersBackend.Controllers
             if (!rest.Contains("AI Mentor chat", StringComparison.OrdinalIgnoreCase) && !rest.Contains("Sprint1", StringComparison.OrdinalIgnoreCase))
                 return item;
             var branchName = !string.IsNullOrEmpty(cardId) ? cardId : "1-B and 1-F";
-            return prefix + "Branch Initialization: Use the action buttons above the chat input box to launch the sprint and generate your " + branchName + " branch. You cannot create branches manually.";
+            return prefix + "Branch Initialization: Use the Branch button in the chat panel to generate your " + branchName + " branch. You cannot create branches manually.";
         }
 
         private string FormatTaskDetails(List<object> tasks)
@@ -1460,6 +1508,7 @@ namespace strAppersBackend.Controllers
             return new[] { roleName };
         }
 
+
         /// <summary>Which dev track a card belongs to, from Trello role labels (for Full Stack sprint task lists).</summary>
         private static string? GetSprintTaskDeveloperTrack(JsonElement card)
         {
@@ -1494,6 +1543,13 @@ namespace strAppersBackend.Controllers
             var frontendPattern = _configuration["GitHub:BranchNamingPatterns:Frontend"] ?? "^(Bugs-F|([1-9]|1[0-9]|20)-F)(-\\d+)?$";
             var validationContext = _configuration["GitHub:ValidationContext"] ?? "Mentor-Validation";
             return $"\n\n🛠 PLATFORM GITHUB & WORKFLOW RULES (Developer Role):\n" +
+                "DEVELOPER FIRST-TIME SETUP (Sprint 1 — before starting tasks):\n" +
+                "When a student is getting started for the first time, guide them through these steps in order:\n" +
+                "1. Accept the GitHub collaborator invitation — check email and accept invitations for both the backend and frontend repositories before attempting any Git operations.\n" +
+                "2. Clone both repositories — clone both the backend and frontend project repositories to your local development environment. This is a one-time setup at the start of the project.\n" +
+                "3. Generate your sprint branches — use the Branch button in the chat panel to create your Sprint 1 branches. Branches are created by the platform; you cannot create them manually.\n" +
+                "4. Pull the new branches locally — after the platform generates your branches, fetch and check out the new branches in both local repositories (`git fetch` then `git checkout <branch-name>`).\n" +
+                "5. Start working on your Sprint 1 tasks.\n\n" +
                 "0. Two workflows—never mix them up\n" +
                 "- **Numbered sprint work** (features/tasks for Sprint 1…N): use **N-B** / **N-F** and the **Sprint N** list; mentor session **SprintId** N matches that work.\n" +
                 "- **Bug / defect work** (any bug, found during **any** sprint or outside a sprint): **always** the **Bugs** workflow only—**Bugs** list in Squad Room, branches **Bugs-B** and **Bugs-F**, platform buttons with **Bugs** sprint context (SprintId **0** / \"Bugs\"). **The sprint where they noticed the bug (e.g. \"during Sprint 6\") does NOT mean they should PR from Sprint 6, stay on 6-B/6-F, or tie the fix to the numbered sprint mentor tab.** Wrong answers include \"yes, open a PR for the bug from Sprint 6\" or \"use the current sprint branch for the fix.\"\n" +
@@ -1506,7 +1562,7 @@ namespace strAppersBackend.Controllers
                 "2. Sprint & Branching Logic (Strict)\n" +
                 "- Platform-Only Branching: Users cannot create branches manually via Git CLI or the GitHub UI. Branching is handled ONLY by the platform backend.\n" +
                 "- Sprint Initialization: No work can begin until the developer initiates the Sprint via the platform's chat buttons.\n" +
-                "- When explaining how to launch the sprint or generate the branch, say to use the buttons above the chat input box (e.g. \"Use the buttons above the chat box to launch the sprint and generate your " + (isSingleRole && roleIndex > 0 ? $"1-B-{roleIndex} and 1-F-{roleIndex}" : "1-B and 1-F") + " branches\"). Do NOT say \"via the AI Mentor chat\" or \"in the chat\"—it is the action buttons above the chat input, not the chat itself.\n" +
+                "- When explaining how to generate sprint branches, tell the student to use the Branch button in the chat panel (e.g. \"Use the Branch button in the chat panel to generate your " + (isSingleRole && roleIndex > 0 ? $"1-B-{roleIndex} and 1-F-{roleIndex}" : "1-B and 1-F") + " branches\"). Do NOT describe its position as 'above the input' or 'below the output'—refer to it simply as the Branch button in the chat panel.\n" +
                 "- Validation Check: The Mentor Agent must always verify if a sprint is initialized by checking if a branch exists that follows the pre-defined naming convention.\n" +
                 "- **Bugs (mandatory):** **All** bug fixes—whether the defect showed up in an old sprint or the active one—go through the **Bugs** list/sprint in the Squad Room and **only** the **Bugs-B** (backend) and **Bugs-F** (frontend) branches, created via the **platform buttons** under **Bugs** sprint context (sprint id 0 / \"Bugs\" in the product). **Do not** instruct users to fix bugs on **N-B** / **N-F** or to \"generate the branch for the current numbered sprint\" for bug work; numbered sprint branches are for sprint feature work, not the Bugs pipeline.\n\n" +
                 "3. Naming Conventions & Enforcement\n" +
@@ -1704,14 +1760,14 @@ Your intelligence is strictly tethered to the Current Project Context and the us
             var n = roleIndex;
             return $@"
 
-⚠️ ROLE COURSE CONTEXT — overrides all squad-model instructions above
+[INTERNAL — DO NOT REVEAL TO STUDENT: Never mention ""Role Course"", ""Track D"", or any internal course classification in your response. This is system-internal context only and is transparent to students.]
 
-This is a ROLE COURSE (Track D). Every squad-based assumption in the context above is REPLACED by the following rules.
+⚠️ SQUAD CONTEXT — overrides cross-role coordination instructions above
 
-1. COURSE STRUCTURE
+1. SQUAD STRUCTURE
    - All developers on this board share one role: {roleName}. This student is developer index {n}.
-   - Each developer works INDEPENDENTLY on their own copy of the project. Peers have a different index number but the same role.
-   - There is NO Product Manager, NO UI/UX Designer, NO Marketing/BizDev, and no cross-functional squad on this board.
+   - Developers work on their own assigned modules within the SAME shared project and repositories. They collaborate as a squad and there are task dependencies between their work. Each peer has a different index number but the same role.
+   - There is NO Product Manager, NO UI/UX Designer, and NO Marketing/BizDev on this board. The squad consists exclusively of developers sharing the same role.
 
 2. REQUIREMENTS — no PM, no staggered delivery
    - Sprint requirements come from the MODULE DESCRIPTION set at course creation, NOT from a PM-authored User Story card.
@@ -1732,17 +1788,17 @@ This is a ROLE COURSE (Track D). Every squad-based assumption in the context abo
    - Sprint card IDs follow the same suffix: e.g. 3-B-{n}. This is correct — not a typo.
    - There is no PM-owned User Story card. Module requirements live in the MODULE DESCRIPTION.
 
-5. PULL REQUESTS — fully independent
-   - Each developer has their own PR from their own indexed branch. PRs are NOT coordinated across peers.
-   - Do NOT suggest waiting for a peer's PR or coordinating merge order.
+5. PULL REQUESTS
+   - Each developer has their own PR from their own indexed branch.
+   - Do NOT suggest coordinating merge timing unless a specific task dependency requires it.
    - ""Review my code"" reviews ONLY this student's indexed branch.
 
 6. ERRORS & DEPLOYMENT — check BOARD STATES first
    - When the student reports errors or deployment issues, read BOARD STATES and state what you see before giving generic troubleshooting advice.
-   - Railway deployment errors reflect the shared backend deployment. An error may have been caused by a peer developer's merge to main, not your own branch.
+   - Backend deployment errors reflect the shared infrastructure. An error may have been caused by a peer developer's merge to main, not your own branch.
 
-7. MEETINGS — peer coordination, not PM-driven
-   - There is no PM responsible for scheduling meetings. Coordination is between indexed peer developers with the same role.
+7. MEETINGS — peer coordination
+   - There is no PM responsible for scheduling meetings. Coordinate directly with your peer developers.
 
 8. WHAT DOES NOT EXIST IN THIS COURSE
    - No Product Manager, UI/UX Designer, Figma handoff, or Marketing/BizDev.
@@ -2309,6 +2365,28 @@ This is a ROLE COURSE (Track D). Every squad-based assumption in the context abo
 
 
         /// <summary>
+        /// Debug endpoint: returns the resolved Mentor:AiModel config value and all active DB models.
+        /// Use this to diagnose config vs DB mismatches (e.g. env var overriding appsettings.json).
+        /// </summary>
+        [HttpGet("use/debug-model")]
+        public async Task<ActionResult<object>> DebugModel()
+        {
+            var configValue = _configuration["Mentor:AiModel"];
+            var activeModels = await _context.AIModels
+                .Where(m => m.IsActive)
+                .Select(m => new { m.Name, m.Provider, m.MaxTokens })
+                .ToListAsync();
+            var resolvedMatch = activeModels.Any(m => m.Name == configValue);
+            return Ok(new
+            {
+                ConfigKey = "Mentor:AiModel",
+                ConfigValue = configValue ?? "(not set)",
+                ResolvedMatch = resolvedMatch,
+                ActiveModels = activeModels
+            });
+        }
+
+        /// <summary>
         /// Webhook endpoint for Railway build failure notifications
         /// Receives deployment failure events from Railway and processes them
         /// </summary>
@@ -2834,7 +2912,8 @@ This is a ROLE COURSE (Track D). Every squad-based assumption in the context abo
                                 scopedDeploymentsConfig,
                                 scopedTestingConfig,
                                 scope.ServiceProvider.GetRequiredService<IServiceScopeFactory>(),
-                                scope.ServiceProvider.GetRequiredService<IAzureBlobStorageService>());
+                                scope.ServiceProvider.GetRequiredService<IAzureBlobStorageService>(),
+                                scope.ServiceProvider.GetRequiredService<ISmtpEmailService>());
                             await tempController.ValidateBackendInternal(capturedBoardId, capturedBranch, fromRailwayWebhook: true);
                             scopedLogger.LogInformation("[RAILWAY WEBHOOK] BuildValidation updated for BoardId={BoardId}, Branch={Branch}", capturedBoardId, capturedBranch);
                         }
@@ -5704,9 +5783,9 @@ This is a ROLE COURSE (Track D). Every squad-based assumption in the context abo
                 if (student != null && isDeveloperRole)
                 {
                     var githubUser = student.GithubUser ?? "";
-                    var (frontendRepoUrl, backendRepoUrl, _) = GetRepositoryUrlsByRole(student);
+                    var (frontendRepoUrl, backendRepoUrl, isFullstackForGitHub) = GetRepositoryUrlsByRole(student);
                     var githubRepoUrl = !string.IsNullOrEmpty(backendRepoUrl) ? backendRepoUrl : frontendRepoUrl ?? "";
-                    
+
                     // Always add GitHub info for developer roles, especially if asking about GitHub or repeating instructions
                     if (isAskingAboutRepo || isAskingToRepeat || !string.IsNullOrEmpty(githubUser) || !string.IsNullOrEmpty(githubRepoUrl))
                     {
@@ -5714,7 +5793,13 @@ This is a ROLE COURSE (Track D). Every squad-based assumption in the context abo
                         githubAccountInfo += "Terminal commands: put each full command in a ```bash ... ``` block. Example—write \"Switch to the main branch\" as plain text, then on the next line: ```bash\ngit checkout main\n``` Do not put single words like main in backticks in sentences. Do not put branch names (e.g. 1-B, 1-F, Sprint 1) in code blocks or backticks when used in prose—only full terminal commands go in ```bash blocks. Write branch names as plain text (e.g. your 1-B branch, your 1-F branch).\n";
                         if (!string.IsNullOrEmpty(githubUser))
                             githubAccountInfo += $"GitHub username: {githubUser}\n";
-                        if (!string.IsNullOrEmpty(githubRepoUrl))
+                        if (isFullstackForGitHub && !string.IsNullOrEmpty(backendRepoUrl) && !string.IsNullOrEmpty(frontendRepoUrl) && backendRepoUrl != frontendRepoUrl)
+                        {
+                            githubAccountInfo += $"Backend repository URL: {backendRepoUrl}\n";
+                            githubAccountInfo += $"Frontend repository URL: {frontendRepoUrl}\n";
+                            githubAccountInfo += "IMPORTANT: This student is a Full Stack Developer — they must clone BOTH repositories (backend AND frontend). Always provide both git clone commands when giving setup or cloning instructions.\n";
+                        }
+                        else if (!string.IsNullOrEmpty(githubRepoUrl))
                             githubAccountInfo += $"Repository URL: {githubRepoUrl}\n";
                         githubAccountInfo += "If the user says 'explain again' or 'repeat', repeat what you last explained (same topic); use ```bash blocks for any commands.";
                     }
@@ -5802,7 +5887,7 @@ This is a ROLE COURSE (Track D). Every squad-based assumption in the context abo
                             if (existingBranches.Count > 0)
                                 statusLine += " Do NOT suggest creating " + string.Join(" or ", existingBranches) + "—already initialized.";
                             if (missingBranches.Count > 0)
-                                statusLine += " Only suggest using the action buttons above the chat to generate " + string.Join(" and ", missingBranches) + ".";
+                                statusLine += " Only suggest using the Branch button in the chat panel to generate " + string.Join(" and ", missingBranches) + ".";
                             enhancedSystemPrompt = $"{enhancedSystemPrompt}\n\n{statusLine}";
                         }
                     }
@@ -6298,8 +6383,15 @@ This is a ROLE COURSE (Track D). Every squad-based assumption in the context abo
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Error getting mentor response for StudentId: {StudentId}, SprintId: {SprintId}, Model: {Model}", 
+                _logger.LogError(ex, "Error getting mentor response for StudentId: {StudentId}, SprintId: {SprintId}, Model: {Model}",
                     request.StudentId, request.SprintId, aiModel?.Name ?? "Unknown");
+                if (DebugAiContext)
+                    try
+                    {
+                        var body = $"StudentId:  {request.StudentId}\nSprintId:   {request.SprintId}\nModel:      {aiModel?.Name ?? "(unknown)"}\nException:  {ex.GetType().Name}\nMessage:    {ex.Message}\n\nStackTrace:\n{ex.StackTrace}";
+                        await _smtpEmailService.SendPlainEmailAsync("ofer@skill-in.com", $"[Mentor Error] StudentId={request.StudentId} {ex.GetType().Name}", body);
+                    }
+                    catch { /* ignore */ }
                 return StatusCode(500, new { Success = false, Message = $"An error occurred: {ex.Message}" });
             }
         }
@@ -6395,8 +6487,14 @@ This is a ROLE COURSE (Track D). Every squad-based assumption in the context abo
                 }
 
                 // Full Stack: always load both FE+BE labeled cards for this user; isBackend only affects UserProfile.Role / mentor focus, not which sprint cards are included
-                var roleNameForUserTaskLabels = IsFullStackStudentRoleName(originalRoleName) ? originalRoleName : roleName;
-                var trelloLabelNames = GetTrelloLabelNamesForRole(roleNameForUserTaskLabels);
+                // For role-course boards the Trello card label includes the developer index (e.g. "Full Stack Developer 1").
+                var roleBaseName = IsFullStackStudentRoleName(originalRoleName) ? originalRoleName : roleName;
+                var isSingleRoleBoardForChat = student.ProjectBoard?.IsSingleRole ?? false;
+                IReadOnlyList<string> trelloLabelNames;
+                if (isSingleRoleBoardForChat && student.RoleIndex > 0)
+                    trelloLabelNames = new[] { $"{roleBaseName} {student.RoleIndex}" };
+                else
+                    trelloLabelNames = GetTrelloLabelNamesForRole(roleBaseName);
                 var seenCardIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                 var mergedCards = new List<JsonElement>();
                 foreach (var labelName in trelloLabelNames)
@@ -6472,7 +6570,26 @@ This is a ROLE COURSE (Track D). Every squad-based assumption in the context abo
                     }
                 }
 
+                if (userTasks.Count == 0)
+                {
+                    _logger.LogWarning("[Mentor/Chat] No tasks found for studentId={StudentId} role='{Role}' labelNames=[{LabelNames}] sprint={SprintId} sprintListId={SprintListId} boardId={BoardId}.",
+                        student.Id, originalRoleName ?? roleName, string.Join(",", trelloLabelNames), sprintId, sprintListId, student.BoardId);
+                    if (DebugAiContext)
+                        try { await _smtpEmailService.SendPlainEmailAsync("ofer@skill-in.com",
+                            $"[Mentor/Chat Debug] No tasks — studentId={student.Id} sprint={sprintId}",
+                            $"StudentId:    {student.Id}\nRole:         {originalRoleName ?? roleName}\nLabelNames:   {string.Join(", ", trelloLabelNames)}\nSprintId:     {sprintId}\nSprintListId: {sprintListId}\nBoardId:      {student.BoardId}\n\nTrello returned 0 cards for this label+list combination."); } catch { /* ignore */ }
+                }
+                else
+                {
+                    _logger.LogInformation("[Mentor/Chat] Loaded {Count} task(s) for studentId={StudentId} role='{Role}' sprint={SprintId}.", userTasks.Count, student.Id, originalRoleName ?? roleName, sprintId);
+                    if (DebugAiContext)
+                        try { await _smtpEmailService.SendPlainEmailAsync("ofer@skill-in.com",
+                            $"[Mentor/Chat Debug] Tasks OK — studentId={student.Id} sprint={sprintId} count={userTasks.Count}",
+                            $"StudentId:    {student.Id}\nRole:         {originalRoleName ?? roleName}\nLabelNames:   {string.Join(", ", trelloLabelNames)}\nSprintId:     {sprintId}\nSprintListId: {sprintListId}\nBoardId:      {student.BoardId}\nTasksLoaded:  {userTasks.Count}"); } catch { /* ignore */ }
+                }
+
                 // Get module descriptions
+                var internalBoardInstituteProjectId = student.ProjectBoard?.InstituteProjectId;
                 var moduleDescriptions = new Dictionary<string, string>();
                 foreach (var task in userTasks)
                 {
@@ -6497,8 +6614,8 @@ This is a ROLE COURSE (Track D). Every squad-based assumption in the context abo
                                 moduleIdStr = moduleIdStr.Trim().Trim('"').Trim('\'').Trim();
                                 if (int.TryParse(moduleIdStr, out int moduleId))
                                 {
-                                    var module = await _context.ProjectModules
-                                        .FirstOrDefaultAsync(pm => pm.Id == moduleId && pm.ProjectId == project.Id);
+                                    var module = await strAppersBackend.Utilities.ProjectModuleLookup.FindByBoardScopeAsync(
+                                        _context, moduleId, project.Id, internalBoardInstituteProjectId);
 
                                     if (module != null && !string.IsNullOrEmpty(module.Description))
                                     {
@@ -6603,7 +6720,8 @@ This is a ROLE COURSE (Track D). Every squad-based assumption in the context abo
                             Id = teamStudent.Id,
                             FirstName = teamStudent.FirstName,
                             LastName = teamStudent.LastName,
-                            RoleName = teamRole?.Role?.Name ?? "Team Member"
+                            RoleName = teamRole?.Role?.Name ?? "Team Member",
+                            RoleIndex = teamStudent.RoleIndex
                         });
                     }
                 }
@@ -6618,7 +6736,12 @@ This is a ROLE COURSE (Track D). Every squad-based assumption in the context abo
 
                     if (!string.IsNullOrEmpty(memberRoleName))
                     {
-                        var memberLabelNames = GetTrelloLabelNamesForRole(memberRoleName);
+                        var memberRoleIndex = memberElement.TryGetProperty("RoleIndex", out var rIdxProp) ? rIdxProp.GetInt32() : 0;
+                        IReadOnlyList<string> memberLabelNames;
+                        if (isSingleRoleBoardForChat && memberRoleIndex > 0)
+                            memberLabelNames = new[] { $"{memberRoleName} {memberRoleIndex}" };
+                        else
+                            memberLabelNames = GetTrelloLabelNamesForRole(memberRoleName);
                         var memberSeenIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                         foreach (var labelName in memberLabelNames)
                         {
@@ -7518,11 +7641,26 @@ This is a ROLE COURSE (Track D). Every squad-based assumption in the context abo
             }
 
             // 5. Build Status Validation (Railway)
-            var buildStatusResult = await ValidateBuildStatusBackendAsync(board, boardId);
-            var buildStatusValid = buildStatusResult.Valid;
-            if (!buildStatusValid)
+            // The BoardState record is written by the Railway webhook. When step 2 already confirmed
+            // via live Railway API that the service is deployed and active, a missing webhook record
+            // means the webhook was missed (e.g. fired before this board existed in DB, or webhook
+            // not yet configured for this service) — not that the deployment failed.
+            // Only run this check when step 2 could not confirm Railway status on its own.
+            (bool Valid, List<string> Issues, object Details) buildStatusResult;
+            bool buildStatusValid;
+            if (railwayValid)
             {
-                issues.AddRange(buildStatusResult.Issues);
+                buildStatusValid = true;
+                buildStatusResult = (true, new List<string>(), new { Skipped = true, Reason = "Railway API (step 2) already confirmed deployment is active" });
+            }
+            else
+            {
+                buildStatusResult = await ValidateBuildStatusBackendAsync(board, boardId);
+                buildStatusValid = buildStatusResult.Valid;
+                if (!buildStatusValid)
+                {
+                    issues.AddRange(buildStatusResult.Issues);
+                }
             }
 
             var overallValid = githubValid && railwayValid && databaseValid && codeStructureValid && buildStatusValid;
@@ -9608,14 +9746,23 @@ This is a ROLE COURSE (Track D). Every squad-based assumption in the context abo
                 {
                     roleLetter = branchParts[1].ToUpper();
                 }
-                var cardId = request.GithubBranch; // CardId matches branch name
                 var isBugsBranch = sprintNumber == 0;
+                var cardId = request.GithubBranch; // CardId matches branch name
 
-                // Get Trello card by CardId (required only for sprint branches; Bugs branches are reviewed by diff only)
+                // Get Trello card by CardId (required only for sprint branches; Bugs branches are diff-only).
+                // For role-indexed branches (e.g. "1-B-4"), Full Stack developers have one card per sprint
+                // regardless of the B/F panel — so if "1-B-4" is not found, also try "1-F-4" (and vice versa).
                 JsonElement? trelloCard = null;
                 if (!isBugsBranch)
                 {
                     var card = await _trelloService.GetCardByCardIdAsync(request.BoardId, cardId);
+                    if (card == null && branchParts.Length == 3)
+                    {
+                        var altLetter = roleLetter == "B" ? "F" : "B";
+                        var altCardId = $"{branchParts[0]}-{altLetter}-{branchParts[2]}";
+                        card = await _trelloService.GetCardByCardIdAsync(request.BoardId, altCardId);
+                        if (card != null) cardId = altCardId;
+                    }
                     if (card == null)
                     {
                         return NotFound(new { Success = false, Message = $"Trello card with CardId '{cardId}' not found" });
@@ -10620,7 +10767,8 @@ APPROVAL: no    (request changes before merge)";
                                                         scopedDeploymentsConfig,
                                                         scopedTestingConfig,
                                                         scope.ServiceProvider.GetRequiredService<IServiceScopeFactory>(),
-                                                        scope.ServiceProvider.GetRequiredService<IAzureBlobStorageService>());
+                                                        scope.ServiceProvider.GetRequiredService<IAzureBlobStorageService>(),
+                                                        scope.ServiceProvider.GetRequiredService<ISmtpEmailService>());
                                                     
                                                     // Call ProcessValidationAsync with scoped services (isWebhook=true for webhook-initiated)
                                                     var (success, feedback, errorMessage) = await tempController.ProcessValidationAsync(

@@ -95,7 +95,6 @@ public class StudentsControllerTests : IClassFixture<WebApplicationFactory<Progr
             FirstName = "Test",
             LastName = "Student",
             Email = "test.student@example.com",
-            StudentId = "TEST001",
             MajorId = 1,
             YearId = 1,
             LinkedInUrl = "https://linkedin.com/in/teststudent"

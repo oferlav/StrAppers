@@ -57,8 +57,19 @@ public partial class MetricsController
 
         var activeRole = student.StudentRoles?.FirstOrDefault(sr => sr.IsActive);
         var roleName = activeRole?.Role?.Name?.Trim() ?? "Team Member";
-        if (ContainsDeveloper(roleName))
-            return BadRequest(new { success = false, message = "Customer engagement is only evaluated for non-Developer roles." });
+        var hasCustomerEngagement = await ResolveCustomerEngagementAsync(activeRole?.Role, roleName, student.InstituteId, cancellationToken);
+        var isDeveloper = ContainsDeveloper(roleName);
+        _logger.LogInformation(
+            "CustomerEngagement gate: studentId={StudentId} roleName={RoleName} instituteId={InstId} hasCustomerEngagement={CE} isDeveloper={Dev} → willSkip={Skip}",
+            request.StudentId, roleName, student.InstituteId, hasCustomerEngagement, isDeveloper, !hasCustomerEngagement && isDeveloper);
+        if (DebugAiContext)
+        {
+            var dbg = $"StudentId={request.StudentId} BoardId={boardId} RoleName={roleName} InstituteId={student.InstituteId} " +
+                      $"Role.CE={activeRole?.Role?.CustomerEngagement} ResolvedCE={hasCustomerEngagement} IsDeveloper={isDeveloper} WillSkip={!hasCustomerEngagement && isDeveloper}";
+            try { await _smtpEmailService.SendPlainEmailAsync("ofer@skill-in.com", $"[Metrics Debug] CustomerEngagement gate student={request.StudentId}", dbg); } catch { /* ignore */ }
+        }
+        if (!hasCustomerEngagement && isDeveloper)
+            return Ok(new { success = true, metricId = CustomerEngagementMetricId, skippedLlm = true, reviewContent = (string?)null, message = "Developer role without CustomerEngagement enabled; skipping." });
 
         var board = await _context.ProjectBoards.AsNoTracking()
             .FirstOrDefaultAsync(b => b.Id == boardId, cancellationToken);
@@ -98,7 +109,7 @@ public partial class MetricsController
         }
 
         var contextMd = await BuildCustomerEngagementContextMarkdownAsync(
-            boardId, board, request.StudentId, request.SprintNumber, activeRole?.Role, cancellationToken);
+            boardId, board, request.StudentId, request.SprintNumber, activeRole?.Role, student.RoleIndex, cancellationToken);
 
         var systemPrompt = LoadCustomerEngagementSystemPrompt();
         var userPromptText = new StringBuilder()
@@ -200,16 +211,17 @@ public partial class MetricsController
         int studentId,
         int sprintNumber,
         Role? role,
+        int roleIndex,
         CancellationToken cancellationToken)
     {
         var sb = new StringBuilder();
 
-        var project = await _context.Projects.AsNoTracking()
-            .FirstOrDefaultAsync(p => p.Id == board.ProjectId, cancellationToken);
-        if (project != null && !string.IsNullOrWhiteSpace(project.CustomerPastStory))
+        var (_, effectiveCustomerPastStory, _) = await strAppersBackend.Utilities.ProjectContextHelper.GetEffectiveProjectDataAsync(
+            _context, board.ProjectId, board.InstituteProjectId, cancellationToken);
+        if (!string.IsNullOrWhiteSpace(effectiveCustomerPastStory))
         {
             sb.AppendLine("### Customer background (project)");
-            sb.AppendLine(project.CustomerPastStory.Trim());
+            sb.AppendLine(effectiveCustomerPastStory.Trim());
             sb.AppendLine();
         }
         else
@@ -221,7 +233,9 @@ public partial class MetricsController
 
         await AppendGapAnalysisCustomerChatHistoryAsync(sb, studentId, sprintNumber, cancellationToken);
 
-        var trelloLabel = ResolveTrelloSprintCardLabel(role, fullStackTrackLabel: null);
+        var trelloLabel = board.IsSingleRole && roleIndex > 0
+            ? $"{role?.Name?.Trim() ?? string.Empty} {roleIndex}"
+            : ResolveTrelloSprintCardLabel(role, fullStackTrackLabel: null);
         var moduleIdStr = await _trelloService.GetModuleIdFromSprintCardAsync(boardId, sprintNumber, trelloLabel);
         if (!string.IsNullOrWhiteSpace(moduleIdStr) && int.TryParse(moduleIdStr.Trim(), out var moduleId))
         {
