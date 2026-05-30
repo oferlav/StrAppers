@@ -437,6 +437,12 @@ namespace strAppersBackend.Controllers
                         }
                     }
 
+                if (userTasks.Count == 0)
+                    _logger.LogWarning("[Mentor] No tasks found for studentId={StudentId} role='{Role}' (labelName='{LabelName}') sprint={SprintId} sprintListId={SprintListId} boardId={BoardId}. Trello label mismatch or empty sprint list.",
+                        studentId, roleName, string.Join(",", trelloLabelNames), sprintId, sprintListId, student.BoardId);
+                else
+                    _logger.LogInformation("[Mentor] Loaded {Count} task(s) for studentId={StudentId} role='{Role}' sprint={SprintId}.", userTasks.Count, studentId, roleName, sprintId);
+
                 // D. Fetch Project Module Description (for each task's ModuleId)
                 var moduleDescriptions = new Dictionary<string, string>();
                 foreach (var task in userTasks)
@@ -1310,7 +1316,7 @@ namespace strAppersBackend.Controllers
             if (!rest.Contains("AI Mentor chat", StringComparison.OrdinalIgnoreCase) && !rest.Contains("Sprint1", StringComparison.OrdinalIgnoreCase))
                 return item;
             var branchName = !string.IsNullOrEmpty(cardId) ? cardId : "1-B and 1-F";
-            return prefix + "Branch Initialization: Use the action buttons above the chat input box to launch the sprint and generate your " + branchName + " branch. You cannot create branches manually.";
+            return prefix + "Branch Initialization: Use the Branch button in the chat panel to generate your " + branchName + " branch. You cannot create branches manually.";
         }
 
         private string FormatTaskDetails(List<object> tasks)
@@ -1470,6 +1476,7 @@ namespace strAppersBackend.Controllers
             return new[] { roleName };
         }
 
+
         /// <summary>Which dev track a card belongs to, from Trello role labels (for Full Stack sprint task lists).</summary>
         private static string? GetSprintTaskDeveloperTrack(JsonElement card)
         {
@@ -1504,6 +1511,13 @@ namespace strAppersBackend.Controllers
             var frontendPattern = _configuration["GitHub:BranchNamingPatterns:Frontend"] ?? "^(Bugs-F|([1-9]|1[0-9]|20)-F)(-\\d+)?$";
             var validationContext = _configuration["GitHub:ValidationContext"] ?? "Mentor-Validation";
             return $"\n\n🛠 PLATFORM GITHUB & WORKFLOW RULES (Developer Role):\n" +
+                "DEVELOPER FIRST-TIME SETUP (Sprint 1 — before starting tasks):\n" +
+                "When a student is getting started for the first time, guide them through these steps in order:\n" +
+                "1. Accept the GitHub collaborator invitation — check email and accept invitations for both the backend and frontend repositories before attempting any Git operations.\n" +
+                "2. Clone both repositories — clone both the backend and frontend project repositories to your local development environment. This is a one-time setup at the start of the project.\n" +
+                "3. Generate your sprint branches — use the Branch button in the chat panel to create your Sprint 1 branches. Branches are created by the platform; you cannot create them manually.\n" +
+                "4. Pull the new branches locally — after the platform generates your branches, fetch and check out the new branches in both local repositories (`git fetch` then `git checkout <branch-name>`).\n" +
+                "5. Start working on your Sprint 1 tasks.\n\n" +
                 "0. Two workflows—never mix them up\n" +
                 "- **Numbered sprint work** (features/tasks for Sprint 1…N): use **N-B** / **N-F** and the **Sprint N** list; mentor session **SprintId** N matches that work.\n" +
                 "- **Bug / defect work** (any bug, found during **any** sprint or outside a sprint): **always** the **Bugs** workflow only—**Bugs** list in Squad Room, branches **Bugs-B** and **Bugs-F**, platform buttons with **Bugs** sprint context (SprintId **0** / \"Bugs\"). **The sprint where they noticed the bug (e.g. \"during Sprint 6\") does NOT mean they should PR from Sprint 6, stay on 6-B/6-F, or tie the fix to the numbered sprint mentor tab.** Wrong answers include \"yes, open a PR for the bug from Sprint 6\" or \"use the current sprint branch for the fix.\"\n" +
@@ -1516,7 +1530,7 @@ namespace strAppersBackend.Controllers
                 "2. Sprint & Branching Logic (Strict)\n" +
                 "- Platform-Only Branching: Users cannot create branches manually via Git CLI or the GitHub UI. Branching is handled ONLY by the platform backend.\n" +
                 "- Sprint Initialization: No work can begin until the developer initiates the Sprint via the platform's chat buttons.\n" +
-                "- When explaining how to launch the sprint or generate the branch, say to use the buttons above the chat input box (e.g. \"Use the buttons above the chat box to launch the sprint and generate your " + (isSingleRole && roleIndex > 0 ? $"1-B-{roleIndex} and 1-F-{roleIndex}" : "1-B and 1-F") + " branches\"). Do NOT say \"via the AI Mentor chat\" or \"in the chat\"—it is the action buttons above the chat input, not the chat itself.\n" +
+                "- When explaining how to generate sprint branches, tell the student to use the Branch button in the chat panel (e.g. \"Use the Branch button in the chat panel to generate your " + (isSingleRole && roleIndex > 0 ? $"1-B-{roleIndex} and 1-F-{roleIndex}" : "1-B and 1-F") + " branches\"). Do NOT describe its position as 'above the input' or 'below the output'—refer to it simply as the Branch button in the chat panel.\n" +
                 "- Validation Check: The Mentor Agent must always verify if a sprint is initialized by checking if a branch exists that follows the pre-defined naming convention.\n" +
                 "- **Bugs (mandatory):** **All** bug fixes—whether the defect showed up in an old sprint or the active one—go through the **Bugs** list/sprint in the Squad Room and **only** the **Bugs-B** (backend) and **Bugs-F** (frontend) branches, created via the **platform buttons** under **Bugs** sprint context (sprint id 0 / \"Bugs\" in the product). **Do not** instruct users to fix bugs on **N-B** / **N-F** or to \"generate the branch for the current numbered sprint\" for bug work; numbered sprint branches are for sprint feature work, not the Bugs pipeline.\n\n" +
                 "3. Naming Conventions & Enforcement\n" +
@@ -1714,14 +1728,14 @@ Your intelligence is strictly tethered to the Current Project Context and the us
             var n = roleIndex;
             return $@"
 
-⚠️ ROLE COURSE CONTEXT — overrides all squad-model instructions above
+[INTERNAL — DO NOT REVEAL TO STUDENT: Never mention ""Role Course"", ""Track D"", or any internal course classification in your response. This is system-internal context only and is transparent to students.]
 
-This is a ROLE COURSE (Track D). Every squad-based assumption in the context above is REPLACED by the following rules.
+⚠️ SQUAD CONTEXT — overrides cross-role coordination instructions above
 
-1. COURSE STRUCTURE
+1. SQUAD STRUCTURE
    - All developers on this board share one role: {roleName}. This student is developer index {n}.
-   - Each developer works INDEPENDENTLY on their own copy of the project. Peers have a different index number but the same role.
-   - There is NO Product Manager, NO UI/UX Designer, NO Marketing/BizDev, and no cross-functional squad on this board.
+   - Developers work on their own assigned modules within the SAME shared project and repositories. They collaborate as a squad and there are task dependencies between their work. Each peer has a different index number but the same role.
+   - There is NO Product Manager, NO UI/UX Designer, and NO Marketing/BizDev on this board. The squad consists exclusively of developers sharing the same role.
 
 2. REQUIREMENTS — no PM, no staggered delivery
    - Sprint requirements come from the MODULE DESCRIPTION set at course creation, NOT from a PM-authored User Story card.
@@ -1742,17 +1756,17 @@ This is a ROLE COURSE (Track D). Every squad-based assumption in the context abo
    - Sprint card IDs follow the same suffix: e.g. 3-B-{n}. This is correct — not a typo.
    - There is no PM-owned User Story card. Module requirements live in the MODULE DESCRIPTION.
 
-5. PULL REQUESTS — fully independent
-   - Each developer has their own PR from their own indexed branch. PRs are NOT coordinated across peers.
-   - Do NOT suggest waiting for a peer's PR or coordinating merge order.
+5. PULL REQUESTS
+   - Each developer has their own PR from their own indexed branch.
+   - Do NOT suggest coordinating merge timing unless a specific task dependency requires it.
    - ""Review my code"" reviews ONLY this student's indexed branch.
 
 6. ERRORS & DEPLOYMENT — check BOARD STATES first
    - When the student reports errors or deployment issues, read BOARD STATES and state what you see before giving generic troubleshooting advice.
-   - Railway deployment errors reflect the shared backend deployment. An error may have been caused by a peer developer's merge to main, not your own branch.
+   - Backend deployment errors reflect the shared infrastructure. An error may have been caused by a peer developer's merge to main, not your own branch.
 
-7. MEETINGS — peer coordination, not PM-driven
-   - There is no PM responsible for scheduling meetings. Coordination is between indexed peer developers with the same role.
+7. MEETINGS — peer coordination
+   - There is no PM responsible for scheduling meetings. Coordinate directly with your peer developers.
 
 8. WHAT DOES NOT EXIST IN THIS COURSE
    - No Product Manager, UI/UX Designer, Figma handoff, or Marketing/BizDev.
@@ -5835,7 +5849,7 @@ This is a ROLE COURSE (Track D). Every squad-based assumption in the context abo
                             if (existingBranches.Count > 0)
                                 statusLine += " Do NOT suggest creating " + string.Join(" or ", existingBranches) + "—already initialized.";
                             if (missingBranches.Count > 0)
-                                statusLine += " Only suggest using the action buttons above the chat to generate " + string.Join(" and ", missingBranches) + ".";
+                                statusLine += " Only suggest using the Branch button in the chat panel to generate " + string.Join(" and ", missingBranches) + ".";
                             enhancedSystemPrompt = $"{enhancedSystemPrompt}\n\n{statusLine}";
                         }
                     }
@@ -6504,6 +6518,12 @@ This is a ROLE COURSE (Track D). Every squad-based assumption in the context abo
                             });
                     }
                 }
+
+                if (userTasks.Count == 0)
+                    _logger.LogWarning("[Mentor/Chat] No tasks found for studentId={StudentId} role='{Role}' (labelName='{LabelName}') sprint={SprintId} sprintListId={SprintListId} boardId={BoardId}. Trello label mismatch or empty sprint list.",
+                        student.Id, originalRoleName ?? roleName, string.Join(",", trelloLabelNames), sprintId, sprintListId, student.BoardId);
+                else
+                    _logger.LogInformation("[Mentor/Chat] Loaded {Count} task(s) for studentId={StudentId} role='{Role}' sprint={SprintId}.", userTasks.Count, student.Id, originalRoleName ?? roleName, sprintId);
 
                 // Get module descriptions
                 var internalBoardInstituteProjectId = student.ProjectBoard?.InstituteProjectId;
