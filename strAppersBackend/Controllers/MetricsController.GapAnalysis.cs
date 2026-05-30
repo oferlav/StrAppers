@@ -467,12 +467,10 @@ public partial class MetricsController
             var track = isBackend ? "backend" : "frontend";
             // Last 600 chars of system prompt confirms which rule version is loaded from disk.
             var sysLast = systemPrompt.Length > 600 ? "…" + systemPrompt[^600..] : systemPrompt;
-            // First 6000 + last 2000 of user prompt captures context block + scoring rules.
-            var userHead = userPrompt.Length > 6000 ? userPrompt[..6000] + "\n…(truncated)…\n" : userPrompt;
-            var userTail = userPrompt.Length > 8000 ? userPrompt[^2000..] : "";
-            var promptDbg = $"Track={track} StudentId={studentId} Sprint={sprintNumber}\n\n" +
+            // Send full user prompt — split into two emails if needed so the PR lookup line is always visible.
+            var promptDbg = $"Track={track} StudentId={studentId} Sprint={sprintNumber} UserPromptLength={userPrompt.Length}\n\n" +
                             $"=== SYSTEM PROMPT (last 600 chars) ===\n{sysLast}\n\n" +
-                            $"=== USER PROMPT (head) ===\n{userHead}{userTail}";
+                            $"=== USER PROMPT ===\n{userPrompt}";
             try { await _smtpEmailService.SendPlainEmailAsync("ofer@skill-in.com", $"[Metrics Debug] GapAnalysis PROMPT track={track} student={studentId} sprint={sprintNumber}", promptDbg); } catch { }
         }
 
