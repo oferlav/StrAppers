@@ -71,17 +71,38 @@ public partial class MetricsController
         var roleLabel = board.IsSingleRole && student.RoleIndex > 0
             ? $"{roleName} {student.RoleIndex}"
             : ResolveTrelloSprintCardLabel(activeRole?.Role, fullStackTrackLabel: null);
-        // Include customer context for non-developer roles (B2C behaviour) or any role with CustomerEngagement=true.
-        // For institute students the flag lives in InstituteSquadRoles, not in Roles.
+        // Include customer context only when the role has CE enabled AND the sprint is module-linked or has actual customer chat.
+        // A setup/onboarding sprint with no module and no chat should not generate a customer alignment category.
         var hasCustomerEngagement = await ResolveCustomerEngagementAsync(activeRole?.Role, roleName, student.InstituteId, cancellationToken);
-        var includeCustomerContext = !ContainsDeveloper(roleName) || hasCustomerEngagement;
+        var ceEnabledForRole = !ContainsDeveloper(roleName) || hasCustomerEngagement;
+
+        bool sprintHasModule = false;
+        bool sprintHasCustomerChat = false;
+        if (ceEnabledForRole)
+        {
+            // Check role sprint card first, then PM sprint card as fallback.
+            var roleModId = await _trelloService.GetModuleIdFromSprintCardAsync(boardId, request.SprintNumber, roleLabel);
+            if (string.IsNullOrWhiteSpace(roleModId))
+            {
+                foreach (var pmLbl in GapAnalysisPmSprintCardLabels)
+                {
+                    roleModId = await _trelloService.GetModuleIdFromSprintCardAsync(boardId, request.SprintNumber, pmLbl);
+                    if (!string.IsNullOrWhiteSpace(roleModId)) break;
+                }
+            }
+            sprintHasModule = !string.IsNullOrWhiteSpace(roleModId);
+            sprintHasCustomerChat = await HasCustomerGapAnalysisChatRowsAsync(request.StudentId, request.SprintNumber, cancellationToken);
+        }
+
+        var includeCustomerContext = ceEnabledForRole && (sprintHasModule || sprintHasCustomerChat);
         _logger.LogInformation(
-            "GapAnalysis context: studentId={StudentId} roleName={RoleName} instituteId={InstId} hasCustomerEngagement={CE} includeCustomerContext={Ctx}",
-            request.StudentId, roleName, student.InstituteId, hasCustomerEngagement, includeCustomerContext);
+            "GapAnalysis context: studentId={StudentId} roleName={RoleName} instituteId={InstId} hasCustomerEngagement={CE} sprintHasModule={Mod} sprintHasCustomerChat={Chat} includeCustomerContext={Ctx}",
+            request.StudentId, roleName, student.InstituteId, hasCustomerEngagement, sprintHasModule, sprintHasCustomerChat, includeCustomerContext);
         if (DebugAiContext)
         {
             var dbg = $"StudentId={request.StudentId} BoardId={boardId} RoleName={roleName} InstituteId={student.InstituteId} " +
-                      $"Role.CE={activeRole?.Role?.CustomerEngagement} ResolvedCE={hasCustomerEngagement} IncludeCustomerContext={includeCustomerContext}";
+                      $"Role.CE={activeRole?.Role?.CustomerEngagement} ResolvedCE={hasCustomerEngagement} " +
+                      $"SprintHasModule={sprintHasModule} SprintHasCustomerChat={sprintHasCustomerChat} IncludeCustomerContext={includeCustomerContext}";
             try { await _smtpEmailService.SendPlainEmailAsync("ofer@skill-in.com", $"[Metrics Debug] GapAnalysis context student={request.StudentId}", dbg); } catch { /* ignore */ }
         }
 
