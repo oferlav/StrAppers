@@ -758,6 +758,13 @@ namespace strAppersBackend.Controllers
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Error getting mentor context for StudentId: {StudentId}, SprintId: {SprintId}", studentId, sprintId);
+                if (DebugAiContext)
+                    try
+                    {
+                        var body = $"StudentId:  {studentId}\nSprintId:   {sprintId}\nException:  {ex.GetType().Name}\nMessage:    {ex.Message}\n\nStackTrace:\n{ex.StackTrace}";
+                        await _smtpEmailService.SendPlainEmailAsync("ofer@skill-in.com", $"[Mentor Context Error] StudentId={studentId} {ex.GetType().Name}", body);
+                    }
+                    catch { /* ignore */ }
                 return StatusCode(500, new { Success = false, Message = $"An error occurred: {ex.Message}" });
             }
         }
@@ -6376,8 +6383,15 @@ Your intelligence is strictly tethered to the Current Project Context and the us
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Error getting mentor response for StudentId: {StudentId}, SprintId: {SprintId}, Model: {Model}", 
+                _logger.LogError(ex, "Error getting mentor response for StudentId: {StudentId}, SprintId: {SprintId}, Model: {Model}",
                     request.StudentId, request.SprintId, aiModel?.Name ?? "Unknown");
+                if (DebugAiContext)
+                    try
+                    {
+                        var body = $"StudentId:  {request.StudentId}\nSprintId:   {request.SprintId}\nModel:      {aiModel?.Name ?? "(unknown)"}\nException:  {ex.GetType().Name}\nMessage:    {ex.Message}\n\nStackTrace:\n{ex.StackTrace}";
+                        await _smtpEmailService.SendPlainEmailAsync("ofer@skill-in.com", $"[Mentor Error] StudentId={request.StudentId} {ex.GetType().Name}", body);
+                    }
+                    catch { /* ignore */ }
                 return StatusCode(500, new { Success = false, Message = $"An error occurred: {ex.Message}" });
             }
         }
