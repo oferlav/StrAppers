@@ -80,6 +80,8 @@ namespace strAppersBackend.Services
         Task<(bool Success, int CardsProcessed, IReadOnlyList<string> Errors)> ApplyRequiredDataCustomFieldsToBoardAsync(string boardId);
         /// <summary>Ensures the BranchContext text custom field exists, then sets Backend Developer to Bugs-B and Frontend Developer to Bugs-F on that sprint list only.</summary>
         Task<BranchContextUtilityResult> UpdateExistingBoardWithBranchContextAsync(string boardId, int sprintNumber, CancellationToken cancellationToken = default);
+        /// <summary>Returns a flat string of all checklist item names on the given native Trello card ID. Returns empty string on failure or when no checklists exist.</summary>
+        Task<string> GetCardChecklistTextAsync(string trelloCardId);
     }
 
     public class TrelloService : ITrelloService
@@ -1610,6 +1612,38 @@ namespace strAppersBackend.Services
             {
                 _logger.LogWarning(ex, "GetSprintRoleCardSnapshotAsync failed for board {BoardId}, sprint {Sprint}, role {Role}.", boardId, sprintNumber, roleName);
                 return null;
+            }
+        }
+
+        /// <inheritdoc />
+        public async Task<string> GetCardChecklistTextAsync(string trelloCardId)
+        {
+            try
+            {
+                var url = $"https://api.trello.com/1/cards/{trelloCardId}?checklists=all&fields=name&key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
+                var res = await _httpClient.GetAsync(url);
+                if (!res.IsSuccessStatusCode) return string.Empty;
+                var json = JsonSerializer.Deserialize<JsonElement>(await res.Content.ReadAsStringAsync());
+                var sb = new StringBuilder();
+                if (json.TryGetProperty("checklists", out var checklists) && checklists.ValueKind == JsonValueKind.Array)
+                {
+                    foreach (var cl in checklists.EnumerateArray())
+                    {
+                        if (!cl.TryGetProperty("checkItems", out var items) || items.ValueKind != JsonValueKind.Array)
+                            continue;
+                        foreach (var item in items.EnumerateArray())
+                        {
+                            var name = item.TryGetProperty("name", out var nm) ? nm.GetString() ?? "" : "";
+                            if (!string.IsNullOrEmpty(name)) sb.AppendLine(name);
+                        }
+                    }
+                }
+                return sb.ToString();
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "GetCardChecklistTextAsync failed for card {CardId}", trelloCardId);
+                return string.Empty;
             }
         }
 

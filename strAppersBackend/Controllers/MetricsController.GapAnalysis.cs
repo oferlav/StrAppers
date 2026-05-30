@@ -29,8 +29,8 @@ public partial class MetricsController
 
     /// <summary>
     /// Sprint gap analysis (MetricId 2): compares sprint requirements to delivered artifacts; stores <see cref="CacheMetrics.ReviewContent"/> and base64 PNG bar chart(s) in <see cref="CacheMetrics.Graph"/> and optional <see cref="CacheMetrics.Graph2"/>.
-    /// Full Stack runs two separate analyses (backend repo vs frontend repo); the model is not told “full stack”—only “backend” or “frontend” expert. Backend result is saved first; frontend narrative and chart are appended (<see cref="CacheMetrics.Graph2"/>).
-    /// Trello cards are matched by the green label: <see cref="Role.Description"/> if set, otherwise <see cref="Role.Name"/> (same board convention as “Role Description” labels).
+    /// Full Stack runs two separate analyses (backend repo vs frontend repo); the model is not told "full stack"—only "backend" or "frontend" expert. Backend result is saved first; frontend narrative and chart are appended (<see cref="CacheMetrics.Graph2"/>).
+    /// Trello cards are matched by the green label: <see cref="Role.Description"/> if set, otherwise <see cref="Role.Name"/> (same board convention as "Role Description" labels).
     /// Set <see cref="GapAnalysisRequest.Test"/> to true to return only generated system and user prompts (no LLM, no DB write).
     /// </summary>
     [HttpPost("use/GapAnalysis")]
@@ -1074,7 +1074,7 @@ public partial class MetricsController
         var bases = new[] { configuredBase, "main", "master", "develop" };
 
         var (diff, usedBase, pr) = await FetchGitHubGapAnalysisEvidenceAsync(owner, repo, head, bases, token);
-        AppendGitHubCompareArtifactLines(sb, diff, usedBase, head, configuredBase, owner, repo);
+        AppendGitHubCompareArtifactLines(sb, diff, usedBase, head, configuredBase, owner, repo, pr?.Merged ?? false);
 
         AppendGitHubPrArtifactLine(sb, pr, owner, repo, head, logIfMissing: true);
 
@@ -1088,7 +1088,7 @@ public partial class MetricsController
                 sb.AppendLine();
                 sb.AppendLine(
                     $"**Sprint default branch `{defaultHead}`:** Trello **BranchContext** targets **`{head}`**, but work is often pushed to the numbered sprint branch **`{defaultHead}`** (e.g. mentor tooling). Additional GitHub evidence for **`{defaultHead}`**:");
-                AppendGitHubCompareArtifactLines(sb, diffAlt, usedAlt, defaultHead, configuredBase, owner, repo);
+                AppendGitHubCompareArtifactLines(sb, diffAlt, usedAlt, defaultHead, configuredBase, owner, repo, prAlt?.Merged ?? false);
                 AppendGitHubPrArtifactLine(sb, prAlt, owner, repo, defaultHead, logIfMissing: false);
                 _logger.LogInformation(
                     "GapAnalysis: appended fallback branch evidence {DefaultHead} (primary was {Head}, pr={HasPr}, diff={HasDiff})",
@@ -1127,7 +1127,8 @@ public partial class MetricsController
         string headLabel,
         string configuredBase,
         string owner,
-        string repo)
+        string repo,
+        bool prMerged = false)
     {
         if (diff != null && usedBase != null)
         {
@@ -1140,10 +1141,22 @@ public partial class MetricsController
             }
             else if (diff.BehindBy > 0 && diff.AheadBy == 0)
             {
-                sb.AppendLine(
-                    $"**{headLabel}** is **behind** **{usedBase}** by {diff.BehindBy} commit(s) and has **no commits ahead** of **{usedBase}** in this compare (status={diff.CompareStatus}). " +
-                    "That usually means the branch tip is stale relative to main (or work was merged and the branch was reset), not that this prompt failed. " +
-                    "Use the PR line below; do **not** treat this as “identical to main” with merged work unless the PR says merged.");
+                if (prMerged)
+                {
+                    sb.AppendLine(
+                        $"⚠️ MANDATORY ASSESSMENT OVERRIDE: **{headLabel}** is behind **{usedBase}** by {diff.BehindBy} commit(s) and has no commits ahead. " +
+                        "The PR for this branch is marked **merged=yes** (see PR line below). " +
+                        "This is the EXPECTED, NORMAL result of the platform's squash-merge workflow — it is NOT a gap. " +
+                        "You MUST NOT create any category or finding about branch divergence or the branch being behind main. " +
+                        "You MUST NOT recommend that the student keep the sprint branch updated with main.");
+                }
+                else
+                {
+                    sb.AppendLine(
+                        $"**{headLabel}** is **behind** **{usedBase}** by {diff.BehindBy} commit(s) and has **no commits ahead** of **{usedBase}** in this compare (status={diff.CompareStatus}). " +
+                        "That usually means the branch tip is stale relative to main (or work was merged and the branch was reset), not that this prompt failed. " +
+                        "Use the PR line below; do **not** treat this as \"identical to main\" with merged work unless the PR says merged.");
+                }
             }
             else if (string.Equals(diff.CompareStatus, "identical", StringComparison.OrdinalIgnoreCase)
                      || (diff.AheadBy == 0 && diff.BehindBy == 0 && diff.CommitsCount == 0))

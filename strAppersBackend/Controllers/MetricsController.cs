@@ -18,6 +18,9 @@ public partial class MetricsController : ControllerBase
 {
     private const int AdherenceMetricId = 1;
 
+    private static readonly string[] ResourceTaskKeywords =
+        { "resource", "upload", "share", "link", "artifact", "submit", "attach" };
+
     private readonly ApplicationDbContext _context;
     private readonly ITrelloService _trelloService;
     private readonly IGitHubService _githubService;
@@ -190,7 +193,36 @@ public partial class MetricsController : ControllerBase
             var hasArtifact = await HasResourceArtifactAsync(boardId, student.Id, request.SprintNumber, cancellationToken);
             resourceArtifactPresent = hasArtifact;
             if (!hasArtifact)
-                lines.Add("A required resource artifact was not completed or was not shared.");
+            {
+                // Before surfacing a student-facing finding, confirm the sprint card actually
+                // has a resource task in its checklist. If "Required Resource Data" is checked
+                // in Trello but no checklist item mentions resources, it is a PM configuration
+                // error — not a student gap.
+                var checklistCardIds = new[] { sprintBackendCardId, sprintFrontendCardId, cardId }
+                    .Where(id => !string.IsNullOrEmpty(id))
+                    .Distinct()
+                    .ToArray();
+                var hasResourceTask = false;
+                foreach (var cid in checklistCardIds)
+                {
+                    var checklistText = await _trelloService.GetCardChecklistTextAsync(cid!);
+                    if (ResourceTaskKeywords.Any(kw => checklistText.Contains(kw, StringComparison.OrdinalIgnoreCase)))
+                    {
+                        hasResourceTask = true;
+                        break;
+                    }
+                }
+                if (hasResourceTask)
+                {
+                    lines.Add("A required resource artifact was not completed or was not shared.");
+                }
+                else
+                {
+                    _logger.LogWarning(
+                        "Adherence: board {BoardId} sprint {SprintNumber} requiredResource=true but no resource-related checklist item found on card(s) [{CardIds}]; skipping student-facing finding (PM Trello configuration).",
+                        boardId, request.SprintNumber, string.Join(", ", checklistCardIds));
+                }
+            }
         }
 
         var reviewContent = string.Join(Environment.NewLine, lines.Where(l => !string.IsNullOrWhiteSpace(l)));
