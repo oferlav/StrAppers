@@ -438,10 +438,22 @@ namespace strAppersBackend.Controllers
                     }
 
                 if (userTasks.Count == 0)
-                    _logger.LogWarning("[Mentor] No tasks found for studentId={StudentId} role='{Role}' (labelName='{LabelName}') sprint={SprintId} sprintListId={SprintListId} boardId={BoardId}. Trello label mismatch or empty sprint list.",
+                {
+                    _logger.LogWarning("[Mentor] No tasks found for studentId={StudentId} role='{Role}' labelNames=[{LabelNames}] sprint={SprintId} sprintListId={SprintListId} boardId={BoardId}.",
                         studentId, roleName, string.Join(",", trelloLabelNames), sprintId, sprintListId, student.BoardId);
+                    if (DebugAiContext)
+                        try { await _smtpEmailService.SendPlainEmailAsync("ofer@skill-in.com",
+                            $"[Mentor Debug] No tasks — studentId={studentId} sprint={sprintId}",
+                            $"StudentId:    {studentId}\nRole:         {roleName}\nLabelNames:   {string.Join(", ", trelloLabelNames)}\nSprintId:     {sprintId}\nSprintListId: {sprintListId}\nBoardId:      {student.BoardId}\n\nTrello returned 0 cards for this label+list combination."); } catch { /* ignore */ }
+                }
                 else
+                {
                     _logger.LogInformation("[Mentor] Loaded {Count} task(s) for studentId={StudentId} role='{Role}' sprint={SprintId}.", userTasks.Count, studentId, roleName, sprintId);
+                    if (DebugAiContext)
+                        try { await _smtpEmailService.SendPlainEmailAsync("ofer@skill-in.com",
+                            $"[Mentor Debug] Tasks OK — studentId={studentId} sprint={sprintId} count={userTasks.Count}",
+                            $"StudentId:    {studentId}\nRole:         {roleName}\nLabelNames:   {string.Join(", ", trelloLabelNames)}\nSprintId:     {sprintId}\nSprintListId: {sprintListId}\nBoardId:      {student.BoardId}\nTasksLoaded:  {userTasks.Count}"); } catch { /* ignore */ }
+                }
 
                 // D. Fetch Project Module Description (for each task's ModuleId)
                 var moduleDescriptions = new Dictionary<string, string>();
@@ -6520,10 +6532,22 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                 }
 
                 if (userTasks.Count == 0)
-                    _logger.LogWarning("[Mentor/Chat] No tasks found for studentId={StudentId} role='{Role}' (labelName='{LabelName}') sprint={SprintId} sprintListId={SprintListId} boardId={BoardId}. Trello label mismatch or empty sprint list.",
+                {
+                    _logger.LogWarning("[Mentor/Chat] No tasks found for studentId={StudentId} role='{Role}' labelNames=[{LabelNames}] sprint={SprintId} sprintListId={SprintListId} boardId={BoardId}.",
                         student.Id, originalRoleName ?? roleName, string.Join(",", trelloLabelNames), sprintId, sprintListId, student.BoardId);
+                    if (DebugAiContext)
+                        try { await _smtpEmailService.SendPlainEmailAsync("ofer@skill-in.com",
+                            $"[Mentor/Chat Debug] No tasks — studentId={student.Id} sprint={sprintId}",
+                            $"StudentId:    {student.Id}\nRole:         {originalRoleName ?? roleName}\nLabelNames:   {string.Join(", ", trelloLabelNames)}\nSprintId:     {sprintId}\nSprintListId: {sprintListId}\nBoardId:      {student.BoardId}\n\nTrello returned 0 cards for this label+list combination."); } catch { /* ignore */ }
+                }
                 else
+                {
                     _logger.LogInformation("[Mentor/Chat] Loaded {Count} task(s) for studentId={StudentId} role='{Role}' sprint={SprintId}.", userTasks.Count, student.Id, originalRoleName ?? roleName, sprintId);
+                    if (DebugAiContext)
+                        try { await _smtpEmailService.SendPlainEmailAsync("ofer@skill-in.com",
+                            $"[Mentor/Chat Debug] Tasks OK — studentId={student.Id} sprint={sprintId} count={userTasks.Count}",
+                            $"StudentId:    {student.Id}\nRole:         {originalRoleName ?? roleName}\nLabelNames:   {string.Join(", ", trelloLabelNames)}\nSprintId:     {sprintId}\nSprintListId: {sprintListId}\nBoardId:      {student.BoardId}\nTasksLoaded:  {userTasks.Count}"); } catch { /* ignore */ }
+                }
 
                 // Get module descriptions
                 var internalBoardInstituteProjectId = student.ProjectBoard?.InstituteProjectId;
