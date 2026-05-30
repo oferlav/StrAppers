@@ -9579,7 +9579,12 @@ Your intelligence is strictly tethered to the Current Project Context and the us
             foreach (var record in existingRecords)
             {
                 var recordBaseSource = ExtractBaseSource(record.Source);
-                if (recordBaseSource == baseSource)
+                // GitHub-Success-PR and GitHub-Failed-PR share the same sequence space because
+                // a failed review is stored as GitHub-Failed-PR-N using a sequence derived from
+                // GitHub-Success-PR. Count both so retries never land on an occupied slot.
+                var matches = recordBaseSource == baseSource
+                    || (baseSource == "GitHub-Success-PR" && recordBaseSource == "GitHub-Failed-PR");
+                if (matches)
                 {
                     // Extract sequence from this record's source
                     var lastDashIndex = record.Source.LastIndexOf('-');
@@ -9809,6 +9814,23 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                     return BadRequest(new { Success = false, Message = "No code changes found in branch. Please make sure you have committed and pushed changes." });
                 }
 
+                // Detect squash-merge divergence: when a previous PR on this branch was squash-merged,
+                // main gets a new squash commit whose SHA doesn't match the original commit on the branch.
+                // The three-dot compare then uses the pre-squash common ancestor as the merge base,
+                // so the diff includes already-merged work from the earlier commit.
+                var isDiverged = commitDiff.BehindBy > 0;
+                if (isDiverged)
+                {
+                    _logger.LogWarning("⚠️ [CODE REVIEW] Branch {Branch} is diverged from main (AheadBy={AheadBy}, BehindBy={BehindBy}, Status={Status}). " +
+                        "Likely caused by a squash merge of a previous PR on this branch. The diff may include already-merged work.",
+                        request.GithubBranch, commitDiff.AheadBy, commitDiff.BehindBy, commitDiff.CompareStatus);
+                }
+                else
+                {
+                    _logger.LogInformation("📊 [CODE REVIEW] Branch status: AheadBy={AheadBy}, BehindBy={BehindBy}, Status={Status}",
+                        commitDiff.AheadBy, commitDiff.BehindBy, commitDiff.CompareStatus);
+                }
+
                 // Check if there are actual code changes (additions or deletions)
                 // Require at least 3 lines of changes to filter out trivial changes (whitespace, single newlines, etc.)
                 var totalLinesChanged = commitDiff.TotalAdditions + commitDiff.TotalDeletions;
@@ -9967,6 +9989,19 @@ APPROVAL: yes   (code is ready for merge)
 APPROVAL: no    (request changes before merge)";
                 }
 
+                // When the branch is behind main (squash-merge divergence), prepend a warning so
+                // the model knows part of the diff may already exist in main and should focus only
+                // on work not yet merged.
+                if (isDiverged)
+                {
+                    var divergenceNote = $"\n\n⚠️ REVIEWER NOTE: This branch is {commitDiff.BehindBy} commit(s) behind `main`, " +
+                        $"likely because a previous PR on this branch was squash-merged. " +
+                        $"The diff below is computed from the common ancestor and therefore includes changes that are already present in `main`. " +
+                        $"Focus your review ONLY on work that is genuinely new — i.e., changes that go beyond what was already merged. " +
+                        $"Do not penalise the student for code that was already approved and merged.\n";
+                    codeReviewPrompt = divergenceNote + codeReviewPrompt;
+                }
+
                 // Resolve model: explicit request → DB lookup; otherwise Assessment:AiModel config
                 string? modelName = null;
                 if (!string.IsNullOrWhiteSpace(request.AIServiceName))
@@ -10075,7 +10110,9 @@ APPROVAL: no    (request changes before merge)";
                                 foreach (var record in existingRecords)
                                 {
                                     var recordBaseSource = ExtractBaseSource(record.Source);
-                                    if (recordBaseSource == baseSource)
+                                    var matches = recordBaseSource == baseSource
+                                        || (baseSource == "GitHub-Success-PR" && recordBaseSource == "GitHub-Failed-PR");
+                                    if (matches)
                                     {
                                         var lastDashIndex = record.Source.LastIndexOf('-');
                                         if (lastDashIndex > 0 && lastDashIndex < record.Source.Length - 1)
@@ -10219,7 +10256,9 @@ APPROVAL: no    (request changes before merge)";
 
                 // PR validation flows use source GitHub-Success-PR: one CacheReview row with Type PR (not Skill).
                 // Standalone POST /use/code-review uses source Junior → Skill.
-                var cacheStudentId = await ResolveCacheReviewStudentIdForBranchAsync(request.BoardId, request.GithubBranch, HttpContext.RequestAborted);
+                // Use CancellationToken.None so a client disconnect (HTTP 499) cannot abort the
+                // post-review DB writes — the AI response is already in hand at this point.
+                var cacheStudentId = await ResolveCacheReviewStudentIdForBranchAsync(request.BoardId, request.GithubBranch, CancellationToken.None);
                 if (cacheStudentId.HasValue)
                 {
                     var cacheType = string.Equals(source, "GitHub-Success-PR", StringComparison.Ordinal)
@@ -10231,7 +10270,7 @@ APPROVAL: no    (request changes before merge)";
                         sprintNumber,
                         cacheType,
                         feedbackWithoutApprovalLine,
-                        HttpContext.RequestAborted);
+                        CancellationToken.None);
                 }
 
                 return Ok(new
