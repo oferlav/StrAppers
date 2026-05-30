@@ -713,13 +713,10 @@ public partial class MetricsController
             .OrderBy(h => h.CreatedAt)
             .ToListAsync(cancellationToken);
 
-        sb.AppendLine("### Customer chat history (AI Customer; filtered by StudentId, SprintNumber)");
         if (chatRows.Count == 0)
-        {
-            sb.AppendLine("(No messages in `CustomerChatHistory` for this student and sprint.)");
-            sb.AppendLine();
             return;
-        }
+
+        sb.AppendLine("### Customer chat history (AI Customer; filtered by StudentId, SprintNumber)");
 
         foreach (var row in chatRows)
         {
