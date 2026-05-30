@@ -6093,7 +6093,8 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                     
                     if (!string.IsNullOrEmpty(readmeContent))
                     {
-                        enhancedSystemPrompt = $"{enhancedSystemPrompt}\n\n{Dbg(4907)}=== PROJECT INFORMATION (FROM README) ===\n" +
+                        enhancedSystemPrompt = $"{enhancedSystemPrompt}\n\n{Dbg(4907)}=== PROJECT INFORMATION (FROM README — SCAFFOLDED STARTING CODEBASE) ===\n" +
+                        $"IMPORTANT: This README describes the platform-provisioned starting codebase. It is what the student inherited — it is NOT student work. Pre-existing tables, endpoints, or files listed here do not count as completed student tasks.\n\n" +
                         $"{readmeContent}\n\n" +
                             $"=== END OF PROJECT INFORMATION ===\n\n";
                     }
