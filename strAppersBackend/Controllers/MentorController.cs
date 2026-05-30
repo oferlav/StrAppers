@@ -12163,6 +12163,9 @@ APPROVAL: no    (request changes before merge)";
                 _logger.LogInformation("📥 [GITHUB-PR] Platform-triggered validation: BoardId={BoardId}, Branch={Branch}, IsBackend={IsBackend}",
                     request.BoardId, request.BranchName, request.IsBackend);
 
+                if (DebugAiContext)
+                    try { await _smtpEmailService.SendPlainEmailAsync("ofer@skill-in.com", $"[GitHub-PR Debug] START board={request.BoardId} branch={request.BranchName} isBackend={request.IsBackend}", $"START\nBoardId={request.BoardId}\nBranch={request.BranchName}\nIsBackend={request.IsBackend}\nUtcNow={DateTime.UtcNow:O}"); } catch { }
+
                 // Get board to find GitHub repo info
                 var board = await _context.ProjectBoards
                     .FirstOrDefaultAsync(pb => pb.Id == request.BoardId);
@@ -12198,15 +12201,22 @@ APPROVAL: no    (request changes before merge)";
 
                 // SHA Lookup: Get the latest commit SHA for the branch
                 _logger.LogInformation("📥 [GITHUB-PR] Looking up SHA for branch {Branch} in {Owner}/{Repo}", request.BranchName, owner, repo);
+                if (DebugAiContext)
+                    try { await _smtpEmailService.SendPlainEmailAsync("ofer@skill-in.com", $"[GitHub-PR Debug] SHA-LOOKUP board={request.BoardId} branch={request.BranchName}", $"About to call GetBranchShaAsync\nOwner={owner} Repo={repo}\nUtcNow={DateTime.UtcNow:O}"); } catch { }
+
                 var sha = await _githubService.GetBranchShaAsync(owner, repo, request.BranchName, accessToken);
 
                 if (string.IsNullOrEmpty(sha))
                 {
                     _logger.LogError("❌ [GITHUB-PR] Failed to get SHA for branch {Branch}", request.BranchName);
+                    if (DebugAiContext)
+                        try { await _smtpEmailService.SendPlainEmailAsync("ofer@skill-in.com", $"[GitHub-PR Debug] SHA-FAIL board={request.BoardId} branch={request.BranchName}", $"GetBranchShaAsync returned empty/null.\nOwner={owner} Repo={repo}\nUtcNow={DateTime.UtcNow:O}"); } catch { }
                     return BadRequest(new { Success = false, Message = $"Failed to get SHA for branch '{request.BranchName}'. Branch may not exist." });
                 }
 
                 _logger.LogInformation("✅ [GITHUB-PR] Found SHA {Sha} for branch {Branch}", sha, request.BranchName);
+                if (DebugAiContext)
+                    try { await _smtpEmailService.SendPlainEmailAsync("ofer@skill-in.com", $"[GitHub-PR Debug] SHA-OK board={request.BoardId} branch={request.BranchName}", $"SHA={sha}\nUtcNow={DateTime.UtcNow:O}"); } catch { }
 
                 // Check if PR exists (but DON'T create it yet - only create AFTER validation passes)
                 _logger.LogInformation("📥 [GITHUB-PR] Checking if PR exists for branch {Branch}", request.BranchName);
@@ -12219,15 +12229,21 @@ APPROVAL: no    (request changes before merge)";
                     _logger.LogInformation("✅ [GITHUB-PR] Found existing PR #{PRNumber} for branch {Branch}", prNumber, request.BranchName);
                 }
 
+                if (DebugAiContext)
+                    try { await _smtpEmailService.SendPlainEmailAsync("ofer@skill-in.com", $"[GitHub-PR Debug] PR-CHECK board={request.BoardId} branch={request.BranchName}", $"ExistingPR={(existingPR == null ? "null" : $"#{existingPR.Number} state={existingPR.State}")}\nAbout to call ProcessValidationAsync\nUtcNow={DateTime.UtcNow:O}"); } catch { }
+
                 // Call shared validation service FIRST (before creating PR)
                 // Pass prNumber if available for PR comment posting
                 var (success, feedback, errorMessage) = await ProcessValidationAsync(
-                    repo, 
-                    request.BranchName, 
-                    sha, 
-                    request.BoardId, 
-                    request.IsBackend, 
+                    repo,
+                    request.BranchName,
+                    sha,
+                    request.BoardId,
+                    request.IsBackend,
                     issueNumber: prNumber);
+
+                if (DebugAiContext)
+                    try { await _smtpEmailService.SendPlainEmailAsync("ofer@skill-in.com", $"[GitHub-PR Debug] VALIDATION-DONE board={request.BoardId} branch={request.BranchName}", $"Success={success}\nErrorMessage={errorMessage}\nFeedback(first 800)={feedback?.Substring(0, Math.Min(800, feedback?.Length ?? 0))}\nUtcNow={DateTime.UtcNow:O}"); } catch { }
 
                 // Only create PR if validation PASSED
                 if (success && (existingPR == null || existingPR.Number == 0))
@@ -12320,6 +12336,8 @@ APPROVAL: no    (request changes before merge)";
             catch (Exception ex)
             {
                 _logger.LogError(ex, "❌ [GITHUB-PR] Error processing platform-triggered validation");
+                if (DebugAiContext)
+                    try { await _smtpEmailService.SendPlainEmailAsync("ofer@skill-in.com", $"[GitHub-PR Debug] EXCEPTION board={request?.BoardId} branch={request?.BranchName}", $"Exception: {ex.GetType().Name}\nMessage: {ex.Message}\nStackTrace:\n{ex.StackTrace}\nInnerException: {ex.InnerException?.Message}\nUtcNow={DateTime.UtcNow:O}"); } catch { }
                 return StatusCode(500, new { Success = false, Message = $"Error validating PR: {ex.Message}" });
             }
         }
