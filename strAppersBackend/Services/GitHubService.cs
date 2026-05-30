@@ -2874,15 +2874,63 @@ public class GitHubService : IGitHubService
 
             var content = await response.Content.ReadAsStringAsync();
             var prsArray = JsonSerializer.Deserialize<JsonElement>(content, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
-            if (prsArray.ValueKind != JsonValueKind.Array || prsArray.GetArrayLength() == 0)
-            {
-                _logger.LogWarning(
-                    "📊 [GITHUB PR][GapAnalysis] No PR found (open or merged) for head {Head} in {Owner}/{Repo}",
-                    headQuery, owner, repo);
-                return null;
-            }
 
-            var prData = prsArray[0];
+            JsonElement prData;
+            if (prsArray.ValueKind == JsonValueKind.Array && prsArray.GetArrayLength() > 0)
+            {
+                prData = prsArray[0];
+            }
+            else
+            {
+                // GitHub's head= filter is unreliable for merged PRs whose branch was deleted.
+                // Fall back: list recent closed PRs and match by head.ref client-side.
+                _logger.LogInformation(
+                    "📊 [GITHUB PR][GapAnalysis] head= filter returned empty for {Head}; scanning recent closed PRs in {Owner}/{Repo}",
+                    headQuery, owner, repo);
+
+                var fallbackUrl = $"{GitHubApiBaseUrl}/repos/{owner}/{repo}/pulls?state=closed&sort=updated&direction=desc&per_page=30";
+                var fallbackRequest = new HttpRequestMessage(HttpMethod.Get, fallbackUrl);
+                if (!string.IsNullOrEmpty(token))
+                    fallbackRequest.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", token);
+
+                var fallbackResponse = await _httpClient.SendAsync(fallbackRequest);
+                if (!fallbackResponse.IsSuccessStatusCode)
+                {
+                    _logger.LogWarning(
+                        "📊 [GITHUB PR][GapAnalysis] Fallback closed-PR list failed for {Owner}/{Repo}: {Status}",
+                        owner, repo, fallbackResponse.StatusCode);
+                    return null;
+                }
+
+                var fallbackContent = await fallbackResponse.Content.ReadAsStringAsync();
+                var allClosed = JsonSerializer.Deserialize<JsonElement>(fallbackContent, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+                if (allClosed.ValueKind != JsonValueKind.Array || allClosed.GetArrayLength() == 0)
+                {
+                    _logger.LogWarning("📊 [GITHUB PR][GapAnalysis] No PR found (open or merged) for head {Head} in {Owner}/{Repo}", headQuery, owner, repo);
+                    return null;
+                }
+
+                JsonElement? matched = null;
+                foreach (var item in allClosed.EnumerateArray())
+                {
+                    if (!item.TryGetProperty("head", out var h)) continue;
+                    if (!h.TryGetProperty("ref", out var r)) continue;
+                    if (string.Equals(r.GetString(), branchName, StringComparison.OrdinalIgnoreCase))
+                    {
+                        matched = item;
+                        break;
+                    }
+                }
+
+                if (matched == null)
+                {
+                    _logger.LogWarning("📊 [GITHUB PR][GapAnalysis] No PR found (open or merged) for head {Head} in {Owner}/{Repo}", headQuery, owner, repo);
+                    return null;
+                }
+
+                prData = matched.Value;
+                _logger.LogInformation("📊 [GITHUB PR][GapAnalysis] Found PR via fallback scan for head {Head} in {Owner}/{Repo}", headQuery, owner, repo);
+            }
             var pr = new GitHubPullRequest
             {
                 Number = prData.TryGetProperty("number", out var numProp) ? numProp.GetInt32() : 0,
