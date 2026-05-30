@@ -28,6 +28,7 @@ public partial class MetricsController : ControllerBase
     private readonly PromptConfig _promptConfig;
     private readonly IMicrosoftGraphService _graphService;
     private readonly ISmtpEmailService _smtpEmailService;
+    private readonly IAzureBlobStorageService _blobStorageService;
 
     private bool DebugAiContext => _configuration.GetValue<bool>("Debug:AiContext", false);
 
@@ -41,7 +42,8 @@ public partial class MetricsController : ControllerBase
         IHttpClientFactory httpClientFactory,
         IOptions<PromptConfig> promptConfig,
         IMicrosoftGraphService graphService,
-        ISmtpEmailService smtpEmailService)
+        ISmtpEmailService smtpEmailService,
+        IAzureBlobStorageService blobStorageService)
     {
         _context = context;
         _trelloService = trelloService;
@@ -53,6 +55,7 @@ public partial class MetricsController : ControllerBase
         _promptConfig = promptConfig.Value;
         _graphService = graphService;
         _smtpEmailService = smtpEmailService;
+        _blobStorageService = blobStorageService;
     }
 
     public class AdherenceRequest

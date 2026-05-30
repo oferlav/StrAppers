@@ -78,7 +78,8 @@ public class SprintAssessmentService : ISprintAssessmentService
         scope.ServiceProvider.GetRequiredService<IHttpClientFactory>(),
         scope.ServiceProvider.GetRequiredService<IOptions<PromptConfig>>(),
         scope.ServiceProvider.GetRequiredService<IMicrosoftGraphService>(),
-        scope.ServiceProvider.GetRequiredService<ISmtpEmailService>());
+        scope.ServiceProvider.GetRequiredService<ISmtpEmailService>(),
+        scope.ServiceProvider.GetRequiredService<IAzureBlobStorageService>());
 
     private static async Task DispatchAsync(MetricsController controller, string boardId, int studentId, int sprintNumber, int metricId, CancellationToken ct)
     {

@@ -483,13 +483,42 @@ public partial class MetricsController
         var systemPrompt = prompts.SystemPrompt;
         var userPrompt = prompts.UserPrompt;
 
+        // Download image resources from Azure Blob for inline vision input
+        var imageDataUrls = new List<string>();
+        if (_blobStorageService.IsConfigured)
+        {
+            var imgResources = await _context.Resources.AsNoTracking()
+                .Where(r => r.BoardId == boardId && r.StudentId == studentId && !r.IsFigma &&
+                            (sprintNumber <= 0 ? r.SprintNumber == null : r.SprintNumber == sprintNumber))
+                .OrderBy(r => r.Id)
+                .ToListAsync(cancellationToken);
+            foreach (var res in imgResources.Where(r => LooksLikeImageUrl(r.Url)))
+            {
+                try
+                {
+                    if (Uri.TryCreate(res.Url.Trim(), UriKind.Absolute, out var blobUri))
+                    {
+                        var blobRead = await _blobStorageService.OpenBlobReadAsync(blobUri, cancellationToken);
+                        if (blobRead.HasValue)
+                        {
+                            using var ms = new MemoryStream();
+                            await blobRead.Value.Stream.CopyToAsync(ms, cancellationToken);
+                            await blobRead.Value.Stream.DisposeAsync();
+                            imageDataUrls.Add($"data:{GapAnalysisImageMimeType(res.Url)};base64,{Convert.ToBase64String(ms.ToArray())}");
+                        }
+                    }
+                }
+                catch { /* skip images that fail to download */ }
+            }
+            if (imageDataUrls.Count > 0)
+                userPrompt += $"\n\n*Note: {imageDataUrls.Count} image(s) from the Resources panel are attached to this message as inline vision inputs. Analyse their content as evidence of the student's deliverable.*";
+        }
+
         if (DebugAiContext)
         {
             var track = isBackend ? "backend" : "frontend";
-            // Last 600 chars of system prompt confirms which rule version is loaded from disk.
             var sysLast = systemPrompt.Length > 600 ? "…" + systemPrompt[^600..] : systemPrompt;
-            // Send full user prompt — split into two emails if needed so the PR lookup line is always visible.
-            var promptDbg = $"Track={track} StudentId={studentId} Sprint={sprintNumber} UserPromptLength={userPrompt.Length}\n\n" +
+            var promptDbg = $"Track={track} StudentId={studentId} Sprint={sprintNumber} UserPromptLength={userPrompt.Length} InlineImages={imageDataUrls.Count}\n\n" +
                             $"=== SYSTEM PROMPT (last 600 chars) ===\n{sysLast}\n\n" +
                             $"=== USER PROMPT ===\n{userPrompt}";
             try { await _smtpEmailService.SendPlainEmailAsync("ofer@skill-in.com", $"[Metrics Debug] GapAnalysis PROMPT track={track} student={studentId} sprint={sprintNumber}", promptDbg); } catch { }
@@ -505,7 +534,12 @@ public partial class MetricsController
             DefaultTemperature = 0.2
         };
 
-        var (llmText, inputTokens, outputTokens) = await _chatCompletionService.GetChatCompletionAsync(aiModel, systemPrompt, userPrompt, null);
+        string llmText;
+        int inputTokens, outputTokens;
+        if (imageDataUrls.Count > 0)
+            (llmText, inputTokens, outputTokens) = await _chatCompletionService.GetOpenAiChatCompletionWithImagesAsync(aiModel, systemPrompt, userPrompt, imageDataUrls);
+        else
+            (llmText, inputTokens, outputTokens) = await _chatCompletionService.GetChatCompletionAsync(aiModel, systemPrompt, userPrompt, null);
 
         if (DebugAiContext)
         {
@@ -812,11 +846,13 @@ public partial class MetricsController
         }
 
         sb.AppendLine("### Resource links (non-Figma; sprint-scoped when sprint number ≥ 1)");
+        sb.AppendLine("Presence of an entry here confirms the student stored the artifact in the Squad Room Resources panel.");
         List<Resource> resources;
         if (sprintNumber > 0)
         {
             resources = await _context.Resources.AsNoTracking()
                 .Where(r => r.BoardId == boardId && r.StudentId == studentId && !r.IsFigma && r.SprintNumber == sprintNumber)
+                .OrderBy(r => r.Id)
                 .ToListAsync(cancellationToken);
         }
         else
@@ -824,10 +860,16 @@ public partial class MetricsController
             resources = await _context.Resources.AsNoTracking()
                 .Where(r => r.BoardId == boardId && r.StudentId == studentId && !r.IsFigma &&
                             (r.SprintNumber == sprintNumber || r.SprintNumber == null))
+                .OrderBy(r => r.Id)
                 .ToListAsync(cancellationToken);
         }
         foreach (var r in resources)
-            sb.AppendLine($"- {r.Name}: {r.Url} (Azure Blob or HTTPS — not sent through the Figma API)");
+        {
+            var hint = LooksLikeImageUrl(r.Url)
+                ? " (image — content sent to model as inline vision input)"
+                : " (non-image — URL confirms storage in Resources panel)";
+            sb.AppendLine($"- {r.Name}: {r.Url}{hint}");
+        }
         if (resources.Count == 0)
             sb.AppendLine("(none)");
 
@@ -964,6 +1006,15 @@ public partial class MetricsController
         var u = url.Trim().ToLowerInvariant();
         return u.Contains(".png", StringComparison.Ordinal) || u.Contains(".jpg", StringComparison.Ordinal) ||
                u.Contains(".jpeg", StringComparison.Ordinal) || u.Contains(".webp", StringComparison.Ordinal) || u.Contains(".gif", StringComparison.Ordinal);
+    }
+
+    private static string GapAnalysisImageMimeType(string url)
+    {
+        var l = url.ToLowerInvariant();
+        if (l.Contains(".jpg") || l.Contains(".jpeg")) return "image/jpeg";
+        if (l.Contains(".webp")) return "image/webp";
+        if (l.Contains(".gif")) return "image/gif";
+        return "image/png";
     }
 
     /// <summary>
