@@ -192,6 +192,23 @@ public partial class MetricsController : ControllerBase
 
         var reviewContent = string.Join(Environment.NewLine, lines.Where(l => !string.IsNullOrWhiteSpace(l)));
 
+        if (string.IsNullOrWhiteSpace(reviewContent))
+        {
+            if (!requiredSkill && !requiredResource)
+            {
+                reviewContent = "No required deliverables were set for this sprint (Required Skill Data and Required Resource Data were not checked on the sprint card).";
+            }
+            else
+            {
+                var met = new List<string>();
+                if (requiredSkill) met.Add(AdherenceSkillDeliverable(roleName));
+                if (requiredResource) met.Add("resource artifact shared");
+                reviewContent = met.Count == 1
+                    ? $"All adherence criteria met. {met[0]} was completed for this sprint."
+                    : $"All adherence criteria met. {string.Join(" and ", met)} were completed for this sprint.";
+            }
+        }
+
         // Skill checks log via GitHubService; resource uses DB only — this line is the only place to see why the resource sentence was skipped.
         _logger.LogInformation(
             "Adherence: board {BoardId} student {StudentId} sprint {SprintNumber} role {RoleName} requiredSkillData={RequiredSkillData} requiredResourceData={RequiredResourceData} resourceArtifactPresent={ResourceArtifactPresent} reviewLineCount={ReviewLineCount}",
@@ -388,6 +405,15 @@ public partial class MetricsController : ControllerBase
             if (!anyB && !anyF)
                 lines.Add("No committed work was found on either the backend or frontend branch for this sprint.");
         }
+    }
+
+    private static string AdherenceSkillDeliverable(string roleName)
+    {
+        if (ContainsDesigner(roleName)) return "Figma work shared";
+        if (ContainsProduct(roleName)) return "user story written";
+        if (IsMarketingOrBizDev(roleName)) return "CRM data captured";
+        if (ContainsDeveloper(roleName)) return "code committed to the sprint branch";
+        return "skill deliverable completed";
     }
 
     private static bool ContainsDesigner(string roleName) =>
