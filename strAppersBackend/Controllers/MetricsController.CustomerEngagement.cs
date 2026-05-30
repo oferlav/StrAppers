@@ -109,7 +109,7 @@ public partial class MetricsController
         }
 
         var contextMd = await BuildCustomerEngagementContextMarkdownAsync(
-            boardId, board, request.StudentId, request.SprintNumber, activeRole?.Role, cancellationToken);
+            boardId, board, request.StudentId, request.SprintNumber, activeRole?.Role, student.RoleIndex, cancellationToken);
 
         var systemPrompt = LoadCustomerEngagementSystemPrompt();
         var userPromptText = new StringBuilder()
@@ -211,6 +211,7 @@ public partial class MetricsController
         int studentId,
         int sprintNumber,
         Role? role,
+        int roleIndex,
         CancellationToken cancellationToken)
     {
         var sb = new StringBuilder();
@@ -232,7 +233,9 @@ public partial class MetricsController
 
         await AppendGapAnalysisCustomerChatHistoryAsync(sb, studentId, sprintNumber, cancellationToken);
 
-        var trelloLabel = ResolveTrelloSprintCardLabel(role, fullStackTrackLabel: null);
+        var trelloLabel = board.IsSingleRole && roleIndex > 0
+            ? $"{role?.Name?.Trim() ?? string.Empty} {roleIndex}"
+            : ResolveTrelloSprintCardLabel(role, fullStackTrackLabel: null);
         var moduleIdStr = await _trelloService.GetModuleIdFromSprintCardAsync(boardId, sprintNumber, trelloLabel);
         if (!string.IsNullOrWhiteSpace(moduleIdStr) && int.TryParse(moduleIdStr.Trim(), out var moduleId))
         {

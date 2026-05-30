@@ -324,12 +324,16 @@ public partial class MetricsController
 
         var activeRole = student.StudentRoles?.FirstOrDefault(sr => sr.IsActive);
         var roleName2 = activeRole?.Role?.Name?.Trim() ?? string.Empty;
-        var resolvedLabels = IsFullStackRole(roleName2)
-            ? await _trelloService.ResolveSprintLabelsAsync(boardId, request.SprintNumber, roleName2)
-            : new[] { ResolveTrelloSprintCardLabel(activeRole?.Role, fullStackTrackLabel: null) };
+        IReadOnlyList<string> resolvedLabels;
+        if (board.IsSingleRole && student.RoleIndex > 0)
+            resolvedLabels = new[] { $"{roleName2} {student.RoleIndex}" };
+        else
+            resolvedLabels = IsFullStackRole(roleName2)
+                ? await _trelloService.ResolveSprintLabelsAsync(boardId, request.SprintNumber, roleName2)
+                : new[] { ResolveTrelloSprintCardLabel(activeRole?.Role, fullStackTrackLabel: null) };
         var trelloLabelUsed = string.Join(" + ", resolvedLabels);
         var sprintContextMd = await BuildMeetingsCommunicationContextAsync(
-            boardId, board, request.SprintNumber, activeRole?.Role, cancellationToken);
+            boardId, board, request.SprintNumber, activeRole?.Role, student.RoleIndex, cancellationToken);
 
         var systemPrompt = LoadMeetingsCommunicationSystemPrompt();
         var userPrompt = new StringBuilder()
@@ -532,15 +536,19 @@ public partial class MetricsController
         ProjectBoard board,
         int sprintNumber,
         Role? role,
+        int roleIndex,
         CancellationToken cancellationToken)
     {
         var sb = new StringBuilder();
         var roleName = role?.Name?.Trim() ?? string.Empty;
 
-        // Full Stack: check if a Full Stack card exists; if so use it directly, else fetch both Backend and Frontend cards
-        var trelloLabels = IsFullStackRole(roleName)
-            ? await _trelloService.ResolveSprintLabelsAsync(boardId, sprintNumber, roleName)
-            : new[] { ResolveTrelloSprintCardLabel(role, fullStackTrackLabel: null) };
+        IReadOnlyList<string> trelloLabels;
+        if (board.IsSingleRole && roleIndex > 0)
+            trelloLabels = new[] { $"{roleName} {roleIndex}" };
+        else
+            trelloLabels = IsFullStackRole(roleName)
+                ? await _trelloService.ResolveSprintLabelsAsync(boardId, sprintNumber, roleName)
+                : new[] { ResolveTrelloSprintCardLabel(role, fullStackTrackLabel: null) };
 
         foreach (var trelloLabel in trelloLabels)
         {

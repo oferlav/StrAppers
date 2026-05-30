@@ -97,7 +97,10 @@ public partial class MentorController
             var roleId = activeRole?.RoleId;
 
             string? moduleIdStr = null;
-            foreach (var label in GetTrelloLabelNamesForRole(originalRoleName))
+            var crmLabels = board.IsSingleRole && student.RoleIndex > 0
+                ? (IReadOnlyList<string>)new[] { $"{originalRoleName} {student.RoleIndex}" }
+                : GetTrelloLabelNamesForRole(originalRoleName);
+            foreach (var label in crmLabels)
             {
                 moduleIdStr = await _trelloService.GetModuleIdFromSprintCardAsync(boardId, request.SprintNumber, label);
                 if (!string.IsNullOrWhiteSpace(moduleIdStr))

@@ -634,7 +634,8 @@ namespace strAppersBackend.Controllers
                             Id = teamStudent.Id,
                             FirstName = teamStudent.FirstName,
                             LastName = teamStudent.LastName,
-                            RoleName = teamRole?.Role?.Name ?? "Team Member"
+                            RoleName = teamRole?.Role?.Name ?? "Team Member",
+                            RoleIndex = teamStudent.RoleIndex
                         });
                     }
                 }
@@ -649,9 +650,14 @@ namespace strAppersBackend.Controllers
 
                     if (!string.IsNullOrEmpty(memberRoleName))
                     {
-                        var memberLabelNames = IsFullStackStudentRoleName(memberRoleName)
-                            ? await _trelloService.ResolveSprintLabelsAsync(student.BoardId, sprintId, memberRoleName)
-                            : (IReadOnlyList<string>)GetTrelloLabelNamesForRole(memberRoleName);
+                        var memberRoleIndex = memberElement.TryGetProperty("RoleIndex", out var rIdxProp) ? rIdxProp.GetInt32() : 0;
+                        IReadOnlyList<string> memberLabelNames;
+                        if (isSingleRoleBoard && memberRoleIndex > 0)
+                            memberLabelNames = new[] { $"{memberRoleName} {memberRoleIndex}" };
+                        else
+                            memberLabelNames = IsFullStackStudentRoleName(memberRoleName)
+                                ? await _trelloService.ResolveSprintLabelsAsync(student.BoardId, sprintId, memberRoleName)
+                                : (IReadOnlyList<string>)GetTrelloLabelNamesForRole(memberRoleName);
                         var memberSeenIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                         foreach (var labelName in memberLabelNames)
                         {
@@ -6694,7 +6700,8 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                             Id = teamStudent.Id,
                             FirstName = teamStudent.FirstName,
                             LastName = teamStudent.LastName,
-                            RoleName = teamRole?.Role?.Name ?? "Team Member"
+                            RoleName = teamRole?.Role?.Name ?? "Team Member",
+                            RoleIndex = teamStudent.RoleIndex
                         });
                     }
                 }
@@ -6709,7 +6716,12 @@ Your intelligence is strictly tethered to the Current Project Context and the us
 
                     if (!string.IsNullOrEmpty(memberRoleName))
                     {
-                        var memberLabelNames = GetTrelloLabelNamesForRole(memberRoleName);
+                        var memberRoleIndex = memberElement.TryGetProperty("RoleIndex", out var rIdxProp) ? rIdxProp.GetInt32() : 0;
+                        IReadOnlyList<string> memberLabelNames;
+                        if (isSingleRoleBoardForChat && memberRoleIndex > 0)
+                            memberLabelNames = new[] { $"{memberRoleName} {memberRoleIndex}" };
+                        else
+                            memberLabelNames = GetTrelloLabelNamesForRole(memberRoleName);
                         var memberSeenIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                         foreach (var labelName in memberLabelNames)
                         {
