@@ -355,9 +355,16 @@ namespace strAppersBackend.Controllers
                 }
 
                 // B. Fetch Current Trello Tasks for current sprint (filtered by role label(s); Full Stack Developer: check for FS card first, else Backend + Frontend labels)
-                var trelloLabelNames = IsFullStackStudentRoleName(roleName)
-                    ? await _trelloService.ResolveSprintLabelsAsync(student.BoardId, sprintId, roleName)
-                    : (IReadOnlyList<string>)GetTrelloLabelNamesForRole(roleName);
+                // For role-course boards the Trello card label includes the developer index (e.g. "Full Stack Developer 1")
+                // while the student's stored role name is the base name ("Full Stack Developer"). Build the exact label here.
+                var isSingleRoleBoard = student.ProjectBoard?.IsSingleRole ?? false;
+                IReadOnlyList<string> trelloLabelNames;
+                if (isSingleRoleBoard && student.RoleIndex > 0)
+                    trelloLabelNames = new[] { $"{roleName} {student.RoleIndex}" };
+                else
+                    trelloLabelNames = IsFullStackStudentRoleName(roleName)
+                        ? await _trelloService.ResolveSprintLabelsAsync(student.BoardId, sprintId, roleName)
+                        : (IReadOnlyList<string>)GetTrelloLabelNamesForRole(roleName);
                 var seenCardIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                 var mergedCards = new List<JsonElement>();
                 foreach (var labelName in trelloLabelNames)
@@ -6454,8 +6461,14 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                 }
 
                 // Full Stack: always load both FE+BE labeled cards for this user; isBackend only affects UserProfile.Role / mentor focus, not which sprint cards are included
-                var roleNameForUserTaskLabels = IsFullStackStudentRoleName(originalRoleName) ? originalRoleName : roleName;
-                var trelloLabelNames = GetTrelloLabelNamesForRole(roleNameForUserTaskLabels);
+                // For role-course boards the Trello card label includes the developer index (e.g. "Full Stack Developer 1").
+                var roleBaseName = IsFullStackStudentRoleName(originalRoleName) ? originalRoleName : roleName;
+                var isSingleRoleBoardForChat = student.ProjectBoard?.IsSingleRole ?? false;
+                IReadOnlyList<string> trelloLabelNames;
+                if (isSingleRoleBoardForChat && student.RoleIndex > 0)
+                    trelloLabelNames = new[] { $"{roleBaseName} {student.RoleIndex}" };
+                else
+                    trelloLabelNames = GetTrelloLabelNamesForRole(roleBaseName);
                 var seenCardIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                 var mergedCards = new List<JsonElement>();
                 foreach (var labelName in trelloLabelNames)
