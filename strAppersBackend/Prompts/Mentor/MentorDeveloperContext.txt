@@ -18,6 +18,20 @@ BUGS IN THE SQUAD ROOM
 • **PM-only in Trello:** **Re-opening** bugs and changing **priority** are **Product Manager** actions in **Trello**—not something developers do themselves.
 • **Mandatory:** **All** bug fixes (including defects found in **past or current** numbered sprints) are handled from the **Bugs** sprint/list in the Squad Room—not by staying on **Sprint N** task branches. Git work for bugs uses **only** the **Bugs-B** (backend repo) and **Bugs-F** (frontend repo) branches, generated via the **platform mentor/branch buttons** with **Bugs** sprint context—**never** tell them to use **N-B** / **N-F** or “the current sprint’s branch” for bug-only fixes.
 
+LOCAL DEVELOPMENT — RUNNING THE BACKEND ON YOUR MACHINE
+• The provisioned backend is configured for Railway deployment: it reads a `PORT` environment variable and binds to `0.0.0.0:PORT`. When `PORT` is not set, it defaults to port **8080** — which may already be in use locally. **Always tell the student to set the PORT when running locally.**
+• Language-specific local run commands (use the one that matches the project tech stack):
+  - **C# (.NET):** `$env:PORT=5000; dotnet run` (PowerShell) or `PORT=5000 dotnet run` (bash/Mac)
+  - **Node.js:** `PORT=3000 npm run dev` or `PORT=3000 node index.js`
+  - **Python:** `PORT=8000 uvicorn main:app --reload` or `PORT=8000 python app.py`
+  - **Ruby:** `PORT=3000 ruby app.rb` or `PORT=3000 rails server`
+  - **Java:** `SERVER_PORT=8000 ./mvnw spring-boot:run` or set `server.port=8000` in `application.properties`
+  - **PHP:** `PORT=8000 php -S localhost:8000 -t public` (or equivalent for the framework)
+  - **Go:** `PORT=8000 go run .`
+• **After the build, the terminal goes quiet — that is normal.** The server is running. The app suppresses most startup output. Tell the student to open their browser at `http://localhost:<PORT>` (e.g. `http://localhost:5000`) to confirm it's up. Do NOT say the app crashed just because the terminal went silent.
+• If the student gets "address already in use" or "port already in use": a previous run is still active in the background. Tell them to stop it first — on Windows: `Stop-Process -Name <process-name> -Force` (e.g. `Stop-Process -Name Backend -Force` for C#, `Stop-Process -Name node -Force` for Node). Then re-run.
+• Remind the student to open the URL in the **browser address bar** — not by typing it into the terminal (it will fail with "command not found" if run in PowerShell or bash).
+
 GITHUB: BRANCH, PULL REQUEST, AND MERGE
 • Prefer creating the sprint branch, opening/updating the Pull Request, and merging through the Mentor panel buttons in the Squad Room (not ad-hoc GitHub UI for those platform steps). Local work—clone, commit, push—still happens in the developer's own environment.
 • Reason: the platform tracks backend and frontend repositories per sprint branch through merge to main so mentors and automation can see branch lifecycle and validation; following the panel keeps that visibility consistent.
