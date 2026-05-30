@@ -462,6 +462,20 @@ public partial class MetricsController
         var systemPrompt = prompts.SystemPrompt;
         var userPrompt = prompts.UserPrompt;
 
+        if (DebugAiContext)
+        {
+            var track = isBackend ? "backend" : "frontend";
+            // Last 600 chars of system prompt confirms which rule version is loaded from disk.
+            var sysLast = systemPrompt.Length > 600 ? "…" + systemPrompt[^600..] : systemPrompt;
+            // First 6000 + last 2000 of user prompt captures context block + scoring rules.
+            var userHead = userPrompt.Length > 6000 ? userPrompt[..6000] + "\n…(truncated)…\n" : userPrompt;
+            var userTail = userPrompt.Length > 8000 ? userPrompt[^2000..] : "";
+            var promptDbg = $"Track={track} StudentId={studentId} Sprint={sprintNumber}\n\n" +
+                            $"=== SYSTEM PROMPT (last 600 chars) ===\n{sysLast}\n\n" +
+                            $"=== USER PROMPT (head) ===\n{userHead}{userTail}";
+            try { await _smtpEmailService.SendPlainEmailAsync("ofer@skill-in.com", $"[Metrics Debug] GapAnalysis PROMPT track={track} student={studentId} sprint={sprintNumber}", promptDbg); } catch { }
+        }
+
         var cheapName = _configuration["OpenAI:CheapModel"] ?? "gpt-4o-mini";
         var aiModel = new AIModel
         {
@@ -473,6 +487,14 @@ public partial class MetricsController
         };
 
         var (llmText, inputTokens, outputTokens) = await _chatCompletionService.GetChatCompletionAsync(aiModel, systemPrompt, userPrompt, null);
+
+        if (DebugAiContext)
+        {
+            var track = isBackend ? "backend" : "frontend";
+            var responseDbg = $"Track={track} StudentId={studentId} Sprint={sprintNumber} InputTokens={inputTokens} OutputTokens={outputTokens}\n\n{llmText}";
+            try { await _smtpEmailService.SendPlainEmailAsync("ofer@skill-in.com", $"[Metrics Debug] GapAnalysis LLM-RESPONSE track={track} student={studentId} sprint={sprintNumber}", responseDbg); } catch { }
+        }
+
         var parsed = TryParseGapAnalysisJson(llmText, out var dto);
         if (!parsed || dto == null)
             return new GapTrackResult(llmText.Trim(), new List<(string, int)>(), new { parseError = true, raw = llmText }, ParsedOk: false, inputTokens, outputTokens);
