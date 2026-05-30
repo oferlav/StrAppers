@@ -5776,9 +5776,9 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                 if (student != null && isDeveloperRole)
                 {
                     var githubUser = student.GithubUser ?? "";
-                    var (frontendRepoUrl, backendRepoUrl, _) = GetRepositoryUrlsByRole(student);
+                    var (frontendRepoUrl, backendRepoUrl, isFullstackForGitHub) = GetRepositoryUrlsByRole(student);
                     var githubRepoUrl = !string.IsNullOrEmpty(backendRepoUrl) ? backendRepoUrl : frontendRepoUrl ?? "";
-                    
+
                     // Always add GitHub info for developer roles, especially if asking about GitHub or repeating instructions
                     if (isAskingAboutRepo || isAskingToRepeat || !string.IsNullOrEmpty(githubUser) || !string.IsNullOrEmpty(githubRepoUrl))
                     {
@@ -5786,7 +5786,13 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                         githubAccountInfo += "Terminal commands: put each full command in a ```bash ... ``` block. Example—write \"Switch to the main branch\" as plain text, then on the next line: ```bash\ngit checkout main\n``` Do not put single words like main in backticks in sentences. Do not put branch names (e.g. 1-B, 1-F, Sprint 1) in code blocks or backticks when used in prose—only full terminal commands go in ```bash blocks. Write branch names as plain text (e.g. your 1-B branch, your 1-F branch).\n";
                         if (!string.IsNullOrEmpty(githubUser))
                             githubAccountInfo += $"GitHub username: {githubUser}\n";
-                        if (!string.IsNullOrEmpty(githubRepoUrl))
+                        if (isFullstackForGitHub && !string.IsNullOrEmpty(backendRepoUrl) && !string.IsNullOrEmpty(frontendRepoUrl) && backendRepoUrl != frontendRepoUrl)
+                        {
+                            githubAccountInfo += $"Backend repository URL: {backendRepoUrl}\n";
+                            githubAccountInfo += $"Frontend repository URL: {frontendRepoUrl}\n";
+                            githubAccountInfo += "IMPORTANT: This student is a Full Stack Developer — they must clone BOTH repositories (backend AND frontend). Always provide both git clone commands when giving setup or cloning instructions.\n";
+                        }
+                        else if (!string.IsNullOrEmpty(githubRepoUrl))
                             githubAccountInfo += $"Repository URL: {githubRepoUrl}\n";
                         githubAccountInfo += "If the user says 'explain again' or 'repeat', repeat what you last explained (same topic); use ```bash blocks for any commands.";
                     }
