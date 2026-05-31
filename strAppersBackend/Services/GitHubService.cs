@@ -4073,11 +4073,8 @@ public class GitHubService : IGitHubService
     {
         var readme = $"# {projectTitle}\n\n";
 
-        if (!string.IsNullOrWhiteSpace(databaseConnectionString))
-        {
-            readme += $"## Application Database\n\n";
-            readme += $"**Application DB Connection String:** `{databaseConnectionString}`\n\n";
-        }
+        readme += $"## Application Database\n\n";
+        readme += "The database connection string is provided by the platform and available in the Squad Room project info. Use it with pgAdmin or DBeaver to inspect your schema locally.\n\n";
 
         if (!string.IsNullOrWhiteSpace(webApiUrl))
         {
@@ -4126,11 +4123,8 @@ public class GitHubService : IGitHubService
     {
         var readme = $"# {projectTitle} - Backend API\n\n";
 
-        if (!string.IsNullOrWhiteSpace(databaseConnectionString))
-        {
-            readme += $"## Application Database\n\n";
-            readme += $"**Application DB Connection String:** `{databaseConnectionString}`\n\n";
-        }
+        readme += $"## Application Database\n\n";
+        readme += "The database connection string is provided by the platform and available in the Squad Room project info. Use it with pgAdmin or DBeaver to inspect your schema locally.\n\n";
 
         if (!string.IsNullOrWhiteSpace(webApiUrl))
         {
