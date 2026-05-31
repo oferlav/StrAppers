@@ -187,49 +187,47 @@ public partial class MetricsController : ControllerBase
             await AppendSkillDataFindingsAsync(lines, boardId, board, request.SprintNumber, student.Id, roleName, cancellationToken, roleIndex);
         }
 
+        // Cross-check: only treat "Required Resource Data" as active when the sprint card's
+        // checklist actually contains a resource task. If the PM checked the field without
+        // adding a resource checklist item it is a Trello configuration error.
+        var effectiveRequiredResource = false;
         bool? resourceArtifactPresent = null;
         if (requiredResource)
+        {
+            var checklistCardIds = new[] { sprintBackendCardId, sprintFrontendCardId, cardId }
+                .Where(id => !string.IsNullOrEmpty(id))
+                .Distinct()
+                .ToArray();
+            foreach (var cid in checklistCardIds)
+            {
+                var checklistText = await _trelloService.GetCardChecklistTextAsync(cid!);
+                if (ResourceTaskKeywords.Any(kw => checklistText.Contains(kw, StringComparison.OrdinalIgnoreCase)))
+                {
+                    effectiveRequiredResource = true;
+                    break;
+                }
+            }
+            if (!effectiveRequiredResource)
+            {
+                _logger.LogWarning(
+                    "Adherence: board {BoardId} sprint {SprintNumber} requiredResource=true but no resource-related checklist item found on card(s) [{CardIds}]; treating resource as not required (PM Trello configuration).",
+                    boardId, request.SprintNumber, string.Join(", ", checklistCardIds));
+            }
+        }
+
+        if (effectiveRequiredResource)
         {
             var hasArtifact = await HasResourceArtifactAsync(boardId, student.Id, request.SprintNumber, cancellationToken);
             resourceArtifactPresent = hasArtifact;
             if (!hasArtifact)
-            {
-                // Before surfacing a student-facing finding, confirm the sprint card actually
-                // has a resource task in its checklist. If "Required Resource Data" is checked
-                // in Trello but no checklist item mentions resources, it is a PM configuration
-                // error — not a student gap.
-                var checklistCardIds = new[] { sprintBackendCardId, sprintFrontendCardId, cardId }
-                    .Where(id => !string.IsNullOrEmpty(id))
-                    .Distinct()
-                    .ToArray();
-                var hasResourceTask = false;
-                foreach (var cid in checklistCardIds)
-                {
-                    var checklistText = await _trelloService.GetCardChecklistTextAsync(cid!);
-                    if (ResourceTaskKeywords.Any(kw => checklistText.Contains(kw, StringComparison.OrdinalIgnoreCase)))
-                    {
-                        hasResourceTask = true;
-                        break;
-                    }
-                }
-                if (hasResourceTask)
-                {
-                    lines.Add("A required resource artifact was not completed or was not shared.");
-                }
-                else
-                {
-                    _logger.LogWarning(
-                        "Adherence: board {BoardId} sprint {SprintNumber} requiredResource=true but no resource-related checklist item found on card(s) [{CardIds}]; skipping student-facing finding (PM Trello configuration).",
-                        boardId, request.SprintNumber, string.Join(", ", checklistCardIds));
-                }
-            }
+                lines.Add("A required resource artifact was not completed or was not shared.");
         }
 
         var reviewContent = string.Join(Environment.NewLine, lines.Where(l => !string.IsNullOrWhiteSpace(l)));
 
         if (string.IsNullOrWhiteSpace(reviewContent))
         {
-            if (!requiredSkill && !requiredResource)
+            if (!requiredSkill && !effectiveRequiredResource)
             {
                 reviewContent = "No required deliverables were set for this sprint (Required Skill Data and Required Resource Data were not checked on the sprint card).";
             }
@@ -237,7 +235,7 @@ public partial class MetricsController : ControllerBase
             {
                 var met = new List<string>();
                 if (requiredSkill) met.Add(AdherenceSkillDeliverable(roleName));
-                if (requiredResource) met.Add("resource artifact shared");
+                if (effectiveRequiredResource) met.Add("resource artifact shared");
                 reviewContent = met.Count == 1
                     ? $"All adherence criteria met. {met[0]} was completed for this sprint."
                     : $"All adherence criteria met. {string.Join(" and ", met)} were completed for this sprint.";
@@ -246,13 +244,14 @@ public partial class MetricsController : ControllerBase
 
         // Skill checks log via GitHubService; resource uses DB only — this line is the only place to see why the resource sentence was skipped.
         _logger.LogInformation(
-            "Adherence: board {BoardId} student {StudentId} sprint {SprintNumber} role {RoleName} requiredSkillData={RequiredSkillData} requiredResourceData={RequiredResourceData} resourceArtifactPresent={ResourceArtifactPresent} reviewLineCount={ReviewLineCount}",
+            "Adherence: board {BoardId} student {StudentId} sprint {SprintNumber} role {RoleName} requiredSkillData={RequiredSkillData} requiredResourceData={RequiredResourceData} effectiveRequiredResource={EffectiveRequiredResource} resourceArtifactPresent={ResourceArtifactPresent} reviewLineCount={ReviewLineCount}",
             boardId,
             student.Id,
             request.SprintNumber,
             roleName,
             requiredSkill,
             requiredResource,
+            effectiveRequiredResource,
             resourceArtifactPresent,
             lines.Count);
 

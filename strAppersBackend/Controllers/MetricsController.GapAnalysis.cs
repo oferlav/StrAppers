@@ -845,8 +845,6 @@ public partial class MetricsController
             }
         }
 
-        sb.AppendLine("### Resource links (non-Figma; sprint-scoped when sprint number ≥ 1)");
-        sb.AppendLine("Presence of an entry here confirms the student stored the artifact in the Squad Room Resources panel.");
         List<Resource> resources;
         if (sprintNumber > 0)
         {
@@ -863,15 +861,21 @@ public partial class MetricsController
                 .OrderBy(r => r.Id)
                 .ToListAsync(cancellationToken);
         }
-        foreach (var r in resources)
+        // Only include the resource section when the student has actually shared something.
+        // An empty section with "(none)" causes the model to comment on missing resources
+        // even for sprints that have no resource task.
+        if (resources.Count > 0)
         {
-            var hint = LooksLikeImageUrl(r.Url)
-                ? " (image — content sent to model as inline vision input)"
-                : " (non-image — URL confirms storage in Resources panel)";
-            sb.AppendLine($"- {r.Name}: {r.Url}{hint}");
+            sb.AppendLine("### Resource links (non-Figma; sprint-scoped when sprint number >= 1)");
+            sb.AppendLine("Presence of an entry here confirms the student stored the artifact in the Squad Room Resources panel.");
+            foreach (var r in resources)
+            {
+                var hint = LooksLikeImageUrl(r.Url)
+                    ? " (image — content sent to model as inline vision input)"
+                    : " (non-image — URL confirms storage in Resources panel)";
+                sb.AppendLine($"- {r.Name}: {r.Url}{hint}");
+            }
         }
-        if (resources.Count == 0)
-            sb.AppendLine("(none)");
 
         return sb.ToString();
     }
