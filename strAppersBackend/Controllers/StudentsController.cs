@@ -534,18 +534,20 @@ public class StudentsController : ControllerBase
 
             // Validate institute coupon and resolve InstituteId
             int? resolvedInstituteId = 1; // default institute
+            string? resolvedCoupon = null;
             if (!string.IsNullOrWhiteSpace(request.InstituteCoupon))
             {
                 _logger.LogInformation("Validating institute coupon: {Coupon}", request.InstituteCoupon);
-                var institute = await _context.Institutes
-                    .FirstOrDefaultAsync(i => i.Coupon == request.InstituteCoupon);
-                if (institute == null)
+                var instituteProject = await _context.InstituteProjects
+                    .FirstOrDefaultAsync(p => p.Coupon == request.InstituteCoupon);
+                if (instituteProject == null)
                 {
-                    _logger.LogWarning("Institute coupon '{Coupon}' not found", request.InstituteCoupon);
+                    _logger.LogWarning("Institute coupon '{Coupon}' not found in InstituteProjects", request.InstituteCoupon);
                     return BadRequest($"Institute coupon '{request.InstituteCoupon}' is not valid.");
                 }
-                resolvedInstituteId = institute.Id;
-                _logger.LogInformation("Institute coupon validated, InstituteId={InstituteId}", institute.Id);
+                resolvedInstituteId = instituteProject.InstituteId;
+                resolvedCoupon = request.InstituteCoupon;
+                _logger.LogInformation("Institute coupon validated, InstituteId={InstituteId}", instituteProject.InstituteId);
             }
 
             // Hash password if provided
@@ -572,6 +574,7 @@ public class StudentsController : ControllerBase
                 Photo = photo, // Base64 encoded image or URL (compressed if larger than 2 MB)
                 ProgrammingLanguageId = programmingLanguageId, // Programming language preference (null allowed)
                 InstituteId = resolvedInstituteId,
+                Coupon = resolvedCoupon,
                 ProjectId = null, // Default to null
                 IsAdmin = false, // Default to false
                 BoardId = null, // Default to null
@@ -1390,7 +1393,8 @@ public class StudentsController : ControllerBase
                 B2c = student.B2c,
                 RoleIndex = student.RoleIndex,
                 IsSingleRole = student.ProjectBoard?.IsSingleRole ?? false,
-                InstituteId = student.InstituteId
+                InstituteId = student.InstituteId,
+                Coupon = student.Coupon
             });
         }
         catch (Exception ex)

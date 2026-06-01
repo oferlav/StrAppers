@@ -1287,8 +1287,10 @@ public partial class ProjectsController : ControllerBase
             if (student.InstituteId == null || student.InstituteId <= 1)
                 return BadRequest("Student does not belong to an institute (InstituteId must be > 1).");
 
+            // Filter by coupon when present (student registered with a specific coupon)
             var projects = await _context.InstituteProjects
-                .Where(p => p.InstituteId == student.InstituteId && p.IsAvailable)
+                .Where(p => p.InstituteId == student.InstituteId && p.IsAvailable &&
+                            (student.Coupon == null || p.Coupon == student.Coupon))
                 .Select(p => new
                 {
                     p.Id,

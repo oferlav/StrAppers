@@ -80,6 +80,13 @@ public class Student
     public Institute? Institute { get; set; }
 
     /// <summary>
+    /// Coupon entered at registration. Matches InstituteProject.Coupon — plain string, no DB FK
+    /// (multiple projects may share the same coupon value).
+    /// </summary>
+    [MaxLength(100)]
+    public string? Coupon { get; set; }
+
+    /// <summary>
     /// FK to ProjectInstances.InstanceId (which instance of a project the student is in).
     /// </summary>
     public int? InstanceId { get; set; }
