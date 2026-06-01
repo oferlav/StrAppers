@@ -1271,6 +1271,58 @@ public partial class ProjectsController : ControllerBase
     }
 
     /// <summary>
+    /// Returns available InstituteProjects for the student's institute.
+    /// Only for students with InstituteId > 1. Existing behaviour for InstituteId=0/1 is unchanged.
+    /// Route: GET /api/Projects/use/institute/available/{studentId}
+    /// </summary>
+    [HttpGet("use/institute/available/{studentId}")]
+    public async Task<ActionResult> GetAvailableInstituteProjectsForStudent(int studentId)
+    {
+        try
+        {
+            var student = await _context.Students.FindAsync(studentId);
+            if (student == null)
+                return NotFound($"Student with ID {studentId} not found.");
+
+            if (student.InstituteId == null || student.InstituteId <= 1)
+                return BadRequest("Student does not belong to an institute (InstituteId must be > 1).");
+
+            var projects = await _context.InstituteProjects
+                .Where(p => p.InstituteId == student.InstituteId && p.IsAvailable)
+                .Select(p => new
+                {
+                    p.Id,
+                    p.Title,
+                    p.Mission,
+                    p.OneLiner,
+                    p.Description,
+                    p.ExtendedDescription,
+                    p.ShortBrief,
+                    p.Priority,
+                    p.IsAvailable,
+                    p.InUse,
+                    p.Logo,
+                    p.CreatedAt,
+                    p.UpdatedAt,
+                    ApplicantsCount = _context.Students.Count(s => s.Status == 1 && (
+                        s.InstitutePriority1 == p.Id ||
+                        s.InstitutePriority2 == p.Id ||
+                        s.InstitutePriority3 == p.Id ||
+                        s.InstitutePriority4 == p.Id
+                    ))
+                })
+                .ToListAsync();
+
+            return Ok(projects);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error retrieving institute projects for student {StudentId}", studentId);
+            return StatusCode(500, "An error occurred while retrieving institute projects.");
+        }
+    }
+
+    /// <summary>
     /// Get all available projects for the given institute.
     /// Built-in catalog rows are always included (even when activated/copied into <c>InstituteProjects</c>).
     /// Route: GET /api/Projects/use/by-institute
