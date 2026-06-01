@@ -109,6 +109,7 @@ public class ApplicationDbContext : DbContext
             entity.Property(e => e.State).HasMaxLength(100);
             entity.Property(e => e.Country).HasMaxLength(100);
             entity.Property(e => e.PasswordHash).HasMaxLength(256);
+            entity.Property(e => e.Coupon).HasMaxLength(100);
 
             entity.HasData(
                 new Institute

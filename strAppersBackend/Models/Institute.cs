@@ -51,6 +51,9 @@ public class Institute
     [MaxLength(256)]
     public string? PasswordHash { get; set; }
 
+    [MaxLength(100)]
+    public string? Coupon { get; set; }
+
     public ICollection<Student> Students { get; set; } = new List<Student>();
 
     public ICollection<Teacher> Teachers { get; set; } = new List<Teacher>();
