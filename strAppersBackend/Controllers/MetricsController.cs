@@ -18,6 +18,9 @@ public partial class MetricsController : ControllerBase
 {
     private const int AdherenceMetricId = 1;
 
+    private static readonly string[] ResourceTaskKeywords =
+        { "resource", "upload", "share", "link", "artifact", "submit", "attach" };
+
     private readonly ApplicationDbContext _context;
     private readonly ITrelloService _trelloService;
     private readonly IGitHubService _githubService;
@@ -28,6 +31,7 @@ public partial class MetricsController : ControllerBase
     private readonly PromptConfig _promptConfig;
     private readonly IMicrosoftGraphService _graphService;
     private readonly ISmtpEmailService _smtpEmailService;
+    private readonly IAzureBlobStorageService _blobStorageService;
 
     private bool DebugAiContext => _configuration.GetValue<bool>("Debug:AiContext", false);
 
@@ -41,7 +45,8 @@ public partial class MetricsController : ControllerBase
         IHttpClientFactory httpClientFactory,
         IOptions<PromptConfig> promptConfig,
         IMicrosoftGraphService graphService,
-        ISmtpEmailService smtpEmailService)
+        ISmtpEmailService smtpEmailService,
+        IAzureBlobStorageService blobStorageService)
     {
         _context = context;
         _trelloService = trelloService;
@@ -53,6 +58,7 @@ public partial class MetricsController : ControllerBase
         _promptConfig = promptConfig.Value;
         _graphService = graphService;
         _smtpEmailService = smtpEmailService;
+        _blobStorageService = blobStorageService;
     }
 
     public class AdherenceRequest
@@ -181,8 +187,35 @@ public partial class MetricsController : ControllerBase
             await AppendSkillDataFindingsAsync(lines, boardId, board, request.SprintNumber, student.Id, roleName, cancellationToken, roleIndex);
         }
 
+        // Cross-check: only treat "Required Resource Data" as active when the sprint card's
+        // checklist actually contains a resource task. If the PM checked the field without
+        // adding a resource checklist item it is a Trello configuration error.
+        var effectiveRequiredResource = false;
         bool? resourceArtifactPresent = null;
         if (requiredResource)
+        {
+            var checklistCardIds = new[] { sprintBackendCardId, sprintFrontendCardId, cardId }
+                .Where(id => !string.IsNullOrEmpty(id))
+                .Distinct()
+                .ToArray();
+            foreach (var cid in checklistCardIds)
+            {
+                var checklistText = await _trelloService.GetCardChecklistTextAsync(cid!);
+                if (ResourceTaskKeywords.Any(kw => checklistText.Contains(kw, StringComparison.OrdinalIgnoreCase)))
+                {
+                    effectiveRequiredResource = true;
+                    break;
+                }
+            }
+            if (!effectiveRequiredResource)
+            {
+                _logger.LogWarning(
+                    "Adherence: board {BoardId} sprint {SprintNumber} requiredResource=true but no resource-related checklist item found on card(s) [{CardIds}]; treating resource as not required (PM Trello configuration).",
+                    boardId, request.SprintNumber, string.Join(", ", checklistCardIds));
+            }
+        }
+
+        if (effectiveRequiredResource)
         {
             var hasArtifact = await HasResourceArtifactAsync(boardId, student.Id, request.SprintNumber, cancellationToken);
             resourceArtifactPresent = hasArtifact;
@@ -192,15 +225,33 @@ public partial class MetricsController : ControllerBase
 
         var reviewContent = string.Join(Environment.NewLine, lines.Where(l => !string.IsNullOrWhiteSpace(l)));
 
+        if (string.IsNullOrWhiteSpace(reviewContent))
+        {
+            if (!requiredSkill && !effectiveRequiredResource)
+            {
+                reviewContent = "No required deliverables were set for this sprint (Required Skill Data and Required Resource Data were not checked on the sprint card).";
+            }
+            else
+            {
+                var met = new List<string>();
+                if (requiredSkill) met.Add(AdherenceSkillDeliverable(roleName));
+                if (effectiveRequiredResource) met.Add("resource artifact shared");
+                reviewContent = met.Count == 1
+                    ? $"All adherence criteria met. {met[0]} was completed for this sprint."
+                    : $"All adherence criteria met. {string.Join(" and ", met)} were completed for this sprint.";
+            }
+        }
+
         // Skill checks log via GitHubService; resource uses DB only — this line is the only place to see why the resource sentence was skipped.
         _logger.LogInformation(
-            "Adherence: board {BoardId} student {StudentId} sprint {SprintNumber} role {RoleName} requiredSkillData={RequiredSkillData} requiredResourceData={RequiredResourceData} resourceArtifactPresent={ResourceArtifactPresent} reviewLineCount={ReviewLineCount}",
+            "Adherence: board {BoardId} student {StudentId} sprint {SprintNumber} role {RoleName} requiredSkillData={RequiredSkillData} requiredResourceData={RequiredResourceData} effectiveRequiredResource={EffectiveRequiredResource} resourceArtifactPresent={ResourceArtifactPresent} reviewLineCount={ReviewLineCount}",
             boardId,
             student.Id,
             request.SprintNumber,
             roleName,
             requiredSkill,
             requiredResource,
+            effectiveRequiredResource,
             resourceArtifactPresent,
             lines.Count);
 
@@ -388,6 +439,15 @@ public partial class MetricsController : ControllerBase
             if (!anyB && !anyF)
                 lines.Add("No committed work was found on either the backend or frontend branch for this sprint.");
         }
+    }
+
+    private static string AdherenceSkillDeliverable(string roleName)
+    {
+        if (ContainsDesigner(roleName)) return "Figma work shared";
+        if (ContainsProduct(roleName)) return "user story written";
+        if (IsMarketingOrBizDev(roleName)) return "CRM data captured";
+        if (ContainsDeveloper(roleName)) return "code committed to the sprint branch";
+        return "skill deliverable completed";
     }
 
     private static bool ContainsDesigner(string roleName) =>

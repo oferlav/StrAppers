@@ -6093,7 +6093,8 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                     
                     if (!string.IsNullOrEmpty(readmeContent))
                     {
-                        enhancedSystemPrompt = $"{enhancedSystemPrompt}\n\n{Dbg(4907)}=== PROJECT INFORMATION (FROM README) ===\n" +
+                        enhancedSystemPrompt = $"{enhancedSystemPrompt}\n\n{Dbg(4907)}=== PROJECT INFORMATION (FROM README — SCAFFOLDED STARTING CODEBASE) ===\n" +
+                        $"IMPORTANT: This README describes the platform-provisioned starting codebase. It is what the student inherited — it is NOT student work. Pre-existing tables, endpoints, or files listed here do not count as completed student tasks.\n\n" +
                         $"{readmeContent}\n\n" +
                             $"=== END OF PROJECT INFORMATION ===\n\n";
                     }
@@ -9578,7 +9579,12 @@ Your intelligence is strictly tethered to the Current Project Context and the us
             foreach (var record in existingRecords)
             {
                 var recordBaseSource = ExtractBaseSource(record.Source);
-                if (recordBaseSource == baseSource)
+                // GitHub-Success-PR and GitHub-Failed-PR share the same sequence space because
+                // a failed review is stored as GitHub-Failed-PR-N using a sequence derived from
+                // GitHub-Success-PR. Count both so retries never land on an occupied slot.
+                var matches = recordBaseSource == baseSource
+                    || (baseSource == "GitHub-Success-PR" && recordBaseSource == "GitHub-Failed-PR");
+                if (matches)
                 {
                     // Extract sequence from this record's source
                     var lastDashIndex = record.Source.LastIndexOf('-');
@@ -9808,6 +9814,23 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                     return BadRequest(new { Success = false, Message = "No code changes found in branch. Please make sure you have committed and pushed changes." });
                 }
 
+                // Detect squash-merge divergence: when a previous PR on this branch was squash-merged,
+                // main gets a new squash commit whose SHA doesn't match the original commit on the branch.
+                // The three-dot compare then uses the pre-squash common ancestor as the merge base,
+                // so the diff includes already-merged work from the earlier commit.
+                var isDiverged = commitDiff.BehindBy > 0;
+                if (isDiverged)
+                {
+                    _logger.LogWarning("⚠️ [CODE REVIEW] Branch {Branch} is diverged from main (AheadBy={AheadBy}, BehindBy={BehindBy}, Status={Status}). " +
+                        "Likely caused by a squash merge of a previous PR on this branch. The diff may include already-merged work.",
+                        request.GithubBranch, commitDiff.AheadBy, commitDiff.BehindBy, commitDiff.CompareStatus);
+                }
+                else
+                {
+                    _logger.LogInformation("📊 [CODE REVIEW] Branch status: AheadBy={AheadBy}, BehindBy={BehindBy}, Status={Status}",
+                        commitDiff.AheadBy, commitDiff.BehindBy, commitDiff.CompareStatus);
+                }
+
                 // Check if there are actual code changes (additions or deletions)
                 // Require at least 3 lines of changes to filter out trivial changes (whitespace, single newlines, etc.)
                 var totalLinesChanged = commitDiff.TotalAdditions + commitDiff.TotalDeletions;
@@ -9966,6 +9989,19 @@ APPROVAL: yes   (code is ready for merge)
 APPROVAL: no    (request changes before merge)";
                 }
 
+                // When the branch is behind main (squash-merge divergence), prepend a warning so
+                // the model knows part of the diff may already exist in main and should focus only
+                // on work not yet merged.
+                if (isDiverged)
+                {
+                    var divergenceNote = $"\n\n⚠️ REVIEWER NOTE: This branch is {commitDiff.BehindBy} commit(s) behind `main`, " +
+                        $"likely because a previous PR on this branch was squash-merged. " +
+                        $"The diff below is computed from the common ancestor and therefore includes changes that are already present in `main`. " +
+                        $"Focus your review ONLY on work that is genuinely new — i.e., changes that go beyond what was already merged. " +
+                        $"Do not penalise the student for code that was already approved and merged.\n";
+                    codeReviewPrompt = divergenceNote + codeReviewPrompt;
+                }
+
                 // Resolve model: explicit request → DB lookup; otherwise Assessment:AiModel config
                 string? modelName = null;
                 if (!string.IsNullOrWhiteSpace(request.AIServiceName))
@@ -10074,7 +10110,9 @@ APPROVAL: no    (request changes before merge)";
                                 foreach (var record in existingRecords)
                                 {
                                     var recordBaseSource = ExtractBaseSource(record.Source);
-                                    if (recordBaseSource == baseSource)
+                                    var matches = recordBaseSource == baseSource
+                                        || (baseSource == "GitHub-Success-PR" && recordBaseSource == "GitHub-Failed-PR");
+                                    if (matches)
                                     {
                                         var lastDashIndex = record.Source.LastIndexOf('-');
                                         if (lastDashIndex > 0 && lastDashIndex < record.Source.Length - 1)
@@ -10218,7 +10256,9 @@ APPROVAL: no    (request changes before merge)";
 
                 // PR validation flows use source GitHub-Success-PR: one CacheReview row with Type PR (not Skill).
                 // Standalone POST /use/code-review uses source Junior → Skill.
-                var cacheStudentId = await ResolveCacheReviewStudentIdForBranchAsync(request.BoardId, request.GithubBranch, HttpContext.RequestAborted);
+                // Use CancellationToken.None so a client disconnect (HTTP 499) cannot abort the
+                // post-review DB writes — the AI response is already in hand at this point.
+                var cacheStudentId = await ResolveCacheReviewStudentIdForBranchAsync(request.BoardId, request.GithubBranch, CancellationToken.None);
                 if (cacheStudentId.HasValue)
                 {
                     var cacheType = string.Equals(source, "GitHub-Success-PR", StringComparison.Ordinal)
@@ -10230,7 +10270,7 @@ APPROVAL: no    (request changes before merge)";
                         sprintNumber,
                         cacheType,
                         feedbackWithoutApprovalLine,
-                        HttpContext.RequestAborted);
+                        CancellationToken.None);
                 }
 
                 return Ok(new
@@ -12162,6 +12202,9 @@ APPROVAL: no    (request changes before merge)";
                 _logger.LogInformation("📥 [GITHUB-PR] Platform-triggered validation: BoardId={BoardId}, Branch={Branch}, IsBackend={IsBackend}",
                     request.BoardId, request.BranchName, request.IsBackend);
 
+                if (DebugAiContext)
+                    try { await _smtpEmailService.SendPlainEmailAsync("ofer@skill-in.com", $"[GitHub-PR Debug] START board={request.BoardId} branch={request.BranchName} isBackend={request.IsBackend}", $"START\nBoardId={request.BoardId}\nBranch={request.BranchName}\nIsBackend={request.IsBackend}\nUtcNow={DateTime.UtcNow:O}"); } catch { }
+
                 // Get board to find GitHub repo info
                 var board = await _context.ProjectBoards
                     .FirstOrDefaultAsync(pb => pb.Id == request.BoardId);
@@ -12197,15 +12240,22 @@ APPROVAL: no    (request changes before merge)";
 
                 // SHA Lookup: Get the latest commit SHA for the branch
                 _logger.LogInformation("📥 [GITHUB-PR] Looking up SHA for branch {Branch} in {Owner}/{Repo}", request.BranchName, owner, repo);
+                if (DebugAiContext)
+                    try { await _smtpEmailService.SendPlainEmailAsync("ofer@skill-in.com", $"[GitHub-PR Debug] SHA-LOOKUP board={request.BoardId} branch={request.BranchName}", $"About to call GetBranchShaAsync\nOwner={owner} Repo={repo}\nUtcNow={DateTime.UtcNow:O}"); } catch { }
+
                 var sha = await _githubService.GetBranchShaAsync(owner, repo, request.BranchName, accessToken);
 
                 if (string.IsNullOrEmpty(sha))
                 {
                     _logger.LogError("❌ [GITHUB-PR] Failed to get SHA for branch {Branch}", request.BranchName);
+                    if (DebugAiContext)
+                        try { await _smtpEmailService.SendPlainEmailAsync("ofer@skill-in.com", $"[GitHub-PR Debug] SHA-FAIL board={request.BoardId} branch={request.BranchName}", $"GetBranchShaAsync returned empty/null.\nOwner={owner} Repo={repo}\nUtcNow={DateTime.UtcNow:O}"); } catch { }
                     return BadRequest(new { Success = false, Message = $"Failed to get SHA for branch '{request.BranchName}'. Branch may not exist." });
                 }
 
                 _logger.LogInformation("✅ [GITHUB-PR] Found SHA {Sha} for branch {Branch}", sha, request.BranchName);
+                if (DebugAiContext)
+                    try { await _smtpEmailService.SendPlainEmailAsync("ofer@skill-in.com", $"[GitHub-PR Debug] SHA-OK board={request.BoardId} branch={request.BranchName}", $"SHA={sha}\nUtcNow={DateTime.UtcNow:O}"); } catch { }
 
                 // Check if PR exists (but DON'T create it yet - only create AFTER validation passes)
                 _logger.LogInformation("📥 [GITHUB-PR] Checking if PR exists for branch {Branch}", request.BranchName);
@@ -12218,15 +12268,21 @@ APPROVAL: no    (request changes before merge)";
                     _logger.LogInformation("✅ [GITHUB-PR] Found existing PR #{PRNumber} for branch {Branch}", prNumber, request.BranchName);
                 }
 
+                if (DebugAiContext)
+                    try { await _smtpEmailService.SendPlainEmailAsync("ofer@skill-in.com", $"[GitHub-PR Debug] PR-CHECK board={request.BoardId} branch={request.BranchName}", $"ExistingPR={(existingPR == null ? "null" : $"#{existingPR.Number} state={existingPR.State}")}\nAbout to call ProcessValidationAsync\nUtcNow={DateTime.UtcNow:O}"); } catch { }
+
                 // Call shared validation service FIRST (before creating PR)
                 // Pass prNumber if available for PR comment posting
                 var (success, feedback, errorMessage) = await ProcessValidationAsync(
-                    repo, 
-                    request.BranchName, 
-                    sha, 
-                    request.BoardId, 
-                    request.IsBackend, 
+                    repo,
+                    request.BranchName,
+                    sha,
+                    request.BoardId,
+                    request.IsBackend,
                     issueNumber: prNumber);
+
+                if (DebugAiContext)
+                    try { await _smtpEmailService.SendPlainEmailAsync("ofer@skill-in.com", $"[GitHub-PR Debug] VALIDATION-DONE board={request.BoardId} branch={request.BranchName}", $"Success={success}\nErrorMessage={errorMessage}\nFeedback(first 800)={feedback?.Substring(0, Math.Min(800, feedback?.Length ?? 0))}\nUtcNow={DateTime.UtcNow:O}"); } catch { }
 
                 // Only create PR if validation PASSED
                 if (success && (existingPR == null || existingPR.Number == 0))
@@ -12319,6 +12375,8 @@ APPROVAL: no    (request changes before merge)";
             catch (Exception ex)
             {
                 _logger.LogError(ex, "❌ [GITHUB-PR] Error processing platform-triggered validation");
+                if (DebugAiContext)
+                    try { await _smtpEmailService.SendPlainEmailAsync("ofer@skill-in.com", $"[GitHub-PR Debug] EXCEPTION board={request?.BoardId} branch={request?.BranchName}", $"Exception: {ex.GetType().Name}\nMessage: {ex.Message}\nStackTrace:\n{ex.StackTrace}\nInnerException: {ex.InnerException?.Message}\nUtcNow={DateTime.UtcNow:O}"); } catch { }
                 return StatusCode(500, new { Success = false, Message = $"Error validating PR: {ex.Message}" });
             }
         }

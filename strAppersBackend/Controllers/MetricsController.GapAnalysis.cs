@@ -29,8 +29,8 @@ public partial class MetricsController
 
     /// <summary>
     /// Sprint gap analysis (MetricId 2): compares sprint requirements to delivered artifacts; stores <see cref="CacheMetrics.ReviewContent"/> and base64 PNG bar chart(s) in <see cref="CacheMetrics.Graph"/> and optional <see cref="CacheMetrics.Graph2"/>.
-    /// Full Stack runs two separate analyses (backend repo vs frontend repo); the model is not told “full stack”—only “backend” or “frontend” expert. Backend result is saved first; frontend narrative and chart are appended (<see cref="CacheMetrics.Graph2"/>).
-    /// Trello cards are matched by the green label: <see cref="Role.Description"/> if set, otherwise <see cref="Role.Name"/> (same board convention as “Role Description” labels).
+    /// Full Stack runs two separate analyses (backend repo vs frontend repo); the model is not told "full stack"—only "backend" or "frontend" expert. Backend result is saved first; frontend narrative and chart are appended (<see cref="CacheMetrics.Graph2"/>).
+    /// Trello cards are matched by the green label: <see cref="Role.Description"/> if set, otherwise <see cref="Role.Name"/> (same board convention as "Role Description" labels).
     /// Set <see cref="GapAnalysisRequest.Test"/> to true to return only generated system and user prompts (no LLM, no DB write).
     /// </summary>
     [HttpPost("use/GapAnalysis")]
@@ -71,17 +71,38 @@ public partial class MetricsController
         var roleLabel = board.IsSingleRole && student.RoleIndex > 0
             ? $"{roleName} {student.RoleIndex}"
             : ResolveTrelloSprintCardLabel(activeRole?.Role, fullStackTrackLabel: null);
-        // Include customer context for non-developer roles (B2C behaviour) or any role with CustomerEngagement=true.
-        // For institute students the flag lives in InstituteSquadRoles, not in Roles.
+        // Include customer context only when the role has CE enabled AND the sprint is module-linked or has actual customer chat.
+        // A setup/onboarding sprint with no module and no chat should not generate a customer alignment category.
         var hasCustomerEngagement = await ResolveCustomerEngagementAsync(activeRole?.Role, roleName, student.InstituteId, cancellationToken);
-        var includeCustomerContext = !ContainsDeveloper(roleName) || hasCustomerEngagement;
+        var ceEnabledForRole = !ContainsDeveloper(roleName) || hasCustomerEngagement;
+
+        bool sprintHasModule = false;
+        bool sprintHasCustomerChat = false;
+        if (ceEnabledForRole)
+        {
+            // Check role sprint card first, then PM sprint card as fallback.
+            var roleModId = await _trelloService.GetModuleIdFromSprintCardAsync(boardId, request.SprintNumber, roleLabel);
+            if (string.IsNullOrWhiteSpace(roleModId))
+            {
+                foreach (var pmLbl in GapAnalysisPmSprintCardLabels)
+                {
+                    roleModId = await _trelloService.GetModuleIdFromSprintCardAsync(boardId, request.SprintNumber, pmLbl);
+                    if (!string.IsNullOrWhiteSpace(roleModId)) break;
+                }
+            }
+            sprintHasModule = !string.IsNullOrWhiteSpace(roleModId);
+            sprintHasCustomerChat = await HasCustomerGapAnalysisChatRowsAsync(request.StudentId, request.SprintNumber, cancellationToken);
+        }
+
+        var includeCustomerContext = ceEnabledForRole && (sprintHasModule || sprintHasCustomerChat);
         _logger.LogInformation(
-            "GapAnalysis context: studentId={StudentId} roleName={RoleName} instituteId={InstId} hasCustomerEngagement={CE} includeCustomerContext={Ctx}",
-            request.StudentId, roleName, student.InstituteId, hasCustomerEngagement, includeCustomerContext);
+            "GapAnalysis context: studentId={StudentId} roleName={RoleName} instituteId={InstId} hasCustomerEngagement={CE} sprintHasModule={Mod} sprintHasCustomerChat={Chat} includeCustomerContext={Ctx}",
+            request.StudentId, roleName, student.InstituteId, hasCustomerEngagement, sprintHasModule, sprintHasCustomerChat, includeCustomerContext);
         if (DebugAiContext)
         {
             var dbg = $"StudentId={request.StudentId} BoardId={boardId} RoleName={roleName} InstituteId={student.InstituteId} " +
-                      $"Role.CE={activeRole?.Role?.CustomerEngagement} ResolvedCE={hasCustomerEngagement} IncludeCustomerContext={includeCustomerContext}";
+                      $"Role.CE={activeRole?.Role?.CustomerEngagement} ResolvedCE={hasCustomerEngagement} " +
+                      $"SprintHasModule={sprintHasModule} SprintHasCustomerChat={sprintHasCustomerChat} IncludeCustomerContext={includeCustomerContext}";
             try { await _smtpEmailService.SendPlainEmailAsync("ofer@skill-in.com", $"[Metrics Debug] GapAnalysis context student={request.StudentId}", dbg); } catch { /* ignore */ }
         }
 
@@ -462,6 +483,47 @@ public partial class MetricsController
         var systemPrompt = prompts.SystemPrompt;
         var userPrompt = prompts.UserPrompt;
 
+        // Download image resources from Azure Blob for inline vision input
+        var imageDataUrls = new List<string>();
+        if (_blobStorageService.IsConfigured)
+        {
+            var imgResources = await _context.Resources.AsNoTracking()
+                .Where(r => r.BoardId == boardId && r.StudentId == studentId && !r.IsFigma &&
+                            (sprintNumber <= 0 ? r.SprintNumber == null : r.SprintNumber == sprintNumber))
+                .OrderBy(r => r.Id)
+                .ToListAsync(cancellationToken);
+            foreach (var res in imgResources.Where(r => LooksLikeImageUrl(r.Url)))
+            {
+                try
+                {
+                    if (Uri.TryCreate(res.Url.Trim(), UriKind.Absolute, out var blobUri))
+                    {
+                        var blobRead = await _blobStorageService.OpenBlobReadAsync(blobUri, cancellationToken);
+                        if (blobRead.HasValue)
+                        {
+                            using var ms = new MemoryStream();
+                            await blobRead.Value.Stream.CopyToAsync(ms, cancellationToken);
+                            await blobRead.Value.Stream.DisposeAsync();
+                            imageDataUrls.Add($"data:{GapAnalysisImageMimeType(res.Url)};base64,{Convert.ToBase64String(ms.ToArray())}");
+                        }
+                    }
+                }
+                catch { /* skip images that fail to download */ }
+            }
+            if (imageDataUrls.Count > 0)
+                userPrompt += $"\n\n*Note: {imageDataUrls.Count} image(s) from the Resources panel are attached to this message as inline vision inputs. Analyse their content as evidence of the student's deliverable.*";
+        }
+
+        if (DebugAiContext)
+        {
+            var track = isBackend ? "backend" : "frontend";
+            var sysLast = systemPrompt.Length > 600 ? "…" + systemPrompt[^600..] : systemPrompt;
+            var promptDbg = $"Track={track} StudentId={studentId} Sprint={sprintNumber} UserPromptLength={userPrompt.Length} InlineImages={imageDataUrls.Count}\n\n" +
+                            $"=== SYSTEM PROMPT (last 600 chars) ===\n{sysLast}\n\n" +
+                            $"=== USER PROMPT ===\n{userPrompt}";
+            try { await _smtpEmailService.SendPlainEmailAsync("ofer@skill-in.com", $"[Metrics Debug] GapAnalysis PROMPT track={track} student={studentId} sprint={sprintNumber}", promptDbg); } catch { }
+        }
+
         var cheapName = _configuration["OpenAI:CheapModel"] ?? "gpt-4o-mini";
         var aiModel = new AIModel
         {
@@ -472,7 +534,20 @@ public partial class MetricsController
             DefaultTemperature = 0.2
         };
 
-        var (llmText, inputTokens, outputTokens) = await _chatCompletionService.GetChatCompletionAsync(aiModel, systemPrompt, userPrompt, null);
+        string llmText;
+        int inputTokens, outputTokens;
+        if (imageDataUrls.Count > 0)
+            (llmText, inputTokens, outputTokens) = await _chatCompletionService.GetOpenAiChatCompletionWithImagesAsync(aiModel, systemPrompt, userPrompt, imageDataUrls);
+        else
+            (llmText, inputTokens, outputTokens) = await _chatCompletionService.GetChatCompletionAsync(aiModel, systemPrompt, userPrompt, null);
+
+        if (DebugAiContext)
+        {
+            var track = isBackend ? "backend" : "frontend";
+            var responseDbg = $"Track={track} StudentId={studentId} Sprint={sprintNumber} InputTokens={inputTokens} OutputTokens={outputTokens}\n\n{llmText}";
+            try { await _smtpEmailService.SendPlainEmailAsync("ofer@skill-in.com", $"[Metrics Debug] GapAnalysis LLM-RESPONSE track={track} student={studentId} sprint={sprintNumber}", responseDbg); } catch { }
+        }
+
         var parsed = TryParseGapAnalysisJson(llmText, out var dto);
         if (!parsed || dto == null)
             return new GapTrackResult(llmText.Trim(), new List<(string, int)>(), new { parseError = true, raw = llmText }, ParsedOk: false, inputTokens, outputTokens);
@@ -713,13 +788,10 @@ public partial class MetricsController
             .OrderBy(h => h.CreatedAt)
             .ToListAsync(cancellationToken);
 
-        sb.AppendLine("### Customer chat history (AI Customer; filtered by StudentId, SprintNumber)");
         if (chatRows.Count == 0)
-        {
-            sb.AppendLine("(No messages in `CustomerChatHistory` for this student and sprint.)");
-            sb.AppendLine();
             return;
-        }
+
+        sb.AppendLine("### Customer chat history (AI Customer; filtered by StudentId, SprintNumber)");
 
         foreach (var row in chatRows)
         {
@@ -773,12 +845,12 @@ public partial class MetricsController
             }
         }
 
-        sb.AppendLine("### Resource links (non-Figma; sprint-scoped when sprint number ≥ 1)");
         List<Resource> resources;
         if (sprintNumber > 0)
         {
             resources = await _context.Resources.AsNoTracking()
                 .Where(r => r.BoardId == boardId && r.StudentId == studentId && !r.IsFigma && r.SprintNumber == sprintNumber)
+                .OrderBy(r => r.Id)
                 .ToListAsync(cancellationToken);
         }
         else
@@ -786,12 +858,24 @@ public partial class MetricsController
             resources = await _context.Resources.AsNoTracking()
                 .Where(r => r.BoardId == boardId && r.StudentId == studentId && !r.IsFigma &&
                             (r.SprintNumber == sprintNumber || r.SprintNumber == null))
+                .OrderBy(r => r.Id)
                 .ToListAsync(cancellationToken);
         }
-        foreach (var r in resources)
-            sb.AppendLine($"- {r.Name}: {r.Url} (Azure Blob or HTTPS — not sent through the Figma API)");
-        if (resources.Count == 0)
-            sb.AppendLine("(none)");
+        // Only include the resource section when the student has actually shared something.
+        // An empty section with "(none)" causes the model to comment on missing resources
+        // even for sprints that have no resource task.
+        if (resources.Count > 0)
+        {
+            sb.AppendLine("### Resource links (non-Figma; sprint-scoped when sprint number >= 1)");
+            sb.AppendLine("Presence of an entry here confirms the student stored the artifact in the Squad Room Resources panel.");
+            foreach (var r in resources)
+            {
+                var hint = LooksLikeImageUrl(r.Url)
+                    ? " (image — content sent to model as inline vision input)"
+                    : " (non-image — URL confirms storage in Resources panel)";
+                sb.AppendLine($"- {r.Name}: {r.Url}{hint}");
+            }
+        }
 
         return sb.ToString();
     }
@@ -928,6 +1012,15 @@ public partial class MetricsController
                u.Contains(".jpeg", StringComparison.Ordinal) || u.Contains(".webp", StringComparison.Ordinal) || u.Contains(".gif", StringComparison.Ordinal);
     }
 
+    private static string GapAnalysisImageMimeType(string url)
+    {
+        var l = url.ToLowerInvariant();
+        if (l.Contains(".jpg") || l.Contains(".jpeg")) return "image/jpeg";
+        if (l.Contains(".webp")) return "image/webp";
+        if (l.Contains(".gif")) return "image/gif";
+        return "image/png";
+    }
+
     /// <summary>
     /// Raw <c>BranchContext</c> from Trello (e.g. <c>Bugs</c>). If it already ends with <c>-B</c> or <c>-F</c>, use as the full branch name; otherwise append <c>-B</c>/<c>-F</c> for this repository.
     /// </summary>
@@ -985,7 +1078,7 @@ public partial class MetricsController
         var bases = new[] { configuredBase, "main", "master", "develop" };
 
         var (diff, usedBase, pr) = await FetchGitHubGapAnalysisEvidenceAsync(owner, repo, head, bases, token);
-        AppendGitHubCompareArtifactLines(sb, diff, usedBase, head, configuredBase, owner, repo);
+        AppendGitHubCompareArtifactLines(sb, diff, usedBase, head, configuredBase, owner, repo, pr?.Merged ?? false);
 
         AppendGitHubPrArtifactLine(sb, pr, owner, repo, head, logIfMissing: true);
 
@@ -999,7 +1092,7 @@ public partial class MetricsController
                 sb.AppendLine();
                 sb.AppendLine(
                     $"**Sprint default branch `{defaultHead}`:** Trello **BranchContext** targets **`{head}`**, but work is often pushed to the numbered sprint branch **`{defaultHead}`** (e.g. mentor tooling). Additional GitHub evidence for **`{defaultHead}`**:");
-                AppendGitHubCompareArtifactLines(sb, diffAlt, usedAlt, defaultHead, configuredBase, owner, repo);
+                AppendGitHubCompareArtifactLines(sb, diffAlt, usedAlt, defaultHead, configuredBase, owner, repo, prAlt?.Merged ?? false);
                 AppendGitHubPrArtifactLine(sb, prAlt, owner, repo, defaultHead, logIfMissing: false);
                 _logger.LogInformation(
                     "GapAnalysis: appended fallback branch evidence {DefaultHead} (primary was {Head}, pr={HasPr}, diff={HasDiff})",
@@ -1038,7 +1131,8 @@ public partial class MetricsController
         string headLabel,
         string configuredBase,
         string owner,
-        string repo)
+        string repo,
+        bool prMerged = false)
     {
         if (diff != null && usedBase != null)
         {
@@ -1051,10 +1145,22 @@ public partial class MetricsController
             }
             else if (diff.BehindBy > 0 && diff.AheadBy == 0)
             {
-                sb.AppendLine(
-                    $"**{headLabel}** is **behind** **{usedBase}** by {diff.BehindBy} commit(s) and has **no commits ahead** of **{usedBase}** in this compare (status={diff.CompareStatus}). " +
-                    "That usually means the branch tip is stale relative to main (or work was merged and the branch was reset), not that this prompt failed. " +
-                    "Use the PR line below; do **not** treat this as “identical to main” with merged work unless the PR says merged.");
+                if (prMerged)
+                {
+                    sb.AppendLine(
+                        $"⚠️ MANDATORY ASSESSMENT OVERRIDE: **{headLabel}** is behind **{usedBase}** by {diff.BehindBy} commit(s) and has no commits ahead. " +
+                        "The PR for this branch is marked **merged=yes** (see PR line below). " +
+                        "This is the EXPECTED, NORMAL result of the platform's squash-merge workflow — it is NOT a gap. " +
+                        "You MUST NOT create any category or finding about branch divergence or the branch being behind main. " +
+                        "You MUST NOT recommend that the student keep the sprint branch updated with main.");
+                }
+                else
+                {
+                    sb.AppendLine(
+                        $"**{headLabel}** is **behind** **{usedBase}** by {diff.BehindBy} commit(s) and has **no commits ahead** of **{usedBase}** in this compare (status={diff.CompareStatus}). " +
+                        "That usually means the branch tip is stale relative to main (or work was merged and the branch was reset), not that this prompt failed. " +
+                        "Use the PR line below; do **not** treat this as \"identical to main\" with merged work unless the PR says merged.");
+                }
             }
             else if (string.Equals(diff.CompareStatus, "identical", StringComparison.OrdinalIgnoreCase)
                      || (diff.AheadBy == 0 && diff.BehindBy == 0 && diff.CommitsCount == 0))

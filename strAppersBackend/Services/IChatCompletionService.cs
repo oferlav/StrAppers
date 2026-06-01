@@ -26,6 +26,17 @@ namespace strAppersBackend.Services
             string userText,
             string? imageDataUrlOrHttpsUrl,
             IReadOnlyList<ChatMessageEntry>? chatHistory = null);
+
+        /// <summary>
+        /// OpenAI only. Appends one <c>image_url</c> content block per entry in <paramref name="imageDataUrls"/> to the user message.
+        /// Each entry should be a <c>data:image/…;base64,…</c> URL. Falls back to plain text when the list is empty.
+        /// </summary>
+        Task<(string Response, int InputTokens, int OutputTokens)> GetOpenAiChatCompletionWithImagesAsync(
+            AIModel aiModel,
+            string systemPrompt,
+            string userText,
+            IReadOnlyList<string> imageDataUrls,
+            IReadOnlyList<ChatMessageEntry>? chatHistory = null);
     }
 
     /// <summary>
