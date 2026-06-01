@@ -532,6 +532,22 @@ public class StudentsController : ControllerBase
                 _logger.LogInformation("Programming language {LanguageName} validated successfully", programmingLanguage.Name);
             }
 
+            // Validate institute coupon and resolve InstituteId
+            int? resolvedInstituteId = 1; // default institute
+            if (!string.IsNullOrWhiteSpace(request.InstituteCoupon))
+            {
+                _logger.LogInformation("Validating institute coupon: {Coupon}", request.InstituteCoupon);
+                var institute = await _context.Institutes
+                    .FirstOrDefaultAsync(i => i.Coupon == request.InstituteCoupon);
+                if (institute == null)
+                {
+                    _logger.LogWarning("Institute coupon '{Coupon}' not found", request.InstituteCoupon);
+                    return BadRequest($"Institute coupon '{request.InstituteCoupon}' is not valid.");
+                }
+                resolvedInstituteId = institute.Id;
+                _logger.LogInformation("Institute coupon validated, InstituteId={InstituteId}", institute.Id);
+            }
+
             // Hash password if provided
             string? passwordHash = null;
             if (!string.IsNullOrWhiteSpace(request.Password))
@@ -555,6 +571,7 @@ public class StudentsController : ControllerBase
                 GithubUser = request.GithubUser ?? string.Empty, // GitHub username (optional)
                 Photo = photo, // Base64 encoded image or URL (compressed if larger than 2 MB)
                 ProgrammingLanguageId = programmingLanguageId, // Programming language preference (null allowed)
+                InstituteId = resolvedInstituteId,
                 ProjectId = null, // Default to null
                 IsAdmin = false, // Default to false
                 BoardId = null, // Default to null

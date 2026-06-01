@@ -226,6 +226,9 @@ public class CreateStudentRequest
     
     // CV field (base64 encoded PDF/document)
     public string? CV { get; set; }
+
+    [MaxLength(100)]
+    public string? InstituteCoupon { get; set; }
 }
 
 public class UpdateStudentRequest
