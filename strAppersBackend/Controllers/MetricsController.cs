@@ -409,12 +409,16 @@ public partial class MetricsController : ControllerBase
                     var bOk = await BranchHasAnyCommitAsync(backendUrl, sprintNumber, isBackend: true, token, roleIndex);
                     if (!bOk)
                         lines.Add("Backend work was not completed or was not committed for this sprint.");
+                    else if (!await BranchHasMergedPRAsync(backendUrl, sprintNumber, isBackend: true, token, roleIndex))
+                        lines.Add("Backend sprint branch had commits but no merged Pull Request was found.");
                 }
                 if (checkFrontend)
                 {
                     var fOk = await BranchHasAnyCommitAsync(frontendUrl, sprintNumber, isBackend: false, token, roleIndex);
                     if (!fOk)
                         lines.Add("Frontend work was not completed or was not committed for this sprint.");
+                    else if (!await BranchHasMergedPRAsync(frontendUrl, sprintNumber, isBackend: false, token, roleIndex))
+                        lines.Add("Frontend sprint branch had commits but no merged Pull Request was found.");
                 }
                 return;
             }
@@ -423,6 +427,8 @@ public partial class MetricsController : ControllerBase
             {
                 if (!await BranchHasAnyCommitAsync(backendUrl, sprintNumber, isBackend: true, token, roleIndex))
                     lines.Add("Backend work was not completed or was not committed for this sprint.");
+                else if (!await BranchHasMergedPRAsync(backendUrl, sprintNumber, isBackend: true, token, roleIndex))
+                    lines.Add("Backend sprint branch had commits but no merged Pull Request was found.");
                 return;
             }
 
@@ -430,6 +436,8 @@ public partial class MetricsController : ControllerBase
             {
                 if (!await BranchHasAnyCommitAsync(frontendUrl, sprintNumber, isBackend: false, token, roleIndex))
                     lines.Add("Frontend work was not completed or was not committed for this sprint.");
+                else if (!await BranchHasMergedPRAsync(frontendUrl, sprintNumber, isBackend: false, token, roleIndex))
+                    lines.Add("Frontend sprint branch had commits but no merged Pull Request was found.");
                 return;
             }
 
@@ -438,6 +446,13 @@ public partial class MetricsController : ControllerBase
             var anyF = await BranchHasAnyCommitAsync(frontendUrl, sprintNumber, isBackend: false, token, roleIndex);
             if (!anyB && !anyF)
                 lines.Add("No committed work was found on either the backend or frontend branch for this sprint.");
+            else
+            {
+                if (anyB && !await BranchHasMergedPRAsync(backendUrl, sprintNumber, isBackend: true, token, roleIndex))
+                    lines.Add("Backend sprint branch had commits but no merged Pull Request was found.");
+                if (anyF && !await BranchHasMergedPRAsync(frontendUrl, sprintNumber, isBackend: false, token, roleIndex))
+                    lines.Add("Frontend sprint branch had commits but no merged Pull Request was found.");
+            }
         }
     }
 
@@ -493,6 +508,24 @@ public partial class MetricsController : ControllerBase
         _logger.LogInformation("Adherence branch check: {Repo} branch={Branch} commitsFound={Count}",
             $"{owner}/{repo}", branch, commits.Count);
         return commits.Count > 0;
+    }
+
+    private async Task<bool> BranchHasMergedPRAsync(string? githubRepoUrl, int sprintNumber, bool isBackend, string token, int roleIndex = 0)
+    {
+        if (string.IsNullOrWhiteSpace(githubRepoUrl))
+            return false;
+        if (!TryParseOwnerRepo(githubRepoUrl, out var owner, out var repo))
+            return false;
+
+        var idxSuffix = roleIndex > 0 ? $"-{roleIndex}" : "";
+        var branch = sprintNumber == 0
+            ? (isBackend ? $"Bugs-B{idxSuffix}" : $"Bugs-F{idxSuffix}")
+            : $"{sprintNumber}-{(isBackend ? "B" : "F")}{idxSuffix}";
+
+        var pr = await _githubService.GetPullRequestForGapAnalysisAsync(owner, repo, branch, token);
+        _logger.LogInformation("Adherence PR check: {Repo} branch={Branch} prFound={Found} merged={Merged}",
+            $"{owner}/{repo}", branch, pr != null, pr?.Merged);
+        return pr?.Merged == true;
     }
 
     private static bool TryParseOwnerRepo(string githubUrl, out string owner, out string repo)
