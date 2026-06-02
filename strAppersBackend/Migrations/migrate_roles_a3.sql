@@ -104,7 +104,7 @@ SELECT
     ir."Name",
     ir."Description",
     ir."Competencies",
-    ir."Category",
+    COALESCE(ir."Category", ''),   -- Category is NOT NULL on Roles; default to empty string
     ir."Type",
     ir."SkillId",
     ir."CustomerEngagement",

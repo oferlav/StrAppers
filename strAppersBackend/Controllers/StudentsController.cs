@@ -1109,29 +1109,16 @@ public class StudentsController : ControllerBase
 
             if (distinctSquadRoles.Any())
             {
-                // Map to global Role IDs by name — StudentRole.RoleId must reference Roles.Id.
-                // TryBuildSquadTeam also matches by name, so this is required for team building.
-                var squadRoleNames = distinctSquadRoles.Select(r => r.Name).ToList();
-                var globalRoles = await _context.Roles
-                    .Where(r => squadRoleNames.Contains(r.Name))
-                    .ToListAsync();
-
                 var squadRoles = distinctSquadRoles
-                    .Select(sr =>
-                    {
-                        var global = globalRoles.FirstOrDefault(r =>
-                            string.Equals(r.Name, sr.Name, StringComparison.OrdinalIgnoreCase));
-                        return global == null ? null : new { id = global.Id, name = global.Name, type = sr.Type };
-                    })
-                    .Where(r => r != null)
+                    .Select(r => new { id = r.Id, name = r.Name, type = r.Type, skillId = r.SkillId, isTechnical = r.IsTechnical, customerEngagement = r.CustomerEngagement })
                     .ToList();
 
-                if (squadRoles.Any())
-                    return Ok(new { source = "squad", roles = (object)squadRoles });
+                return Ok(new { source = "squad", roles = (object)squadRoles });
             }
 
-            // Fallback: no active template with a squad → return global roles
+            // Fallback: no active template with a squad → return global (InstituteId=1) roles
             var defaultRoles = await _context.Roles
+                .Where(r => r.InstituteId == 1)
                 .OrderBy(r => r.Name)
                 .Select(r => new { id = r.Id, name = r.Name, type = r.Type })
                 .ToListAsync();
@@ -1447,6 +1434,8 @@ public class StudentsController : ControllerBase
                 ProgrammingLanguageName = student.ProgrammingLanguage?.Name,
                 RoleId = roleInfo?.RoleId,
                 RoleName = roleInfo?.Role?.Name,
+                RoleSkillId = roleInfo?.Role?.SkillId,
+                RoleType = roleInfo?.Role?.Type,
                 CreatedAt = student.CreatedAt,
                 UpdatedAt = student.UpdatedAt,
                 MinutesToWork = student.MinutesToWork,

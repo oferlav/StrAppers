@@ -613,54 +613,7 @@ public partial class MetricsController : ControllerBase
         return Regex.Matches(text.Trim(), @"\b\w+\b", RegexOptions.None).Count;
     }
 
-    /// <summary>
-    /// Resolves the effective CustomerEngagement flag for a student/role.
-    /// For institute students (InstituteId > 1) the flag is read from <see cref="InstituteSquadRoles"/>
-    /// because each squad can override the base role definition. B2C students fall back to <see cref="Role.CustomerEngagement"/>.
-    /// </summary>
-    private async Task<bool> ResolveCustomerEngagementAsync(
-        Role? role,
-        string roleName,
-        int? studentInstituteId,
-        CancellationToken cancellationToken)
-    {
-        if (role?.CustomerEngagement == true)
-        {
-            _logger.LogInformation("ResolveCustomerEngagement: roleName={RoleName} instituteId={InstId} → true (Role flag)", roleName, studentInstituteId);
-            return true;
-        }
-
-        if (studentInstituteId is > 1)
-        {
-            var squadRole = await _context.InstituteSquadRoles
-                .AsNoTracking()
-                .Join(_context.InstituteSquads.AsNoTracking().Where(s => s.InstituteId == studentInstituteId.Value),
-                    r => r.SquadId, s => s.Id, (r, s) => r)
-                .Where(r => r.Name == roleName)
-                .Select(r => new { r.Id, r.Name, r.CustomerEngagement, r.SquadId })
-                .FirstOrDefaultAsync(cancellationToken);
-
-            if (squadRole != null)
-            {
-                _logger.LogInformation(
-                    "ResolveCustomerEngagement: roleName={RoleName} instituteId={InstId} squadRoleId={SrId} squadId={SqId} → CustomerEngagement={CE}",
-                    roleName, studentInstituteId, squadRole.Id, squadRole.SquadId, squadRole.CustomerEngagement);
-                return squadRole.CustomerEngagement;
-            }
-
-            _logger.LogWarning(
-                "ResolveCustomerEngagement: roleName={RoleName} instituteId={InstId} — no matching InstituteSquadRole found → false",
-                roleName, studentInstituteId);
-        }
-        else
-        {
-            _logger.LogInformation(
-                "ResolveCustomerEngagement: roleName={RoleName} instituteId={InstId} — not an institute student, Role.CE={RoleCE} → false",
-                roleName, studentInstituteId, role?.CustomerEngagement);
-        }
-
-        return false;
-    }
+    private static bool ResolveCustomerEngagement(Role? role) => role?.CustomerEngagement == true;
 
     /// <param name="graph2Base64">Optional second chart (e.g. frontend track). Ignored when null in append mode.</param>
     /// <param name="appendReviewContent">When true, appends <paramref name="reviewContent"/> and only sets Graph/Graph2 when the corresponding argument is non-null.</param>

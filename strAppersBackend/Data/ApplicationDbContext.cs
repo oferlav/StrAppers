@@ -576,6 +576,23 @@ public class ApplicationDbContext : DbContext
 
             entity.HasIndex(e => e.SkillId);
 
+            entity.Property(e => e.InstituteId).IsRequired().HasDefaultValue(1);
+            entity.Property(e => e.IsTechnical).HasDefaultValue(false);
+            entity.Property(e => e.Competencies).HasColumnType("text");
+
+            entity.HasOne(e => e.Institute)
+                  .WithMany()
+                  .HasForeignKey(e => e.InstituteId)
+                  .OnDelete(DeleteBehavior.Cascade);
+
+            entity.HasOne(e => e.Squad)
+                  .WithMany(s => s.Roles)
+                  .HasForeignKey(e => e.SquadId)
+                  .OnDelete(DeleteBehavior.SetNull);
+
+            entity.HasIndex(e => e.InstituteId);
+            entity.HasIndex(e => e.SquadId);
+
             // Note: Seed data removed from HasData() to prevent overwriting production data
             // Roles are seeded via migration (20250127000000_EnsureRolesDataWithoutOverwrite) 
             // that syncs prod with dev data:
@@ -663,7 +680,7 @@ public class ApplicationDbContext : DbContext
             entity.Property(e => e.CreatedAt).HasDefaultValueSql("CURRENT_TIMESTAMP");
 
             entity.HasOne(e => e.Squad)
-                .WithMany(s => s.Roles)
+                .WithMany()
                 .HasForeignKey(e => e.SquadId)
                 .OnDelete(DeleteBehavior.Cascade);
 

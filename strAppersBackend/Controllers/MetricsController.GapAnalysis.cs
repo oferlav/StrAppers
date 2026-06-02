@@ -73,7 +73,7 @@ public partial class MetricsController
             : ResolveTrelloSprintCardLabel(activeRole?.Role, fullStackTrackLabel: null);
         // Include customer context only when the role has CE enabled AND the sprint is module-linked or has actual customer chat.
         // A setup/onboarding sprint with no module and no chat should not generate a customer alignment category.
-        var hasCustomerEngagement = await ResolveCustomerEngagementAsync(activeRole?.Role, roleName, student.InstituteId, cancellationToken);
+        var hasCustomerEngagement = ResolveCustomerEngagement(activeRole?.Role);
         var ceEnabledForRole = !ContainsDeveloper(roleName) || hasCustomerEngagement;
 
         bool sprintHasModule = false;

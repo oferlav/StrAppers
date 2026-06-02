@@ -314,7 +314,7 @@ public partial class BoardsController
     }
 
     /// <summary>
-    /// Distinct roles present in InstituteSquadRoles for the given institute, matched to main Roles by name.
+    /// Distinct active roles scoped to squads for the given institute.
     /// Route: GET /api/Boards/use/institute-squad-roles?instituteId={id}
     /// </summary>
     [HttpGet("institute-squad-roles")]
@@ -334,35 +334,15 @@ public partial class BoardsController
             if (squadIds.Count == 0)
                 return Ok(Array.Empty<object>());
 
-            var squadRoleNames = await _context.InstituteSquadRoles
+            var roles = await _context.Roles
                 .AsNoTracking()
-                .Where(sr => squadIds.Contains(sr.SquadId) && sr.IsActive)
-                .Select(sr => sr.Name)
+                .Where(r => r.SquadId != null && squadIds.Contains(r.SquadId.Value) && r.IsActive)
+                .Select(r => new { id = r.Id, name = r.Name })
                 .Distinct()
+                .OrderBy(r => r.name)
                 .ToListAsync(cancellationToken);
 
-            if (squadRoleNames.Count == 0)
-                return Ok(Array.Empty<object>());
-
-            var namesToMatch = squadRoleNames.Select(n => n.ToLowerInvariant()).ToList();
-            var matchedRoles = await _context.Roles
-                .AsNoTracking()
-                .Where(r => namesToMatch.Contains(r.Name.ToLower()))
-                .ToListAsync(cancellationToken);
-
-            var result = squadRoleNames
-                .Select(sn => new
-                {
-                    squadName = sn,
-                    role = matchedRoles.FirstOrDefault(r => string.Equals(r.Name, sn, StringComparison.OrdinalIgnoreCase)),
-                })
-                .Where(x => x.role != null)
-                .DistinctBy(x => x.role!.Id)
-                .OrderBy(x => x.squadName)
-                .Select(x => (object)new { id = x.role!.Id, name = x.squadName })
-                .ToList();
-
-            return Ok(result);
+            return Ok(roles.Cast<object>().ToList());
         }
         catch (Exception ex)
         {

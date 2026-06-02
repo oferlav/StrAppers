@@ -171,10 +171,9 @@ public class CourseBoardBuilderService : ICourseBoardBuilderService
         {
             var filterIds = request.InstituteRoleIds is { Count: > 0 } ? request.InstituteRoleIds : null;
 
-            var squadQuery = _context.InstituteSquadRoles
+            var squadQuery = _context.Roles
                 .AsNoTracking()
                 .Include(r => r.Skill)
-                .Include(r => r.BaseInstituteRole)
                 .Where(r => r.SquadId == instituteTemplate.SquadId.Value && r.IsActive);
 
             if (filterIds != null)
@@ -195,12 +194,10 @@ public class CourseBoardBuilderService : ICourseBoardBuilderService
             roles = squadRoles.Select(sr => new InstituteRole
             {
                 Id = sr.Id,
-                InstituteId = instituteTemplate.InstituteId,
+                InstituteId = sr.InstituteId,
                 Name = sr.Name,
                 Description = sr.Description,
-                Competencies = !string.IsNullOrWhiteSpace(sr.Competencies)
-                    ? sr.Competencies
-                    : sr.BaseInstituteRole?.Competencies,
+                Competencies = sr.Competencies,
                 Category = sr.Category,
                 Type = sr.Type,
                 SkillId = sr.SkillId,
@@ -218,15 +215,35 @@ public class CourseBoardBuilderService : ICourseBoardBuilderService
             if (effectiveRoleIds.Count == 0)
                 return Fail("This template has no squad linked. Provide InstituteRoleId or InstituteRoleIds.");
 
-            roles = await _context.InstituteRoles
+            var baseRoles = await _context.Roles
                 .AsNoTracking()
                 .Include(r => r.Skill)
-                .Where(r => effectiveRoleIds.Contains(r.Id) && r.TemplateId == request.TemplateId)
+                .Where(r => effectiveRoleIds.Contains(r.Id)
+                         && r.InstituteId == instituteTemplate.InstituteId
+                         && r.SquadId == null)
                 .ToListAsync();
 
-            var missingIds = effectiveRoleIds.Except(roles.Select(r => r.Id)).ToList();
+            var missingIds = effectiveRoleIds.Except(baseRoles.Select(r => r.Id)).ToList();
             if (missingIds.Count > 0)
-                return Fail($"InstituteRole(s) {string.Join(", ", missingIds)} were not found for template {request.TemplateId}.");
+                return Fail($"InstituteRole(s) {string.Join(", ", missingIds)} were not found for institute {instituteTemplate.InstituteId}.");
+
+            roles = baseRoles.Select(r => new InstituteRole
+            {
+                Id = r.Id,
+                InstituteId = r.InstituteId,
+                Name = r.Name,
+                Description = r.Description,
+                Competencies = r.Competencies,
+                Category = r.Category,
+                Type = r.Type,
+                SkillId = r.SkillId,
+                Skill = r.Skill,
+                CustomerEngagement = r.CustomerEngagement,
+                IsTechnical = r.IsTechnical,
+                IsActive = r.IsActive,
+                CreatedAt = r.CreatedAt,
+                UpdatedAt = r.UpdatedAt,
+            }).ToList();
         }
 
         if (project.InstituteId.HasValue && roles.Any(r => r.InstituteId != project.InstituteId.Value))

@@ -1284,8 +1284,8 @@ public partial class ProjectsController : ControllerBase
             if (student == null)
                 return NotFound($"Student with ID {studentId} not found.");
 
-            if (student.InstituteId == null || student.InstituteId <= 1)
-                return BadRequest("Student does not belong to an institute (InstituteId must be > 1).");
+            if (student.InstituteId == null || student.InstituteId <= 0)
+                return BadRequest("Student does not have a valid institute assignment (InstituteId must be >= 1).");
 
             // Filter by coupon when present (student registered with a specific coupon)
             var projects = await _context.InstituteProjects
@@ -1315,7 +1315,71 @@ public partial class ProjectsController : ControllerBase
                 })
                 .ToListAsync();
 
-            return Ok(projects);
+            // Load squad roles + template metadata for all returned projects
+            var projectIds = projects.Select(p => p.Id).ToList();
+
+            var squadRolesFlat = await _context.InstituteTemplates
+                .Where(t => t.InstituteProjectId != null &&
+                            projectIds.Contains(t.InstituteProjectId.Value) &&
+                            t.IsActive &&
+                            t.SquadId != null)
+                .SelectMany(t => _context.Roles
+                    .Where(r => r.SquadId == t.SquadId && r.IsActive)
+                    .Select(r => new { ProjectId = t.InstituteProjectId!.Value, r.Name, r.Type }))
+                .ToListAsync();
+
+            var templateMetadata = await _context.InstituteTemplates
+                .Where(t => t.InstituteProjectId != null &&
+                            projectIds.Contains(t.InstituteProjectId.Value) &&
+                            t.IsActive)
+                .Select(t => new
+                {
+                    ProjectId = t.InstituteProjectId!.Value,
+                    RequireDeveloperRule = t.Squad != null && t.Squad.RequireDeveloperRule,
+                    t.CourseType,
+                    t.RoleCount,
+                })
+                .ToListAsync();
+
+            var squadRolesByProject = squadRolesFlat
+                .GroupBy(r => r.ProjectId)
+                .ToDictionary(
+                    g => g.Key,
+                    g => (IEnumerable<object>)g
+                        .GroupBy(r => r.Name, StringComparer.OrdinalIgnoreCase)
+                        .Select(ng => (object)new { ng.First().Name, ng.First().Type })
+                        .ToList()
+                );
+
+            var metaByProject = templateMetadata
+                .GroupBy(m => m.ProjectId)
+                .ToDictionary(g => g.Key, g => g.First());
+
+            return Ok(projects.Select(p =>
+            {
+                var meta = metaByProject.GetValueOrDefault(p.Id);
+                return new
+                {
+                    p.Id,
+                    p.Title,
+                    p.Mission,
+                    p.OneLiner,
+                    p.Description,
+                    p.ExtendedDescription,
+                    p.ShortBrief,
+                    p.Priority,
+                    p.IsAvailable,
+                    p.InUse,
+                    p.Logo,
+                    p.CreatedAt,
+                    p.UpdatedAt,
+                    p.ApplicantsCount,
+                    SquadRoles = squadRolesByProject.GetValueOrDefault(p.Id, Enumerable.Empty<object>()),
+                    RequireDeveloperRule = meta?.RequireDeveloperRule ?? false,
+                    CourseType = meta?.CourseType,
+                    RoleCount = meta?.RoleCount,
+                };
+            }));
         }
         catch (Exception ex)
         {
