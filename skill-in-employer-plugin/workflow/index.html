@@ -1,0 +1,948 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Skill-in Employer Plugin</title>
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:         #0f1117;
+      --surface:    #1a1d27;
+      --surface2:   #22263a;
+      --border:     #2e3352;
+      --accent:     #4f7cff;
+      --accent-dim: #1e2d5a;
+      --green:      #22c55e;
+      --yellow:     #f59e0b;
+      --red:        #ef4444;
+      --text:       #e2e8f0;
+      --muted:      #64748b;
+      --radius:     8px;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+    }
+
+    /* ── Top bar ── */
+    .topbar {
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      padding: 0 24px;
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      height: 52px;
+      position: sticky;
+      top: 0;
+      z-index: 10;
+    }
+    .logo { width: 28px; height: 28px; background: var(--accent); border-radius: 6px; display: flex; align-items: center; justify-content: center; font-weight: 800; font-size: 13px; color: white; flex-shrink: 0; }
+    .brand { font-size: 14px; font-weight: 600; margin-right: 8px; }
+    .badge { background: var(--accent-dim); color: var(--accent); font-size: 10px; font-weight: 700; padding: 2px 8px; border-radius: 20px; letter-spacing: 0.5px; }
+
+    /* ── Tabs ── */
+    .tabs { display: flex; gap: 2px; margin-left: auto; }
+    .tab-btn {
+      background: none;
+      border: none;
+      color: var(--muted);
+      font-size: 13px;
+      font-weight: 500;
+      padding: 6px 14px;
+      border-radius: 6px;
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+    .tab-btn:hover { color: var(--text); background: var(--surface2); }
+    .tab-btn.active { color: var(--accent); background: var(--accent-dim); }
+
+    /* ── Page layout ── */
+    .page { display: none; padding: 28px 24px; max-width: 860px; margin: 0 auto; }
+    .page.active { display: block; }
+
+    /* ── Cards ── */
+    .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 20px; margin-bottom: 16px; }
+    .card-title { font-size: 12px; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: 0.6px; margin-bottom: 16px; display: flex; align-items: center; gap: 8px; }
+    .step-badge { width: 20px; height: 20px; background: var(--accent); border-radius: 50%; font-size: 11px; font-weight: 700; color: white; display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; }
+
+    /* ── Section headers inside config cards ── */
+    .section-title { font-size: 13px; font-weight: 600; color: var(--text); margin-bottom: 12px; margin-top: 4px; display: flex; align-items: center; gap: 8px; }
+    .section-sep { border: none; border-top: 1px solid var(--border); margin: 18px 0; }
+
+    /* ── Form fields ── */
+    .field-row { display: flex; gap: 12px; margin-bottom: 12px; flex-wrap: wrap; }
+    .field { flex: 1; min-width: 160px; }
+    .field.narrow { flex: 0 0 120px; }
+    .field.wide { flex: 2; min-width: 220px; }
+    label { display: block; font-size: 11px; color: var(--muted); margin-bottom: 5px; letter-spacing: 0.3px; }
+    input[type="text"], input[type="url"], input[type="email"], input[type="password"], input[type="number"], input[type="date"] {
+      width: 100%;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      color: var(--text);
+      font-size: 13px;
+      padding: 8px 11px;
+      outline: none;
+      transition: border-color 0.15s;
+    }
+    input:focus { border-color: var(--accent); }
+    input:disabled { opacity: 0.4; cursor: not-allowed; }
+
+    /* ── Toggle ── */
+    .toggle-row { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; }
+    .toggle-label { font-size: 13px; font-weight: 600; }
+    .toggle-wrap { position: relative; width: 36px; height: 20px; flex-shrink: 0; }
+    .toggle-wrap input { opacity: 0; width: 0; height: 0; }
+    .toggle-slider { position: absolute; inset: 0; background: var(--border); border-radius: 20px; cursor: pointer; transition: background 0.2s; }
+    .toggle-slider::before { content: ''; position: absolute; width: 14px; height: 14px; left: 3px; top: 3px; background: white; border-radius: 50%; transition: transform 0.2s; }
+    .toggle-wrap input:checked + .toggle-slider { background: var(--accent); }
+    .toggle-wrap input:checked + .toggle-slider::before { transform: translateX(16px); }
+    .connector-fields { transition: opacity 0.2s; }
+    .connector-fields.disabled { opacity: 0.35; pointer-events: none; }
+
+    /* ── Employee table ── */
+    .emp-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    .emp-table th { font-size: 11px; color: var(--muted); text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); letter-spacing: 0.3px; }
+    .emp-table td { padding: 6px 4px; }
+    .emp-table td input { padding: 6px 8px; font-size: 13px; }
+    .emp-table .del-btn { background: none; border: 1px solid var(--border); color: var(--muted); padding: 4px 8px; border-radius: 4px; cursor: pointer; font-size: 12px; }
+    .emp-table .del-btn:hover { border-color: var(--red); color: var(--red); }
+    .add-emp-btn { background: none; border: 1px dashed var(--border); color: var(--muted); font-size: 12px; padding: 7px 14px; border-radius: var(--radius); cursor: pointer; margin-top: 8px; width: 100%; transition: all 0.15s; }
+    .add-emp-btn:hover { border-color: var(--accent); color: var(--accent); }
+
+    /* ── Buttons ── */
+    button.primary { background: var(--accent); color: white; border: none; border-radius: var(--radius); padding: 10px 20px; font-size: 13px; font-weight: 600; cursor: pointer; transition: opacity 0.15s; white-space: nowrap; }
+    button.primary:hover { opacity: 0.88; }
+    button.primary:disabled { opacity: 0.4; cursor: not-allowed; }
+    button.secondary { background: var(--surface2); color: var(--text); border: 1px solid var(--border); border-radius: var(--radius); padding: 10px 18px; font-size: 13px; font-weight: 500; cursor: pointer; transition: all 0.15s; white-space: nowrap; }
+    button.secondary:hover { border-color: var(--accent); color: var(--accent); }
+
+    /* ── Alerts ── */
+    .alert { font-size: 13px; padding: 10px 14px; border-radius: var(--radius); margin-top: 10px; }
+    .alert.error { background: rgba(239,68,68,.1); border: 1px solid rgba(239,68,68,.3); color: #fca5a5; }
+    .alert.success { background: rgba(34,197,94,.1); border: 1px solid rgba(34,197,94,.3); color: #86efac; }
+    .alert.info { background: var(--accent-dim); border: 1px solid rgba(79,124,255,.3); color: #93c5fd; }
+
+    /* ── Assessment-specific ── */
+    .row { display: flex; gap: 10px; align-items: flex-end; }
+    .info-box { background: var(--surface2); border: 1px solid var(--border); border-radius: var(--radius); padding: 14px 16px; font-size: 13px; margin-top: 14px; }
+    .info-item label { margin-bottom: 2px; }
+    .info-item .val { font-weight: 600; font-size: 14px; }
+    .info-item .val.mono { font-family: monospace; font-size: 13px; color: var(--accent); }
+
+    /* ── Results ── */
+    .results-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; margin-top: 16px; }
+    .results-header { background: var(--surface2); padding: 12px 20px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--border); }
+    .results-header h2 { font-size: 14px; font-weight: 600; }
+    .results-meta { font-size: 12px; color: var(--muted); }
+    .results-body { padding: 20px; }
+    .score-row { display: flex; align-items: center; gap: 12px; margin-bottom: 8px; }
+    .score-label { font-size: 13px; min-width: 200px; flex-shrink: 0; }
+    .score-bar-wrap { flex: 1; background: var(--bg); border-radius: 4px; height: 8px; overflow: hidden; }
+    .score-bar { height: 100%; border-radius: 4px; transition: width .4s ease; }
+    .score-num { font-size: 13px; font-weight: 600; min-width: 36px; text-align: right; }
+    .narrative-content { font-size: 13px; line-height: 1.7; }
+    .narrative-content h1, .narrative-content h2 { font-size: 15px; font-weight: 600; margin: 16px 0 8px; }
+    .narrative-content h3 { font-size: 13px; font-weight: 600; margin: 12px 0 6px; }
+    .narrative-content p { margin-bottom: 10px; }
+    .narrative-content ul, .narrative-content ol { margin: 8px 0 8px 20px; }
+    .narrative-content li { margin-bottom: 4px; }
+    .narrative-content strong { color: #f1f5f9; }
+    .narrative-content code { background: var(--surface2); padding: 2px 5px; border-radius: 4px; font-size: 12px; }
+    .divider { border: none; border-top: 1px solid var(--border); margin: 16px 0; }
+
+    /* ── Submit table ── */
+    .submit-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    .submit-table th { font-size: 11px; color: var(--muted); text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); }
+    .submit-table td { padding: 7px 6px; border-bottom: 1px solid var(--border); }
+    .submit-table td input { padding: 5px 8px; font-size: 12px; }
+
+    /* ── Misc ── */
+    .spinner { display: inline-block; width: 13px; height: 13px; border: 2px solid rgba(255,255,255,.3); border-top-color: white; border-radius: 50%; animation: spin .7s linear infinite; margin-right: 6px; vertical-align: middle; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .hidden { display: none !important; }
+    .locked { opacity: 0.42; pointer-events: none; }
+  </style>
+</head>
+<body>
+
+<!-- ── Top bar ─────────────────────────────────────────────────────────── -->
+<div class="topbar">
+  <div class="logo">SI</div>
+  <span class="brand">Skill-in Employer Plugin</span>
+  <span class="badge">DRY RUN</span>
+  <div class="tabs">
+    <button class="tab-btn active" onclick="showTab('assessment')">Assessment</button>
+    <button class="tab-btn"        onclick="showTab('config')">Configuration</button>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════════════
+     TAB 1 — ASSESSMENT
+     ═══════════════════════════════════════════════════════════════════════ -->
+<div class="page active" id="tab-assessment">
+
+  <!-- Step 1 -->
+  <div class="card">
+    <div class="card-title"><span class="step-badge">1</span> Student Lookup</div>
+    <div class="row">
+      <div class="field">
+        <label>Student ID</label>
+        <input type="number" id="student-id" placeholder="e.g. 42" min="1" />
+      </div>
+      <div class="field">
+        <label>Backend URL</label>
+        <input type="url" id="api-url" value="https://skill-in-backend-dvdmgbe7fmhmg4hp.eastus2-01.azurewebsites.net" />
+      </div>
+      <button class="primary" onclick="lookupStudent()" id="lookup-btn">Look Up</button>
+    </div>
+    <div id="lookup-error" class="alert error hidden"></div>
+    <div id="student-info" class="info-box hidden">
+      <div class="row" style="flex-wrap:wrap;gap:20px">
+        <div class="info-item"><label>Student</label><div class="val" id="si-name">—</div></div>
+        <div class="info-item"><label>Role</label><div class="val" id="si-role">—</div></div>
+        <div class="info-item"><label>Project</label><div class="val" id="si-project">—</div></div>
+        <div class="info-item"><label>Board ID</label><div class="val mono" id="si-board">—</div></div>
+        <div class="info-item"><label>Start date</label><div class="val" id="si-start">—</div></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Step 2 -->
+  <div class="card locked" id="assessment-card">
+    <div class="card-title"><span class="step-badge">2</span> Run Gap Analysis</div>
+    <div class="row">
+      <div class="field" style="max-width:160px">
+        <label>Sprint Number (1–8)</label>
+        <input type="number" id="sprint-num" placeholder="e.g. 2" min="0" max="8" />
+      </div>
+      <button class="primary" onclick="runAssessment()" id="assess-btn">Run Assessment</button>
+    </div>
+    <div id="assess-error" class="alert error hidden"></div>
+    <div id="assess-info" class="alert info hidden"></div>
+  </div>
+
+  <!-- Step 3 -->
+  <div class="card locked" id="submit-card">
+    <div class="card-title"><span class="step-badge">3</span> Submit Skillset to Skill-in</div>
+    <p style="font-size:13px;color:var(--muted);margin-bottom:16px">
+      Review AI scores, enter your human rating anchors and dimension weights, then submit.
+      Only aggregated scores leave this environment — no raw data, no employee names.
+    </p>
+
+    <div id="skill-rows-wrap">
+      <p id="no-skills-msg" style="font-size:13px;color:var(--muted)">Run an assessment in Step 2 to populate skill dimensions here.</p>
+      <table class="submit-table hidden" id="skill-rows-table">
+        <thead>
+          <tr>
+            <th>Dimension</th>
+            <th style="width:80px">AI Score</th>
+            <th style="width:120px">Your Rating <span style="font-weight:400;opacity:.6">(0–100)</span></th>
+            <th style="width:100px">Weight <span style="font-weight:400;opacity:.6">(×)</span></th>
+          </tr>
+        </thead>
+        <tbody id="skill-rows-body"></tbody>
+      </table>
+    </div>
+
+    <div class="field-row" style="margin-top:16px">
+      <div class="field" style="max-width:200px">
+        <label>Company Identifier</label>
+        <input type="text" id="company-id" placeholder="e.g. acme-corp" />
+      </div>
+      <div class="field" style="max-width:240px">
+        <label>Role Name</label>
+        <input type="text" id="role-name" placeholder="e.g. Senior Backend Engineer" />
+      </div>
+      <button class="primary" onclick="submitSkillset()" id="submit-btn" style="margin-top:18px">Submit Skillset</button>
+    </div>
+
+    <div id="submit-error" class="alert error hidden"></div>
+    <div id="submit-success" class="info-box hidden" style="margin-top:14px">
+      <div class="row" style="flex-wrap:wrap;gap:20px">
+        <div class="info-item"><label>Skillset ID</label><div class="val mono" id="ss-id">—</div></div>
+        <div class="info-item" style="flex:2"><label>Status</label><div class="val" id="ss-msg" style="color:var(--green)">—</div></div>
+        <div class="info-item"><label>Weighted Score</label><div class="val" id="ss-score">—</div></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Results -->
+  <div id="results" class="hidden">
+    <div class="results-card">
+      <div class="results-header">
+        <h2 id="results-title">Gap Analysis Results</h2>
+        <span class="results-meta" id="results-meta"></span>
+      </div>
+      <div class="results-body">
+        <div id="scores-section">
+          <p style="font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:10px">Category Scores</p>
+          <div id="scores-list"></div>
+        </div>
+        <hr class="divider" />
+        <p style="font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:12px">Assessment Narrative</p>
+        <div class="narrative-content" id="narrative-content"></div>
+        <div id="chart-section" style="display:none">
+          <hr class="divider" style="margin-top:20px" />
+          <p style="font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:12px">Score Chart</p>
+          <img id="chart-img" src="" alt="Gap Analysis Chart" style="max-width:100%;border-radius:var(--radius);border:1px solid var(--border)" />
+        </div>
+      </div>
+    </div>
+  </div>
+
+</div><!-- /tab-assessment -->
+
+
+<!-- ═══════════════════════════════════════════════════════════════════════
+     TAB 2 — CONFIGURATION
+     ═══════════════════════════════════════════════════════════════════════ -->
+<div class="page" id="tab-config">
+
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px">
+    <div>
+      <h1 style="font-size:16px;font-weight:600">Plugin Configuration</h1>
+      <p style="font-size:13px;color:var(--muted);margin-top:3px">Saved to <code style="font-size:12px;background:var(--surface2);padding:1px 5px;border-radius:4px">connector-config.json</code> on this machine. Never committed to source control.</p>
+    </div>
+    <div style="display:flex;gap:8px">
+      <button class="secondary" onclick="loadConfig()">↺ Reload</button>
+      <button class="primary" onclick="saveConfig()" id="save-btn">Save Configuration</button>
+    </div>
+  </div>
+
+  <div id="config-load-error" class="alert error hidden" style="margin-bottom:16px"></div>
+  <div id="config-save-msg"  class="hidden"             style="margin-bottom:16px"></div>
+
+  <!-- Employer -->
+  <div class="card">
+    <div class="card-title">Employer</div>
+    <div class="field-row">
+      <div class="field wide">
+        <label>Company Name</label>
+        <input type="text" id="cfg-company-name" placeholder="Acme Corp" oninput="autoSlug()" />
+      </div>
+      <div class="field wide">
+        <label>Company Identifier <span style="color:var(--muted);font-weight:400">(slug, no spaces)</span></label>
+        <input type="text" id="cfg-company-id" placeholder="acme-corp" />
+      </div>
+      <div class="field wide">
+        <label>Contact Email</label>
+        <input type="email" id="cfg-contact-email" placeholder="you@yourcompany.com" />
+      </div>
+    </div>
+  </div>
+
+  <!-- Assessment -->
+  <div class="card">
+    <div class="card-title">Assessment Settings</div>
+    <div class="field-row">
+      <div class="field wide">
+        <label>Role Name</label>
+        <input type="text" id="cfg-role-name" placeholder="Senior Backend Engineer" />
+      </div>
+      <div class="field narrow">
+        <label>Date From</label>
+        <input type="date" id="cfg-date-from" />
+      </div>
+      <div class="field narrow">
+        <label>Date To</label>
+        <input type="date" id="cfg-date-to" />
+      </div>
+    </div>
+  </div>
+
+  <!-- Employees -->
+  <div class="card">
+    <div class="card-title">Employees to Assess</div>
+    <table class="emp-table" id="emp-table">
+      <thead>
+        <tr>
+          <th style="width:80px">ID</th>
+          <th>Name</th>
+          <th>Email</th>
+          <th style="width:60px"></th>
+        </tr>
+      </thead>
+      <tbody id="emp-body"></tbody>
+    </table>
+    <button class="add-emp-btn" onclick="addEmployee()">+ Add Employee</button>
+  </div>
+
+  <!-- Connectors -->
+  <div class="card">
+    <div class="card-title">Data Source Connectors</div>
+    <p style="font-size:13px;color:var(--muted);margin-bottom:18px">Enable each source you want to pull from. Credentials stay on this machine and are never sent to Skill-in.</p>
+
+    <!-- Jira -->
+    <div class="section-title">
+      <div class="toggle-wrap">
+        <input type="checkbox" id="jira-enabled" onchange="toggleConnector('jira')" />
+        <span class="toggle-slider"></span>
+      </div>
+      Jira <span style="color:var(--muted);font-size:12px;font-weight:400">— Tasks & SLA</span>
+    </div>
+    <div class="connector-fields disabled" id="jira-fields">
+      <div class="field-row">
+        <div class="field wide"><label>Base URL</label><input type="url" id="jira-url" placeholder="https://yourcompany.atlassian.net" /></div>
+        <div class="field wide"><label>Admin Email</label><input type="email" id="jira-email" placeholder="admin@yourcompany.com" /></div>
+      </div>
+      <div class="field-row">
+        <div class="field wide"><label>API Token</label><input type="password" id="jira-token" placeholder="••••••••••••••" /></div>
+        <div class="field narrow"><label>Project Key</label><input type="text" id="jira-project" placeholder="ENG" /></div>
+      </div>
+      <p style="font-size:12px;color:var(--muted);margin-top:2px">Generate token at <em>id.atlassian.com → Security → API tokens</em></p>
+    </div>
+
+    <hr class="section-sep" />
+
+    <!-- Slack -->
+    <div class="section-title">
+      <div class="toggle-wrap">
+        <input type="checkbox" id="slack-enabled" onchange="toggleConnector('slack')" />
+        <span class="toggle-slider"></span>
+      </div>
+      Slack <span style="color:var(--muted);font-size:12px;font-weight:400">— Communication</span>
+    </div>
+    <div class="connector-fields disabled" id="slack-fields">
+      <div class="field-row">
+        <div class="field wide"><label>Bot Token</label><input type="password" id="slack-token" placeholder="xoxb-••••••••••••" /></div>
+        <div class="field wide"><label>Channels <span style="font-weight:400">(comma-separated)</span></label><input type="text" id="slack-channels" placeholder="engineering, backend-team" /></div>
+      </div>
+      <p style="font-size:12px;color:var(--muted);margin-top:2px">Bot needs: <em>channels:history, channels:read, users:read</em></p>
+    </div>
+
+    <hr class="section-sep" />
+
+    <!-- GitHub -->
+    <div class="section-title">
+      <div class="toggle-wrap">
+        <input type="checkbox" id="github-enabled" onchange="toggleConnector('github')" />
+        <span class="toggle-slider"></span>
+      </div>
+      GitHub <span style="color:var(--muted);font-size:12px;font-weight:400">— Artifacts</span>
+    </div>
+    <div class="connector-fields disabled" id="github-fields">
+      <div class="field-row">
+        <div class="field wide"><label>Personal Access Token</label><input type="password" id="github-token" placeholder="ghp_••••••••••••••••••••" /></div>
+        <div class="field"><label>Organisation</label><input type="text" id="github-org" placeholder="your-org" /></div>
+      </div>
+      <div class="field-row">
+        <div class="field wide"><label>Repositories <span style="font-weight:400">(comma-separated)</span></label><input type="text" id="github-repos" placeholder="backend-api, core-services" /></div>
+      </div>
+      <p style="font-size:12px;color:var(--muted);margin-top:2px">Token needs: <em>repo (read)</em> — github.com/settings/tokens</p>
+    </div>
+
+    <hr class="section-sep" />
+
+    <!-- Confluence -->
+    <div class="section-title">
+      <div class="toggle-wrap">
+        <input type="checkbox" id="confluence-enabled" onchange="toggleConnector('confluence')" />
+        <span class="toggle-slider"></span>
+      </div>
+      Confluence <span style="color:var(--muted);font-size:12px;font-weight:400">— Design Content</span>
+    </div>
+    <div class="connector-fields disabled" id="confluence-fields">
+      <div class="field-row">
+        <div class="field wide"><label>Base URL</label><input type="url" id="confluence-url" placeholder="https://yourcompany.atlassian.net/wiki" /></div>
+        <div class="field wide"><label>Admin Email</label><input type="email" id="confluence-email" placeholder="admin@yourcompany.com" /></div>
+      </div>
+      <div class="field-row">
+        <div class="field wide"><label>API Token <span style="font-weight:400">(same as Jira on Atlassian Cloud)</span></label><input type="password" id="confluence-token" placeholder="••••••••••••••" /></div>
+        <div class="field narrow"><label>Space Key</label><input type="text" id="confluence-space" placeholder="ENG" /></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Skill-in -->
+  <div class="card">
+    <div class="card-title">Skill-in Platform</div>
+    <div class="field-row">
+      <div class="field wide">
+        <label>API URL</label>
+        <input type="url" id="cfg-skillin-url" value="https://skill-in-backend-dvdmgbe7fmhmg4hp.eastus2-01.azurewebsites.net" />
+      </div>
+      <div class="field wide">
+        <label>API Key <span style="color:var(--muted);font-weight:400">(provided by Skill-in)</span></label>
+        <input type="password" id="cfg-skillin-key" placeholder="sk-••••••••••••••••••••" />
+      </div>
+    </div>
+  </div>
+
+  <div style="display:flex;justify-content:flex-end;gap:10px;margin-top:4px">
+    <button class="secondary" onclick="loadConfig()">↺ Reload</button>
+    <button class="primary" onclick="saveConfig()" id="save-btn-bottom">Save Configuration</button>
+  </div>
+
+</div><!-- /tab-config -->
+
+
+<script>
+// ═══════════════════════════════════════════════════════════════════════════
+// TAB NAVIGATION
+// ═══════════════════════════════════════════════════════════════════════════
+function showTab(tab) {
+  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+  document.getElementById(`tab-${tab}`).classList.add('active');
+  event.target.classList.add('active');
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// CONFIGURATION TAB
+// ═══════════════════════════════════════════════════════════════════════════
+
+let empRowCount = 0;
+
+function toggleConnector(id) {
+  const enabled = document.getElementById(`${id}-enabled`).checked;
+  document.getElementById(`${id}-fields`).classList.toggle('disabled', !enabled);
+}
+
+function autoSlug() {
+  const name = document.getElementById('cfg-company-name').value;
+  const slug = name.toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+  document.getElementById('cfg-company-id').value = slug;
+}
+
+function addEmployee(emp) {
+  const i = empRowCount++;
+  const id    = emp?.id    ?? `emp-${String(i + 1).padStart(3, '0')}`;
+  const name  = emp?.name  ?? '';
+  const email = emp?.email ?? '';
+  const row = document.createElement('tr');
+  row.id = `emp-row-${i}`;
+  row.innerHTML = `
+    <td><input type="text"  value="${esc(id)}"    id="emp-id-${i}"    style="width:100%" /></td>
+    <td><input type="text"  value="${esc(name)}"  id="emp-name-${i}"  placeholder="Alice Smith" style="width:100%" /></td>
+    <td><input type="email" value="${esc(email)}" id="emp-email-${i}" placeholder="alice@company.com" style="width:100%" /></td>
+    <td><button class="del-btn" onclick="removeEmployee(${i})">✕</button></td>`;
+  document.getElementById('emp-body').appendChild(row);
+}
+
+function removeEmployee(i) {
+  document.getElementById(`emp-row-${i}`)?.remove();
+}
+
+function esc(s) {
+  return String(s ?? '').replace(/"/g, '&quot;').replace(/</g, '&lt;');
+}
+
+function getEmployees() {
+  const rows = [];
+  document.querySelectorAll('#emp-body tr').forEach(row => {
+    const idx = row.id.replace('emp-row-', '');
+    const id    = document.getElementById(`emp-id-${idx}`)?.value?.trim();
+    const name  = document.getElementById(`emp-name-${idx}`)?.value?.trim();
+    const email = document.getElementById(`emp-email-${idx}`)?.value?.trim();
+    if (email) rows.push({ id: id || `emp-${idx}`, name: name || email, email });
+  });
+  return rows;
+}
+
+async function loadConfig() {
+  const errEl = document.getElementById('config-load-error');
+  errEl.classList.add('hidden');
+  try {
+    const resp = await fetch('/api/config');
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const cfg = await resp.json();
+    populateForm(cfg);
+  } catch (e) {
+    errEl.textContent = `Could not load config: ${e.message}. Make sure you started the workflow with "node serve.js" (not a plain static server).`;
+    errEl.classList.remove('hidden');
+  }
+}
+
+function populateForm(cfg) {
+  // Employer
+  set('cfg-company-name',    cfg.employer?.companyName    ?? '');
+  set('cfg-company-id',      cfg.employer?.companyIdentifier ?? '');
+  set('cfg-contact-email',   cfg.employer?.contactEmail   ?? '');
+  // Assessment
+  set('cfg-role-name',  cfg.assessment?.roleName  ?? '');
+  set('cfg-date-from',  cfg.assessment?.dateFrom  ?? '');
+  set('cfg-date-to',    cfg.assessment?.dateTo    ?? '');
+  // Employees
+  document.getElementById('emp-body').innerHTML = '';
+  empRowCount = 0;
+  (cfg.employees ?? []).forEach(e => addEmployee(e));
+  // Connectors
+  populateConnector('jira', cfg.connectors?.jira, {
+    'jira-url':     'baseUrl',
+    'jira-email':   'email',
+    'jira-token':   'apiToken',
+    'jira-project': 'projectKey',
+  });
+  populateConnector('slack', cfg.connectors?.slack, {
+    'slack-token':    'botToken',
+    'slack-channels': v => (v?.channels ?? []).join(', '),
+  });
+  populateConnector('github', cfg.connectors?.github, {
+    'github-token': 'personalAccessToken',
+    'github-org':   'org',
+    'github-repos': v => (v?.repos ?? []).join(', '),
+  });
+  populateConnector('confluence', cfg.connectors?.confluence, {
+    'confluence-url':   'baseUrl',
+    'confluence-email': 'email',
+    'confluence-token': 'apiToken',
+    'confluence-space': 'spaceKey',
+  });
+  // Skill-in
+  set('cfg-skillin-url', cfg.skillin?.apiUrl ?? '');
+  set('cfg-skillin-key', cfg.skillin?.apiKey ?? '');
+}
+
+function populateConnector(id, data, fields) {
+  const enabled = data?.enabled ?? false;
+  document.getElementById(`${id}-enabled`).checked = enabled;
+  document.getElementById(`${id}-fields`).classList.toggle('disabled', !enabled);
+  Object.entries(fields).forEach(([inputId, keyOrFn]) => {
+    const val = typeof keyOrFn === 'function' ? keyOrFn(data) : (data?.[keyOrFn] ?? '');
+    set(inputId, val);
+  });
+}
+
+function set(id, val) {
+  const el = document.getElementById(id);
+  if (el) el.value = val ?? '';
+}
+
+function buildConfig() {
+  return {
+    employer: {
+      companyName:       get('cfg-company-name'),
+      companyIdentifier: get('cfg-company-id'),
+      contactEmail:      get('cfg-contact-email'),
+    },
+    assessment: {
+      roleName: get('cfg-role-name'),
+      dateFrom: get('cfg-date-from'),
+      dateTo:   get('cfg-date-to'),
+    },
+    employees: getEmployees(),
+    connectors: {
+      jira: {
+        enabled:    document.getElementById('jira-enabled').checked,
+        baseUrl:    get('jira-url'),
+        email:      get('jira-email'),
+        apiToken:   get('jira-token'),
+        projectKey: get('jira-project'),
+      },
+      slack: {
+        enabled:  document.getElementById('slack-enabled').checked,
+        botToken: get('slack-token'),
+        channels: get('slack-channels').split(',').map(s => s.trim()).filter(Boolean),
+      },
+      github: {
+        enabled:             document.getElementById('github-enabled').checked,
+        personalAccessToken: get('github-token'),
+        org:                 get('github-org'),
+        repos:               get('github-repos').split(',').map(s => s.trim()).filter(Boolean),
+      },
+      confluence: {
+        enabled:  document.getElementById('confluence-enabled').checked,
+        baseUrl:  get('confluence-url'),
+        email:    get('confluence-email'),
+        apiToken: get('confluence-token'),
+        spaceKey: get('confluence-space'),
+      },
+    },
+    skillin: {
+      apiUrl: get('cfg-skillin-url'),
+      apiKey:  get('cfg-skillin-key'),
+    },
+  };
+}
+
+function get(id) {
+  return document.getElementById(id)?.value?.trim() ?? '';
+}
+
+async function saveConfig() {
+  const msgEl = document.getElementById('config-save-msg');
+  msgEl.className = 'hidden';
+
+  const cfg = buildConfig();
+  if (!cfg.employer.companyIdentifier) {
+    showMsg('error', 'Company Identifier is required.'); return;
+  }
+
+  setBtnLoading('save-btn', true);
+  setBtnLoading('save-btn-bottom', true);
+
+  try {
+    const resp = await fetch('/api/config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(cfg, null, 2),
+    });
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.error ?? `HTTP ${resp.status}`);
+    showMsg('success', `✓ Saved to ${data.savedTo}`);
+  } catch (e) {
+    showMsg('error', `Save failed: ${e.message}`);
+  } finally {
+    setBtnLoading('save-btn', false);
+    setBtnLoading('save-btn-bottom', false);
+  }
+}
+
+function showMsg(type, text) {
+  const el = document.getElementById('config-save-msg');
+  el.className = `alert ${type}`;
+  el.textContent = text;
+}
+
+function setBtnLoading(id, loading) {
+  const btn = document.getElementById(id);
+  if (!btn) return;
+  btn.disabled = loading;
+  btn.innerHTML = loading ? '<span class="spinner"></span>Saving…' : 'Save Configuration';
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ASSESSMENT TAB
+// ═══════════════════════════════════════════════════════════════════════════
+
+let currentBoard = null;
+let currentStudentId = null;
+let currentStudentName = null;
+let lastParsedSkills = [];
+
+function getApiUrl() {
+  return (document.getElementById('api-url')?.value ?? '').replace(/\/$/, '')
+    || 'https://skill-in-backend-dvdmgbe7fmhmg4hp.eastus2-01.azurewebsites.net';
+}
+
+function unlock(id) {
+  document.getElementById(id).classList.remove('locked');
+}
+
+function showError(id, msg) {
+  const el = document.getElementById(id);
+  el.textContent = msg;
+  el.classList.remove('hidden');
+}
+
+function hideError(id) {
+  document.getElementById(id)?.classList.add('hidden');
+}
+
+function setLoading(btnId, loading, text) {
+  const btn = document.getElementById(btnId);
+  if (!btn) return;
+  btn.disabled = loading;
+  btn.innerHTML = loading ? `<span class="spinner"></span>${text}` : text;
+}
+
+function scoreColor(score) {
+  if (score >= 75) return '#22c55e';
+  if (score >= 50) return '#f59e0b';
+  return '#ef4444';
+}
+
+async function lookupStudent() {
+  const studentId = parseInt(document.getElementById('student-id').value);
+  if (!studentId) { showError('lookup-error', 'Enter a student ID.'); return; }
+  hideError('lookup-error');
+  document.getElementById('student-info').classList.add('hidden');
+  setLoading('lookup-btn', true, 'Looking up…');
+
+  try {
+    const resp = await fetch(`${getApiUrl()}/api/Boards/use/student/${studentId}`);
+    const data = await resp.json();
+    if (!resp.ok) { showError('lookup-error', data.message ?? `Error ${resp.status}`); return; }
+
+    const me = (data.teamMembers ?? []).find(m => m.id === studentId);
+    currentBoard       = data.boardId;
+    currentStudentId   = studentId;
+    currentStudentName = me ? `${me.firstName ?? ''} ${me.lastName ?? ''}`.trim() : `Student #${studentId}`;
+
+    document.getElementById('si-name').textContent    = currentStudentName;
+    document.getElementById('si-role').textContent    = me?.roles?.[0]?.roleName ?? '—';
+    document.getElementById('si-project').textContent = data.projectName ?? '—';
+    document.getElementById('si-board').textContent   = data.boardId ?? '—';
+    document.getElementById('si-start').textContent   = data.startDate ? new Date(data.startDate).toLocaleDateString() : '—';
+    document.getElementById('student-info').classList.remove('hidden');
+    unlock('assessment-card');
+  } catch (e) {
+    showError('lookup-error', `Network error: ${e.message}`);
+  } finally {
+    setLoading('lookup-btn', false, 'Look Up');
+  }
+}
+
+async function runAssessment() {
+  const sprint = parseInt(document.getElementById('sprint-num').value);
+  if (isNaN(sprint) || sprint < 0 || sprint > 8) { showError('assess-error', 'Sprint number must be 0–8.'); return; }
+  if (!currentBoard) { showError('assess-error', 'Look up a student first.'); return; }
+  hideError('assess-error');
+  document.getElementById('assess-info').classList.remove('hidden');
+  document.getElementById('assess-info').textContent = `Running Gap Analysis for Sprint ${sprint}… this may take 20–40 seconds.`;
+  document.getElementById('results').classList.add('hidden');
+  setLoading('assess-btn', true, 'Running…');
+
+  try {
+    const resp = await fetch(`${getApiUrl()}/api/Metrics/use/GapAnalysis`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ boardId: currentBoard, studentId: currentStudentId, sprintNumber: sprint }),
+    });
+    document.getElementById('assess-info').classList.add('hidden');
+    const data = await resp.json();
+    if (!resp.ok) { showError('assess-error', data.message ?? `Error ${resp.status}`); return; }
+    renderResults(data, sprint);
+  } catch (e) {
+    showError('assess-error', `Network error: ${e.message}`);
+  } finally {
+    setLoading('assess-btn', false, 'Run Assessment');
+  }
+}
+
+function renderResults(data, sprint) {
+  document.getElementById('results-title').textContent = `Sprint ${sprint} · ${currentStudentName ?? 'Student'}`;
+  document.getElementById('results-meta').textContent  = `${data.inputTokens ?? '?'} in / ${data.outputTokens ?? '?'} out tokens`;
+
+  const narrative = data.reviewContent ?? '';
+  const scoreMatches = [];
+  const catPattern = /\*\*([^*]+)\*\*[:\s—–-]*(\d{1,3})\s*(?:\/\s*100|\%)?/g;
+  let m;
+  while ((m = catPattern.exec(narrative)) !== null) {
+    const score = parseInt(m[2]);
+    if (score >= 0 && score <= 100) scoreMatches.push({ name: m[1].trim(), score });
+  }
+
+  const scoresList = document.getElementById('scores-list');
+  scoresList.innerHTML = '';
+  if (scoreMatches.length) {
+    scoreMatches.forEach(({ name, score }) => {
+      const c = scoreColor(score);
+      scoresList.innerHTML += `<div class="score-row">
+        <span class="score-label">${name}</span>
+        <div class="score-bar-wrap"><div class="score-bar" style="width:${score}%;background:${c}"></div></div>
+        <span class="score-num" style="color:${c}">${score}</span>
+      </div>`;
+    });
+  } else {
+    scoresList.innerHTML = '<p style="font-size:13px;color:var(--muted)">Scores embedded in narrative below.</p>';
+  }
+
+  document.getElementById('narrative-content').innerHTML =
+    typeof marked !== 'undefined' ? marked.parse(narrative) : narrative.replace(/\n/g, '<br>');
+
+  const chartSection = document.getElementById('chart-section');
+  if (data.graphBase64) {
+    document.getElementById('chart-img').src = `data:image/png;base64,${data.graphBase64}`;
+    chartSection.style.display = 'block';
+  } else {
+    chartSection.style.display = 'none';
+  }
+
+  document.getElementById('results').classList.remove('hidden');
+  document.getElementById('results').scrollIntoView({ behavior: 'smooth', block: 'start' });
+
+  populateSkillRows(scoreMatches);
+  unlock('submit-card');
+}
+
+// ── Step 3 ──────────────────────────────────────────────────────────────────
+
+function populateSkillRows(skills) {
+  lastParsedSkills = skills;
+  const tbody = document.getElementById('skill-rows-body');
+  const table = document.getElementById('skill-rows-table');
+  const msg   = document.getElementById('no-skills-msg');
+
+  if (!skills.length) { table.classList.add('hidden'); msg.style.display = 'block'; return; }
+  table.classList.remove('hidden');
+  msg.style.display = 'none';
+  tbody.innerHTML = '';
+
+  skills.forEach((s, i) => {
+    tbody.innerHTML += `<tr>
+      <td style="font-weight:500">${s.name}</td>
+      <td style="color:${scoreColor(s.score)};font-weight:600">${s.score}</td>
+      <td><input type="number" min="0" max="100" value="${s.score}" id="hr-${i}" style="width:72px" /></td>
+      <td><input type="number" min="0.1" max="5" step="0.1" value="1.0" id="wt-${i}" style="width:60px" /></td>
+    </tr>`;
+  });
+}
+
+async function submitSkillset() {
+  const companyId = document.getElementById('company-id').value.trim();
+  const roleName  = document.getElementById('role-name').value.trim();
+
+  if (!companyId)               { showError('submit-error', 'Company Identifier is required.'); return; }
+  if (!roleName)                { showError('submit-error', 'Role Name is required.'); return; }
+  if (!lastParsedSkills.length) { showError('submit-error', 'Run an assessment first.'); return; }
+
+  hideError('submit-error');
+  document.getElementById('submit-success').classList.add('hidden');
+  setLoading('submit-btn', true, 'Submitting…');
+
+  const skills = lastParsedSkills.map((s, i) => ({
+    name: s.name,
+    metricCategory: 'tasks_and_sla',
+    dataSources: ['skill-in-platform'],
+    aggregatedScore: s.score,
+    humanRatingAnchor: parseFloat(document.getElementById(`hr-${i}`)?.value ?? s.score),
+    weight: parseFloat(document.getElementById(`wt-${i}`)?.value ?? '1.0'),
+    confidence: 0.85,
+    rationale: '',
+  }));
+
+  try {
+    const resp = await fetch(`${getApiUrl()}/api/employer-skillset/use/submit`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        companyIdentifier: companyId,
+        roleName,
+        assessedPeriod: { from: '', to: '' },
+        dataSourcesUsed: ['skill-in-platform'],
+        employeeSampleSize: 1,
+        skills,
+        metadata: { pluginVersion: '1.0.0', generatedAt: new Date().toISOString(), connectorType: 'skill-in-dry-run' },
+      }),
+    });
+    const data = await resp.json();
+    if (!resp.ok) { showError('submit-error', data.message ?? `Error ${resp.status}`); return; }
+
+    document.getElementById('ss-id').textContent    = data.skillsetId ?? '—';
+    document.getElementById('ss-msg').textContent   = data.message ?? 'Submitted';
+    document.getElementById('ss-score').textContent = data.summary?.weightedSkillsetScore ?? '—';
+    document.getElementById('submit-success').classList.remove('hidden');
+  } catch (e) {
+    showError('submit-error', `Network error: ${e.message}`);
+  } finally {
+    setLoading('submit-btn', false, 'Submit Skillset');
+  }
+}
+
+// ── Boot ───────────────────────────────────────────────────────────────────
+
+document.getElementById('student-id').addEventListener('keydown', e => {
+  if (e.key === 'Enter') lookupStudent();
+});
+
+// Auto-load config when Configuration tab opens
+document.querySelectorAll('.tab-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    if (btn.textContent.trim() === 'Configuration' && document.getElementById('emp-body').children.length === 0) {
+      loadConfig();
+    }
+  });
+});
+</script>
+</body>
+</html>

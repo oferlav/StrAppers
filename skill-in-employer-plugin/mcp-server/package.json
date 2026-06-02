@@ -1,0 +1,13 @@
+{
+  "name": "skill-in-assessment-mcp",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "MCP server for the Skill-in Assessment Plugin",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0"
+  }
+}

@@ -1,0 +1,836 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Skill-in · The Skills Marketplace</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  :root {
+    --bg:      #080b14;
+    --surface: #0e1220;
+    --card:    #131827;
+    --border:  #1c2238;
+    --blue:    #4f7cff;
+    --blue2:   #7da0ff;
+    --green:   #22c55e;
+    --yellow:  #f59e0b;
+    --red:     #ef4444;
+    --purple:  #a78bfa;
+    --teal:    #2dd4bf;
+    --text:    #e8edf8;
+    --muted:   #4a5578;
+    --dim:     #7a8aaa;
+  }
+  html, body { width:100%; height:100%; overflow:hidden; background:var(--bg); }
+  body { font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif; color:var(--text); }
+
+  .deck { width:100vw; height:100vh; position:relative; }
+  .slide {
+    position:absolute; inset:0;
+    display:flex; flex-direction:column;
+    padding:48px 76px 76px;
+    opacity:0; pointer-events:none;
+    transition:opacity .35s ease, transform .35s ease;
+    transform:translateX(48px);
+  }
+  .slide.active { opacity:1; pointer-events:all; transform:translateX(0); }
+  .slide.out    { opacity:0; transform:translateX(-48px); }
+
+  /* Nav */
+  .nav { position:fixed; bottom:24px; left:50%; transform:translateX(-50%); display:flex; align-items:center; gap:18px; z-index:100; background:rgba(14,18,32,.92); backdrop-filter:blur(16px); border:1px solid var(--border); border-radius:40px; padding:9px 22px; }
+  .nav button { background:none; border:none; color:var(--muted); cursor:pointer; font-size:17px; padding:4px 8px; border-radius:6px; transition:color .2s,background .2s; }
+  .nav button:hover { color:var(--text); background:var(--border); }
+  .nav button:disabled { opacity:.2; cursor:default; }
+  .slide-counter { font-size:11px; color:var(--muted); min-width:44px; text-align:center; }
+  .dots { display:flex; gap:5px; }
+  .dot { width:5px; height:5px; border-radius:50%; background:var(--border); cursor:pointer; transition:background .2s,transform .2s; }
+  .dot.active { background:var(--blue); transform:scale(1.6); }
+
+  /* Brand bar */
+  .brand-bar { display:flex; align-items:center; gap:10px; margin-bottom:4px; }
+  .brand-icon { width:40px; height:40px; object-fit:contain; flex-shrink:0; filter:invert(1) hue-rotate(180deg); }
+  .brand-name { font-size:11px; font-weight:700; color:var(--blue2); letter-spacing:.6px; }
+  .slide-label { font-size:10px; color:var(--yellow); margin-left:auto; letter-spacing:1px; text-transform:uppercase; font-weight:700; text-shadow:0 0 10px rgba(245,158,11,.55); }
+
+  /* Type */
+  h1 { font-size:clamp(32px,4.6vw,60px); font-weight:800; line-height:1.1; letter-spacing:-.5px; }
+  h2 { font-size:clamp(24px,3vw,40px); font-weight:700; line-height:1.15; }
+  h3 { font-size:16px; font-weight:700; }
+  .lead { font-size:clamp(14px,1.5vw,19px); color:var(--dim); line-height:1.65; }
+  .hl        { color:var(--blue2); }
+  .hl-green  { color:var(--green); }
+  .hl-yellow { color:var(--yellow); }
+  .hl-purple { color:var(--purple); }
+  .hl-teal   { color:var(--teal); }
+
+  /* Layout */
+  .row    { display:flex; gap:18px; }
+  .col    { flex:1; }
+  .spacer { flex:1; }
+  .center { display:flex; flex-direction:column; align-items:center; justify-content:center; text-align:center; flex:1; }
+  .mt8{margin-top:8px} .mt12{margin-top:12px} .mt16{margin-top:16px}
+  .mt24{margin-top:24px} .mt32{margin-top:32px} .mt40{margin-top:40px}
+
+  /* Cards */
+  .card { background:var(--card); border:1px solid var(--border); border-radius:13px; padding:20px 24px; }
+  .card.blue   { border-color:rgba(79,124,255,.35);  background:rgba(79,124,255,.06); }
+  .card.green  { border-color:rgba(34,197,94,.3);    background:rgba(34,197,94,.05); }
+  .card.purple { border-color:rgba(167,139,250,.3);  background:rgba(167,139,250,.05); }
+  .card.teal   { border-color:rgba(45,212,191,.3);   background:rgba(45,212,191,.05); }
+  .card.yellow { border-color:rgba(245,158,11,.3);   background:rgba(245,158,11,.04); }
+  .card.red    { border-color:rgba(239,68,68,.25);   background:rgba(239,68,68,.04); }
+  .card.orange { border-color:rgba(251,146,60,.4);   background:rgba(251,146,60,.07); }
+
+  /* Pills */
+  .pill { display:inline-flex; align-items:center; background:rgba(79,124,255,.12); border:1px solid rgba(79,124,255,.3); color:var(--blue2); font-size:10px; font-weight:700; padding:3px 9px; border-radius:20px; letter-spacing:.3px; }
+  .pill.green  { background:rgba(34,197,94,.12);   border-color:rgba(34,197,94,.35);   color:var(--green); }
+  .pill.yellow { background:rgba(245,158,11,.12);  border-color:rgba(245,158,11,.35);  color:var(--yellow); }
+  .pill.purple { background:rgba(167,139,250,.12); border-color:rgba(167,139,250,.35); color:var(--purple); }
+  .pill.teal   { background:rgba(45,212,191,.12);  border-color:rgba(45,212,191,.35);  color:var(--teal); }
+
+  /* Quote */
+  .quote { border-left:3px solid var(--blue); padding:13px 20px; background:rgba(79,124,255,.05); border-radius:0 10px 10px 0; font-size:clamp(13px,1.3vw,17px); font-style:italic; color:var(--text); line-height:1.65; }
+
+  /* Bullet */
+  .blist { list-style:none; display:flex; flex-direction:column; gap:10px; }
+  .blist li { display:flex; gap:9px; align-items:flex-start; font-size:clamp(12px,1.2vw,15px); line-height:1.55; color:var(--dim); }
+  .blist li b { color:var(--text); }
+  .blist li::before { content:''; width:5px; height:5px; border-radius:50%; background:var(--blue); margin-top:6px; flex-shrink:0; }
+  .blist li.cross::before { content:'✕'; background:none; color:var(--red);   font-size:10px; width:auto; margin-top:3px; }
+  .blist li.check::before { content:'✓'; background:none; color:var(--green); font-size:11px; width:auto; margin-top:2px; }
+  .blist li.arrow::before { content:'→'; background:none; color:var(--blue2); font-size:11px; width:auto; margin-top:2px; }
+
+  /* Slide backgrounds */
+  .hero-bg  { background:radial-gradient(ellipse 90% 70% at 65% 40%,rgba(79,124,255,.07) 0%,transparent 65%); }
+  .close-bg { background:radial-gradient(ellipse 80% 60% at 50% 55%,rgba(79,124,255,.09) 0%,transparent 65%); }
+  .kb-hint  { position:fixed; bottom:80px; right:32px; font-size:10px; color:var(--muted); }
+
+  /* ── Architecture diagram specific ── */
+  .arch-zone { border-radius:14px; border:1px dashed; padding:14px; position:relative; }
+  .arch-zone-label { position:absolute; top:-10px; left:16px; background:var(--bg); padding:0 8px; font-size:10px; font-weight:700; letter-spacing:1px; text-transform:uppercase; }
+  .arch-box { border-radius:9px; padding:10px 14px; font-size:12px; font-weight:600; text-align:center; border:1px solid; }
+  .arch-arrow { display:flex; align-items:center; justify-content:center; font-size:13px; color:var(--yellow); font-weight:700; text-shadow:0 0 8px rgba(245,158,11,.6); padding:2px 0; }
+  .arch-row { display:flex; gap:8px; align-items:center; }
+
+  /* ── Process flow specific ── */
+  .pf-step { display:flex; gap:12px; align-items:flex-start; }
+  .pf-num { width:26px; height:26px; border-radius:50%; display:flex; align-items:center; justify-content:center; font-size:11px; font-weight:800; flex-shrink:0; }
+  .pf-connector { width:2px; background:var(--border); margin-left:12px; flex-shrink:0; height:16px; }
+</style>
+</head>
+<body>
+<div class="deck" id="deck">
+
+<!-- ══ SLIDE 1 ·TITLE ══ -->
+<div class="slide hero-bg active" id="s1">
+  <div class="brand-bar">
+    <img src="skill-in.png" style="height:28px;object-fit:contain;filter:invert(1) hue-rotate(180deg)" alt="Skill-in"/>
+    <span class="slide-label">Employer Overview · 2026</span>
+  </div>
+  <div class="spacer"></div>
+  <div style="max-width:800px">
+    <div class="row" style="gap:8px; margin-bottom:20px; flex-wrap:wrap">
+      <span class="pill green">AI-powered</span>
+      <span class="pill">Skills-based</span>
+      <span class="pill yellow">Both sides of the market</span>
+    </div>
+    <h1>The Skills<br>Marketplace.</h1>
+    <p class="lead mt24" style="max-width:560px">AI profiles for employers and job seekers alike.<br>When the fit is real — both sides find out.</p>
+  </div>
+  <div class="spacer"></div>
+  <div style="font-size:14px; font-weight:700; color:var(--yellow); text-shadow:0 0 10px rgba(245,158,11,.5); letter-spacing:.5px">skill-in.com</div>
+</div>
+
+
+<!-- ══ SLIDE 2 ·BROKEN MARKET ══ -->
+<div class="slide" id="s2">
+  <div class="brand-bar"><img src="skillin3.png" class="brand-icon" alt=""/><span class="brand-name">SKILL-IN</span><span class="slide-label">01 · The Problem</span></div>
+  <h2 class="mt28" style="margin-top:28px">The market is broken<br><span style="color:var(--red)">on both sides.</span></h2>
+  <div class="row mt24" style="gap:18px; flex:1; align-items:stretch">
+    <div class="col">
+      <div class="card" style="height:100%">
+        <div style="font-size:16px; font-weight:800; color:var(--blue2); letter-spacing:.3px; margin-bottom:14px; text-shadow:0 0 12px rgba(79,124,255,.4)">Companies</div>
+        <ul class="blist">
+          <li class="cross"><span><b>Job descriptions</b> are wish lists, vague, generic, copied from last year</span></li>
+          <li class="cross"><span><b>Resumes</b> measure what people claim, not what they do</span></li>
+          <li class="cross"><span><b>Home exams</b> can be AI-generated or faked, with no signal on real work quality</span></li>
+          <li class="cross"><span><b style="color:var(--text)">Bad hire:</b> 6-18 months of salary wasted before the mismatch surfaces</span></li>
+        </ul>
+      </div>
+    </div>
+    <div style="display:flex; align-items:center; justify-content:center; flex-shrink:0; color:var(--muted); font-size:26px">✕</div>
+    <div class="col">
+      <div class="card" style="height:100%">
+        <div style="font-size:16px; font-weight:800; color:var(--green); letter-spacing:.3px; margin-bottom:14px; text-shadow:0 0 12px rgba(34,197,94,.4)">Job Seekers</div>
+        <ul class="blist">
+          <li class="cross"><span><b>Certifications</b> prove study time, not ability to execute</span></li>
+          <li class="cross"><span><b>Portfolio projects</b> are polished demos, staged and rehearsed, not observed</span></li>
+          <li class="cross"><span><b>No signal</b> for communication, delivery pace, or collaboration style</span></li>
+          <li class="cross"><span><b style="color:var(--text)">Organization fit:</b> no way to know if the company's work style, culture, and pace actually match yours</span></li>
+        </ul>
+      </div>
+    </div>
+  </div>
+  <div class="quote mt20" style="margin-top:20px">Both sides are guessing. The market needs a common language, <strong>one that AI can read on both sides.</strong></div>
+</div>
+
+
+<!-- ══ SLIDE 3 ·THE SKILLSET ══ -->
+<div class="slide" id="s3">
+  <div class="brand-bar"><img src="skillin3.png" class="brand-icon" alt=""/><span class="brand-name">SKILL-IN</span><span class="slide-label">02 · The New Unit</span></div>
+  <h2 style="margin-top:28px">Not a resume. Not a job description.<br>A <span class="hl">Skillset.</span></h2>
+  <div class="row mt24" style="gap:18px; flex:1; align-items:stretch">
+    <div class="card col blue" style="display:flex; flex-direction:column; gap:14px">
+      <div style="font-size:10px; font-weight:700; color:var(--blue); letter-spacing:1px; text-transform:uppercase">Company Skillset</div>
+      <p style="font-size:13px; color:var(--dim); line-height:1.6">AI-generated profile of what a specific role looks like at a specific company, <strong style="color:var(--text)">reverse-engineered</strong> from how top performers actually work.</p>
+      <ul class="blist" style="gap:9px">
+        <li class="check"><span><b>Work patterns:</b> pace, consistency, collaboration style</span></li>
+        <li class="check"><span><b>Tech stack &amp; tools:</b> what they actually use day to day</span></li>
+        <li class="check"><span><b>Communication style:</b> async vs sync, depth, meeting cadence</span></li>
+        <li class="check"><span><b>Culture signals:</b> how ownership, initiative, and quality are expressed</span></li>
+        <li class="check"><span><b>Competency benchmarks:</b> what "good" means here, not in general</span></li>
+        <li class="check"><span><b>Engineering patterns:</b> commit velocity, PR success rate, vibe vs spec-driven delivery</span></li>
+      </ul>
+      <div style="margin-top:auto; font-size:12px; font-weight:700; color:var(--blue2)">"Senior Backend Engineer at Acme Corp" · the standard, not a job spec.</div>
+    </div>
+    <div style="display:flex; align-items:center; justify-content:center; color:var(--muted); font-size:20px; flex-shrink:0">⟷</div>
+    <div class="card col green" style="display:flex; flex-direction:column; gap:14px">
+      <div style="font-size:10px; font-weight:700; color:var(--green); letter-spacing:1px; text-transform:uppercase">Candidate Skillset</div>
+      <p style="font-size:13px; color:var(--dim); line-height:1.6">AI-generated profile of how a person actually performs, built from months of <strong style="color:var(--text)">real project</strong> work on the Skill-in platform.</p>
+      <ul class="blist" style="gap:9px">
+        <li class="check"><span><b>Delivery record:</b> how they perform under sprint pressure</span></li>
+        <li class="check"><span><b>Code quality &amp; behaviour:</b> commits, PR success rate, velocity, review patterns, AI-assisted vs spec-driven coding style</span></li>
+        <li class="check"><span><b>Communication behaviour:</b> team engagement, stakeholder handling</span></li>
+        <li class="check"><span><b>Problem-solving approach:</b> blockers, ambiguity, initiative</span></li>
+        <li class="check"><span><b>Role fit signals:</b> PM, dev, designer, patterns across sprints</span></li>
+        <li class="check"><span><b>Work style fingerprint:</b> pace, consistency, async vs sync, ownership signals</span></li>
+      </ul>
+      <div style="margin-top:auto; font-size:12px; font-weight:700; color:var(--green)">"Works like a mid-senior backend dev at a fast-moving product company."</div>
+    </div>
+  </div>
+</div>
+
+
+<!-- ══ SLIDE 4 ·COMPANY SIDE ══ -->
+<div class="slide" id="s4">
+  <div class="brand-bar"><img src="skillin3.png" class="brand-icon" alt=""/><span class="brand-name">SKILL-IN</span><span class="slide-label">03 · Company Side</span></div>
+  <h2 style="margin-top:28px">Your team already defined<br>your standard. <span class="hl">We read it.</span></h2>
+  <div class="row mt24" style="gap:18px; flex:1; align-items:stretch">
+    <div class="col" style="display:flex; flex-direction:column; max-width:300px">
+      <div class="card" style="display:flex; gap:12px; align-items:flex-start; flex:1">
+        <div style="width:36px;height:36px;border-radius:50%;background:rgba(79,124,255,.3);border:1px solid rgba(79,124,255,.6);display:flex;align-items:center;justify-content:center;flex-shrink:0;font-size:16px">🔌</div>
+        <div><div style="font-weight:700; font-size:13px; margin-bottom:3px">Connect</div><div style="font-size:12px; color:var(--dim); line-height:1.5">Install the plugin. Point it at Jira, GitHub, Slack, read-only.</div></div>
+      </div>
+      <div style="display:flex;align-items:center;justify-content:center;height:22px;flex-shrink:0;color:var(--yellow);font-size:14px;font-weight:700;text-shadow:0 0 8px rgba(245,158,11,.6)">↓</div>
+      <div class="card" style="display:flex; gap:12px; align-items:flex-start; flex:1">
+        <div style="width:36px;height:36px;border-radius:50%;background:rgba(245,158,11,.12);display:flex;align-items:center;justify-content:center;flex-shrink:0;font-size:16px">🔍</div>
+        <div><div style="font-weight:700; font-size:13px; margin-bottom:3px">Analyze</div><div style="font-size:12px; color:var(--dim); line-height:1.5">Pick 3–5 top performers. AI reads work patterns across all data sources.</div></div>
+      </div>
+      <div style="display:flex;align-items:center;justify-content:center;height:22px;flex-shrink:0;color:var(--yellow);font-size:14px;font-weight:700;text-shadow:0 0 8px rgba(245,158,11,.6)">↓</div>
+      <div class="card" style="display:flex; gap:12px; align-items:flex-start; flex:1">
+        <div style="width:36px;height:36px;border-radius:50%;background:rgba(167,139,250,.12);display:flex;align-items:center;justify-content:center;flex-shrink:0;font-size:16px">✏️</div>
+        <div><div style="font-weight:700; font-size:13px; margin-bottom:3px">Calibrate</div><div style="font-size:12px; color:var(--dim); line-height:1.5">Add your ratings. Set what matters most for this role.</div></div>
+      </div>
+      <div style="display:flex;align-items:center;justify-content:center;height:22px;flex-shrink:0;color:var(--yellow);font-size:14px;font-weight:700;text-shadow:0 0 8px rgba(245,158,11,.6)">↓</div>
+      <div class="card green" style="display:flex; gap:12px; align-items:flex-start; flex:1">
+        <div style="width:36px;height:36px;border-radius:50%;background:rgba(34,197,94,.12);display:flex;align-items:center;justify-content:center;flex-shrink:0;font-size:16px">✓</div>
+        <div><div style="font-weight:700; font-size:13px; margin-bottom:3px; color:var(--green)">Skillset is live</div><div style="font-size:12px; color:var(--dim); line-height:1.5">Matching begins. Courses shaped. Candidates train to your standard.</div></div>
+      </div>
+    </div>
+    <div class="card col blue" style="display:flex; flex-direction:row; padding:0; gap:0; overflow:hidden">
+
+      <!-- Left: AI Pattern Analysis -->
+      <div style="flex:1; display:flex; flex-direction:column; gap:10px; padding:20px 18px; border-right:1px solid rgba(79,124,255,.2)">
+        <div style="font-size:9px; font-weight:700; letter-spacing:1px; text-transform:uppercase; color:var(--blue2)">AI Pattern Analysis</div>
+        <div style="background:rgba(79,124,255,.08); border:1px solid rgba(79,124,255,.2); border-radius:8px; padding:8px 10px; flex:1">
+          <div style="font-size:9px; color:var(--blue2); font-weight:700; margin-bottom:3px; text-transform:uppercase; letter-spacing:.6px">Delivery</div>
+          <div style="font-size:10px; color:var(--text); line-height:1.45">"Consistent, high-cadence delivery. Tasks closed on time with low rework rate."</div>
+        </div>
+        <div style="background:rgba(79,124,255,.08); border:1px solid rgba(79,124,255,.2); border-radius:8px; padding:8px 10px; flex:1">
+          <div style="font-size:9px; color:var(--blue2); font-weight:700; margin-bottom:3px; text-transform:uppercase; letter-spacing:.6px">Engineering style</div>
+          <div style="font-size:10px; color:var(--text); line-height:1.45">"High PR success rate, clean merges, strong AI-assisted workflow. Moves fast with direction."</div>
+        </div>
+        <div style="background:rgba(79,124,255,.08); border:1px solid rgba(79,124,255,.2); border-radius:8px; padding:8px 10px; flex:1">
+          <div style="font-size:9px; color:var(--blue2); font-weight:700; margin-bottom:3px; text-transform:uppercase; letter-spacing:.6px">Collaboration</div>
+          <div style="font-size:10px; color:var(--text); line-height:1.45">"Async-first, thread-heavy. Takes ownership early without prompting."</div>
+        </div>
+        <div style="background:rgba(79,124,255,.08); border:1px solid rgba(79,124,255,.2); border-radius:8px; padding:8px 10px; flex:1">
+          <div style="font-size:9px; color:var(--blue2); font-weight:700; margin-bottom:3px; text-transform:uppercase; letter-spacing:.6px">Communication</div>
+          <div style="font-size:10px; color:var(--text); line-height:1.45">"Proactive updater. Flags blockers early. Engages customers with context, not just status."</div>
+        </div>
+        <div style="background:rgba(79,124,255,.08); border:1px solid rgba(79,124,255,.2); border-radius:8px; padding:8px 10px; flex:1">
+          <div style="font-size:9px; color:var(--blue2); font-weight:700; margin-bottom:3px; text-transform:uppercase; letter-spacing:.6px">Tech stack</div>
+          <div style="font-size:10px; color:var(--text); line-height:1.45">"Node.js, PostgreSQL, Docker. Comfortable with cloud infra. Leans on AI tooling for scaffolding."</div>
+        </div>
+        <div style="background:rgba(79,124,255,.08); border:1px solid rgba(79,124,255,.2); border-radius:8px; padding:8px 10px; flex:1">
+          <div style="font-size:9px; color:var(--blue2); font-weight:700; margin-bottom:3px; text-transform:uppercase; letter-spacing:.6px">Ownership</div>
+          <div style="font-size:10px; color:var(--text); line-height:1.45">"Ships without hand-holding. Defines scope independently when requirements are ambiguous."</div>
+        </div>
+      </div>
+
+      <!-- Right: Employer Calibration -->
+      <div style="flex:1; display:flex; flex-direction:column; gap:12px; padding:20px 18px; background:rgba(245,158,11,.03)">
+        <div style="font-size:9px; font-weight:700; letter-spacing:1px; text-transform:uppercase; color:var(--yellow); text-shadow:0 0 6px rgba(245,158,11,.4)">Employer Calibration</div>
+
+        <!-- Header row -->
+        <div style="display:grid; grid-template-columns:1fr auto auto; gap:8px; align-items:center; font-size:9px; font-weight:700; color:var(--text); text-transform:uppercase; letter-spacing:.6px; padding-bottom:6px; border-bottom:1px solid var(--border)">
+          <span>Dimension</span><span style="text-align:center">Rating</span><span style="text-align:center">Weight</span>
+        </div>
+
+        <!-- Row 1: Delivery -->
+        <div style="display:grid; grid-template-columns:1fr auto auto; gap:8px; align-items:center">
+          <span style="font-size:11px; color:var(--text); font-weight:600">Delivery</span>
+          <div style="display:flex; gap:3px">
+            <span style="width:10px;height:10px;border-radius:50%;background:var(--yellow);display:inline-block;box-shadow:0 0 4px rgba(245,158,11,.6)"></span>
+            <span style="width:10px;height:10px;border-radius:50%;background:var(--yellow);display:inline-block;box-shadow:0 0 4px rgba(245,158,11,.6)"></span>
+            <span style="width:10px;height:10px;border-radius:50%;background:var(--yellow);display:inline-block;box-shadow:0 0 4px rgba(245,158,11,.6)"></span>
+            <span style="width:10px;height:10px;border-radius:50%;background:var(--yellow);display:inline-block;box-shadow:0 0 4px rgba(245,158,11,.6)"></span>
+            <span style="width:10px;height:10px;border-radius:50%;background:var(--yellow);display:inline-block;box-shadow:0 0 4px rgba(245,158,11,.6)"></span>
+          </div>
+          <span style="background:rgba(245,158,11,.2);border:1px solid rgba(245,158,11,.4);color:var(--yellow);font-size:10px;font-weight:700;padding:2px 8px;border-radius:5px;text-align:center">×2</span>
+        </div>
+
+        <!-- Row 2: Engineering -->
+        <div style="display:grid; grid-template-columns:1fr auto auto; gap:8px; align-items:center">
+          <span style="font-size:11px; color:var(--text); font-weight:600">Eng. Style</span>
+          <div style="display:flex; gap:3px">
+            <span style="width:10px;height:10px;border-radius:50%;background:var(--yellow);display:inline-block;box-shadow:0 0 4px rgba(245,158,11,.6)"></span>
+            <span style="width:10px;height:10px;border-radius:50%;background:var(--yellow);display:inline-block;box-shadow:0 0 4px rgba(245,158,11,.6)"></span>
+            <span style="width:10px;height:10px;border-radius:50%;background:var(--yellow);display:inline-block;box-shadow:0 0 4px rgba(245,158,11,.6)"></span>
+            <span style="width:10px;height:10px;border-radius:50%;background:var(--yellow);display:inline-block;box-shadow:0 0 4px rgba(245,158,11,.6)"></span>
+            <span style="width:10px;height:10px;border-radius:50%;background:var(--border);display:inline-block"></span>
+          </div>
+          <span style="background:rgba(245,158,11,.2);border:1px solid rgba(245,158,11,.4);color:var(--yellow);font-size:10px;font-weight:700;padding:2px 8px;border-radius:5px;text-align:center">×3</span>
+        </div>
+
+        <!-- Row 3: Collaboration -->
+        <div style="display:grid; grid-template-columns:1fr auto auto; gap:8px; align-items:center">
+          <span style="font-size:11px; color:var(--text); font-weight:600">Collaboration</span>
+          <div style="display:flex; gap:3px">
+            <span style="width:10px;height:10px;border-radius:50%;background:var(--yellow);display:inline-block;box-shadow:0 0 4px rgba(245,158,11,.6)"></span>
+            <span style="width:10px;height:10px;border-radius:50%;background:var(--yellow);display:inline-block;box-shadow:0 0 4px rgba(245,158,11,.6)"></span>
+            <span style="width:10px;height:10px;border-radius:50%;background:var(--yellow);display:inline-block;box-shadow:0 0 4px rgba(245,158,11,.6)"></span>
+            <span style="width:10px;height:10px;border-radius:50%;background:var(--border);display:inline-block"></span>
+            <span style="width:10px;height:10px;border-radius:50%;background:var(--border);display:inline-block"></span>
+          </div>
+          <span style="background:rgba(245,158,11,.2);border:1px solid rgba(245,158,11,.4);color:var(--yellow);font-size:10px;font-weight:700;padding:2px 8px;border-radius:5px;text-align:center">×1</span>
+        </div>
+
+        <div style="margin-top:auto; padding:10px 12px; background:rgba(245,158,11,.06); border:1px solid rgba(245,158,11,.2); border-radius:8px; font-size:10px; color:var(--dim); line-height:1.5">
+          <span style="color:var(--text)">Rating:</span> how strongly this pattern fits your ideal hire (1–5 dots).<br><span style="color:var(--text)">Weight:</span> relative importance of this dimension for this role.
+        </div>
+      </div>
+
+    </div>
+  </div>
+</div>
+
+
+<!-- ══ SLIDE 5 ·PROCESS FLOW ══ -->
+<div class="slide" id="s5">
+  <div class="brand-bar"><img src="skillin3.png" class="brand-icon" alt=""/><span class="brand-name">SKILL-IN</span><span class="slide-label">04 · The Process</span></div>
+  <h2 style="margin-top:24px">From tools and talent to<br><span class="hl">profiles in the marketplace.</span></h2>
+
+  <div class="row" style="gap:14px; flex:1; margin-top:32px; align-items:stretch">
+
+    <!-- Employer side -->
+    <div style="flex:1; display:flex; flex-direction:column; gap:0">
+      <div style="font-size:11px; font-weight:800; color:var(--blue2); letter-spacing:1.2px; text-transform:uppercase; margin-bottom:10px; padding-left:4px; text-shadow:0 0 10px rgba(79,124,255,.4)">Employer</div>
+      <div style="display:flex; flex-direction:column; gap:4px; flex:1">
+        <div class="pf-step">
+          <div class="pf-num" style="background:rgba(79,124,255,.18);color:var(--blue2)">1</div>
+          <div class="card col" style="padding:10px 14px">
+            <div style="font-size:12px; font-weight:700; margin-bottom:3px">Share stack &amp; tools</div>
+            <div style="font-size:11px; color:var(--dim)">Jira, GitHub, Slack · tech stack · role description · team size</div>
+          </div>
+        </div>
+        <div class="pf-connector"></div>
+        <div class="pf-step">
+          <div class="pf-num" style="background:rgba(79,124,255,.18);color:var(--blue2)">2</div>
+          <div class="card col" style="padding:10px 14px">
+            <div style="font-size:12px; font-weight:700; margin-bottom:3px">We build the connector</div>
+            <div style="font-size:11px; color:var(--dim)">Custom MCP server · Claude assessment agent</div>
+          </div>
+        </div>
+        <div class="pf-connector"></div>
+        <div class="pf-step">
+          <div class="pf-num" style="background:rgba(79,124,255,.18);color:var(--blue2)">3</div>
+          <div class="card col" style="padding:10px 14px">
+            <div style="font-size:12px; font-weight:700; margin-bottom:3px">Plugin delivered</div>
+            <div style="font-size:11px; color:var(--dim)">Packaged Claude Code plugin: Skill-in skill · MCP config · <code style="font-size:10px;background:var(--border);padding:1px 4px;border-radius:3px">/generate-skillset</code></div>
+          </div>
+        </div>
+        <div class="pf-connector"></div>
+        <div class="pf-step">
+          <div class="pf-num" style="background:rgba(79,124,255,.18);color:var(--blue2)">4</div>
+          <div class="card col" style="padding:10px 14px">
+            <div style="font-size:12px; font-weight:700; margin-bottom:3px">Employer runs it</div>
+            <div style="font-size:11px; color:var(--dim)">Installs plugin · runs command · adds human ratings · approves</div>
+          </div>
+        </div>
+        <div class="pf-connector"></div>
+        <div class="pf-step">
+          <div class="pf-num" style="background:rgba(79,124,255,.25);color:var(--blue2)">✓</div>
+          <div class="card col blue" style="padding:10px 14px">
+            <div style="font-size:12px; font-weight:700; margin-bottom:5px; color:var(--blue2)">Platform receives</div>
+            <div style="display:flex; gap:8px; flex-wrap:wrap">
+              <span class="pill" style="font-size:10px">Company Logo</span>
+              <span class="pill" style="font-size:10px">Skillset</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Candidate side -->
+    <div style="flex:1; display:flex; flex-direction:column; gap:0">
+      <div style="font-size:11px; font-weight:800; color:var(--green); letter-spacing:1.2px; text-transform:uppercase; margin-bottom:10px; padding-left:4px; text-shadow:0 0 10px rgba(34,197,94,.4)">Candidate</div>
+      <div style="display:flex; flex-direction:column; gap:4px; flex:1">
+        <div class="pf-step">
+          <div class="pf-num" style="background:rgba(34,197,94,.15);color:var(--green)">1</div>
+          <div class="card col" style="padding:10px 14px">
+            <div style="font-size:12px; font-weight:700; margin-bottom:3px">Skillsets define courses</div>
+            <div style="font-size:11px; color:var(--dim)">Platform reads employer Skillsets · extracts role targets · culture patterns · stack</div>
+          </div>
+        </div>
+        <div class="pf-connector"></div>
+        <div class="pf-step">
+          <div class="pf-num" style="background:rgba(34,197,94,.15);color:var(--green)">2</div>
+          <div class="card col" style="padding:10px 14px">
+            <div style="font-size:12px; font-weight:700; margin-bottom:3px">Course is built</div>
+            <div style="font-size:11px; color:var(--dim)">Tech requirements, difficulty level, and assessment criteria shaped by the Skillset</div>
+          </div>
+        </div>
+        <div class="pf-connector"></div>
+        <div class="pf-step">
+          <div class="pf-num" style="background:rgba(34,197,94,.15);color:var(--green)">3</div>
+          <div class="card col" style="padding:10px 14px">
+            <div style="font-size:12px; font-weight:700; margin-bottom:3px">Candidate chooses a project</div>
+            <div style="font-size:11px; color:var(--dim)">Browses courses by desired role, skills, and tech stack · selects the one that fits</div>
+          </div>
+        </div>
+        <div class="pf-connector"></div>
+        <div class="pf-step">
+          <div class="pf-num" style="background:rgba(34,197,94,.15);color:var(--green)">4</div>
+          <div class="card col" style="padding:10px 14px">
+            <div style="font-size:12px; font-weight:700; margin-bottom:3px">Candidate takes the course</div>
+            <div style="font-size:11px; color:var(--dim)">Real sprints · real projects · months of observed performance</div>
+          </div>
+        </div>
+        <div class="pf-connector"></div>
+        <div class="pf-step">
+          <div class="pf-num" style="background:rgba(34,197,94,.2);color:var(--green)">✓</div>
+          <div class="card col green" style="padding:10px 14px">
+            <div style="font-size:12px; font-weight:700; margin-bottom:5px; color:var(--green)">Platform receives</div>
+            <div style="display:flex; gap:8px; flex-wrap:wrap">
+              <span class="pill green" style="font-size:10px">Job seeker profile</span>
+              <span class="pill green" style="font-size:10px">Skillset</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- Marketplace -->
+  <div style="display:flex; flex-direction:column; align-items:center; gap:10px; margin-top:14px">
+    <span style="background:rgba(167,139,250,.15); border:1px solid rgba(167,139,250,.4); color:var(--purple); font-size:10px; font-weight:700; padding:3px 14px; border-radius:20px; letter-spacing:1px; text-transform:uppercase; text-shadow:0 0 8px rgba(167,139,250,.4)">Marketplace</span>
+    <div style="display:flex; align-items:center; gap:20px">
+
+      <!-- Company card -->
+      <div style="width:110px; background:rgba(79,124,255,.07); border:1.5px solid rgba(79,124,255,.4); border-radius:12px; padding:16px 12px; display:flex; flex-direction:column; align-items:center; gap:8px; box-shadow:0 0 18px rgba(79,124,255,.15)">
+        <svg width="36" height="36" viewBox="0 0 36 36" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <rect x="5" y="14" width="26" height="18" rx="1" fill="rgba(79,124,255,.25)" stroke="rgba(125,160,255,.8)" stroke-width="1.5"/>
+          <polygon points="3,14 18,4 33,14" fill="rgba(79,124,255,.2)" stroke="rgba(125,160,255,.8)" stroke-width="1.5"/>
+          <rect x="10" y="19" width="4" height="4" rx="0.5" fill="rgba(125,160,255,.9)"/>
+          <rect x="16" y="19" width="4" height="4" rx="0.5" fill="rgba(125,160,255,.9)"/>
+          <rect x="22" y="19" width="4" height="4" rx="0.5" fill="rgba(125,160,255,.9)"/>
+          <rect x="14" y="26" width="8" height="6" rx="0.5" fill="rgba(125,160,255,.9)"/>
+        </svg>
+        <div style="text-align:center">
+          <div style="font-size:11px; font-weight:700; color:var(--text)">Acme Corp</div>
+          <div style="font-size:9px; color:var(--blue2); margin-top:2px">Sr. Backend Eng.</div>
+        </div>
+      </div>
+
+      <!-- Match engine -->
+      <div style="display:flex; flex-direction:column; align-items:center; gap:4px">
+        <div style="font-size:22px; color:var(--yellow); text-shadow:0 0 12px rgba(245,158,11,.8); line-height:1">⚡</div>
+        <div style="font-size:15px; font-weight:800; color:var(--yellow); text-shadow:0 0 10px rgba(245,158,11,.6); letter-spacing:.5px">MATCH</div>
+        <div style="font-size:22px; color:var(--yellow); text-shadow:0 0 12px rgba(245,158,11,.8); line-height:1">⚡</div>
+      </div>
+
+      <!-- Candidate card -->
+      <div style="width:110px; background:rgba(34,197,94,.07); border:1.5px solid rgba(34,197,94,.4); border-radius:12px; padding:16px 12px; display:flex; flex-direction:column; align-items:center; gap:8px; box-shadow:0 0 18px rgba(34,197,94,.12)">
+        <svg width="36" height="36" viewBox="0 0 36 36" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <circle cx="18" cy="12" r="7" fill="rgba(255,255,255,.15)" stroke="rgba(255,255,255,.85)" stroke-width="1.5"/>
+          <path d="M4 33 C4 24 32 24 32 33" stroke="rgba(255,255,255,.85)" stroke-width="1.5" fill="rgba(255,255,255,.1)" stroke-linecap="round"/>
+        </svg>
+        <div style="text-align:center">
+          <div style="font-size:11px; font-weight:700; color:var(--text)">Alex Chen</div>
+          <div style="font-size:9px; color:var(--green); margin-top:2px">Backend Dev</div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+</div>
+
+
+<!-- ══ SLIDE 6 ·ARCHITECTURE ══ -->
+<div class="slide" id="s6">
+  <div class="brand-bar"><img src="skillin3.png" class="brand-icon" alt=""/><span class="brand-name">SKILL-IN</span><span class="slide-label">05 · Plugin Architecture</span></div>
+  <h2 style="margin-top:20px">Inside the plugin.</h2>
+  <p class="lead mt8">How orchestration and MCP servers work together.</p>
+
+  <div class="row mt16" style="gap:14px; flex:1; align-items:stretch">
+
+    <!-- Main architecture diagram -->
+    <div style="flex:2; display:flex; flex-direction:column; gap:10px">
+
+      <!-- Zone: Employer Machine -->
+      <div class="arch-zone" style="border-color:rgba(79,124,255,.3); display:flex; flex-direction:column; gap:10px">
+        <div class="arch-zone-label" style="color:var(--blue2)">Employer Machine</div>
+
+        <!-- Config row -->
+        <div class="arch-row" style="gap:8px; margin-top:6px">
+          <div class="arch-box" style="flex:1; border-color:rgba(79,124,255,.3); background:rgba(79,124,255,.08); color:var(--blue2); padding:14px; font-size:13px">
+            CLAUDE.md<br><span style="font-size:11px; color:var(--text); font-weight:400">Context &amp; permissions</span>
+          </div>
+          <div class="arch-box" style="flex:1; border-color:rgba(167,139,250,.4); background:rgba(167,139,250,.1); color:var(--purple); padding:14px; font-size:13px">
+            /generate-skillset<br><span style="font-size:11px; color:var(--text); font-weight:400">Claude Skill</span>
+          </div>
+          <div class="arch-box" style="flex:1; border-color:rgba(79,124,255,.3); background:rgba(79,124,255,.08); color:var(--blue2); padding:14px; font-size:13px">
+            connector-config.json<br><span style="font-size:11px; color:var(--text); font-weight:400">Tool credentials</span>
+          </div>
+        </div>
+
+        <div class="arch-arrow">↓</div>
+
+        <!-- Agentic Workflow (unified dashed box) -->
+        <div style="border:1.5px dashed rgba(167,139,250,.45); border-radius:10px; padding:14px; position:relative; display:flex; flex-direction:column; gap:10px">
+          <div style="position:absolute; top:-10px; left:14px; background:var(--bg); padding:0 8px; font-size:10px; font-weight:700; color:var(--purple); letter-spacing:1px; text-transform:uppercase; text-shadow:0 0 8px rgba(167,139,250,.4)">Agentic Workflow</div>
+
+          <!-- Claude AI (top of loop) -->
+          <div class="arch-box" style="border-color:rgba(167,139,250,.5); background:rgba(167,139,250,.1); color:var(--purple); font-size:14px; font-weight:700; padding:14px 16px; margin-top:4px">
+            Claude AI · Orchestrator
+            <div style="font-size:11px; font-weight:400; color:var(--text); margin-top:4px">Reads Claude Skill · generates LLM assessment · collects employer input · decides what to submit</div>
+          </div>
+
+          <div class="arch-arrow" style="font-size:11px; color:var(--dim); font-weight:600; text-shadow:none">↕ calls tools · receives data</div>
+
+          <!-- Connector MCP Server (nested, called by Claude) -->
+          <div style="border:1px solid rgba(245,158,11,.35); background:rgba(245,158,11,.05); border-radius:9px; padding:12px 14px">
+            <div style="font-size:12px; font-weight:700; color:var(--yellow); margin-bottom:10px; letter-spacing:.5px; text-align:center">Connector MCP Server</div>
+            <div class="arch-row" style="gap:8px">
+              <div style="flex:1; font-size:11px; background:rgba(245,158,11,.08); border:1px solid rgba(245,158,11,.2); border-radius:5px; padding:8px 10px; color:var(--text); text-align:center">fetch_tasks<br><span style="color:var(--dim); font-size:10px">→ Jira API</span></div>
+              <div style="flex:1; font-size:11px; background:rgba(245,158,11,.08); border:1px solid rgba(245,158,11,.2); border-radius:5px; padding:8px 10px; color:var(--text); text-align:center">fetch_communication<br><span style="color:var(--dim); font-size:10px">→ Slack API</span></div>
+              <div style="flex:1; font-size:11px; background:rgba(245,158,11,.08); border:1px solid rgba(245,158,11,.2); border-radius:5px; padding:8px 10px; color:var(--text); text-align:center">fetch_artifacts<br><span style="color:var(--dim); font-size:10px">→ GitHub API</span></div>
+            </div>
+          </div>
+
+          <div class="arch-arrow" style="font-size:11px; color:var(--dim); font-weight:600; text-shadow:none">↓ employer inputs &amp; output</div>
+
+          <!-- Bottom row: human inputs + anonymized output -->
+          <div class="arch-row" style="gap:10px">
+            <div style="flex:1; font-size:11px; background:rgba(245,158,11,.08); border:1px solid rgba(245,158,11,.2); border-radius:6px; padding:11px 10px; color:var(--yellow); text-align:center; font-weight:600">
+              Employee<br>Rating
+            </div>
+            <div style="flex:1; font-size:11px; background:rgba(245,158,11,.08); border:1px solid rgba(245,158,11,.2); border-radius:6px; padding:11px 10px; color:var(--yellow); text-align:center; font-weight:600">
+              Weights
+            </div>
+            <div style="flex:2; font-size:11px; background:rgba(34,197,94,.07); border:1px solid rgba(34,197,94,.25); border-radius:6px; padding:11px 12px; color:var(--green); text-align:center; font-weight:600">
+              Anonymized<br><span style="font-size:10px; color:var(--text); font-weight:400">assessment data only</span>
+            </div>
+          </div>
+
+        </div>
+
+      </div>
+
+      <!-- Arrow + Skill-in Platform -->
+      <div class="arch-arrow">↓</div>
+      <div class="arch-box" style="border-color:rgba(34,197,94,.4); background:rgba(34,197,94,.07); color:var(--green); font-size:14px; font-weight:700; padding:16px">
+        Skill-in Platform<br><span style="font-size:11px; font-weight:400; color:var(--text)">AI-generated work patterns &amp; role Skillset · no names · no PII</span>
+      </div>
+    </div>
+
+    <!-- Right: privacy legend -->
+    <div style="flex:1; display:flex; flex-direction:column; gap:10px">
+      <div class="card" style="border-color:rgba(239,68,68,.25); background:rgba(239,68,68,.04)">
+        <div style="font-size:10px; font-weight:700; color:#f87171; letter-spacing:1px; text-transform:uppercase; margin-bottom:10px">Your Data, Protected</div>
+        <ul class="blist" style="gap:7px">
+          <li class="cross" style="font-size:11px"><span>API credentials &amp; tokens</span></li>
+          <li class="cross" style="font-size:11px"><span>Slack message content</span></li>
+          <li class="cross" style="font-size:11px"><span>Jira ticket descriptions</span></li>
+          <li class="cross" style="font-size:11px"><span>GitHub code diffs</span></li>
+          <li class="cross" style="font-size:11px"><span>Employee names &amp; emails</span></li>
+        </ul>
+      </div>
+      <div class="card" style="border-color:rgba(167,139,250,.3); background:rgba(167,139,250,.05)">
+        <div style="font-size:10px; font-weight:700; color:var(--purple); letter-spacing:1px; text-transform:uppercase; margin-bottom:10px">To LLM (Claude / Cursor)</div>
+        <ul class="blist" style="gap:7px">
+          <li class="arrow" style="font-size:11px"><span>Task counts &amp; completion rates</span></li>
+          <li class="arrow" style="font-size:11px"><span>Message word counts</span></li>
+          <li class="arrow" style="font-size:11px"><span>Commit frequency &amp; PR ratios</span></li>
+          <li class="arrow" style="font-size:11px"><span>Timestamps &amp; metadata</span></li>
+        </ul>
+      </div>
+      <div class="card green">
+        <div style="font-size:10px; font-weight:700; color:var(--green); letter-spacing:1px; text-transform:uppercase; margin-bottom:10px">To Skill-in</div>
+        <ul class="blist" style="gap:7px">
+          <li class="check" style="font-size:11px"><span>AI-generated work pattern descriptions per dimension</span></li>
+          <li class="check" style="font-size:11px"><span>Human rating anchors</span></li>
+          <li class="check" style="font-size:11px"><span>Dimension weights</span></li>
+          <li class="check" style="font-size:11px"><span>Company slug &amp; role name</span></li>
+        </ul>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+
+
+<!-- ══ SLIDE 7 ·EMPLOYER HOOK ══ -->
+<div class="slide" id="s7">
+  <div class="brand-bar"><img src="skillin3.png" class="brand-icon" alt=""/><span class="brand-name">SKILL-IN</span><span class="slide-label">06 · The Employer Hook</span></div>
+  <h2 style="margin-top:24px">The <span class="hl-yellow">Employer Hook.</span></h2>
+  <p class="lead mt8" style="max-width:700px">Two ways the right match finds you. Every Skillset in the platform is active — every candidate a potential match, whether they targeted you or not.</p>
+
+  <div class="row mt20" style="gap:20px; flex:1; align-items:stretch; margin-top:20px">
+
+    <!-- Scenario 1: Course Match Alert -->
+    <div class="card col blue" style="display:flex; flex-direction:column; gap:14px; padding:26px">
+      <div style="display:flex; align-items:center; gap:12px">
+        <div style="width:38px; height:38px; border-radius:50%; background:rgba(79,124,255,.25); border:1.5px solid rgba(79,124,255,.55); display:flex; align-items:center; justify-content:center; font-size:16px; font-weight:800; color:var(--blue2); flex-shrink:0">1</div>
+        <div>
+          <div style="font-size:10px; font-weight:700; color:var(--blue2); letter-spacing:1px; text-transform:uppercase; margin-bottom:2px">Scenario 01</div>
+          <div style="font-weight:700; font-size:17px">Course Match Alert</div>
+        </div>
+      </div>
+      <p style="font-size:13px; color:var(--dim); line-height:1.65">A candidate takes a course shaped directly by your Skillset — built to your stack, your criteria, your work patterns. When they score above your threshold across all assessed dimensions, you receive an alert.</p>
+      <div style="display:flex; flex-direction:column; gap:5px; padding:14px; background:rgba(79,124,255,.06); border:1px solid rgba(79,124,255,.18); border-radius:10px">
+        <div style="font-size:11px; color:var(--text); font-weight:600; padding:7px 11px; background:rgba(79,124,255,.1); border-radius:6px">🏢 Your Skillset shapes the course criteria</div>
+        <div style="text-align:center; color:var(--yellow); font-size:13px; text-shadow:0 0 6px rgba(245,158,11,.5)">↓</div>
+        <div style="font-size:11px; color:var(--text); font-weight:600; padding:7px 11px; background:rgba(79,124,255,.1); border-radius:6px">👤 Candidate completes it and scores high</div>
+        <div style="text-align:center; color:var(--yellow); font-size:13px; text-shadow:0 0 6px rgba(245,158,11,.5)">↓</div>
+        <div style="font-size:11px; color:var(--yellow); font-weight:700; padding:7px 11px; background:rgba(245,158,11,.07); border:1px solid rgba(245,158,11,.3); border-radius:6px">⚡ Alert — candidate matched your simulated work environment</div>
+      </div>
+      <div style="margin-top:auto; font-size:12px; color:var(--blue2); font-weight:600; line-height:1.55">This is intentional targeting. The candidate chose your environment. The signal is high-confidence by design.</div>
+    </div>
+
+    <!-- OR divider -->
+    <div style="display:flex; align-items:center; justify-content:center; flex-shrink:0">
+      <div style="font-size:11px; font-weight:700; color:var(--muted); letter-spacing:1.5px; writing-mode:vertical-lr; text-transform:uppercase">OR</div>
+    </div>
+
+    <!-- Scenario 2: Matching Engine -->
+    <div class="card col purple" style="display:flex; flex-direction:column; gap:14px; padding:26px">
+      <div style="display:flex; align-items:center; gap:12px">
+        <div style="width:38px; height:38px; border-radius:50%; background:rgba(167,139,250,.2); border:1.5px solid rgba(167,139,250,.55); display:flex; align-items:center; justify-content:center; font-size:16px; font-weight:800; color:var(--purple); flex-shrink:0">2</div>
+        <div>
+          <div style="font-size:10px; font-weight:700; color:var(--purple); letter-spacing:1px; text-transform:uppercase; margin-bottom:2px">Scenario 02</div>
+          <div style="font-weight:700; font-size:17px">Ambient Matching Engine</div>
+        </div>
+      </div>
+      <p style="font-size:13px; color:var(--dim); line-height:1.65">Every candidate who completes any course earns a Skillset that is stored in the platform. The matching engine continuously compares all candidate Skillsets against all employer Skillsets — across every role and every company. When a match clears the threshold, both sides are notified simultaneously.</p>
+      <div style="display:flex; flex-direction:column; gap:5px; padding:14px; background:rgba(167,139,250,.05); border:1px solid rgba(167,139,250,.18); border-radius:10px">
+        <div style="font-size:11px; color:var(--text); font-weight:600; padding:7px 11px; background:rgba(167,139,250,.1); border-radius:6px">👤 Candidate completes any course → Skillset stored</div>
+        <div style="text-align:center; color:var(--yellow); font-size:13px; text-shadow:0 0 6px rgba(245,158,11,.5)">↓</div>
+        <div style="font-size:11px; color:var(--text); font-weight:600; padding:7px 11px; background:rgba(167,139,250,.1); border-radius:6px">⚙️ Matching engine runs continuously across all Skillsets</div>
+        <div style="text-align:center; color:var(--yellow); font-size:13px; text-shadow:0 0 6px rgba(245,158,11,.5)">↓</div>
+        <div style="font-size:11px; color:var(--yellow); font-weight:700; padding:7px 11px; background:rgba(245,158,11,.07); border:1px solid rgba(245,158,11,.3); border-radius:6px">⚡ Push notification → employer and candidate, simultaneously</div>
+      </div>
+      <div style="margin-top:auto; font-size:12px; color:var(--purple); font-weight:600; line-height:1.55">This is passive discovery. You get matched to candidates who weren't even targeting your role — but whose profile fits.</div>
+    </div>
+
+  </div>
+</div>
+
+
+<!-- ══ SLIDE 8 ·CLOSED LOOP ══ -->
+<div class="slide" id="s8">
+  <div class="brand-bar"><img src="skillin3.png" class="brand-icon" alt=""/><span class="brand-name">SKILL-IN</span><span class="slide-label">07 · The Loop</span></div>
+  <h2 style="margin-top:28px">Both sides make each other<br><span class="hl">more valuable.</span></h2>
+  <div style="flex:1; display:flex; align-items:center; justify-content:center; margin-top:20px">
+    <div style="display:grid; grid-template-columns:1fr 120px 1fr; grid-template-rows:1fr 80px 1fr; gap:12px; width:100%; max-width:800px">
+
+      <!-- TL: Employer submits -->
+      <div class="card blue" style="display:flex; flex-direction:column; gap:10px; padding:20px 22px; aspect-ratio:1.6">
+        <div style="display:flex; align-items:center; gap:10px">
+          <div style="font-size:22px">🏢</div>
+          <div>
+            <div style="font-size:10px; font-weight:700; color:var(--blue2); letter-spacing:1px; text-transform:uppercase; margin-bottom:2px">01</div>
+            <div style="font-weight:700; font-size:14px">Employer submits Skillset</div>
+          </div>
+        </div>
+        <div style="font-size:12px; color:#8a96b0; line-height:1.5; margin-top:auto">Defines excellence for this role: culture, stack, competencies, patterns.</div>
+      </div>
+
+      <!-- → with label below -->
+      <div style="display:flex; flex-direction:column; align-items:center; justify-content:center; gap:5px">
+        <div style="color:var(--yellow); font-size:26px; font-weight:700; text-shadow:0 0 10px rgba(245,158,11,.7)">→</div>
+        <div style="font-size:11px; font-weight:700; color:var(--blue2); text-align:center; line-height:1.35">More Skillsets<br>richer courses</div>
+      </div>
+
+      <!-- TR: Platform shapes -->
+      <div class="card purple" style="display:flex; flex-direction:column; gap:10px; padding:20px 22px; aspect-ratio:1.6">
+        <div style="display:flex; align-items:center; gap:10px">
+          <div style="font-size:22px">📚</div>
+          <div>
+            <div style="font-size:10px; font-weight:700; color:var(--purple); letter-spacing:1px; text-transform:uppercase; margin-bottom:2px">02</div>
+            <div style="font-weight:700; font-size:14px">Platform shapes a course</div>
+          </div>
+        </div>
+        <div style="font-size:12px; color:#8a96b0; line-height:1.5; margin-top:auto">Stack, criteria, and difficulty trained toward the employer's standard.</div>
+      </div>
+
+      <!-- ↑ with label -->
+      <div style="display:flex; flex-direction:column; align-items:center; justify-content:center; gap:5px">
+        <div style="color:var(--yellow); font-size:26px; font-weight:700; text-shadow:0 0 10px rgba(245,158,11,.7)">↑</div>
+        <div style="font-size:11px; font-weight:700; color:var(--green); text-align:center; line-height:1.35">More employers<br>more Skillsets</div>
+      </div>
+
+      <!-- ↺ center -->
+      <div style="display:flex; align-items:center; justify-content:center; color:var(--yellow); font-size:34px; font-weight:700; text-shadow:0 0 16px rgba(245,158,11,.8)">↺</div>
+
+      <!-- ↓ with label -->
+      <div style="display:flex; flex-direction:column; align-items:center; justify-content:center; gap:5px">
+        <div style="color:var(--yellow); font-size:26px; font-weight:700; text-shadow:0 0 10px rgba(245,158,11,.7)">↓</div>
+        <div style="font-size:11px; font-weight:700; color:var(--purple); text-align:center; line-height:1.35">More courses<br>more candidates</div>
+      </div>
+
+      <!-- BL: Matching fires -->
+      <div class="card green" style="display:flex; flex-direction:column; gap:10px; padding:20px 22px; aspect-ratio:1.6">
+        <div style="display:flex; align-items:center; gap:10px">
+          <div style="font-size:22px">⚡</div>
+          <div>
+            <div style="font-size:10px; font-weight:700; color:var(--green); letter-spacing:1px; text-transform:uppercase; margin-bottom:2px">04</div>
+            <div style="font-weight:700; font-size:14px">Matching engine fires</div>
+          </div>
+        </div>
+        <div style="font-size:12px; color:#8a96b0; line-height:1.5; margin-top:auto">Skillsets matched. Both sides alerted. The loop completes.</div>
+      </div>
+
+      <!-- ← with label above -->
+      <div style="display:flex; flex-direction:column; align-items:center; justify-content:center; gap:5px">
+        <div style="font-size:11px; font-weight:700; color:var(--teal); text-align:center; line-height:1.35">More candidates<br>faster matches</div>
+        <div style="color:var(--yellow); font-size:26px; font-weight:700; text-shadow:0 0 10px rgba(245,158,11,.7)">←</div>
+      </div>
+
+      <!-- BR: Candidates take course -->
+      <div class="card teal" style="display:flex; flex-direction:column; gap:10px; padding:20px 22px; aspect-ratio:1.6">
+        <div style="display:flex; align-items:center; gap:10px">
+          <div style="font-size:22px">👤</div>
+          <div>
+            <div style="font-size:10px; font-weight:700; color:var(--teal); letter-spacing:1px; text-transform:uppercase; margin-bottom:2px">03</div>
+            <div style="font-weight:700; font-size:14px">Candidates take the course</div>
+          </div>
+        </div>
+        <div style="font-size:12px; color:#8a96b0; line-height:1.5; margin-top:auto">Real projects. Real data. Verified Skillset earned through performance.</div>
+      </div>
+
+    </div>
+  </div>
+</div>
+
+
+<!-- ══ SLIDE 9 ·JOBS TINDER ══ -->
+<div class="slide" id="s9">
+  <div class="brand-bar"><img src="skillin3.png" class="brand-icon" alt=""/><span class="brand-name">SKILL-IN</span><span class="slide-label">08 · The Vision</span></div>
+  <div class="center" style="gap:24px">
+    <h1 style="font-size:clamp(34px,4.8vw,64px)"><span style="color:#f472b6">"Jobs Tinder"</span><br>but the profile<br>is written by <span class="hl">AI.</span></h1>
+    <p class="lead" style="max-width:560px">Both sides have profiles they didn't write themselves.<br>When the fit is real, both sides find out at the same time.</p>
+    <div class="row" style="gap:18px; width:100%; max-width:680px">
+      <div class="card col" style="text-align:center; padding:22px"><div style="font-size:28px; margin-bottom:10px">🏢</div><div style="font-weight:700; font-size:14px; margin-bottom:6px">Company</div><p style="font-size:12px; color:var(--dim); line-height:1.5">Skillset from real team work patterns. Calibrated by human judgment.</p><div class="pill mt12">Generated by plugin</div></div>
+      <div style="display:flex; align-items:center; justify-content:center; flex-direction:column; gap:6px; flex-shrink:0"><div style="font-size:26px; color:var(--green)">⚡</div><div style="font-size:10px; color:var(--yellow); text-transform:uppercase; letter-spacing:.8px; font-weight:700; text-shadow:0 0 8px rgba(245,158,11,.6)">Match</div></div>
+      <div class="card col" style="text-align:center; padding:22px"><div style="font-size:28px; margin-bottom:10px">👤</div><div style="font-weight:700; font-size:14px; margin-bottom:6px">Job Seeker</div><p style="font-size:12px; color:var(--dim); line-height:1.5">Skillset from months of real project work. Scored by AI across sprints.</p><div class="pill green mt12">Generated by PBL</div></div>
+    </div>
+    <div class="card" style="max-width:660px; width:100%; background:rgba(79,124,255,.07); border-color:rgba(79,124,255,.3); padding:18px 26px">
+      <div style="display:flex; gap:14px; align-items:flex-start"><div style="font-size:18px; flex-shrink:0">💡</div><p style="font-size:13px; color:var(--dim); line-height:1.6">Traditional job boards are self-reported on both sides. Skill-in is the first platform where <strong style="color:var(--text)">both profiles are independently generated from actual work</strong> making the match signal trustworthy for the first time.</p></div>
+    </div>
+  </div>
+</div>
+
+
+
+<!-- ══ SLIDE 11 ·CTA ══ -->
+<div class="slide close-bg" id="s11">
+  <div class="brand-bar"><img src="skillin3.png" class="brand-icon" alt=""/><span class="brand-name">SKILL-IN</span><span class="slide-label">10 · Start</span></div>
+  <div class="center" style="gap:24px">
+    <img src="skill-in.png" style="height:36px;object-fit:contain;margin-bottom:8px;filter:invert(1) hue-rotate(180deg)" alt="Skill-in"/>
+    <h1 style="max-width:700px; text-align:center">Generate your Skillset.<br>Shape a course.<br><span class="hl">Get your first match.</span></h1>
+    <p class="lead" style="max-width:520px; text-align:center">One session. By the end, your hiring standard is live.</p>
+    <div class="row" style="gap:14px; max-width:640px; width:100%">
+      <div class="card col" style="text-align:center; padding:18px"><div style="font-size:22px; margin-bottom:6px">Day 1</div><div style="font-size:12px; font-weight:700; margin-bottom:4px">Generate Skillset</div><div style="font-size:11px; color:var(--dim)">Connect · analyze · calibrate · submit</div></div>
+      <div class="card col blue" style="text-align:center; padding:18px"><div style="font-size:22px; margin-bottom:6px">Week 1</div><div style="font-size:12px; font-weight:700; color:var(--blue2); margin-bottom:4px">Course goes live</div><div style="font-size:11px; color:var(--dim)">Your Skillset shapes a course. Candidates train.</div></div>
+      <div class="card col green" style="text-align:center; padding:18px"><div style="font-size:22px; margin-bottom:6px">Week 7+</div><div style="font-size:12px; font-weight:700; color:var(--green); margin-bottom:4px">First matches arrive</div><div style="font-size:11px; color:var(--dim)">Skills Hook fires. Real candidates. Real fit.</div></div>
+    </div>
+    <div class="card" style="max-width:520px; width:100%; background:rgba(79,124,255,.08); border-color:rgba(79,124,255,.35); padding:20px 28px; text-align:center">
+      <div style="font-size:10px; color:var(--muted); margin-bottom:8px; letter-spacing:.8px; text-transform:uppercase">Pilot offer</div>
+      <p style="font-size:14px; color:var(--dim); line-height:1.65">We run the plugin with you. Live. Your Skillset generated in real time. First match candidates appear within weeks.</p>
+    </div>
+    <div class="row" style="gap:10px; flex-wrap:wrap; justify-content:center">
+<span class="pill">Zero new tools</span>
+      <span class="pill yellow">Privacy-first</span>
+      <span class="pill purple">Both sides notified</span>
+      <span class="pill teal">Network effects</span>
+    </div>
+  </div>
+</div>
+
+</div>
+
+<!-- Nav -->
+<div class="nav">
+  <button id="btn-prev">&#8592;</button>
+  <div class="dots" id="dots"></div>
+  <div class="slide-counter" id="counter">1 / 11</div>
+  <button id="btn-next">&#8594;</button>
+</div>
+<div class="kb-hint">← → · click to advance</div>
+
+<script>
+  const slides = Array.from(document.querySelectorAll('.slide'));
+  const total  = slides.length;
+  let   cur    = 0;
+  const dotsEl    = document.getElementById('dots');
+  const counterEl = document.getElementById('counter');
+  const btnPrev   = document.getElementById('btn-prev');
+  const btnNext   = document.getElementById('btn-next');
+
+  slides.forEach((_, i) => {
+    const d = document.createElement('div');
+    d.className = 'dot' + (i === 0 ? ' active' : '');
+    d.addEventListener('click', () => go(i));
+    dotsEl.appendChild(d);
+  });
+
+  function go(idx) {
+    if (idx < 0 || idx >= total) return;
+    slides[cur].classList.remove('active');
+    slides[cur].classList.add('out');
+    const prev = cur; cur = idx;
+    setTimeout(() => slides[prev].classList.remove('out'), 400);
+    slides[cur].classList.add('active');
+    document.querySelectorAll('.dot').forEach((d, i) => d.classList.toggle('active', i === cur));
+    counterEl.textContent = `${cur + 1} / ${total}`;
+    btnPrev.disabled = cur === 0;
+    btnNext.disabled = cur === total - 1;
+  }
+
+  btnPrev.addEventListener('click', () => go(cur - 1));
+  btnNext.addEventListener('click', () => go(cur + 1));
+  btnPrev.disabled = true;
+
+  document.addEventListener('keydown', e => {
+    if (e.key==='ArrowRight'||e.key==='ArrowDown'||e.key===' '){ e.preventDefault(); go(cur+1); }
+    if (e.key==='ArrowLeft' ||e.key==='ArrowUp')               { e.preventDefault(); go(cur-1); }
+  });
+  document.getElementById('deck').addEventListener('click', e => { if (!e.target.closest('.nav')) go(cur+1); });
+</script>
+</body>
+</html>
