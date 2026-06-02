@@ -134,7 +134,8 @@ public partial class MetricsController
                             : IsBackendDeveloperRole(roleName) || (ContainsDeveloper(roleName) && !IsFrontendDeveloperRole(roleName));
                         var singleFsPrompts = await BuildGapAnalysisPromptsForTrackAsync(
                             boardId, board, student.Id, request.SprintNumber, fsLabelsTest[0], roleDesc, roleName,
-                            isBackend: backendFirstFsTest, includeCustomerContext, cancellationToken);
+                            isBackend: backendFirstFsTest, includeCustomerContext, cancellationToken,
+                            includeBothRepos: gaCheckBackendTest && gaCheckFrontendTest);
                         return Ok(new
                         {
                             success = true,
@@ -251,13 +252,15 @@ public partial class MetricsController
                 var fsLabels = await _trelloService.ResolveSprintLabelsAsync(boardId, request.SprintNumber, roleLabel);
                 if (fsLabels.Length == 1)
                 {
-                    // Board has a Full Stack card — single track analysis; CardId determines which repo
+                    // Board has a Full Stack card — single track analysis; CardId determines which repo.
+                    // When no CardId scopes to a single repo, include both backend and frontend GitHub sections.
                     var backendFirstFs = gaCheckBackend && !gaCheckFrontend ? true
                         : !gaCheckBackend && gaCheckFrontend ? false
                         : IsBackendDeveloperRole(roleName) || (ContainsDeveloper(roleName) && !IsFrontendDeveloperRole(roleName));
                     var fsTrackResult = await RunGapAnalysisForTrackAsync(
                         boardId, board, student.Id, request.SprintNumber, fsLabels[0], roleDesc, roleName,
-                        isBackend: backendFirstFs, includeCustomerContext, cancellationToken);
+                        isBackend: backendFirstFs, includeCustomerContext, cancellationToken,
+                        includeBothRepos: gaCheckBackend && gaCheckFrontend);
 
                     if (!fsTrackResult.ParsedOk)
                     {
@@ -440,10 +443,11 @@ public partial class MetricsController
         string originalRoleName,
         bool isBackend,
         bool includeCustomerContext,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool includeBothRepos = false)
     {
         var contextMd = await BuildGapAnalysisContextAsync(boardId, board, studentId, sprintNumber, trelloRoleLabel, originalRoleName, includeCustomerContext, cancellationToken);
-        var artifactsMd = await BuildGapAnalysisArtifactsAsync(boardId, board, studentId, sprintNumber, trelloRoleLabel, originalRoleName, isBackend, cancellationToken);
+        var artifactsMd = await BuildGapAnalysisArtifactsAsync(boardId, board, studentId, sprintNumber, trelloRoleLabel, originalRoleName, isBackend, cancellationToken, includeBothRepos);
 
         var systemTemplate = LoadGapAnalysisSystemPrompt();
         var systemPrompt = systemTemplate.Replace("{{ROLE_DESCRIPTION}}", expertRoleDescription, StringComparison.Ordinal);
@@ -476,10 +480,11 @@ public partial class MetricsController
         string originalRoleName,
         bool isBackend,
         bool includeCustomerContext,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool includeBothRepos = false)
     {
         var prompts = await BuildGapAnalysisPromptsForTrackAsync(
-            boardId, board, studentId, sprintNumber, trelloRoleLabel, expertRoleDescription, originalRoleName, isBackend, includeCustomerContext, cancellationToken);
+            boardId, board, studentId, sprintNumber, trelloRoleLabel, expertRoleDescription, originalRoleName, isBackend, includeCustomerContext, cancellationToken, includeBothRepos);
         var systemPrompt = prompts.SystemPrompt;
         var userPrompt = prompts.UserPrompt;
 
@@ -813,7 +818,8 @@ public partial class MetricsController
         string trelloRoleLabel,
         string originalRoleName,
         bool isBackend,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool includeBothRepos = false)
     {
         var sb = new StringBuilder();
         var ghToken = _configuration["GitHub:AccessToken"];
@@ -842,6 +848,8 @@ public partial class MetricsController
                     if (stu?.RoleIndex > 0) roleIndex = stu.RoleIndex;
                 }
                 await AppendGitHubDeveloperArtifactsAsync(sb, boardId, board, sprintNumber, trelloRoleLabel, isBackend, ghToken, cancellationToken, roleIndex);
+                if (includeBothRepos)
+                    await AppendGitHubDeveloperArtifactsAsync(sb, boardId, board, sprintNumber, trelloRoleLabel, !isBackend, ghToken, cancellationToken, roleIndex);
             }
         }
 
