@@ -1099,17 +1099,36 @@ public class StudentsController : ControllerBase
                             projectIds.Contains(t.InstituteProjectId.Value))
                 .ToListAsync();
 
-            var squadRoles = templates
+            var distinctSquadRoles = templates
                 .Where(t => t.Squad != null)
                 .SelectMany(t => t.Squad!.Roles.Where(r => r.IsActive))
                 .GroupBy(r => r.Name, StringComparer.OrdinalIgnoreCase)
                 .Select(g => g.First())
                 .OrderBy(r => r.Name)
-                .Select(r => new { id = r.Id, name = r.Name, type = r.Type })
                 .ToList();
 
-            if (squadRoles.Any())
-                return Ok(new { source = "squad", roles = (object)squadRoles });
+            if (distinctSquadRoles.Any())
+            {
+                // Map to global Role IDs by name — StudentRole.RoleId must reference Roles.Id.
+                // TryBuildSquadTeam also matches by name, so this is required for team building.
+                var squadRoleNames = distinctSquadRoles.Select(r => r.Name).ToList();
+                var globalRoles = await _context.Roles
+                    .Where(r => squadRoleNames.Contains(r.Name))
+                    .ToListAsync();
+
+                var squadRoles = distinctSquadRoles
+                    .Select(sr =>
+                    {
+                        var global = globalRoles.FirstOrDefault(r =>
+                            string.Equals(r.Name, sr.Name, StringComparison.OrdinalIgnoreCase));
+                        return global == null ? null : new { id = global.Id, name = global.Name, type = sr.Type };
+                    })
+                    .Where(r => r != null)
+                    .ToList();
+
+                if (squadRoles.Any())
+                    return Ok(new { source = "squad", roles = (object)squadRoles });
+            }
 
             // Fallback: no active template with a squad → return global roles
             var defaultRoles = await _context.Roles
