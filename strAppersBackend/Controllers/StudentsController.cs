@@ -1073,6 +1073,60 @@ public class StudentsController : ControllerBase
     }
 
     /// <summary>
+    /// Returns roles for the dropdown based on an institute coupon.
+    /// Resolves: coupon → InstituteProjects → active InstituteTemplate (with SquadId) → InstituteSquadRoles.
+    /// Falls back to the global Roles table when no active template with a SquadId is found.
+    /// </summary>
+    [HttpGet("use/institute/roles-by-coupon/{coupon}")]
+    public async Task<ActionResult> GetRolesByCoupon(string coupon)
+    {
+        try
+        {
+            var projects = await _context.InstituteProjects
+                .Where(p => p.Coupon == coupon)
+                .ToListAsync();
+
+            if (!projects.Any())
+                return BadRequest($"Coupon '{coupon}' is not valid.");
+
+            var projectIds = projects.Select(p => p.Id).ToList();
+
+            var templates = await _context.InstituteTemplates
+                .Include(t => t.Squad)
+                    .ThenInclude(s => s!.Roles)
+                .Where(t => t.IsActive &&
+                            t.InstituteProjectId != null &&
+                            projectIds.Contains(t.InstituteProjectId.Value))
+                .ToListAsync();
+
+            var squadRoles = templates
+                .Where(t => t.Squad != null)
+                .SelectMany(t => t.Squad!.Roles.Where(r => r.IsActive))
+                .GroupBy(r => r.Name, StringComparer.OrdinalIgnoreCase)
+                .Select(g => g.First())
+                .OrderBy(r => r.Name)
+                .Select(r => new { id = r.Id, name = r.Name, type = r.Type })
+                .ToList();
+
+            if (squadRoles.Any())
+                return Ok(new { source = "squad", roles = (object)squadRoles });
+
+            // Fallback: no active template with a squad → return global roles
+            var defaultRoles = await _context.Roles
+                .OrderBy(r => r.Name)
+                .Select(r => new { id = r.Id, name = r.Name, type = r.Type })
+                .ToListAsync();
+
+            return Ok(new { source = "default", roles = (object)defaultRoles });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error retrieving roles for coupon {Coupon}", coupon);
+            return StatusCode(500, "An error occurred while retrieving roles for the coupon.");
+        }
+    }
+
+    /// <summary>
     /// Suspend a student (set IsAvailable to false)
     /// </summary>
     [HttpPost("use/suspend/{id}")]
