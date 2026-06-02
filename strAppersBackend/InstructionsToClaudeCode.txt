@@ -1,0 +1,24 @@
+I would like you to re-work on the endpoint POST/api/Courses/use/build
+
+Instructions: 
+You can change this endpoint or add any helpers but don’t change existing methods without asking me first.
+You can write the prompts insider Prompts/Courses (instead of current hardcoded)
+
+
+The goal is to create a template which this method will use to generate a course. You can find the reference 5 courses under Courses folder, all have same structure (Trello boards). First, you need to analyze them and find all the patterns to help with understanding the template. The analysis should produce the correct prompt engineering to be used by the method. The goal is to produce a course which has the same structure but can be generated for different projects (e.g. designs), and different skillsets. In the given courses you will find 10 Trello lists: 8 sprints + Bugs + UserStories. The Bugs and User Stories should stay empty (will be used by user after course is created). Note, that at first (Only to realize you can produce a good template) we will use a fixed number of sprints (8 sprints). Also, we will use fixed number of Modules (5 modules). Later on we see how we can extend the number of sprints and number of modules as part as the input params. Also, at the moment the method accepts a single role. Later, we will extend it to a squad (multiple roles doing the course).  Just few things you should note:
+1.	The CSV folder has some relevant data from the DB
+2.	the ONLY relevant projects in the CSV are ProjectId (86, 87, 88, 89, 90) 
+3.	You should ignore the following custom fields (on the Trello cards): Priority, Status, Risk, Dependencies, Branched, Effort , SprintNumber, BranchContext -> Not in use!
+4.	You should always note the ModuleId – this is the link between the design and the tasks/requirements. Not every card has a moduleId. The cards without moduleId are usually for first/last sprints.
+5.	You can find data in the CSV files which I downloaded from the DB – this will help you understanding the context of the Trello course data against the Modules & Roles data. 
+6.	Note that some times other roles in the squad are mentioned in the card description/tasks checklist. This should be part of the template (the squad can be formed of different roles but the template should dictate the referencing of another role in order to maintain a cross-functional / multi-role course. For example, one course can have a card of a backend developer mentioning a task of synching with the Product Manager. Another course can have the same backend developer card but mentioning a “Project Manager” role (since the squad has a Project Manager). In this example, both Product Manager and Project Manager will be of the same Type (Roles.Type) – which give them the leadership role in the squad. These properties are given as part of the input param
+7.	 Note of a relevant properties from the Roles or InstituteRoles table such as Type, SkillId, CustomerEngagement. I gave you some CSV data so you have a visibility about it:
+8.	A Role “Type” has different elements, but the one important for the template is the Leadership. See RoleType table (Id, Description):
+9.	SkillId is about the main tool they are using (they have api from our platform). Currently the platform includes these tools(see Skills table in CSV), however more tools might be used in the future. 
+10.	Ignore the Roles.Description or Roles.Category (or same with InstituteRoles.Description and InstituteRoles.Category) – have no contextual meaning.
+11.	Pedagogical Requirements: can be found in InstituteRoles.Competencies (at the moment I only included one for the BE developer, just as an example). This is important part – it will be included in the input params so the LLM will know what missions to include in the course per each role!).
+12.	Generally keep this “vibe” of the course – we worked on it a lot with human PM, UI/UX, Marketing, and Full stack developer (myself) so we built this kind of course which aligns with the designs you can find in the CSV . The goal is to generate this type of course with input of: Project/ProjectMoudules design, Squad (Roles with all their properties), Pedagogical Requirements , sprint length (so it will know how to load balance the tasks….
+13.	As I mentioned, for now lets start with a fixed 8 weeks course (8 sprints, sprint is one week for our first try, to keep it simple). So the template can match our existing courses. 
+14.	My final goal: to let any institute/bootcamp generating their own PBL course and use my platform
+
+If anything is unclear – ask me! Don’t assume.

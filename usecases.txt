@@ -1,0 +1,14 @@
+ another issue. I look at this task which was generated ( as a checklist item): 
+‘Architectural Foundation: Review the project requirements and draft a high-level architecture diagram that outlines the key components of the CareLink
+  Platform”
+Here are the rules regarding the requirements from the design:
+Usecase1: Squad mode, with at least one role with Customer Engagement flag + Trello as the main tool (SkillId) . 
+Usecase1 outcome: LLM Course Builder must make sure: A task (checklist item) assigned to the above role, for writing a User Story per sprint based on the information received from the AI Customer, using the Trello board.
+Usecase2: Squad mode, with at least one role with Customer Engagement flag and NO Trello as the main tool . 
+Usecase2 outcome: LLM Course Builder must make sure: A task (checklist item) assigned to the above role, for writing a PRD/User Story document for each sprint based on the information received from the AI Customer.
+Usecase3: Squad mode OR Role mode, No Customer Engagement assigned to anyone.
+Usecase3 outcome: LLM Course Builder should assume that the requirements are available to all participants. This template should be tagged with “VisableDesign” flag which will make a System Design be available to all in the squad room (perhaps require a flag in the ProjectBoard table upon board creation – lets leave this for now, just remember we should address this).
+Usecase4: Role mode, with Customer Engagement flag. 
+Usecase4 outcome: LLM Course Builder must make sure each sprint includes at least one task, per student, to get the module requirements from the AI customer and upload a document (PRD/User Story) using the Squad room Resources panel.
+
+The usecases should be identified by platfom (NOT LLM), and change user prompts accordingly. 

@@ -1,0 +1,11 @@
+So here is what I want: 
+1.	Git pull all the latest source code to C:\ClaudeCode\StrAppers (so 2 repos: backend (StrAppers) and frontend (skill-in-Frontend) )
+2.	Here is a new repo, under same account: https://github.com/oferlav/academiabridge-hub
+3.	I would like to replace my landing page:
+a.	Keep old ones- don’t override anything!
+b.	I would like to have the exact landing page of the academiabridge-hub repo with some things to change:
+i.	Remove the Hebrew tab (also remove the EN tab)
+ii.	“Book a demo call” will use same functionality of the current “Get a demo” button you can find in LandingNew/BootcampsTrainingCenters
+iii.	Remove the LinkedIn link at the bottom
+iv.	Privacy Policy/Terms of Use/Cookie settings – copy same functionality from the current 
+v.	Add a “Join a Squad” button, with same functionality of the source page , located on the right-top corner, instead of the language tab – this will take to the login (I have a google oauth redirect settings on my google, so I hope it will not be disturbed). But try to match the theme/style with this added button

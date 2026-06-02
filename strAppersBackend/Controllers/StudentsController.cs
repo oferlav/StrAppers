@@ -532,6 +532,24 @@ public class StudentsController : ControllerBase
                 _logger.LogInformation("Programming language {LanguageName} validated successfully", programmingLanguage.Name);
             }
 
+            // Validate institute coupon and resolve InstituteId
+            int? resolvedInstituteId = 1; // default institute
+            string? resolvedCoupon = null;
+            if (!string.IsNullOrWhiteSpace(request.InstituteCoupon))
+            {
+                _logger.LogInformation("Validating institute coupon: {Coupon}", request.InstituteCoupon);
+                var instituteProject = await _context.InstituteProjects
+                    .FirstOrDefaultAsync(p => p.Coupon == request.InstituteCoupon);
+                if (instituteProject == null)
+                {
+                    _logger.LogWarning("Institute coupon '{Coupon}' not found in InstituteProjects", request.InstituteCoupon);
+                    return BadRequest($"Institute coupon '{request.InstituteCoupon}' is not valid.");
+                }
+                resolvedInstituteId = instituteProject.InstituteId;
+                resolvedCoupon = request.InstituteCoupon;
+                _logger.LogInformation("Institute coupon validated, InstituteId={InstituteId}", instituteProject.InstituteId);
+            }
+
             // Hash password if provided
             string? passwordHash = null;
             if (!string.IsNullOrWhiteSpace(request.Password))
@@ -555,6 +573,8 @@ public class StudentsController : ControllerBase
                 GithubUser = request.GithubUser ?? string.Empty, // GitHub username (optional)
                 Photo = photo, // Base64 encoded image or URL (compressed if larger than 2 MB)
                 ProgrammingLanguageId = programmingLanguageId, // Programming language preference (null allowed)
+                InstituteId = resolvedInstituteId,
+                Coupon = resolvedCoupon,
                 ProjectId = null, // Default to null
                 IsAdmin = false, // Default to false
                 BoardId = null, // Default to null
@@ -894,6 +914,237 @@ public class StudentsController : ControllerBase
         }
     }
 
+    // ──────────────────────────────────────────────────────────────────────────
+    // Institute project allocation (InstitutePriority1-4). InstituteId=0/1 uses
+    // the original ProjectPriority endpoints above — these are institute-only.
+    // ──────────────────────────────────────────────────────────────────────────
+
+    [HttpPost("use/institute/allocate/{instituteProjectId}/{studentId}")]
+    public async Task<ActionResult> AllocateStudentToInstituteProject(int instituteProjectId, int studentId, [FromBody] AllocateStudentRequest request)
+    {
+        try
+        {
+            var student = await _context.Students.FindAsync(studentId);
+            if (student == null)
+                return NotFound($"Student with ID {studentId} not found.");
+
+            var project = await _context.InstituteProjects.FindAsync(instituteProjectId);
+            if (project == null)
+                return NotFound($"Institute project with ID {instituteProjectId} not found.");
+
+            if (!student.InstitutePriority1.HasValue || student.InstitutePriority1 == 0)
+                student.InstitutePriority1 = instituteProjectId;
+            else if (!student.InstitutePriority2.HasValue || student.InstitutePriority2 == 0)
+                student.InstitutePriority2 = instituteProjectId;
+            else if (!student.InstitutePriority3.HasValue || student.InstitutePriority3 == 0)
+                student.InstitutePriority3 = instituteProjectId;
+            else if (!student.InstitutePriority4.HasValue || student.InstitutePriority4 == 0)
+                student.InstitutePriority4 = instituteProjectId;
+            else
+                return BadRequest("Student already has all 4 institute project priorities set.");
+
+            if (student.Status is null or 0)
+            {
+                student.Status = 1;
+                student.StartPendingAt = DateTime.UtcNow;
+            }
+            student.UpdatedAt = DateTime.UtcNow;
+
+            await _context.SaveChangesAsync();
+
+            return Ok(new
+            {
+                Success = true,
+                Message = "Student added to institute project priority list.",
+                InstitutePriority1 = student.InstitutePriority1,
+                InstitutePriority2 = student.InstitutePriority2,
+                InstitutePriority3 = student.InstitutePriority3,
+                InstitutePriority4 = student.InstitutePriority4
+            });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error allocating student {StudentId} to institute project {ProjectId}", studentId, instituteProjectId);
+            return StatusCode(500, "An error occurred while processing the allocation.");
+        }
+    }
+
+    [HttpPost("use/institute/deallocate/{instituteProjectId}/{studentId}")]
+    public async Task<ActionResult> DeallocateStudentFromInstituteProject(int instituteProjectId, int studentId, [FromBody] DeallocateStudentRequest request)
+    {
+        try
+        {
+            var student = await _context.Students.FindAsync(studentId);
+            if (student == null)
+                return NotFound($"Student with ID {studentId} not found.");
+
+            bool isAllocated = student.InstitutePriority1 == instituteProjectId ||
+                               student.InstitutePriority2 == instituteProjectId ||
+                               student.InstitutePriority3 == instituteProjectId ||
+                               student.InstitutePriority4 == instituteProjectId;
+
+            if (!isAllocated)
+                return BadRequest("Student is not allocated to this institute project.");
+
+            if (student.InstitutePriority1 == instituteProjectId) student.InstitutePriority1 = null;
+            if (student.InstitutePriority2 == instituteProjectId) student.InstitutePriority2 = null;
+            if (student.InstitutePriority3 == instituteProjectId) student.InstitutePriority3 = null;
+            if (student.InstitutePriority4 == instituteProjectId) student.InstitutePriority4 = null;
+
+            student.UpdatedAt = DateTime.UtcNow;
+            await _context.SaveChangesAsync();
+
+            return Ok(new { Success = true, Message = "Student removed from institute project priority list." });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error deallocating student {StudentId} from institute project {ProjectId}", studentId, instituteProjectId);
+            return StatusCode(500, "An error occurred while processing the deallocation.");
+        }
+    }
+
+    [HttpGet("use/institute/allocated-projects/{email}")]
+    public async Task<ActionResult> GetAllocatedInstituteProjects(string email)
+    {
+        try
+        {
+            var student = await _context.Students.FirstOrDefaultAsync(s => s.Email == email);
+            if (student == null)
+                return NotFound($"Student with email {email} not found.");
+
+            var projectIds = new List<int>();
+            if (student.InstitutePriority1.HasValue && student.InstitutePriority1.Value > 0) projectIds.Add(student.InstitutePriority1.Value);
+            if (student.InstitutePriority2.HasValue && student.InstitutePriority2.Value > 0) projectIds.Add(student.InstitutePriority2.Value);
+            if (student.InstitutePriority3.HasValue && student.InstitutePriority3.Value > 0) projectIds.Add(student.InstitutePriority3.Value);
+            if (student.InstitutePriority4.HasValue && student.InstitutePriority4.Value > 0) projectIds.Add(student.InstitutePriority4.Value);
+
+            if (projectIds.Count == 0)
+                return Ok(new List<object>());
+
+            projectIds = projectIds.Distinct().ToList();
+
+            var projects = await _context.InstituteProjects
+                .Where(p => projectIds.Contains(p.Id))
+                .Select(p => new
+                {
+                    p.Id,
+                    p.Title,
+                    p.Description,
+                    p.ExtendedDescription,
+                    p.Priority,
+                    p.IsAvailable,
+                    p.CreatedAt,
+                    p.UpdatedAt
+                })
+                .ToListAsync();
+
+            return Ok(projects);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error retrieving allocated institute projects for {Email}", email);
+            return StatusCode(500, "An error occurred while retrieving allocated institute projects.");
+        }
+    }
+
+    [HttpGet("use/institute/is-allocatable/{instituteProjectId}/{studentId}")]
+    public async Task<ActionResult<object>> IsStudentInstituteAllocatable(int instituteProjectId, int studentId)
+    {
+        try
+        {
+            var student = await _context.Students.FindAsync(studentId);
+            if (student == null)
+                return NotFound($"Student with ID {studentId} not found.");
+
+            var project = await _context.InstituteProjects.FindAsync(instituteProjectId);
+            if (project == null)
+                return NotFound($"Institute project with ID {instituteProjectId} not found.");
+
+            if (!project.IsAvailable)
+                return Ok(new { isAllocatable = false, message = "This institute project is not currently available." });
+
+            return Ok(new { isAllocatable = true, message = "Allocation is allowed." });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error checking allocatability for student {StudentId} / institute project {ProjectId}", studentId, instituteProjectId);
+            return StatusCode(500, "An error occurred while checking allocation feasibility.");
+        }
+    }
+
+    /// <summary>
+    /// Returns roles for the dropdown based on an institute coupon.
+    /// Resolves: coupon → InstituteProjects → active InstituteTemplate (with SquadId) → InstituteSquadRoles.
+    /// Falls back to the global Roles table when no active template with a SquadId is found.
+    /// </summary>
+    [HttpGet("use/institute/roles-by-coupon/{coupon}")]
+    public async Task<ActionResult> GetRolesByCoupon(string coupon)
+    {
+        try
+        {
+            var projects = await _context.InstituteProjects
+                .Where(p => p.Coupon == coupon)
+                .ToListAsync();
+
+            if (!projects.Any())
+                return BadRequest($"Coupon '{coupon}' is not valid.");
+
+            var projectIds = projects.Select(p => p.Id).ToList();
+
+            var templates = await _context.InstituteTemplates
+                .Include(t => t.Squad)
+                    .ThenInclude(s => s!.Roles)
+                .Where(t => t.IsActive &&
+                            t.InstituteProjectId != null &&
+                            projectIds.Contains(t.InstituteProjectId.Value))
+                .ToListAsync();
+
+            var distinctSquadRoles = templates
+                .Where(t => t.Squad != null)
+                .SelectMany(t => t.Squad!.Roles.Where(r => r.IsActive))
+                .GroupBy(r => r.Name, StringComparer.OrdinalIgnoreCase)
+                .Select(g => g.First())
+                .OrderBy(r => r.Name)
+                .ToList();
+
+            if (distinctSquadRoles.Any())
+            {
+                // Map to global Role IDs by name — StudentRole.RoleId must reference Roles.Id.
+                // TryBuildSquadTeam also matches by name, so this is required for team building.
+                var squadRoleNames = distinctSquadRoles.Select(r => r.Name).ToList();
+                var globalRoles = await _context.Roles
+                    .Where(r => squadRoleNames.Contains(r.Name))
+                    .ToListAsync();
+
+                var squadRoles = distinctSquadRoles
+                    .Select(sr =>
+                    {
+                        var global = globalRoles.FirstOrDefault(r =>
+                            string.Equals(r.Name, sr.Name, StringComparison.OrdinalIgnoreCase));
+                        return global == null ? null : new { id = global.Id, name = global.Name, type = sr.Type };
+                    })
+                    .Where(r => r != null)
+                    .ToList();
+
+                if (squadRoles.Any())
+                    return Ok(new { source = "squad", roles = (object)squadRoles });
+            }
+
+            // Fallback: no active template with a squad → return global roles
+            var defaultRoles = await _context.Roles
+                .OrderBy(r => r.Name)
+                .Select(r => new { id = r.Id, name = r.Name, type = r.Type })
+                .ToListAsync();
+
+            return Ok(new { source = "default", roles = (object)defaultRoles });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error retrieving roles for coupon {Coupon}", coupon);
+            return StatusCode(500, "An error occurred while retrieving roles for the coupon.");
+        }
+    }
+
     /// <summary>
     /// Suspend a student (set IsAvailable to false)
     /// </summary>
@@ -1214,7 +1465,9 @@ public class StudentsController : ControllerBase
                 NextMeetingUrl = student.NextMeetingUrl,
                 B2c = student.B2c,
                 RoleIndex = student.RoleIndex,
-                IsSingleRole = student.ProjectBoard?.IsSingleRole ?? false
+                IsSingleRole = student.ProjectBoard?.IsSingleRole ?? false,
+                InstituteId = student.InstituteId,
+                Coupon = student.Coupon
             });
         }
         catch (Exception ex)

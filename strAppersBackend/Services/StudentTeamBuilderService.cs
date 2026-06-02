@@ -329,6 +329,12 @@ namespace strAppersBackend.Services
             return (null, false);
         }
 
+        internal List<Student>? TestTryBuildSquadTeam(
+            List<Student> candidates,
+            InstituteTemplate template,
+            int instituteId,
+            int ipId) { var s = 0; return TryBuildSquadTeam(candidates, template, instituteId, ipId, ref s); }
+
         private List<Student>? TryBuildSquadTeam(
             List<Student> candidates,
             InstituteTemplate template,
@@ -345,11 +351,14 @@ namespace strAppersBackend.Services
                 return null;
             }
 
-            var requiredRoles = template.Squad.Roles.Where(r => r.IsActive).ToList();
+            var activeRoles = template.Squad.Roles.Where(r => r.IsActive).ToList();
             var team = new List<Student>();
             var available = candidates.ToList();
 
-            foreach (var squadRole in requiredRoles)
+            // ── Type=3 (Required) and Type=4 (Leadership) ─────────────────
+            // Both are mandatory: team cannot form without a matching candidate.
+            var mandatoryRoles = activeRoles.Where(r => r.Type == 3 || r.Type == 4).ToList();
+            foreach (var squadRole in mandatoryRoles)
             {
                 var matched = available.FirstOrDefault(s =>
                     s.StudentRoles.Any(sr =>
@@ -360,17 +369,110 @@ namespace strAppersBackend.Services
                 if (matched == null)
                 {
                     _logger.LogInformation(
-                        "[INSTITUTE-TEAM-BUILDER] Institute {II}, IpId {IpId}: no student for squad role '{Role}', skipping.",
-                        instituteId, ipId, squadRole.Name);
+                        "[INSTITUTE-TEAM-BUILDER] Institute {II}, IpId {IpId}: no candidate for mandatory squad role '{Role}' (Type={Type}), skipping.",
+                        instituteId, ipId, squadRole.Name, squadRole.Type);
                     skipped++;
                     return null;
                 }
 
                 team.Add(matched);
                 available.Remove(matched);
+                _logger.LogInformation(
+                    "[INSTITUTE-TEAM-BUILDER] Institute {II}, IpId {IpId}: matched mandatory role '{Role}' (Type={Type}) → student {StudentId}.",
+                    instituteId, ipId, squadRole.Name, squadRole.Type, matched.Id);
             }
 
-            return team;
+            // ── Type=1/2 (Bundle / developer) ─────────────────────────────
+            // Only enforced when InstituteSquad.RequireDeveloperRule is true.
+            // Rule: Type=1 (full-stack) >= 1  OR  Type=2 (FE+BE bundle) >= 2
+            var bundleRoles = activeRoles.Where(r => r.Type == 1 || r.Type == 2).ToList();
+            if (bundleRoles.Any())
+            {
+                if (template.Squad.RequireDeveloperRule)
+                {
+                    var matchedBundle = new List<Student>();
+                    foreach (var squadRole in bundleRoles)
+                    {
+                        var matched = available.FirstOrDefault(s =>
+                            s.StudentRoles.Any(sr =>
+                                sr.IsActive &&
+                                sr.Role != null &&
+                                string.Equals(sr.Role.Name, squadRole.Name, StringComparison.OrdinalIgnoreCase)));
+
+                        if (matched != null)
+                        {
+                            matchedBundle.Add(matched);
+                            available.Remove(matched);
+                        }
+                    }
+
+                    var fullStackCount = matchedBundle.Count(s =>
+                        s.StudentRoles.Any(sr => sr.IsActive && sr.Role != null &&
+                            activeRoles.Any(r => r.Type == 1 && string.Equals(r.Name, sr.Role.Name, StringComparison.OrdinalIgnoreCase))));
+                    var bundleCount = matchedBundle.Count(s =>
+                        s.StudentRoles.Any(sr => sr.IsActive && sr.Role != null &&
+                            activeRoles.Any(r => r.Type == 2 && string.Equals(r.Name, sr.Role.Name, StringComparison.OrdinalIgnoreCase))));
+
+                    var developerRuleMet = fullStackCount >= 1 || bundleCount >= 2;
+                    if (!developerRuleMet)
+                    {
+                        _logger.LogInformation(
+                            "[INSTITUTE-TEAM-BUILDER] Institute {II}, IpId {IpId}: developer rule not met (FullStack={FS}, Bundle={B}), skipping.",
+                            instituteId, ipId, fullStackCount, bundleCount);
+                        skipped++;
+                        return null;
+                    }
+
+                    team.AddRange(matchedBundle);
+                    _logger.LogInformation(
+                        "[INSTITUTE-TEAM-BUILDER] Institute {II}, IpId {IpId}: developer rule met (FullStack={FS}, Bundle={B}).",
+                        instituteId, ipId, fullStackCount, bundleCount);
+                }
+                else
+                {
+                    // RequireDeveloperRule=false: bundle roles are optional — add matched, skip unmatched
+                    foreach (var squadRole in bundleRoles)
+                    {
+                        var matched = available.FirstOrDefault(s =>
+                            s.StudentRoles.Any(sr =>
+                                sr.IsActive &&
+                                sr.Role != null &&
+                                string.Equals(sr.Role.Name, squadRole.Name, StringComparison.OrdinalIgnoreCase)));
+
+                        if (matched != null)
+                        {
+                            team.Add(matched);
+                            available.Remove(matched);
+                        }
+                    }
+                }
+            }
+
+            // ── Type=0 (Default) ───────────────────────────────────────────
+            // Optional: add matched candidates, silently skip unmatched.
+            var optionalRoles = activeRoles.Where(r => r.Type == 0).ToList();
+            foreach (var squadRole in optionalRoles)
+            {
+                var matched = available.FirstOrDefault(s =>
+                    s.StudentRoles.Any(sr =>
+                        sr.IsActive &&
+                        sr.Role != null &&
+                        string.Equals(sr.Role.Name, squadRole.Name, StringComparison.OrdinalIgnoreCase)));
+
+                if (matched != null)
+                {
+                    team.Add(matched);
+                    available.Remove(matched);
+                }
+                else
+                {
+                    _logger.LogInformation(
+                        "[INSTITUTE-TEAM-BUILDER] Institute {II}, IpId {IpId}: no candidate for optional role '{Role}' (Type=0), continuing.",
+                        instituteId, ipId, squadRole.Name);
+                }
+            }
+
+            return team.Count > 0 ? team : null;
         }
 
         private async Task<(bool Success, string? Error)> CallCreateBoardAsync(

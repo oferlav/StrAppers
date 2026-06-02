@@ -1,0 +1,525 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Skill-in | Design Partnership</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+  background: #0f1623;
+  overflow: hidden;
+  height: 100vh;
+}
+
+#deck { width: 100vw; height: 100vh; position: relative; }
+
+.slide {
+  position: absolute; inset: 0;
+  display: none;
+  padding: 64px 88px 80px;
+  flex-direction: column;
+  justify-content: center;
+}
+.slide.active { display: flex; }
+
+.bg-dark  { background: #1a2235; }
+.bg-grad  { background: linear-gradient(145deg, #1a2235 0%, #1e2d47 100%); }
+.bg-light { background: #F7F9FC; }
+
+.logo-sm {
+  position: absolute; top: 26px; left: 42px;
+  height: 24px; width: auto; opacity: 0.75;
+}
+
+.label {
+  font-size: 11px; font-weight: 700; letter-spacing: 2.2px;
+  text-transform: uppercase; margin-bottom: 14px; opacity: 0.38;
+}
+.slide-dark .label  { color: #fff; }
+.slide-light .label { color: #1a2235; }
+
+h1 { font-size: 56px; font-weight: 800; line-height: 1.06; letter-spacing: -1.8px; }
+h2 { font-size: 40px; font-weight: 800; line-height: 1.1;  letter-spacing: -1px; }
+
+.slide-dark  h1, .slide-dark  h2 { color: #fff; }
+.slide-light h1, .slide-light h2 { color: #1a2235; }
+
+.lead { font-size: 18px; line-height: 1.7; margin-top: 18px; max-width: 620px; }
+.slide-dark  .lead { color: rgba(255,255,255,0.58); }
+.slide-light .lead { color: #4B5563; }
+
+.accent { color: #60A5FA; }
+.slide-light .accent { color: #2563EB; }
+
+.divider { width: 44px; height: 3px; background: #3B82F6; border-radius: 2px; margin: 22px 0; }
+
+.clist { list-style: none; margin-top: 26px; display: flex; flex-direction: column; gap: 15px; }
+.clist li { font-size: 17px; line-height: 1.55; padding-left: 34px; position: relative; }
+.clist li::before { content: '\2713'; position: absolute; left: 0; font-weight: 800; font-size: 14px; }
+.slide-dark  .clist li { color: rgba(255,255,255,0.82); }
+.slide-dark  .clist li::before { color: #34D399; }
+.slide-light .clist li { color: #374151; }
+.slide-light .clist li::before { color: #059669; }
+
+.blist { list-style: none; margin-top: 24px; display: flex; flex-direction: column; gap: 13px; }
+.blist li { font-size: 16.5px; line-height: 1.55; padding-left: 22px; position: relative; }
+.blist li::before { content: '\00b7'; position: absolute; left: 0; font-size: 22px; line-height: 1.2; opacity: 0.4; }
+.slide-dark  .blist li { color: rgba(255,255,255,0.78); }
+.slide-light .blist li { color: #374151; }
+
+.hbox { border-radius: 12px; padding: 17px 22px; font-size: 15.5px; line-height: 1.65; margin-top: 26px; }
+.slide-dark  .hbox { background: rgba(59,130,246,0.1); border: 1px solid rgba(59,130,246,0.22); color: rgba(255,255,255,0.85); }
+.slide-light .hbox { background: #EFF6FF; border: 1px solid #BFDBFE; color: #1E3A8A; }
+
+/* Workflow */
+.workflow { display: flex; align-items: stretch; gap: 0; margin-top: 44px; }
+
+.wstep { flex: 1; display: flex; flex-direction: column; align-items: center; text-align: center; position: relative; }
+
+.warrow { display: flex; align-items: flex-start; padding: 0 4px; flex-shrink: 0; padding-top: 30px; }
+.warrow svg { opacity: 0.3; }
+
+.wicon {
+  width: 64px; height: 64px; border-radius: 16px;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 24px; margin-bottom: 14px; flex-shrink: 0;
+}
+.wicon-tools  { background: rgba(255,255,255,0.07); border: 1px solid rgba(255,255,255,0.12); }
+.wicon-plat   { background: rgba(59,130,246,0.15);  border: 1px solid rgba(59,130,246,0.3); }
+.wicon-skill  { background: rgba(52,211,153,0.12);  border: 1px solid rgba(52,211,153,0.3); }
+.wicon-match  { background: rgba(167,139,250,0.12); border: 1px solid rgba(167,139,250,0.3); }
+
+.wstep-title { font-size: 16px; font-weight: 700; color: #fff; margin-bottom: 8px; }
+.wstep-sub   { font-size: 13px; color: rgba(255,255,255,0.48); line-height: 1.5; max-width: 130px; }
+
+.skill-badge {
+  display: inline-block;
+  background: rgba(52,211,153,0.15); border: 1px solid rgba(52,211,153,0.4);
+  color: #34D399; font-size: 11px; font-weight: 700; letter-spacing: 0.8px;
+  text-transform: uppercase; padding: 3px 10px; border-radius: 100px;
+  margin-bottom: 10px;
+}
+
+/* Benefit cards */
+.bcards { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 32px; }
+.bcard { border-radius: 14px; padding: 22px 22px; background: #fff; border: 1px solid #E2E8F0; box-shadow: 0 2px 10px rgba(0,0,0,0.05); }
+.bcard-num   { font-size: 11px; font-weight: 700; letter-spacing: 1px; text-transform: uppercase; color: #2563EB; margin-bottom: 8px; }
+.bcard-title { font-size: 17px; font-weight: 700; color: #1a2235; margin-bottom: 7px; }
+.bcard-desc  { font-size: 14px; line-height: 1.6; color: #6B7280; }
+
+/* Privacy */
+.pgrid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 14px; margin-top: 30px; }
+.pbox { background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.09); border-radius: 12px; padding: 20px 18px; }
+.pbox-icon  { font-size: 20px; margin-bottom: 10px; }
+.pbox-title { font-size: 13px; font-weight: 700; color: #34D399; margin-bottom: 6px; }
+.pbox p     { font-size: 13.5px; line-height: 1.6; color: rgba(255,255,255,0.58); }
+
+/* Timeline */
+.trows { display: flex; flex-direction: column; gap: 0; margin-top: 32px; }
+.trow  { display: flex; align-items: stretch; gap: 0; }
+.trow-left { width: 110px; flex-shrink: 0; display: flex; flex-direction: column; align-items: center; }
+.trow-week { font-size: 11px; font-weight: 700; letter-spacing: 1px; text-transform: uppercase; color: rgba(255,255,255,0.35); margin-bottom: 6px; white-space: nowrap; }
+.trow-dot  { width: 14px; height: 14px; border-radius: 50%; background: #3B82F6; flex-shrink: 0; position: relative; z-index: 1; }
+.trow-dot.green { background: #34D399; }
+.trow-line { width: 2px; flex: 1; background: rgba(255,255,255,0.1); margin-top: 4px; }
+.trow:last-child .trow-line { background: transparent; }
+.trow-right { flex: 1; padding: 0 0 24px 20px; }
+.trow-title { font-size: 17px; font-weight: 700; color: #fff; margin-bottom: 5px; }
+.trow-desc  { font-size: 14px; color: rgba(255,255,255,0.52); line-height: 1.55; }
+.trow-you  { display: inline-block; margin-top: 7px; font-size: 11px; font-weight: 700; letter-spacing: 0.8px; text-transform: uppercase; color: #60A5FA; background: rgba(59,130,246,0.12); border: 1px solid rgba(59,130,246,0.25); border-radius: 100px; padding: 2px 9px; }
+.trow-auto { display: inline-block; margin-top: 7px; font-size: 11px; font-weight: 700; letter-spacing: 0.8px; text-transform: uppercase; color: rgba(255,255,255,0.3); background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1); border-radius: 100px; padding: 2px 9px; }
+
+/* Code */
+.code-block { background: #0f1623; border-radius: 12px; padding: 20px 22px; font-family: 'Courier New', Consolas, monospace; font-size: 12.5px; line-height: 1.75; border: 1px solid rgba(255,255,255,0.07); }
+.ck { color: #34D399; } .cv { color: #FCD34D; } .cb { color: #60A5FA; }
+
+.two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 40px; margin-top: 28px; align-items: start; }
+
+/* Apples-to-apples framework */
+.dcard { background: #fff; border: 1px solid #E2E8F0; border-radius: 12px; padding: 16px 14px; text-align: center; box-shadow: 0 2px 8px rgba(0,0,0,0.04); }
+.dcard-icon { font-size: 20px; margin-bottom: 7px; }
+.dcard-title { font-size: 14px; font-weight: 700; color: #1a2235; margin-bottom: 4px; }
+.dcard-sub { font-size: 11.5px; color: #6B7280; line-height: 1.45; }
+.aa-box { border-radius: 12px; border: 1px solid; padding: 18px 20px; }
+
+/* Nav */
+#nav { position: fixed; bottom: 28px; right: 36px; display: flex; gap: 9px; z-index: 1000; }
+.nbtn { background: rgba(255,255,255,0.09); border: 1px solid rgba(255,255,255,0.13); color: rgba(255,255,255,0.85); width: 40px; height: 40px; border-radius: 9px; cursor: pointer; font-size: 16px; display: flex; align-items: center; justify-content: center; transition: background .15s; user-select: none; }
+.nbtn:hover:not(:disabled) { background: rgba(255,255,255,0.16); }
+.nbtn:disabled { opacity: 0.22; cursor: default; }
+#counter { position: fixed; bottom: 36px; left: 50%; transform: translateX(-50%); font-size: 12px; color: rgba(255,255,255,0.25); letter-spacing: 1.5px; z-index: 1000; }
+</style>
+</head>
+<body>
+<div id="deck">
+
+<!-- SLIDE 1: Cover -->
+<div class="slide slide-dark bg-grad active">
+  <img src="https://media.base44.com/images/public/6921e483433efbf322f60465/bb0d13df2_image.png"
+       alt="Skill-in" style="height:46px;width:auto;margin-bottom:52px;">
+  <p class="label">Design Partnership Proposal</p>
+  <h1>Hire by Skill,<br>not by CV.</h1>
+  <div class="divider"></div>
+  <p class="lead">A new standard for role-based hiring, where every position has a precise Skill definition and every candidate is matched against it with evidence.</p>
+</div>
+
+<!-- SLIDE 2: The Problem -->
+<div class="slide slide-light bg-light">
+  <img src="https://media.base44.com/images/public/6921e483433efbf322f60465/bb0d13df2_image.png" alt="Skill-in" class="logo-sm">
+  <p class="label">The challenge</p>
+  <h2>The problem isn't the interview.<br>It's who you invite to it.</h2>
+  <ul class="blist">
+    <li><strong>CVs</strong> tell you where someone worked, not whether they can actually do the job you need done.</li>
+    <li><strong>The real cost</strong> is the hours your team spends screening, meeting, and assessing people who weren't the right fit from the start.</li>
+    <li><strong>By the time you find out</strong> a candidate isn't skilled for your specific role, you've already invested weeks of your team's time.</li>
+  </ul>
+  <div class="hbox" style="margin-top:28px;">
+    Interviews and assessments are valuable, but only when you're already talking to the right people. <strong>That's exactly what Skill-in solves.</strong>
+  </div>
+</div>
+
+<!-- SLIDE 3: What is a Skill -->
+<div class="slide slide-dark bg-dark">
+  <img src="https://media.base44.com/images/public/6921e483433efbf322f60465/bb0d13df2_image.png" alt="Skill-in" class="logo-sm">
+  <p class="label">The concept</p>
+  <h2>Introducing the<br><span class="accent">Skill.</span></h2>
+  <div class="two-col" style="margin-top:30px; align-items:center;">
+    <div>
+      <p class="lead" style="margin-top:0;">A <strong style="color:#fff;">Skill</strong> is a structured, AI-native definition of what great looks like for a specific position at your company.</p>
+      <p class="lead">Built from how your best people actually work, not from a generic job description.</p>
+      <p class="lead">Used directly by AI to match and assess candidates against your standard, not a recruiter's gut feel.</p>
+    </div>
+    <div class="code-block">
+      <span style="opacity:0.38;font-size:11px;">// Skill: Senior Full-Stack Engineer @ YourCo</span><br><br>
+      <span class="cb">{</span><br>
+      &nbsp;&nbsp;<span class="ck">"role":</span> <span class="cv">"Senior Full-Stack Engineer"</span>,<br>
+      &nbsp;&nbsp;<span class="ck">"version":</span> <span class="cv">"1.0"</span>,<br>
+      &nbsp;&nbsp;<span class="ck">"signals":</span> <span class="cb">{</span><br>
+      &nbsp;&nbsp;&nbsp;&nbsp;<span class="ck">"delivery":</span>&nbsp;&nbsp;&nbsp;&nbsp;<span class="cb">{</span> <span class="ck">"weight":</span> 5, <span class="ck">"basis":</span> <span class="cv">"sprint_closure_rate"</span> <span class="cb">}</span>,<br>
+      &nbsp;&nbsp;&nbsp;&nbsp;<span class="ck">"communication":</span> <span class="cb">{</span> <span class="ck">"weight":</span> 4, <span class="ck">"basis":</span> <span class="cv">"async_update_frequency"</span> <span class="cb">}</span>,<br>
+      &nbsp;&nbsp;&nbsp;&nbsp;<span class="ck">"quality":</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="cb">{</span> <span class="ck">"weight":</span> 4, <span class="ck">"basis":</span> <span class="cv">"pr_review_depth"</span> <span class="cb">}</span>,<br>
+      &nbsp;&nbsp;&nbsp;&nbsp;<span class="ck">"collaboration":</span> <span class="cb">{</span> <span class="ck">"weight":</span> 3, <span class="ck">"basis":</span> <span class="cv">"cross_role_handoff"</span> <span class="cb">}</span><br>
+      &nbsp;&nbsp;<span class="cb">}</span>,<br>
+      &nbsp;&nbsp;<span class="ck">"competencies":</span> <span class="cb">[</span><br>
+      &nbsp;&nbsp;&nbsp;&nbsp;<span class="cb">{</span> <span class="ck">"name":</span> <span class="cv">"Delivery consistency"</span>, <span class="ck">"weight":</span> 5,<br>
+      &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="ck">"positive":</span> <span class="cb">[</span><span class="cv">"Commits distributed across sprint"</span>, <span class="cv">"PRs reference ACs"</span><span class="cb">]</span>,<br>
+      &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="ck">"negative":</span> <span class="cb">[</span><span class="cv">"Deadline-clustered commits"</span>, <span class="cv">"No peer review on merge"</span><span class="cb">] }</span>,<br>
+      &nbsp;&nbsp;&nbsp;&nbsp;<span class="cb">{</span> <span class="ck">"name":</span> <span class="cv">"Proactive communication"</span>, <span class="ck">"weight":</span> 4,<br>
+      &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="ck">"positive":</span> <span class="cb">[</span><span class="cv">"Async updates before check-ins"</span>, <span class="cv">"Blockers surfaced with resolution"</span><span class="cb">] }</span><br>
+      &nbsp;&nbsp;<span class="cb">]</span>,<br>
+      &nbsp;&nbsp;<span class="ck">"dealBreakers":</span> <span class="cb">[</span><span class="cv">"No output artifacts across any sprint"</span><span class="cb">]</span>,<br>
+      &nbsp;&nbsp;<span class="ck">"matchThreshold":</span> 68<br>
+      <span class="cb">}</span>
+    </div>
+  </div>
+</div>
+
+<!-- SLIDE 4: Apples-to-Apples Framework -->
+<div class="slide slide-light bg-light">
+  <img src="https://media.base44.com/images/public/6921e483433efbf322f60465/bb0d13df2_image.png" alt="Skill-in" class="logo-sm">
+  <p class="label">The foundation</p>
+  <h2>Four data domains.<br>The same for your team and every candidate.</h2>
+  <p class="lead" style="margin-top:10px;max-width:660px;font-size:16px;">We analyze both your employees and candidates across the exact same four data domains. Your team sets the baseline. Every candidate is measured against it. True apples-to-apples.</p>
+
+  <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-top:22px;">
+    <div class="dcard">
+      <div class="dcard-icon">&#128210;</div>
+      <div class="dcard-title">Design</div>
+      <div class="dcard-sub">PRDs, briefs,<br>specs, design docs</div>
+    </div>
+    <div class="dcard">
+      <div class="dcard-icon">&#9989;</div>
+      <div class="dcard-title">Tasks</div>
+      <div class="dcard-sub">Jira, Trello, Linear,<br>sprint boards</div>
+    </div>
+    <div class="dcard">
+      <div class="dcard-icon">&#128172;</div>
+      <div class="dcard-title">Communication</div>
+      <div class="dcard-sub">Slack, Teams,<br>email, async threads</div>
+    </div>
+    <div class="dcard">
+      <div class="dcard-icon">&#128230;</div>
+      <div class="dcard-title">Output</div>
+      <div class="dcard-sub">GitHub commits,<br>docs, deliverables</div>
+    </div>
+  </div>
+
+  <div style="display:grid;grid-template-columns:1fr 90px 1fr;gap:0;margin-top:18px;align-items:stretch;">
+    <div class="aa-box" style="border-color:#BFDBFE;background:#EFF6FF;">
+      <div style="font-size:10px;font-weight:800;letter-spacing:1.5px;text-transform:uppercase;color:#2563EB;margin-bottom:8px;">Your team &mdash; the baseline</div>
+      <p style="font-size:13.5px;line-height:1.6;color:#374151;">Work signals are collected from your existing tools. You rate a sample of your people using our framework. The platform synthesizes your Skill from the patterns it finds.</p>
+    </div>
+    <div style="display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;padding:0 10px;">
+      <svg width="2" height="32" viewBox="0 0 2 32"><line x1="1" y1="0" x2="1" y2="32" stroke="#D1D5DB" stroke-width="2" stroke-dasharray="4 3"/></svg>
+      <span style="background:#1a2235;color:#fff;font-size:10px;font-weight:800;letter-spacing:1px;padding:5px 10px;border-radius:100px;text-transform:uppercase;white-space:nowrap;">Skill</span>
+      <svg width="2" height="32" viewBox="0 0 2 32"><line x1="1" y1="0" x2="1" y2="32" stroke="#D1D5DB" stroke-width="2" stroke-dasharray="4 3"/></svg>
+    </div>
+    <div class="aa-box" style="border-color:#A7F3D0;background:#ECFDF5;">
+      <div style="font-size:10px;font-weight:800;letter-spacing:1.5px;text-transform:uppercase;color:#059669;margin-bottom:8px;">Candidates &mdash; scored against it</div>
+      <p style="font-size:13.5px;line-height:1.6;color:#374151;">Every candidate's real project work is analyzed using the same four domains. Their signals are scored against your Skill. The result is a verified, objective match percentage.</p>
+    </div>
+  </div>
+</div>
+
+<!-- SLIDE 5: Workflow Diagram -->
+<div class="slide slide-dark bg-grad">
+  <img src="https://media.base44.com/images/public/6921e483433efbf322f60465/bb0d13df2_image.png" alt="Skill-in" class="logo-sm">
+  <p class="label">The process</p>
+  <h2>Four steps.<br>One Skill.</h2>
+
+  <div class="workflow">
+
+    <div class="wstep">
+      <div class="wicon wicon-tools">&#9881;</div>
+      <div class="wstep-title">Your work data</div>
+      <div class="wstep-sub">Your existing tools: GitHub, Jira, Slack, and others</div>
+    </div>
+
+    <div class="warrow">
+      <svg width="28" height="18" viewBox="0 0 28 18" fill="none">
+        <path d="M0 9h24M18 3l6 6-6 6" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+    </div>
+
+    <div class="wstep">
+      <div class="wicon wicon-plat">
+        <img src="https://media.base44.com/images/public/6921e483433efbf322f60465/bb0d13df2_image.png"
+             alt="Skill-in" style="height:28px;width:auto;opacity:0.9;">
+      </div>
+      <div class="wstep-title">Skill-in Platform</div>
+      <div class="wstep-sub">Analyzes patterns from your exemplary people, privately and automatically</div>
+    </div>
+
+    <div class="warrow">
+      <svg width="28" height="18" viewBox="0 0 28 18" fill="none">
+        <path d="M0 9h24M18 3l6 6-6 6" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+    </div>
+
+    <div class="wstep">
+      <div class="skill-badge">Skill</div>
+      <div class="wicon wicon-skill" style="margin-top:0;">&#10022;</div>
+      <div class="wstep-title">Your Skill</div>
+      <div class="wstep-sub">A structured, AI-native profile of excellence, specific to your company</div>
+    </div>
+
+    <div class="warrow">
+      <svg width="28" height="18" viewBox="0 0 28 18" fill="none">
+        <path d="M0 9h24M18 3l6 6-6 6" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+    </div>
+
+    <div class="wstep">
+      <div class="wicon wicon-match">&#127919;</div>
+      <div class="wstep-title">Your marketplace</div>
+      <div class="wstep-sub">Browse matched candidates, explore their work, invite to interview in one place</div>
+    </div>
+
+  </div>
+
+  <p style="font-size:13px;color:rgba(255,255,255,0.3);margin-top:28px;text-align:center;">
+    We already run an active platform generating continuous skills data from real project work. Your Skill plugs directly into it.
+  </p>
+</div>
+
+<!-- SLIDE 6: Benefits -->
+<div class="slide slide-light bg-light">
+  <img src="https://media.base44.com/images/public/6921e483433efbf322f60465/bb0d13df2_image.png" alt="Skill-in" class="logo-sm">
+  <p class="label">What's in it for you</p>
+  <h2>Your company's standard.<br>Evidence-backed matching.</h2>
+  <div class="bcards">
+    <div class="bcard">
+      <div class="bcard-num">01 &nbsp;Precision</div>
+      <div class="bcard-title">Hire to your actual standard</div>
+      <div class="bcard-desc">The Skill is built from how your best people work, not a generic job description. Candidates are matched against what great actually means at your company.</div>
+    </div>
+    <div class="bcard">
+      <div class="bcard-num">02 &nbsp;Efficiency</div>
+      <div class="bcard-title">Evidence replaces gut feel</div>
+      <div class="bcard-desc">Every candidate comes with a skill-match score and supporting evidence: delivery patterns, communication signals, output quality. No blind CV screening.</div>
+    </div>
+    <div class="bcard">
+      <div class="bcard-num">03 &nbsp;Reusability</div>
+      <div class="bcard-title">A standard you own and reuse</div>
+      <div class="bcard-desc">Your Skill is yours. Use it for every future hire in that position. Update it as your team evolves. Apply it to L&amp;D and internal mobility too.</div>
+    </div>
+    <div class="bcard">
+      <div class="bcard-num">04 &nbsp;Control</div>
+      <div class="bcard-title">You review and approve it</div>
+      <div class="bcard-desc">Before your Skill is used for matching, you read it, adjust it, and approve it. It is transparent, human-readable, and fully within your control.</div>
+    </div>
+  </div>
+</div>
+
+<!-- SLIDE 6: Privacy -->
+<div class="slide slide-dark bg-dark">
+  <img src="https://media.base44.com/images/public/6921e483433efbf322f60465/bb0d13df2_image.png" alt="Skill-in" class="logo-sm">
+  <p class="label">Privacy</p>
+  <h2>Zero personal data<br><span class="accent">in the output.</span></h2>
+  <p class="lead" style="max-width:580px;">Your team's data is used to identify patterns, not to profile individuals. The Skill contains no names, no identifiers, and no personal information of any kind.</p>
+  <div class="pgrid">
+    <div class="pbox">
+      <div class="pbox-icon">&#128274;</div>
+      <div class="pbox-title">No personal data in output</div>
+      <p>The Skill is a behavioral pattern. No names, emails, or identifiers. It cannot be linked to any individual.</p>
+    </div>
+    <div class="pbox">
+      <div class="pbox-icon">&#9889;</div>
+      <div class="pbox-title">Raw data is ephemeral</div>
+      <p>Individual signals are processed and deleted immediately after synthesis. Only the aggregated pattern survives.</p>
+    </div>
+    <div class="pbox">
+      <div class="pbox-icon">&#128065;</div>
+      <div class="pbox-title">Full employee transparency</div>
+      <p>Employees receive a clear notice explaining what signal categories are analyzed. Participation is consensual.</p>
+    </div>
+  </div>
+  <div class="hbox" style="margin-top:22px;font-size:15px;">
+    The output is a pattern, not a profile. No individual can ever be identified from it.
+  </div>
+</div>
+
+<!-- SLIDE 7: Timeline -->
+<div class="slide slide-dark bg-grad">
+  <img src="https://media.base44.com/images/public/6921e483433efbf322f60465/bb0d13df2_image.png" alt="Skill-in" class="logo-sm">
+  <p class="label">What it takes</p>
+  <h2>6 weeks.<br><span class="accent">Mostly automated.</span></h2>
+
+  <div class="trows">
+    <div class="trow">
+      <div class="trow-left">
+        <div class="trow-week">Week 1</div>
+        <div class="trow-dot"></div>
+        <div class="trow-line"></div>
+      </div>
+      <div class="trow-right">
+        <div class="trow-title">Onboard and calibrate</div>
+        <div class="trow-desc">We connect your existing tools to the platform and run a single calibration session. You select a few people from your team and rate them using our Skill framework. That's all we need from you to get started.</div>
+        <span class="trow-you">One session, about 2 hours total</span>
+      </div>
+    </div>
+    <div class="trow">
+      <div class="trow-left">
+        <div class="trow-week">Weeks 2–5</div>
+        <div class="trow-dot"></div>
+        <div class="trow-line"></div>
+      </div>
+      <div class="trow-right">
+        <div class="trow-title">Platform analyzes</div>
+        <div class="trow-desc">Fully automated. Your team works normally. No input required from you. One brief check-in at week 3.</div>
+        <span class="trow-auto">Automated, nothing from you</span>
+      </div>
+    </div>
+    <div class="trow">
+      <div class="trow-left">
+        <div class="trow-week">Week 6</div>
+        <div class="trow-dot"></div>
+        <div class="trow-line"></div>
+      </div>
+      <div class="trow-right">
+        <div class="trow-title">Review your Skill</div>
+        <div class="trow-desc">We walk you through the output together. You read it, adjust if needed, and approve it before it goes live. A 45-minute session.</div>
+        <span class="trow-you">45 min review session</span>
+      </div>
+    </div>
+    <div class="trow">
+      <div class="trow-left">
+        <div class="trow-week">Week 7+</div>
+        <div class="trow-dot green"></div>
+        <div class="trow-line"></div>
+      </div>
+      <div class="trow-right">
+        <div class="trow-title">Your marketplace goes live</div>
+        <div class="trow-desc">Candidates from our active platform are scored against your Skill and delivered to you, ranked with evidence. Browse, explore portfolios, and invite the right ones to interview.</div>
+        <span class="trow-auto">Ongoing, passive</span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- SLIDE 8: Marketplace -->
+<div class="slide slide-light bg-light">
+  <img src="https://media.base44.com/images/public/6921e483433efbf322f60465/bb0d13df2_image.png" alt="Skill-in" class="logo-sm">
+  <p class="label">The marketplace</p>
+  <h2>Your shortlist.<br>Already waiting for you.</h2>
+  <p class="lead" style="max-width:600px;">Once your Skill is live, you get access to a curated candidate marketplace, pre-filtered to people who match your standard. No cold outreach. No blind screening.</p>
+  <div class="bcards" style="margin-top:28px;">
+    <div class="bcard">
+      <div class="bcard-num">Browse</div>
+      <div class="bcard-title">See the right candidates first</div>
+      <div class="bcard-desc">Every candidate in your shortlist is skill-matched. You see their score, the evidence behind it, and the specific strengths that make them relevant for your role.</div>
+    </div>
+    <div class="bcard">
+      <div class="bcard-num">Explore</div>
+      <div class="bcard-title">Real portfolios, not CVs</div>
+      <div class="bcard-desc">Each candidate has a verified project portfolio of real work, real tools, and real sprints. You see what they built, how they collaborated, and how they delivered.</div>
+    </div>
+    <div class="bcard">
+      <div class="bcard-num">Engage</div>
+      <div class="bcard-title">Invite to interview in one click</div>
+      <div class="bcard-desc">When someone looks right, you reach out directly through the platform. One click sends an interview invitation. No middlemen, no back-and-forth, no wasted time.</div>
+    </div>
+    <div class="bcard" style="background:#1a2235;border-color:#1a2235;">
+      <div class="bcard-num" style="color:#60A5FA;">The result</div>
+      <div class="bcard-title" style="color:#fff;">Every interview counts</div>
+      <div class="bcard-desc" style="color:rgba(255,255,255,0.6);">You are not screening anymore, you are selecting. Every person you bring in already fits your definition of great. Your hiring process becomes faster, sharper, and far less expensive.</div>
+    </div>
+  </div>
+</div>
+
+<!-- SLIDE 9: CTA -->
+<div class="slide slide-dark bg-grad" style="align-items:center;text-align:center;">
+  <img src="https://media.base44.com/images/public/6921e483433efbf322f60465/bb0d13df2_image.png"
+       alt="Skill-in" style="height:56px;width:auto;margin-bottom:48px;">
+  <p class="label" style="text-align:center;">Design Partnership, 2 to 3 companies selected</p>
+  <h2 style="max-width:560px;margin:0 auto;">Let's define what great<br>looks like at your company.</h2>
+  <div class="divider" style="margin:28px auto;"></div>
+  <p style="font-size:17px;color:rgba(255,255,255,0.38);letter-spacing:0.4px;">skill-in.com</p>
+  <div style="margin-top:36px;display:flex;gap:32px;justify-content:center;">
+    <div style="text-align:left;">
+      <div style="font-size:11px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:rgba(255,255,255,0.3);margin-bottom:6px;">Commitment</div>
+      <div style="font-size:16px;color:rgba(255,255,255,0.7);">About 2 hours over 6 weeks</div>
+    </div>
+    <div style="width:1px;background:rgba(255,255,255,0.1);"></div>
+    <div style="text-align:left;">
+      <div style="font-size:11px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:rgba(255,255,255,0.3);margin-bottom:6px;">What you get</div>
+      <div style="font-size:16px;color:rgba(255,255,255,0.7);">Your Skill and a live candidate marketplace</div>
+    </div>
+    <div style="width:1px;background:rgba(255,255,255,0.1);"></div>
+    <div style="text-align:left;">
+      <div style="font-size:11px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:rgba(255,255,255,0.3);margin-bottom:6px;">Risk</div>
+      <div style="font-size:16px;color:rgba(255,255,255,0.7);">Read-only access. No process change.</div>
+    </div>
+  </div>
+</div>
+
+</div>
+
+<div id="nav">
+  <button class="nbtn" id="prev" onclick="go(-1)" disabled>&#8592;</button>
+  <button class="nbtn" id="next" onclick="go(1)">&#8594;</button>
+</div>
+<div id="counter">1 / 10</div>
+
+<script>
+  let cur = 0;
+  const slides = document.querySelectorAll('.slide');
+  const n = slides.length;
+  function go(d) {
+    slides[cur].classList.remove('active');
+    cur = Math.max(0, Math.min(n-1, cur+d));
+    slides[cur].classList.add('active');
+    document.getElementById('counter').textContent = (cur+1) + ' / ' + n;
+    document.getElementById('prev').disabled = cur === 0;
+    document.getElementById('next').disabled = cur === n-1;
+  }
+  document.addEventListener('keydown', e => {
+    if (e.key==='ArrowRight'||e.key==='ArrowDown') go(1);
+    if (e.key==='ArrowLeft' ||e.key==='ArrowUp')   go(-1);
+  });
+</script>
+</body>
+</html>

@@ -1,7 +1,7 @@
 UI/UX Designer — Figma sharing for the team
 
 FIGMA IN THE PLATFORM
-• Enter the team-visible design URL via the Figma button in the Team Room so everyone opens the same link—do not rely on ad-hoc DMs for the primary handoff.
+• Enter the team-visible design URL via the Figma button in the Squad Room so everyone opens the same link—do not rely on ad-hoc DMs for the primary handoff.
 
 PUBLIC VIEW-ONLY LINK (REQUIRED FOR SMOOTH ACCESS)
 Walk the designer through verifying sharing so teammates are not blocked by permission prompts:

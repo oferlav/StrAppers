@@ -1,0 +1,175 @@
+SKILL-IN — EMPLOYER PRESENTATION OUTLINE
+=========================================
+11 slides · Employer Overview · 2026
+
+
+SLIDE 1 — TITLE
+  Headline:   "The Skills Marketplace."
+  Sub:        AI profiles for employers and job seekers alike.
+              When the fit is real — both sides find out.
+  Pills:      AI-powered · Skills-based · Both sides of the market
+
+
+SLIDE 2 — THE PROBLEM  (01 — The Problem)
+  Headline:   "The market is broken on both sides."
+  Left col (Companies):
+    - Job descriptions are wish lists — vague, generic, copied from last year
+    - Resumes measure what people claim, not what they do
+    - Interviews test nerves and preparation, not real work quality
+    - Every bad hire costs 6–18 months of salary to discover and fix
+  Right col (Job Seekers):
+    - Certifications prove study time, not ability to execute
+    - Portfolio projects are polished demos — staged, not observed
+    - No signal for communication, delivery pace, or collaboration style
+    - No way to say "I work like your team works"
+  Quote:      "Both sides are guessing. The market needs a common language —
+               one that AI can read on both sides."
+
+
+SLIDE 3 — THE SKILLSET  (02 — The New Unit)
+  Headline:   "Not a resume. Not a job description. A Skillset."
+  Left (Company Skillset — blue):
+    - Work patterns — pace, consistency, collaboration style
+    - Tech stack & tools — what they actually use day to day
+    - Communication style — async vs sync, depth, meeting cadence
+    - Culture signals — ownership, initiative, quality
+    - Competency benchmarks — what "good" means here, not in general
+    Tagline:  "Senior Backend Engineer at Acme Corp" — not a generic job spec.
+  Right (Candidate Skillset — green):
+    - Delivery record — how they perform under sprint pressure
+    - Code quality — real commits, real reviews, real merges
+    - Communication behaviour — team engagement, stakeholder handling
+    - Problem-solving approach — blockers, ambiguity, initiative
+    - Role fit signals — PM, dev, designer — patterns across sprints
+    Tagline:  "Works like a mid-senior backend dev at a fast-moving product company."
+
+
+SLIDE 4 — COMPANY SIDE  (03 — Company Side)
+  Headline:   "Your team already defined your standard. We read it."
+  Left (4-step flow):
+    1. Connect   — Install the plugin. Point at Jira, GitHub, Slack. 5 min.
+    2. Analyze   — Pick 3–5 top performers. AI reads work patterns.
+    3. Calibrate — Review AI scores. Add ratings. Set dimension weights.
+    4. Skillset is live — Matching begins. Courses shaped.
+  Right (Example card — "Senior Backend Engineer · Acme Corp"):
+    - Delivery & Velocity:     84 — 84% tasks on time, consistent velocity
+    - Code Quality & Reviews:  79 — Clean PRs, avg 3.2 review comments
+    - Communication Patterns:  71 — Async-first, thread-heavy, low meeting dependency
+    - Culture & Stack Tags:    Ownership-driven · Remote-native · Fast iteration
+                                Node.js · PostgreSQL · Docker · AWS
+
+
+SLIDE 5 — PROCESS FLOW  (04 — The Process)
+  Headline:   "From tools and talent to profiles in the marketplace."
+  Left (Employer side — blue):
+    1. Share stack & tools    — Jira, GitHub, Slack · tech stack · role description
+    2. We build the connector — Custom MCP server · Claude assessment agent · privacy filter
+    3. Plugin delivered       — CLAUDE.md · MCP config · /generate-skillset command
+    4. Employer runs it       — Installs · runs · reviews scores · adds ratings · approves
+    ✓  Platform receives      — Their logo + Their Skillset profile
+  Center (Marketplace mockup):
+    Employer card (Acme Corp · Sr. Backend Eng.) ⚡ Matching Engine ⚡ Candidate card (Alex Chen)
+  Right (Candidate side — green):
+    1. Skillsets define courses — Platform reads Skillsets · extracts targets · stack
+    2. Course is built          — Project brief & criteria shaped by the Skillset
+    3. Shallow filter first     — Short role-fit course · baseline established
+    4. Candidate takes course   — Real sprints · 4 data buckets · months of signal
+    ✓  Platform receives        — Their photo + Their Skillset profile
+
+
+SLIDE 6 — PLUGIN ARCHITECTURE  (05 — Plugin Architecture)
+  Headline:   "Inside the plugin."
+  Sub:        How orchestration, connectors, and privacy validation work together.
+  Main diagram (Employer Machine — local):
+    Config layer:   CLAUDE.md · /generate-skillset · connector-config.json (credentials never leave)
+    Orchestrator:   Claude AI — reads context, calls tools, asks for human ratings, applies scoring
+    MCP servers:
+      Connector MCP (yellow):  fetch_tasks → Jira API
+                                fetch_communication → Slack API
+                                fetch_artifacts → GitHub API
+                                🔒 Privacy filter: strips content, keeps metrics
+      Assessment MCP (teal):   get_student_board · run_gap_analysis · submit_skillset
+                                ✓ Calls Skill-in API only
+    External:
+      Anthropic API (purple) — receives: normalized metadata only
+                               (counts, ratios, frequencies · no message content · no code)
+      Skill-in Backend (green) — receives: anonymized scores only
+                                  (0–100 per dimension · no names · no PII)
+  Privacy legend (right panel):
+    Stays on machine:  API credentials · Slack message content · Jira descriptions ·
+                       GitHub code diffs · Employee names & emails
+    To Anthropic:      Task counts & completion rates · message word counts ·
+                       commit frequency & PR ratios · timestamps & metadata
+    To Skill-in:       Aggregated scores (0–100) · human rating anchors ·
+                       dimension weights · company slug & role name
+
+
+SLIDE 7 — CANDIDATE SIDE  (06 — Candidate Side)
+  Headline:   "Not a certificate. A verified work profile."
+  Sub:        Candidates earn their Skillset by doing — not by studying.
+  Left (3-step flow):
+    1. Shallow filter course      — Short role-based, establishes baseline fit
+    2. Employer-shaped course     — Deeper course built from real Skillsets
+    ✓  Candidate Skillset earned  — Months of real work, AI-scored from actual behaviour
+  Right (What gets assessed):
+    - Sprint delivery — tasks closed, on time, to spec
+    - Code quality — real commits, PRs, code reviews
+    - Communication — team, stakeholders, AI customer
+    - Design thinking — spec quality, user story depth
+    - Collaboration — async vs sync, initiative, blocker handling
+    Callout: "A Skillset is a longitudinal work record — patterns built across weeks
+              of real project pressure."
+
+
+SLIDE 8 — THE LOOP  (07 — The Loop)
+  Headline:   "Both sides make each other more valuable."
+  Left (cycle):
+    🏢 Employer submits Skillset   → defines excellence for this role
+    📚 Platform shapes a course    → project, stack, criteria trained toward this standard
+    👤 Candidates take the course  → real projects, verified Skillset earned
+    ⚡  Matching engine fires       → Skillsets matched, both sides alerted
+  Right (Network effects):
+    1. More Skillsets  → richer, more varied courses
+    2. More courses    → more candidates with verified profiles
+    3. More candidates → faster, more accurate matches
+    4. More matches    → more employers join
+
+
+SLIDE 9 — JOBS TINDER  (08 — The Vision)
+  Headline:   "Jobs Tinder — but the profile is written by AI."
+  Sub:        Both sides have profiles they didn't write themselves.
+              When the fit is real — both sides find out at the same time.
+  Company card:   Skillset from real team work patterns · calibrated by human judgment
+                  → Generated by plugin
+  Candidate card: Skillset from months of real project work · AI-scored across sprints
+                  → Generated by PBL
+  Insight box:    "Skill-in is the first platform where both profiles are independently
+                  generated from actual work — making the match signal trustworthy."
+
+
+SLIDE 10 — THE MOAT  (09 — Why This Works)
+  Headline:   "Why this can't be easily replicated."
+  4 moat cards:
+    🔒 Real data, not claimed     — Can't fake a longitudinal work record
+    🔄 Continuous, not snapshot   — Months of data vs 60-minute interview
+    🌐 Both sides incentivized    — Employers get matches; candidates get a portable profile
+    📈 Network effects compound   — More Skillsets → better courses → more candidates → more matches
+  First mover box (yellow):
+    Early companies get:
+    - First access to matched candidates
+    - Shape courses toward their standard
+    - Hiring signal that sharpens over time
+    - Influence which skills candidates develop next
+    "Waiting means letting other companies define the talent pool first."
+
+
+SLIDE 11 — CTA  (10 — Start)
+  Headline:   "Generate your Skillset. Shape a course. Get your first match."
+  Sub:        One session. Less than an hour. By the end, your hiring standard is live.
+  Timeline:
+    Day 1   — Generate Skillset:  Connect · analyze · calibrate · submit
+    Week 1  — Course goes live:   Your Skillset shapes a course · candidates train
+    Week 4+ — First matches arrive: Skills Hook fires · real candidates · real fit
+  Pilot offer:   "We run the plugin with you. Live. Your Skillset generated in real time.
+                  First match candidates appear within weeks."
+  Pills:  Under 1 hour · Zero new tools · Privacy-first · Both sides notified · Network effects

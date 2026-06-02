@@ -107,6 +107,13 @@ public class InstituteProject
     [Column("CriteriaIds")]
     public string? CriteriaIds { get; set; }
 
+    /// <summary>
+    /// Format: {Institutes.Coupon}-{Integer}. Multiple projects in the same institute
+    /// may share the same coupon. Uniqueness across institutes is enforced by the prefix.
+    /// </summary>
+    [MaxLength(100)]
+    public string? Coupon { get; set; }
+
     public ICollection<InstituteTemplate> InstituteTemplates { get; set; } = new List<InstituteTemplate>();
 
     public ICollection<InstituteProjectModule> InstituteProjectModules { get; set; } = new List<InstituteProjectModule>();

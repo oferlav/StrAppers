@@ -1,0 +1,13 @@
+{
+  "name": "skill-in-connector-mcp",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Skill-in connector MCP server — reads connector-config.json, fetches from employer data sources, normalises to Skill-in schema",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0"
+  }
+}

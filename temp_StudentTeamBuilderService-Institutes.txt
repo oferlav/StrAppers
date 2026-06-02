@@ -1,0 +1,22 @@
+Now lets focus on the StudentTeamBuilderService:
+
+Need identify that the student has an Institute assigned (otherwise do the default logic)
+
+Workflow (if working in Institutes mode): 
+(foreach student) Check Students.ProjectPriority -> look in InstituteProjects and match Id (for ProjectId)+InstituteId->look at InstituteTemplates (same InstituteId, isActive=true) to determine CourseType(Squad/Role) -> If Role -> Look at InstituteTemplates.RoleCount to determine number of students | If Squad -> Look at InstituteSquads+InstituteSquadRoles (=SquadId, isActive=true) to determine number of students/Min required roles (determined by InstituteSquadRoles.Type) -> Then when you have all the information about required roles/minimum participants, you can look for other students to build up the squad/team of roles and creating the board with all required parameters. In order to initialize the board creation needs to check:
+•	All students selected same ProjectPriority (one of them, as in current logic)
+•	All students has same Role (in case of role-base course)
+•	All students has ProgrammingLanguage  (if not null) (in case of role-base course)
+Analyze the workflow. Check also the existing workflow of StudentTeamBuilderService. Identify gaps, possible issues or if I forgot anything. Show me your insights before proceeding to develop.
+
+
+Answers
+1. When we develop the students project selection (for institutes), the UI will store their own institute InstituteProjects.ID
+2. When we develop the student registration (for institutes), the role selection will be taken from InstituteRoles. This will also populate the StudentRoles table (like it is now) to match the student with the role. Question: do we need a new table (InstituteStudentRoles) or can we still use existing table (so theoretically can be same RoleId wich are refereing to different roles...but StudentId should always be uniqe)
+3. When the service decides to build up a team, the RoleIndex need to be assigned - no matter the ordering.
+4. For Institutes, trello board will always be taken from InstituteProjects.TrelloBobardJson (since you told me this is the place where the "to-use" data is)
+5. the algorithm needs to be the same as it is now with the ProjectPriority
+6. the algorithm needs to be the same as it is now (Skipping when min requirments are not met)
+7. hard, but only for role-based. The board creation includes BE provisioned setup so it must be sure of the programming lang
+8. This is an existing service so the logic for running is already set. Now we just add another itteration for Institutes which will run in addition to the current itterations.
+Important: All changes must respect the current logic for non-institutes (b2c), so no existing logic will be broken!
