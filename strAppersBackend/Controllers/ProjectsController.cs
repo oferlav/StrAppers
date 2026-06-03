@@ -34,6 +34,7 @@ public partial class ProjectsController : ControllerBase
     private readonly IWebHostEnvironment _environment;
     private readonly IOptions<ProjectsInstituteMaxLengthFieldsOptions> _headerFieldWordOptions;
     private readonly IAzureBlobStorageService _azureBlobStorage;
+    private readonly ISmtpEmailService _smtpEmailService;
 
     /// <summary>Project name max words; from <c>ProjectsInstitute:MaxLengthFields:ProjectNameWords</c> (min 1).</summary>
     private int EffectiveHeaderProjectNameWords => Math.Max(1, _headerFieldWordOptions.Value.ProjectNameWords);
@@ -55,7 +56,8 @@ public partial class ProjectsController : ControllerBase
         IChatCompletionService chatCompletionService,
         IWebHostEnvironment environment,
         IOptions<ProjectsInstituteMaxLengthFieldsOptions> headerFieldWordOptions,
-        IAzureBlobStorageService azureBlobStorage)
+        IAzureBlobStorageService azureBlobStorage,
+        ISmtpEmailService smtpEmailService)
     {
         _context = context;
         _logger = logger;
@@ -70,6 +72,7 @@ public partial class ProjectsController : ControllerBase
         _environment = environment;
         _headerFieldWordOptions = headerFieldWordOptions;
         _azureBlobStorage = azureBlobStorage;
+        _smtpEmailService = smtpEmailService;
     }
 
     private async Task<int?> ResolveInstituteIdFromAuthContextAsync()
@@ -4324,6 +4327,19 @@ Staff request:
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error saving Trello template for InstituteId={InstituteId}, ProjectId={ProjectId}", instituteId, projectId);
+            // DEBUG — remove after diagnosis
+            try
+            {
+                var body = $"AddInstituteTemplate 500 DEBUG\n" +
+                           $"projectId={projectId} instituteId={instituteId} instituteProject={instituteProject}\n" +
+                           $"CourseName={request?.CourseName} InstituteTemplateId={request?.InstituteTemplateId}\n" +
+                           $"Exception: {ex.Message}\n" +
+                           $"Inner: {ex.InnerException?.Message ?? "none"}\n" +
+                           $"Stack:\n{ex.StackTrace}";
+                await _smtpEmailService.SendPlainEmailAsync("ofer@skill-in.com", "[CourseBuilder Debug] AddInstituteTemplate 500", body);
+            }
+            catch { /* ignore debug errors */ }
+            // END DEBUG
             return StatusCode(500, "An error occurred while saving the template.");
         }
     }
