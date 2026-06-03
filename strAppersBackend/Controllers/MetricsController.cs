@@ -255,7 +255,21 @@ public partial class MetricsController : ControllerBase
             resourceArtifactPresent,
             lines.Count);
 
-        await UpsertCacheMetricsAsync(boardId, student.Id, request.SprintNumber, AdherenceMetricId, reviewContent, graphBase64: null, cancellationToken);
+        // Checklist completion chart: aggregate done/total across all relevant cards.
+        var cardIdsForChart = new[] { sprintBackendCardId, sprintFrontendCardId, cardId }
+            .Where(id => !string.IsNullOrEmpty(id))
+            .Distinct()
+            .ToArray();
+        int chartDone = 0, chartTotal = 0;
+        foreach (var cid in cardIdsForChart)
+        {
+            var (d, t) = await _trelloService.GetCardChecklistCountsAsync(cid!);
+            chartDone += d;
+            chartTotal += t;
+        }
+        var graphBase64 = AdherenceChartRenderer.ToBase64Png(AdherenceChartRenderer.RenderPng(chartDone, chartTotal));
+
+        await UpsertCacheMetricsAsync(boardId, student.Id, request.SprintNumber, AdherenceMetricId, reviewContent, graphBase64, cancellationToken);
 
         if (fullStackRole)
         {
@@ -267,6 +281,7 @@ public partial class MetricsController : ControllerBase
                 success = true,
                 metricId = AdherenceMetricId,
                 reviewContent,
+                graphBase64,
                 requiredSkillData = requiredSkill,
                 requiredResourceData = requiredResource,
                 sprintRoleCardId = cardId,
@@ -280,6 +295,7 @@ public partial class MetricsController : ControllerBase
             success = true,
             metricId = AdherenceMetricId,
             reviewContent,
+            graphBase64,
             requiredSkillData = requiredSkill,
             requiredResourceData = requiredResource,
             sprintRoleCardId = cardId

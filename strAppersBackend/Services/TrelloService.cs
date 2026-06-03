@@ -82,6 +82,8 @@ namespace strAppersBackend.Services
         Task<BranchContextUtilityResult> UpdateExistingBoardWithBranchContextAsync(string boardId, int sprintNumber, CancellationToken cancellationToken = default);
         /// <summary>Returns a flat string of all checklist item names on the given native Trello card ID. Returns empty string on failure or when no checklists exist.</summary>
         Task<string> GetCardChecklistTextAsync(string trelloCardId);
+        /// <summary>Counts checklist items on the given card. Returns (Done, Total) where Done = items with state "complete".</summary>
+        Task<(int Done, int Total)> GetCardChecklistCountsAsync(string trelloCardId);
     }
 
     public class TrelloService : ITrelloService
@@ -1644,6 +1646,40 @@ namespace strAppersBackend.Services
             {
                 _logger.LogWarning(ex, "GetCardChecklistTextAsync failed for card {CardId}", trelloCardId);
                 return string.Empty;
+            }
+        }
+
+        /// <inheritdoc />
+        public async Task<(int Done, int Total)> GetCardChecklistCountsAsync(string trelloCardId)
+        {
+            try
+            {
+                var url = $"https://api.trello.com/1/cards/{trelloCardId}?checklists=all&fields=name&key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
+                var res = await _httpClient.GetAsync(url);
+                if (!res.IsSuccessStatusCode) return (0, 0);
+                var json = JsonSerializer.Deserialize<JsonElement>(await res.Content.ReadAsStringAsync());
+                int done = 0, total = 0;
+                if (json.TryGetProperty("checklists", out var checklists) && checklists.ValueKind == JsonValueKind.Array)
+                {
+                    foreach (var cl in checklists.EnumerateArray())
+                    {
+                        if (!cl.TryGetProperty("checkItems", out var items) || items.ValueKind != JsonValueKind.Array)
+                            continue;
+                        foreach (var item in items.EnumerateArray())
+                        {
+                            total++;
+                            var state = item.TryGetProperty("state", out var st) ? st.GetString() ?? "" : "";
+                            if (state.Equals("complete", StringComparison.OrdinalIgnoreCase))
+                                done++;
+                        }
+                    }
+                }
+                return (done, total);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "GetCardChecklistCountsAsync failed for card {CardId}", trelloCardId);
+                return (0, 0);
             }
         }
 
