@@ -331,19 +331,31 @@ public partial class BoardsController
                 .Select(sq => sq.Id)
                 .ToListAsync(cancellationToken);
 
-            if (squadIds.Count == 0)
-                return Ok(Array.Empty<object>());
+            IList<(int Id, string Name)> roles = squadIds.Count > 0
+                ? (await _context.Roles
+                    .AsNoTracking()
+                    .Where(r => r.SquadId != null && squadIds.Contains(r.SquadId.Value) && r.IsActive)
+                    .Select(r => new { r.Id, r.Name })
+                    .OrderBy(r => r.Name)
+                    .ToListAsync(cancellationToken))
+                    .Select(r => (r.Id, r.Name)).ToList()
+                : new List<(int, string)>();
 
-            var roles = await _context.Roles
-                .AsNoTracking()
-                .Where(r => r.SquadId != null && squadIds.Contains(r.SquadId.Value) && r.IsActive)
-                .Select(r => new { id = r.Id, name = r.Name })
-                .OrderBy(r => r.name)
-                .ToListAsync(cancellationToken);
+            // Fall back to global catalog when no squad roles are configured yet
+            if (roles.Count == 0)
+            {
+                var globalRoles = await _context.Roles
+                    .AsNoTracking()
+                    .Where(r => r.InstituteId == null && r.IsActive)
+                    .Select(r => new { id = r.Id, name = r.Name })
+                    .OrderBy(r => r.name)
+                    .ToListAsync(cancellationToken);
+                return Ok(globalRoles.Cast<object>().ToList());
+            }
 
             var distinct = roles
-                .GroupBy(r => r.name, StringComparer.OrdinalIgnoreCase)
-                .Select(g => g.First())
+                .GroupBy(r => r.Name, StringComparer.OrdinalIgnoreCase)
+                .Select(g => new { id = g.First().Id, name = g.First().Name })
                 .OrderBy(r => r.name)
                 .Cast<object>()
                 .ToList();
