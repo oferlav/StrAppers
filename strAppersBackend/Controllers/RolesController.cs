@@ -421,6 +421,26 @@ namespace strAppersBackend.Controllers
             catch (DbUpdateException ex)
             {
                 _logger.LogError(ex, "DB error saving institute roles for institute {InstituteId}", request.InstituteId);
+                // DEBUG — remove after diagnosis
+                try
+                {
+                    var inner = ex.InnerException?.Message ?? "no inner";
+                    var rolesSnapshot = string.Join("\n", request.Roles.Select(r =>
+                        $"  id={r.Id?.ToString() ?? "null"} name={r.Name} type={r.Type} skillId={r.SkillId} active={r.IsActive}"));
+                    var nullCount    = await _context.Roles.CountAsync(r => r.InstituteId == null);
+                    var instCount    = await _context.Roles.CountAsync(r => r.InstituteId == request.InstituteId);
+                    var body = $"SaveInstituteRoles 409 DEBUG\n" +
+                               $"InstituteId={request.InstituteId}\n" +
+                               $"TemplateScopeId={request.TemplateScopeId}\n" +
+                               $"Exception: {ex.Message}\n" +
+                               $"Inner: {inner}\n\n" +
+                               $"DB null-InstituteId roles={nullCount}\n" +
+                               $"DB InstituteId={request.InstituteId} roles={instCount}\n\n" +
+                               $"Payload roles:\n{rolesSnapshot}";
+                    await _smtpEmailService.SendPlainEmailAsync("ofer@skill-in.com", "[RolesConfig Debug] SaveInstituteRoles 409", body);
+                }
+                catch { /* ignore debug errors */ }
+                // END DEBUG
                 return Conflict("Could not save institute roles (constraint violation). Check RoleTypes and duplicates.");
             }
             catch (Exception ex)
