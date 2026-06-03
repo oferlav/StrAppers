@@ -50,6 +50,7 @@ public class Worker : BackgroundService
                 var created = await TryCreateBoardsAsync(connectionString, baseUrl, stoppingToken);
                 _logger.LogInformation("[ITERATION] Completed at {Time}. Boards created: {Created}", DateTime.UtcNow, created);
 
+                await LogInstituteDiagnosticsAsync(connectionString, stoppingToken);
                 await CallRunDueSprintMergesAsync(baseUrl, stoppingToken);
             }
             catch (Exception ex)
@@ -339,6 +340,81 @@ public class Worker : BackgroundService
         if (affected > 0)
         {
             _logger.LogInformation("[EXPIRE] Reset {Count} students from pending due to timeout (>{Hours}h)", affected, hours);
+        }
+    }
+
+    private async Task LogInstituteDiagnosticsAsync(string connectionString, CancellationToken ct)
+    {
+        try
+        {
+            using var conn = new NpgsqlConnection(connectionString);
+            await conn.OpenAsync(ct);
+
+            // Per-student view: all students who have any InstitutePriority set
+            var studentSql = @"
+                SELECT s.""Id"" AS StudentId, s.""InstituteId"", s.""RoleIndex"", s.""Status"",
+                       s.""InstitutePriority1"", s.""InstitutePriority2"",
+                       s.""InstitutePriority3"", s.""InstitutePriority4"",
+                       ro.""Id"" AS RoleId, ro.""Name"" AS RoleName, ro.""Type"" AS RoleType,
+                       s.""StartPendingAt""
+                FROM ""Students"" s
+                LEFT JOIN ""StudentRoles"" sr ON sr.""StudentId"" = s.""Id"" AND sr.""IsActive"" = TRUE
+                LEFT JOIN ""Roles"" ro ON ro.""Id"" = sr.""RoleId""
+                WHERE s.""InstitutePriority1"" IS NOT NULL
+                   OR s.""InstitutePriority2"" IS NOT NULL
+                   OR s.""InstitutePriority3"" IS NOT NULL
+                   OR s.""InstitutePriority4"" IS NOT NULL
+                ORDER BY s.""InstitutePriority1"", s.""Id""";
+
+            var students = (await conn.QueryAsync<InstituteStudentRow>(new CommandDefinition(studentSql, cancellationToken: ct))).ToList();
+            _logger.LogInformation("[INSTITUTE-CANDIDATES] Students with InstitutePriority set: {Count}", students.Count);
+            foreach (var s in students)
+            {
+                _logger.LogInformation(
+                    "[INSTITUTE-CANDIDATES]   StudentId={StudentId} Status={Status} InstituteId={InstituteId} RoleIndex={RoleIndex} RoleId={RoleId} RoleName={RoleName} RoleType={RoleType} P1={P1} P2={P2} P3={P3} P4={P4} StartPendingAt={StartPendingAt}",
+                    s.StudentId, s.Status, s.InstituteId?.ToString() ?? "NULL", s.RoleIndex,
+                    s.RoleId?.ToString() ?? "NULL", s.RoleName ?? "NULL", s.RoleType?.ToString() ?? "NULL",
+                    s.InstitutePriority1?.ToString() ?? "NULL", s.InstitutePriority2?.ToString() ?? "NULL",
+                    s.InstitutePriority3?.ToString() ?? "NULL", s.InstitutePriority4?.ToString() ?? "NULL",
+                    s.StartPendingAt?.ToString("u") ?? "NULL");
+            }
+
+            // Per-project summary: how many pending students per InstituteProject
+            var projectSql = @"
+                SELECT p.prjId AS ProjectId, ip.""Name"" AS ProjectName,
+                       COUNT(*) AS TotalCount,
+                       COUNT(*) FILTER (WHERE s.""Status"" = 1) AS PendingCount,
+                       STRING_AGG(s.""Id""::text, ',' ORDER BY s.""Id"") AS StudentIds,
+                       STRING_AGG(COALESCE(ro.""Name"", '(no role)'), ',' ORDER BY s.""Id"") AS RoleNames,
+                       STRING_AGG(s.""RoleIndex""::text, ',' ORDER BY s.""Id"") AS RoleIndexes,
+                       STRING_AGG(s.""Status""::text, ',' ORDER BY s.""Id"") AS Statuses
+                FROM ""Students"" s
+                CROSS JOIN LATERAL (
+                    VALUES (s.""InstitutePriority1"", 1),
+                           (s.""InstitutePriority2"", 2),
+                           (s.""InstitutePriority3"", 3),
+                           (s.""InstitutePriority4"", 4)
+                ) AS p(prjId, prio)
+                LEFT JOIN ""InstituteProjects"" ip ON ip.""Id"" = p.prjId
+                LEFT JOIN ""StudentRoles"" sr ON sr.""StudentId"" = s.""Id"" AND sr.""IsActive"" = TRUE
+                LEFT JOIN ""Roles"" ro ON ro.""Id"" = sr.""RoleId""
+                WHERE p.prjId IS NOT NULL
+                GROUP BY p.prjId, ip.""Name""
+                ORDER BY p.prjId";
+
+            var projects = (await conn.QueryAsync<InstituteProjectRow>(new CommandDefinition(projectSql, cancellationToken: ct))).ToList();
+            _logger.LogInformation("[INSTITUTE-GROUP] Institute projects with students: {Count}", projects.Count);
+            foreach (var p in projects)
+            {
+                _logger.LogInformation(
+                    "[INSTITUTE-GROUP]   ProjectId={ProjectId} Name={Name} Total={Total} Pending(Status=1)={Pending} StudentIds=[{Ids}] Roles=[{Roles}] RoleIndexes=[{Indexes}] Statuses=[{Statuses}]",
+                    p.ProjectId, p.ProjectName ?? "Unknown", p.TotalCount, p.PendingCount,
+                    p.StudentIds ?? "", p.RoleNames ?? "", p.RoleIndexes ?? "", p.Statuses ?? "");
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[INSTITUTE-CANDIDATES] Diagnostic query failed: {Message}", ex.Message);
         }
     }
 
@@ -799,6 +875,34 @@ public record ProjectInfo
 {
     public int Id { get; init; }
     public DateTime CreatedAt { get; init; }
+}
+
+public record InstituteStudentRow
+{
+    public int StudentId { get; init; }
+    public int? InstituteId { get; init; }
+    public int RoleIndex { get; init; }
+    public int Status { get; init; }
+    public int? InstitutePriority1 { get; init; }
+    public int? InstitutePriority2 { get; init; }
+    public int? InstitutePriority3 { get; init; }
+    public int? InstitutePriority4 { get; init; }
+    public int? RoleId { get; init; }
+    public string? RoleName { get; init; }
+    public int? RoleType { get; init; }
+    public DateTime? StartPendingAt { get; init; }
+}
+
+public record InstituteProjectRow
+{
+    public int ProjectId { get; init; }
+    public string? ProjectName { get; init; }
+    public int TotalCount { get; init; }
+    public int PendingCount { get; init; }
+    public string? StudentIds { get; init; }
+    public string? RoleNames { get; init; }
+    public string? RoleIndexes { get; init; }
+    public string? Statuses { get; init; }
 }
 
 
