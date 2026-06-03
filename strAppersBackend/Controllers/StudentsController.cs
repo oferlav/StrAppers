@@ -1116,7 +1116,7 @@ public class StudentsController : ControllerBase
                 return Ok(new { source = "squad", roles = (object)squadRoles });
             }
 
-            // Fallback: no active template with a squad → return global (InstituteId=1) roles
+            // Fallback: no active template with a squad → return global (InstituteId=null) roles
             var defaultRoles = await _context.Roles
                 .Where(r => r.InstituteId == null)
                 .OrderBy(r => r.Name)
