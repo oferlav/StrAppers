@@ -344,6 +344,12 @@ namespace strAppersBackend.Controllers
 
                 // Base path: only base-scoped rows (SquadId=null) for this institute.
                 // Safety: never touch InstituteId=1 rows — they are global/B2C.
+                if (request.InstituteId == 1)
+                {
+                    await tx.RollbackAsync();
+                    return BadRequest("Institute ID 1 is reserved for global roles and cannot be managed via this endpoint.");
+                }
+
                 var existingForInstitute = await _context.Roles
                     .Where(r => r.InstituteId == request.InstituteId && r.SquadId == null)
                     .ToListAsync();
