@@ -363,6 +363,11 @@ namespace strAppersBackend.Controllers
                         // dto.Id may be a global role Id (InstituteId=null) — not in existingForInstitute,
                         // so row stays null and a new institute-specific row is created instead.
                     }
+                    // Fallback: match by name to prevent duplicates when the same role
+                    // appears twice in the payload or a stale save re-sends negative IDs.
+                    if (row == null)
+                        row = existingForInstitute.FirstOrDefault(er =>
+                            string.Equals(er.Name.Trim(), name, StringComparison.OrdinalIgnoreCase));
 
                     if (row != null)
                     {
