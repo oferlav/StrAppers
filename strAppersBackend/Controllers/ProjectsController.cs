@@ -4241,13 +4241,10 @@ Staff request:
                         .AnyAsync(t =>
                             t.InstituteId == instituteId &&
                             t.Id != row.Id &&
-                            t.CourseName.ToLower() == newName.ToLower() &&
-                            (instituteProject
-                                ? t.InstituteProjectId == projectId && t.ProjectId == null
-                                : t.ProjectId == projectId && t.InstituteProjectId == null));
+                            t.CourseName.ToLower() == newName.ToLower());
                     if (taken)
                     {
-                        return Conflict($"A template named \"{newName}\" already exists for this project.");
+                        return Conflict($"A template named \"{newName}\" already exists for this institute.");
                     }
 
                     row.CourseName = newName;
