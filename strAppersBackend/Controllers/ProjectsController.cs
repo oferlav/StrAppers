@@ -4282,16 +4282,14 @@ Staff request:
             }
 
             var insertName = ClampName(effectiveCourseName!);
+            // Check against the DB unique constraint: (InstituteId, CourseName) is unique across all projects.
             var insertNameTaken = await _context.InstituteTemplates.AsNoTracking()
                 .AnyAsync(t =>
                     t.InstituteId == instituteId &&
-                    t.CourseName.ToLower() == insertName.ToLower() &&
-                    (instituteProject
-                        ? t.InstituteProjectId == projectId && t.ProjectId == null
-                        : t.ProjectId == projectId && t.InstituteProjectId == null));
+                    t.CourseName.ToLower() == insertName.ToLower());
             if (insertNameTaken)
             {
-                return Conflict($"A template named \"{insertName}\" already exists for this project.");
+                return Conflict($"A template named \"{insertName}\" already exists for this institute.");
             }
 
             var newRow = new InstituteTemplate
