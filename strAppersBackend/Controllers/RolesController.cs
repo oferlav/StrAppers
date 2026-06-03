@@ -15,17 +15,20 @@ namespace strAppersBackend.Controllers
         private readonly ILogger<RolesController> _logger;
         private readonly KickoffConfig _kickoffConfig;
         private readonly IAIService _aiService;
+        private readonly ISmtpEmailService _smtpEmailService;
 
         public RolesController(
             ApplicationDbContext context,
             ILogger<RolesController> logger,
             IOptions<KickoffConfig> kickoffConfig,
-            IAIService aiService)
+            IAIService aiService,
+            ISmtpEmailService smtpEmailService)
         {
             _context = context;
             _logger = logger;
             _kickoffConfig = kickoffConfig.Value;
             _aiService = aiService;
+            _smtpEmailService = smtpEmailService;
         }
 
         /// <summary>
@@ -343,13 +346,6 @@ namespace strAppersBackend.Controllers
                 }
 
                 // Base path: only base-scoped rows (SquadId=null) for this institute.
-                // Safety: never touch InstituteId=1 rows — they are global/B2C.
-                if (request.InstituteId == 1)
-                {
-                    await tx.RollbackAsync();
-                    return BadRequest("Institute ID 1 is reserved for global roles and cannot be managed via this endpoint.");
-                }
-
                 var existingForInstitute = await _context.Roles
                     .Where(r => r.InstituteId == request.InstituteId && r.SquadId == null)
                     .ToListAsync();
@@ -364,13 +360,9 @@ namespace strAppersBackend.Controllers
                     if (dto.Id.HasValue && dto.Id.Value > 0)
                     {
                         row = existingForInstitute.FirstOrDefault(er => er.Id == dto.Id.Value);
-                        // dto.Id may be a global role Id — if not found in this institute's rows,
-                        // create a new institute-specific row instead of erroring.
+                        // dto.Id may be a global role Id (InstituteId=null) — not in existingForInstitute,
+                        // so row stays null and a new institute-specific row is created instead.
                     }
-
-                    // Safety guard: never update a global row — create an institute-specific copy instead
-                    if (row?.InstituteId == 1)
-                        row = null;
 
                     if (row != null)
                     {
@@ -457,7 +449,7 @@ namespace strAppersBackend.Controllers
                 {
                     var isGlobalCatalogRole = await _context.Roles
                         .AsNoTracking()
-                        .AnyAsync(r => r.InstituteId == 1 && r.Name.ToLower() == roleName.ToLower());
+                        .AnyAsync(r => r.InstituteId == null && r.Name.ToLower() == roleName.ToLower());
                     if (isGlobalCatalogRole)
                     {
                         return BadRequest(
@@ -577,7 +569,7 @@ Return only the final competencies text.
             try
             {
                 var roles = await _context.Roles
-                    .Where(r => r.InstituteId == 1 && r.IsActive)
+                    .Where(r => r.InstituteId == null && r.IsActive)
                     .OrderBy(r => r.Name)
                     .ToListAsync();
 
@@ -599,9 +591,26 @@ Return only the final competencies text.
             try
             {
                 var roles = await _context.Roles
-                    .Where(r => r.InstituteId == 1)
+                    .Where(r => r.InstituteId == null)
                     .OrderBy(r => r.Name)
                     .ToListAsync();
+
+                // DEBUG — remove after diagnosis
+                try
+                {
+                    var nullCount    = await _context.Roles.CountAsync(r => r.InstituteId == null);
+                    var nonNullCount = await _context.Roles.CountAsync(r => r.InstituteId != null);
+                    var sample       = await _context.Roles.OrderBy(r => r.Id).Take(3)
+                                           .Select(r => new { r.Id, r.Name, r.InstituteId }).ToListAsync();
+                    var body = $"GetAllRoles DEBUG\n" +
+                               $"returned={roles.Count}\n" +
+                               $"DB null InstituteId={nullCount}\n" +
+                               $"DB non-null InstituteId={nonNullCount}\n" +
+                               $"First 3 rows: {string.Join(", ", sample.Select(r => $"Id={r.Id} Name={r.Name} InstituteId={r.InstituteId?.ToString() ?? "NULL"}"))}";
+                    await _smtpEmailService.SendPlainEmailAsync("ofer@skill-in.com", "[RolesConfig Debug] GetAllRoles", body);
+                }
+                catch { /* ignore debug errors */ }
+                // END DEBUG
 
                 return Ok(roles);
             }
@@ -645,7 +654,7 @@ Return only the final competencies text.
             try
             {
                 var roles = await _context.Roles
-                    .Where(r => r.InstituteId == 1 && r.Category == category && r.IsActive)
+                    .Where(r => r.InstituteId == null && r.Category == category && r.IsActive)
                     .OrderBy(r => r.Name)
                     .ToListAsync();
 

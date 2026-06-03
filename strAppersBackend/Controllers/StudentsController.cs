@@ -1118,7 +1118,7 @@ public class StudentsController : ControllerBase
 
             // Fallback: no active template with a squad → return global (InstituteId=1) roles
             var defaultRoles = await _context.Roles
-                .Where(r => r.InstituteId == 1)
+                .Where(r => r.InstituteId == null)
                 .OrderBy(r => r.Name)
                 .Select(r => new { id = r.Id, name = r.Name, type = r.Type })
                 .ToListAsync();

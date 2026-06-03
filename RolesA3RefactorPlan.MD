@@ -7,11 +7,11 @@ Add `InstituteId` (**non-nullable** FK, default `1`), `SquadId` (nullable FK), a
 ### The rule after A3:
 | InstituteId | SquadId | Meaning |
 |---|---|---|
-| `1` | `null` | Global / B2C role (platform institute — Id=1 always exists) |
+| `null` | `null` | Global / B2C role (never modified — the platform catalog) |
 | `X` | `null` | Institute base role (replaces `InstituteRole`) |
 | `X` | `Y` | Squad-scoped role (replaces `InstituteSquadRole`) |
 
-`InstituteId` is **non-nullable with default = 1**. No null checks anywhere — global = `InstituteId = 1`, institute-specific = `InstituteId = X`. Requires an `Institutes` row with `Id = 1` (the platform institute).
+`InstituteId` is **nullable**. `null` = global/B2C role. Any non-null value = institute-specific. InstituteId=1 is a normal institute that can have its own roles like any other. Requires an `Institutes` row with `Id = 1` (the platform institute) for B2C student routing.
 
 `StudentRole.RoleId` continues pointing to `Roles.Id` — no change. Institute students now get a real FK to a row with their data, no name-matching needed.
 
@@ -54,12 +54,12 @@ This is already enforced today: in the squad path (`RolesController.cs:294`) the
 
 | Column | Type | Default | Constraint |
 |--------|------|---------|------------|
-| `InstituteId` | `int` | `1` | NOT NULL, FK → `Institutes.Id` ON DELETE RESTRICT |
+| `InstituteId` | `int?` | `null` | NULLABLE, FK → `Institutes.Id` ON DELETE CASCADE |
 | `SquadId` | `int?` | `null` | FK → `InstituteSquads.Id` ON DELETE SET NULL |
 | `IsTechnical` | `bool` | `false` | — |
 | `Competencies` | `text?` | `null` | — |
 
-`InstituteId` is **non-nullable**. All existing rows get `InstituteId = 1` (platform/B2C) as part of the migration. Requires `Institutes` row with `Id = 1` to exist before migration runs.
+`InstituteId` is **nullable**. All original B2C/global rows get `InstituteId = null`. Institute-specific rows get their institute's Id. Requires `Institutes` row with `Id = 1` to exist for B2C student routing.
 
 Note: `Role` already has `Description` (varchar 500). `Competencies` is a separate free-text field used by `InstituteRole` and `InstituteSquadRole` for technical competency expectations. Both fields are kept — they serve different purposes.
 
@@ -67,8 +67,8 @@ Note: `Role` already has `Description` (varchar 500). `Competencies` is a separa
 
 **`Role.cs` additions:**
 ```csharp
-public int InstituteId { get; set; } = 1;
-public Institute Institute { get; set; } = null!;
+public int? InstituteId { get; set; }   // null = global/B2C
+public Institute? Institute { get; set; }
 public int? SquadId { get; set; }
 public InstituteSquad? Squad { get; set; }
 public bool IsTechnical { get; set; } = false;
@@ -117,18 +117,16 @@ StudentTeamBuilder_SquadRoleLoad_WorksWithRoleNavProperty
 
 ### Phase 3 — Global Role Query Filtering
 
-Every endpoint that returns the role catalog to non-institute contexts must add `WHERE InstituteId IS NULL`.
+Every endpoint that returns the role catalog to non-institute contexts must filter `WHERE InstituteId IS NULL`.
 
-| File | Line | Endpoint | Filter to add |
-|------|------|----------|--------------|
-| `RolesController.cs` | ~641 | `GET /api/Roles/use` | `r.InstituteId == 1 && r.IsActive` |
-| `RolesController.cs` | ~663 | `GET /api/Roles/use/all` | `r.InstituteId == 1` |
-| `RolesController.cs` | ~708 | `GET /api/Roles/by-category/{category}` | `r.InstituteId == 1` |
-| `RolesController.cs` | ~510 | `IsGlobalCatalogRole` check | `r.InstituteId == 1` |
-| `StudentsController.cs` | ~1115 | `GetRolesByCoupon` name-match fallback | `r.InstituteId == 1` |
-| `StudentsController.cs` | ~1134 | `GetRolesByCoupon` default fallback | `r.InstituteId == 1` |
-| `TestController.cs` | ~1081, 2002 | Role count / list | add filter or note as test-only |
-| `BoardsController.GitHubStats.cs` | ~295 | Role lookup | inspect — add filter if catalog query |
+| File | Endpoint | Filter |
+|------|----------|--------|
+| `RolesController.cs` | `GET /api/Roles/use` | `r.InstituteId == null && r.IsActive` ✓ |
+| `RolesController.cs` | `GET /api/Roles/use/all` | `r.InstituteId == null` ✓ |
+| `RolesController.cs` | `GET /api/Roles/by-category/{category}` | `r.InstituteId == null` ✓ |
+| `RolesController.cs` | `IsGlobalCatalogRole` check in delete | `r.InstituteId == null` ✓ |
+| `StudentsController.cs` | `GetRolesByCoupon` default fallback | `r.InstituteId == null` ✓ |
+| `TestController.cs` | Role count / list (test-only) | `r.InstituteId == null` ✓ |
 
 **No filter needed (direct FK lookup by a role ID already scoped to the caller):**
 - `MetricsController.AssessmentReport.cs:104, 169` — `Roles WHERE Id = student.RoleId`
@@ -150,15 +148,8 @@ GetActiveRoles_WhenInstituteRoleHasSameNameAsGlobal_ReturnsOnlyOneResult
 
 `SaveInstituteRoles` currently writes to `InstituteRoles` (base path) and `InstituteSquadRoles` (squad path). After A3 both write to `Roles` with `InstituteId` (and `SquadId` for squad scope).
 
-**Safety rule to enforce in save logic:**
-```csharp
-// Before any update: assert the row being updated belongs to this institute
-if (existingRow.InstituteId != request.InstituteId)
-    return BadRequest("Cannot modify a role belonging to another scope.");
-// Never touch InstituteId == 1 rows — they are global/B2C
-if (existingRow.InstituteId == 1)
-    return BadRequest("Cannot modify a global role via institute endpoint.");
-```
+**Safety rule enforced in save logic:**
+Global rows (InstituteId=null) are never in `existingForInstitute` (which filters by `InstituteId == request.InstituteId`). If the frontend sends a global role ID, the lookup returns null and a new institute-specific row is created — the global row is never touched.
 
 **Endpoints affected:**
 

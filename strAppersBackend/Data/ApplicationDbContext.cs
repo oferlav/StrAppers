@@ -576,13 +576,14 @@ public class ApplicationDbContext : DbContext
 
             entity.HasIndex(e => e.SkillId);
 
-            entity.Property(e => e.InstituteId).IsRequired().HasDefaultValue(1);
+            entity.Property(e => e.InstituteId).IsRequired(false);
             entity.Property(e => e.IsTechnical).HasDefaultValue(false);
             entity.Property(e => e.Competencies).HasColumnType("text");
 
             entity.HasOne(e => e.Institute)
                   .WithMany()
                   .HasForeignKey(e => e.InstituteId)
+                  .IsRequired(false)
                   .OnDelete(DeleteBehavior.Cascade);
 
             entity.HasOne(e => e.Squad)

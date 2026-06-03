@@ -127,7 +127,7 @@ namespace strAppersBackend.Controllers
                         organizations = await _context.Organizations.CountAsync(),
                         majors = await _context.Majors.CountAsync(),
                         years = await _context.Years.CountAsync(),
-                        roles = await _context.Roles.CountAsync(r => r.InstituteId == 1),
+                        roles = await _context.Roles.CountAsync(r => r.InstituteId == null),
                         projectStatuses = await _context.ProjectStatuses.CountAsync(),
                         joinRequests = await _context.JoinRequests.CountAsync()
                     }
@@ -1078,7 +1078,7 @@ namespace strAppersBackend.Controllers
                         activeOrganizations = await _context.Organizations.CountAsync(s => s.IsActive),
                         activeMajors = await _context.Majors.CountAsync(m => m.IsActive),
                         activeYears = await _context.Years.CountAsync(y => y.IsActive),
-                        activeRoles = await _context.Roles.CountAsync(r => r.InstituteId == 1 && r.IsActive),
+                        activeRoles = await _context.Roles.CountAsync(r => r.InstituteId == null && r.IsActive),
                         activeProjectStatuses = await _context.ProjectStatuses.CountAsync(ps => ps.IsActive)
                     },
                     businessRuleValidation = new

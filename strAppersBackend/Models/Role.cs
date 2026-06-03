@@ -33,15 +33,15 @@ public class Role
     public bool CustomerEngagement { get; set; } = false;
 
     /// <summary>
-    /// InstituteId = 1 → global/B2C role. InstituteId = X → institute-specific role.
+    /// Null → global/B2C role (never modified). Non-null → institute-specific or squad-scoped role.
     /// </summary>
-    public int InstituteId { get; set; } = 1;
+    public int? InstituteId { get; set; }
 
     public Institute? Institute { get; set; }
 
     /// <summary>
     /// When set, this role is scoped to a specific squad (replaces InstituteSquadRole).
-    /// Null = base institute role (or global when InstituteId = 1).
+    /// Null = base institute role (or global when InstituteId is null).
     /// </summary>
     public int? SquadId { get; set; }
 
