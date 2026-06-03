@@ -176,8 +176,10 @@ namespace strAppersBackend.Controllers
                     .ToListAsync())
                     .ToHashSet();
 
+                // Accept both institute-specific base roles and global (null) roles as valid BaseInstituteRoleId.
+                // When no institute rows exist, the frontend falls back to global catalog IDs.
                 var baseInstituteRoleIdSet = (await _context.Roles.AsNoTracking()
-                    .Where(r => r.InstituteId == request.InstituteId && r.SquadId == null)
+                    .Where(r => (r.InstituteId == request.InstituteId || r.InstituteId == null) && r.SquadId == null)
                     .Select(r => r.Id)
                     .ToListAsync())
                     .ToHashSet();
