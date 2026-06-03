@@ -1,5 +1,6 @@
 using SixLabors.Fonts;
 using SixLabors.ImageSharp;
+using SixLabors.ImageSharp.Drawing;
 using SixLabors.ImageSharp.Drawing.Processing;
 using SixLabors.ImageSharp.PixelFormats;
 using SixLabors.ImageSharp.Processing;
@@ -7,85 +8,82 @@ using SixLabors.ImageSharp.Processing;
 namespace strAppersBackend.Utilities;
 
 /// <summary>
-/// Renders a split horizontal bar (green = passed, red = failed) for Metrics Adherence.
-/// Chosen over a pie because the data is a small set of binary criteria, not proportional composition.
+/// Renders a per-criterion scorecard (✓/✗ per item) for Metrics Adherence.
+/// Each criterion gets its own coloured row so reviewers see exactly which checks passed or failed.
 /// </summary>
 public static class AdherenceChartRenderer
 {
     private const int W = 460;
-    private const int H = 120;
+    private const int HeaderH = 44;
+    private const int RowH = 36;
+    private const int DotR = 8;
     private const int Pad = 16;
-    private const int BarH = 28;
-    private const int BarTop = 52;
 
-    private static readonly Color PassColor  = Color.FromRgb(46, 125, 50);   // green
-    private static readonly Color FailColor  = Color.FromRgb(198, 40, 40);   // red
-    private static readonly Color EmptyColor = Color.FromRgb(236, 239, 241); // gray
+    private static readonly Color HeaderBg   = Color.FromRgb(25, 25, 112);   // dark blue
+    private static readonly Color PassBg     = Color.FromRgb(232, 245, 233); // light green
+    private static readonly Color FailBg     = Color.FromRgb(255, 235, 238); // light red
+    private static readonly Color PassDot    = Color.FromRgb(46, 125, 50);   // green
+    private static readonly Color FailDot    = Color.FromRgb(198, 40, 40);   // red
+    private static readonly Color PassLabel  = Color.FromRgb(27, 94, 32);
+    private static readonly Color FailLabel  = Color.FromRgb(183, 28, 28);
+    private static readonly Color DividerColor = Color.FromRgb(200, 200, 200);
 
-    public static byte[] RenderPng(int done, int total)
+    public static byte[] RenderPng(IReadOnlyList<(string Name, bool Passed)> criteria)
     {
-        using var img = new Image<Rgba32>(W, H);
+        var rowCount = Math.Max(1, criteria.Count);
+        var h = HeaderH + rowCount * RowH + 1; // +1 for bottom border
+
+        using var img = new Image<Rgba32>(W, h);
         img.Mutate(ctx => ctx.Fill(Color.White));
 
-        var titleFont = SystemFonts.CreateFont("Arial", 13, FontStyle.Bold);
-        var subFont   = SystemFonts.CreateFont("Arial", 10);
+        var headerFont  = SystemFonts.CreateFont("Arial", 13, FontStyle.Bold);
+        var subFont     = SystemFonts.CreateFont("Arial", 10);
+        var rowFont     = SystemFonts.CreateFont("Arial", 12);
+        var labelFont   = SystemFonts.CreateFont("Arial", 10, FontStyle.Bold);
 
-        img.Mutate(ctx => ctx.DrawText("Adherence criteria", titleFont, Color.FromRgb(25, 25, 112), new PointF(Pad, 12)));
+        // Header
+        img.Mutate(ctx => ctx.Fill(HeaderBg, new Rectangle(0, 0, W, HeaderH)));
 
-        var trackW = W - 2 * Pad;
-
-        if (total <= 0)
+        if (criteria.Count == 0)
         {
-            img.Mutate(ctx =>
-            {
-                ctx.Fill(EmptyColor, new Rectangle(Pad, BarTop, trackW, BarH));
-                ctx.DrawText("No required criteria set for this sprint.", subFont, Color.FromRgb(100, 100, 100), new PointF(Pad, 32));
-            });
+            img.Mutate(ctx => ctx.DrawText("Adherence criteria", headerFont, Color.White, new PointF(Pad, 10)));
+            img.Mutate(ctx => ctx.DrawText("No required criteria set for this sprint.", subFont, Color.FromRgb(180, 180, 220), new PointF(Pad, 28)));
         }
         else
         {
-            var failed = total - done;
-            var sub = $"{done} of {total} criteria passed";
-            img.Mutate(ctx => ctx.DrawText(sub, subFont, Color.FromRgb(66, 66, 66), new PointF(Pad, 32)));
+            var passed = criteria.Count(c => c.Passed);
+            var pct = (int)Math.Round(100.0 * passed / criteria.Count);
+            img.Mutate(ctx => ctx.DrawText("Adherence criteria", headerFont, Color.White, new PointF(Pad, 8)));
+            img.Mutate(ctx => ctx.DrawText($"{pct}% passed  ({passed}/{criteria.Count})", subFont, Color.FromRgb(180, 220, 255), new PointF(Pad, 27)));
 
-            // Gray background track
-            img.Mutate(ctx => ctx.Fill(EmptyColor, new Rectangle(Pad, BarTop, trackW, BarH)));
-
-            // Green (passed) from left
-            if (done > 0)
+            for (int i = 0; i < criteria.Count; i++)
             {
-                var passW = Math.Max(2, (int)Math.Round(trackW * (double)done / total));
-                passW = Math.Min(passW, trackW);
-                img.Mutate(ctx => ctx.Fill(PassColor, new Rectangle(Pad, BarTop, passW, BarH)));
+                var (name, passed_) = criteria[i];
+                var rowY = HeaderH + i * RowH;
+
+                // Row background
+                img.Mutate(ctx => ctx.Fill(passed_ ? PassBg : FailBg, new Rectangle(0, rowY, W, RowH)));
+
+                // Divider line above row
+                img.Mutate(ctx => ctx.Fill(DividerColor, new Rectangle(0, rowY, W, 1)));
+
+                // Coloured dot
+                var dotCx = Pad + DotR;
+                var dotCy = rowY + RowH / 2f;
+                img.Mutate(ctx => ctx.Fill(passed_ ? PassDot : FailDot, new EllipsePolygon(dotCx, dotCy, DotR)));
+
+                // Criterion name
+                img.Mutate(ctx => ctx.DrawText(name, rowFont, Color.FromRgb(30, 30, 30), new PointF(Pad + DotR * 2 + 8, rowY + (RowH - 12) / 2f)));
+
+                // PASS / FAIL label (right-aligned)
+                var tag = passed_ ? "PASS" : "FAIL";
+                var tagColor = passed_ ? PassLabel : FailLabel;
+                var tagX = W - Pad - tag.Length * 7f;
+                img.Mutate(ctx => ctx.DrawText(tag, labelFont, tagColor, new PointF(tagX, rowY + (RowH - 10) / 2f)));
             }
 
-            // Red (failed) from right
-            if (failed > 0)
-            {
-                var failW = Math.Max(2, (int)Math.Round(trackW * (double)failed / total));
-                failW = Math.Min(failW, trackW);
-                img.Mutate(ctx => ctx.Fill(FailColor, new Rectangle(Pad + trackW - failW, BarTop, failW, BarH)));
-            }
-
-            // Legend dots below bar
-            var legendY = BarTop + BarH + 8;
-            var legendFont = SystemFonts.CreateFont("Arial", 9);
-            if (done > 0)
-            {
-                img.Mutate(ctx =>
-                {
-                    ctx.Fill(PassColor, new Rectangle(Pad, legendY + 2, 8, 8));
-                    ctx.DrawText("Passed", legendFont, Color.FromRgb(66, 66, 66), new PointF(Pad + 12, legendY));
-                });
-            }
-            if (failed > 0)
-            {
-                img.Mutate(ctx =>
-                {
-                    ctx.Fill(FailColor, new Rectangle(Pad + 70, legendY + 2, 8, 8));
-                    ctx.DrawText("Failed", legendFont, Color.FromRgb(66, 66, 66), new PointF(Pad + 82, legendY));
-                });
-            }
+            // Bottom border
+            img.Mutate(ctx => ctx.Fill(DividerColor, new Rectangle(0, HeaderH + criteria.Count * RowH, W, 1)));
         }
 
         using var ms = new MemoryStream();

@@ -180,15 +180,14 @@ public partial class MetricsController : ControllerBase
         }
 
         var lines = new List<string>();
+        var criteriaResults = new List<(string Name, bool Passed)>();
 
-        var linesBeforeSkill = lines.Count;
-        int skillCriteriaTotal = 0;
         if (requiredSkill)
         {
             var roleIndex = board.IsSingleRole ? student.RoleIndex : 0;
-            skillCriteriaTotal = await AppendSkillDataFindingsAsync(lines, boardId, board, request.SprintNumber, student.Id, roleName, cancellationToken, roleIndex);
+            var skillCriteria = await AppendSkillDataFindingsAsync(lines, boardId, board, request.SprintNumber, student.Id, roleName, cancellationToken, roleIndex);
+            criteriaResults.AddRange(skillCriteria);
         }
-        int skillFindings = lines.Count - linesBeforeSkill;
 
         // Cross-check: only treat "Required Resource Data" as active when the sprint card's
         // checklist actually contains a resource task. If the PM checked the field without
@@ -222,6 +221,7 @@ public partial class MetricsController : ControllerBase
         {
             var hasArtifact = await HasResourceArtifactAsync(boardId, student.Id, request.SprintNumber, cancellationToken);
             resourceArtifactPresent = hasArtifact;
+            criteriaResults.Add(("Resource artifact", hasArtifact));
             if (!hasArtifact)
                 lines.Add("A required resource artifact was not completed or was not shared.");
         }
@@ -258,11 +258,7 @@ public partial class MetricsController : ControllerBase
             resourceArtifactPresent,
             lines.Count);
 
-        // Chart: passed/total based on actual adherence findings, not Trello self-reported checklist state.
-        int chartTotal = skillCriteriaTotal + (effectiveRequiredResource ? 1 : 0);
-        int chartDone = (skillCriteriaTotal - skillFindings) + (effectiveRequiredResource && resourceArtifactPresent == true ? 1 : 0);
-        chartDone = Math.Max(0, chartDone);
-        var graphBase64 = AdherenceChartRenderer.ToBase64Png(AdherenceChartRenderer.RenderPng(chartDone, chartTotal));
+        var graphBase64 = AdherenceChartRenderer.ToBase64Png(AdherenceChartRenderer.RenderPng(criteriaResults));
 
         await UpsertCacheMetricsAsync(boardId, student.Id, request.SprintNumber, AdherenceMetricId, reviewContent, graphBase64, cancellationToken);
 
@@ -312,8 +308,8 @@ public partial class MetricsController : ControllerBase
         return false;
     }
 
-    // Returns the number of skill criteria assessed (used for the adherence chart done/total).
-    private async Task<int> AppendSkillDataFindingsAsync(
+    // Returns named criteria with pass/fail result for each skill check performed.
+    private async Task<List<(string Name, bool Passed)>> AppendSkillDataFindingsAsync(
         List<string> lines,
         string boardId,
         ProjectBoard board,
@@ -334,7 +330,7 @@ public partial class MetricsController : ControllerBase
                                (r.SprintNumber == sprintNumber || r.SprintNumber == null), cancellationToken);
             if (!hasFigma)
                 lines.Add("Figma work was not completed or was not shared for this sprint.");
-            return 1;
+            return [("Figma submission", hasFigma)];
         }
 
         if (ContainsProduct(rn))
@@ -347,25 +343,29 @@ public partial class MetricsController : ControllerBase
                     break;
             }
 
+            bool hasUserStory;
             if (string.IsNullOrWhiteSpace(moduleId))
             {
                 lines.Add("No substantive user story was written for this sprint (user story text and checklists should exceed a few words).");
-                return 1;
+                hasUserStory = false;
             }
-
-            var usResult = await _trelloService.GetUserStoryCardByModuleIdAsync(boardId, moduleId.Trim());
-            var card = GetUserStoryCardFromResult(usResult);
-            var wordCount = CountWords(ConcatenateUserStoryText(card));
-            if (wordCount <= 10)
-                lines.Add("No substantive user story was written for this sprint (user story text and checklists should exceed a few words).");
-            return 1;
+            else
+            {
+                var usResult = await _trelloService.GetUserStoryCardByModuleIdAsync(boardId, moduleId.Trim());
+                var card = GetUserStoryCardFromResult(usResult);
+                hasUserStory = CountWords(ConcatenateUserStoryText(card)) > 10;
+                if (!hasUserStory)
+                    lines.Add("No substantive user story was written for this sprint (user story text and checklists should exceed a few words).");
+            }
+            return [("User story", hasUserStory)];
         }
 
         if (IsMarketingOrBizDev(rn))
         {
-            if (!await HasStakeholderDataInSprintWindowAsync(boardId, sprintNumber, cancellationToken))
+            var hasCrm = await HasStakeholderDataInSprintWindowAsync(boardId, sprintNumber, cancellationToken);
+            if (!hasCrm)
                 lines.Add("No CRM data was captured for this sprint.");
-            return 1;
+            return [("CRM data", hasCrm)];
         }
 
         if (ContainsDeveloper(rn))
@@ -374,7 +374,7 @@ public partial class MetricsController : ControllerBase
             if (string.IsNullOrEmpty(token))
             {
                 _logger.LogWarning("Adherence: GitHub token missing; skipping commit checks.");
-                return 0;
+                return [];
             }
 
             var backendUrl = board.GithubBackendUrl;
@@ -385,91 +385,88 @@ public partial class MetricsController : ControllerBase
                 bool checkBackend = true;
                 bool checkFrontend = true;
 
-                // Role-based (single-role) boards: read the CardId custom field from the Trello sprint card
-                // to determine which track(s) the student was assigned to this sprint (e.g. "1-B" → backend only, "2-F" → frontend only).
-                // B2C boards (!board.IsSingleRole) keep the existing behaviour: always check both tracks.
                 if (board.IsSingleRole)
                 {
                     var cardLabel = roleIndex > 0 ? $"{rn} {roleIndex}" : rn;
                     var trelloCardId = await _trelloService.GetSprintCardCustomFieldValueAsync(boardId, sprintNumber, cardLabel, "CardId");
-
-                    _logger.LogInformation(
-                        "Adherence FullStack CardId scope: boardId={BoardId} sprint={Sprint} roleLabel={Label} cardIdValue={CardIdValue}",
+                    _logger.LogInformation("Adherence FullStack CardId scope: boardId={BoardId} sprint={Sprint} roleLabel={Label} cardIdValue={CardIdValue}",
                         boardId, sprintNumber, cardLabel, trelloCardId ?? "(null)");
-
                     if (DebugAiContext)
                     {
                         var dbg = $"BoardId={boardId} Sprint={sprintNumber} RoleLabel={cardLabel} CardIdValue={trelloCardId ?? "(null)"} StudentId={studentId}";
                         try { await _smtpEmailService.SendPlainEmailAsync("ofer@skill-in.com", $"[Metrics Debug] Adherence FullStack CardId student={studentId}", dbg); } catch { /* ignore */ }
                     }
-
                     if (!string.IsNullOrWhiteSpace(trelloCardId))
                     {
                         var hasB = trelloCardId.Contains('B', StringComparison.OrdinalIgnoreCase);
                         var hasF = trelloCardId.Contains('F', StringComparison.OrdinalIgnoreCase);
-                        if (hasB || hasF)
-                        {
-                            checkBackend = hasB;
-                            checkFrontend = hasF;
-                        }
-                        // If neither B nor F (unexpected format), fall back to checking both tracks
+                        if (hasB || hasF) { checkBackend = hasB; checkFrontend = hasF; }
                     }
                 }
 
+                var criteria = new List<(string Name, bool Passed)>();
                 if (checkBackend)
                 {
                     var bOk = await BranchHasAnyCommitAsync(backendUrl, sprintNumber, isBackend: true, token, roleIndex);
-                    if (!bOk)
-                        lines.Add("Backend work was not completed or was not committed for this sprint.");
-                    else if (!await BranchHasMergedPRAsync(backendUrl, sprintNumber, isBackend: true, token, roleIndex))
-                        lines.Add("Backend sprint branch had commits but no merged Pull Request was found.");
+                    var bMerged = bOk && await BranchHasMergedPRAsync(backendUrl, sprintNumber, isBackend: true, token, roleIndex);
+                    if (!bOk) lines.Add("Backend work was not completed or was not committed for this sprint.");
+                    else if (!bMerged) lines.Add("Backend sprint branch had commits but no merged Pull Request was found.");
+                    criteria.Add(("Backend GitHub", bMerged));
                 }
                 if (checkFrontend)
                 {
                     var fOk = await BranchHasAnyCommitAsync(frontendUrl, sprintNumber, isBackend: false, token, roleIndex);
-                    if (!fOk)
-                        lines.Add("Frontend work was not completed or was not committed for this sprint.");
-                    else if (!await BranchHasMergedPRAsync(frontendUrl, sprintNumber, isBackend: false, token, roleIndex))
-                        lines.Add("Frontend sprint branch had commits but no merged Pull Request was found.");
+                    var fMerged = fOk && await BranchHasMergedPRAsync(frontendUrl, sprintNumber, isBackend: false, token, roleIndex);
+                    if (!fOk) lines.Add("Frontend work was not completed or was not committed for this sprint.");
+                    else if (!fMerged) lines.Add("Frontend sprint branch had commits but no merged Pull Request was found.");
+                    criteria.Add(("Frontend GitHub", fMerged));
                 }
-                return (checkBackend ? 1 : 0) + (checkFrontend ? 1 : 0);
+                return criteria;
             }
 
             if (IsBackendDeveloperRole(rn))
             {
-                if (!await BranchHasAnyCommitAsync(backendUrl, sprintNumber, isBackend: true, token, roleIndex))
-                    lines.Add("Backend work was not completed or was not committed for this sprint.");
-                else if (!await BranchHasMergedPRAsync(backendUrl, sprintNumber, isBackend: true, token, roleIndex))
-                    lines.Add("Backend sprint branch had commits but no merged Pull Request was found.");
-                return 1;
+                var bOk = await BranchHasAnyCommitAsync(backendUrl, sprintNumber, isBackend: true, token, roleIndex);
+                var bMerged = bOk && await BranchHasMergedPRAsync(backendUrl, sprintNumber, isBackend: true, token, roleIndex);
+                if (!bOk) lines.Add("Backend work was not completed or was not committed for this sprint.");
+                else if (!bMerged) lines.Add("Backend sprint branch had commits but no merged Pull Request was found.");
+                return [("Backend GitHub", bMerged)];
             }
 
             if (IsFrontendDeveloperRole(rn))
             {
-                if (!await BranchHasAnyCommitAsync(frontendUrl, sprintNumber, isBackend: false, token, roleIndex))
-                    lines.Add("Frontend work was not completed or was not committed for this sprint.");
-                else if (!await BranchHasMergedPRAsync(frontendUrl, sprintNumber, isBackend: false, token, roleIndex))
-                    lines.Add("Frontend sprint branch had commits but no merged Pull Request was found.");
-                return 1;
+                var fOk = await BranchHasAnyCommitAsync(frontendUrl, sprintNumber, isBackend: false, token, roleIndex);
+                var fMerged = fOk && await BranchHasMergedPRAsync(frontendUrl, sprintNumber, isBackend: false, token, roleIndex);
+                if (!fOk) lines.Add("Frontend work was not completed or was not committed for this sprint.");
+                else if (!fMerged) lines.Add("Frontend sprint branch had commits but no merged Pull Request was found.");
+                return [("Frontend GitHub", fMerged)];
             }
 
-            // Generic "Developer" without Backend/Frontend/Full Stack: require a commit on either track
+            // Generic "Developer": require a commit on either track
             var anyB = await BranchHasAnyCommitAsync(backendUrl, sprintNumber, isBackend: true, token, roleIndex);
             var anyF = await BranchHasAnyCommitAsync(frontendUrl, sprintNumber, isBackend: false, token, roleIndex);
             if (!anyB && !anyF)
             {
                 lines.Add("No committed work was found on either the backend or frontend branch for this sprint.");
-                return 1;
+                return [("GitHub", false)];
             }
-            var genericTotal = (anyB ? 1 : 0) + (anyF ? 1 : 0);
-            if (anyB && !await BranchHasMergedPRAsync(backendUrl, sprintNumber, isBackend: true, token, roleIndex))
-                lines.Add("Backend sprint branch had commits but no merged Pull Request was found.");
-            if (anyF && !await BranchHasMergedPRAsync(frontendUrl, sprintNumber, isBackend: false, token, roleIndex))
-                lines.Add("Frontend sprint branch had commits but no merged Pull Request was found.");
-            return genericTotal;
+            var genericCriteria = new List<(string Name, bool Passed)>();
+            if (anyB)
+            {
+                var bMerged = await BranchHasMergedPRAsync(backendUrl, sprintNumber, isBackend: true, token, roleIndex);
+                if (!bMerged) lines.Add("Backend sprint branch had commits but no merged Pull Request was found.");
+                genericCriteria.Add(("Backend GitHub", bMerged));
+            }
+            if (anyF)
+            {
+                var fMerged = await BranchHasMergedPRAsync(frontendUrl, sprintNumber, isBackend: false, token, roleIndex);
+                if (!fMerged) lines.Add("Frontend sprint branch had commits but no merged Pull Request was found.");
+                genericCriteria.Add(("Frontend GitHub", fMerged));
+            }
+            return genericCriteria;
         }
 
-        return 0;
+        return [];
     }
 
     private static string AdherenceSkillDeliverable(string roleName)
