@@ -362,14 +362,12 @@ namespace strAppersBackend.Controllers
                         // create a new institute-specific row instead of erroring.
                     }
 
+                    // Safety guard: never update a global row — create an institute-specific copy instead
+                    if (row?.InstituteId == 1)
+                        row = null;
+
                     if (row != null)
                     {
-                        // Safety guard: never update a global row
-                        if (row.InstituteId == 1)
-                        {
-                            await tx.RollbackAsync();
-                            return BadRequest("Cannot modify a global role via institute endpoint.");
-                        }
                         row.Name = name;
                         row.Description = dto.Description;
                         row.Competencies = dto.Competencies;

@@ -338,11 +338,17 @@ public partial class BoardsController
                 .AsNoTracking()
                 .Where(r => r.SquadId != null && squadIds.Contains(r.SquadId.Value) && r.IsActive)
                 .Select(r => new { id = r.Id, name = r.Name })
-                .Distinct()
                 .OrderBy(r => r.name)
                 .ToListAsync(cancellationToken);
 
-            return Ok(roles.Cast<object>().ToList());
+            var distinct = roles
+                .GroupBy(r => r.name, StringComparer.OrdinalIgnoreCase)
+                .Select(g => g.First())
+                .OrderBy(r => r.name)
+                .Cast<object>()
+                .ToList();
+
+            return Ok(distinct);
         }
         catch (Exception ex)
         {
