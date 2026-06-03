@@ -205,8 +205,8 @@ public class GetRolesByCouponTests
         using var ctx = CreateContext(nameof(ActiveTemplateWithoutSquadId_FallsBackToDefaultRoles));
         ctx.Institutes.Add(new Institute { Id = 2, Name = "Uni" });
         ctx.InstituteProjects.Add(new InstituteProject { Id = 1, InstituteId = 2, Title = "P", IsAvailable = true, Coupon = "UNI-1" });
-        ctx.Roles.Add(new Role { Id = 10, Name = "DefaultRole", Type = 0 });
-        // Template with no SquadId
+        ctx.Roles.Add(new Role { Id = 10, Name = "DefaultRole", Type = 0 }); // InstituteId=null → global
+        // Template with no SquadId, no institute base roles
         ctx.InstituteTemplates.Add(new InstituteTemplate
         {
             Id = 1, InstituteId = 2, InstituteProjectId = 1,
@@ -220,5 +220,109 @@ public class GetRolesByCouponTests
         var json = JsonSerializer.Serialize(ok.Value);
         Assert.Contains("\"source\":\"default\"", json);
         Assert.Contains("DefaultRole", json);
+    }
+
+    // ── Scenario 2: institute has customised base roles, no squad ─────────
+
+    [Fact]
+    public async Task NoSquad_InstituteHasBaseRoles_ReturnsInstituteBaseRoles()
+    {
+        using var ctx = CreateContext(nameof(NoSquad_InstituteHasBaseRoles_ReturnsInstituteBaseRoles));
+        ctx.Institutes.Add(new Institute { Id = 3, Name = "Tech Academy" });
+        ctx.InstituteProjects.Add(new InstituteProject { Id = 1, InstituteId = 3, Title = "P", IsAvailable = true, Coupon = "TECH-1" });
+
+        // Global catalog roles
+        ctx.Roles.Add(new Role { Id = 1, InstituteId = null, Name = "Backend Developer", Type = 1, IsActive = true });
+        ctx.Roles.Add(new Role { Id = 2, InstituteId = null, Name = "Frontend Developer", Type = 1, IsActive = true });
+
+        // Institute-customised base roles (InstituteId=3, SquadId=null)
+        ctx.Roles.Add(new Role { Id = 100, InstituteId = 3, SquadId = null, Name = "Backend Developer", Type = 1, IsActive = true, CustomerEngagement = false, IsTechnical = true });
+        ctx.Roles.Add(new Role { Id = 101, InstituteId = 3, SquadId = null, Name = "Frontend Developer", Type = 1, IsActive = true, CustomerEngagement = true,  IsTechnical = true });
+
+        // Template exists but has no squad
+        ctx.InstituteTemplates.Add(new InstituteTemplate
+        {
+            Id = 1, InstituteId = 3, InstituteProjectId = 1,
+            CourseName = "Built-in Course", IsActive = true, SquadId = null
+        });
+        await ctx.SaveChangesAsync();
+
+        var result = await CreateController(ctx).GetRolesByCoupon("TECH-1");
+
+        var ok = Assert.IsType<OkObjectResult>(result);
+        var json = JsonSerializer.Serialize(ok.Value);
+
+        // Must use institute base roles, not global
+        Assert.Contains("\"source\":\"institute\"", json);
+        var doc = JsonDocument.Parse(json);
+        var roles = doc.RootElement.GetProperty("roles").EnumerateArray().ToList();
+        Assert.Equal(2, roles.Count);
+        Assert.Contains(roles, r => r.GetProperty("id").GetInt32() == 100);
+        Assert.Contains(roles, r => r.GetProperty("id").GetInt32() == 101);
+        // Global IDs must not appear
+        Assert.DoesNotContain(roles, r => r.GetProperty("id").GetInt32() == 1);
+        Assert.DoesNotContain(roles, r => r.GetProperty("id").GetInt32() == 2);
+    }
+
+    [Fact]
+    public async Task NoSquad_NoInstituteBaseRoles_FallsBackToGlobal()
+    {
+        using var ctx = CreateContext(nameof(NoSquad_NoInstituteBaseRoles_FallsBackToGlobal));
+        ctx.Institutes.Add(new Institute { Id = 3, Name = "Tech Academy" });
+        ctx.InstituteProjects.Add(new InstituteProject { Id = 1, InstituteId = 3, Title = "P", IsAvailable = true, Coupon = "TECH-1" });
+
+        // Only global roles — no institute base roles for institute 3
+        ctx.Roles.Add(new Role { Id = 1, InstituteId = null, Name = "Backend Developer", Type = 1, IsActive = true });
+        ctx.Roles.Add(new Role { Id = 2, InstituteId = null, Name = "Frontend Developer", Type = 1, IsActive = true });
+
+        ctx.InstituteTemplates.Add(new InstituteTemplate
+        {
+            Id = 1, InstituteId = 3, InstituteProjectId = 1,
+            CourseName = "Built-in Course", IsActive = true, SquadId = null
+        });
+        await ctx.SaveChangesAsync();
+
+        var result = await CreateController(ctx).GetRolesByCoupon("TECH-1");
+
+        var ok = Assert.IsType<OkObjectResult>(result);
+        var json = JsonSerializer.Serialize(ok.Value);
+        Assert.Contains("\"source\":\"default\"", json);
+        var doc = JsonDocument.Parse(json);
+        var roles = doc.RootElement.GetProperty("roles").EnumerateArray().ToList();
+        Assert.Contains(roles, r => r.GetProperty("id").GetInt32() == 1);
+        Assert.Contains(roles, r => r.GetProperty("id").GetInt32() == 2);
+    }
+
+    [Fact]
+    public async Task SquadRoles_TakePriorityOverInstituteBaseRoles()
+    {
+        using var ctx = CreateContext(nameof(SquadRoles_TakePriorityOverInstituteBaseRoles));
+        ctx.Institutes.Add(new Institute { Id = 3, Name = "Tech Academy" });
+        ctx.InstituteProjects.Add(new InstituteProject { Id = 1, InstituteId = 3, Title = "P", IsAvailable = true, Coupon = "TECH-1" });
+
+        // Institute base role
+        ctx.Roles.Add(new Role { Id = 100, InstituteId = 3, SquadId = null, Name = "Backend Developer", Type = 1, IsActive = true });
+
+        // Squad-scoped role (should win)
+        var squad = new InstituteSquad { Id = 1, InstituteId = 3, Name = "Squad A", IsActive = true };
+        ctx.InstituteSquads.Add(squad);
+        ctx.Roles.Add(new Role { Id = 200, InstituteId = 3, SquadId = 1, Name = "Backend Developer", Type = 1, IsActive = true });
+
+        ctx.InstituteTemplates.Add(new InstituteTemplate
+        {
+            Id = 1, InstituteId = 3, InstituteProjectId = 1,
+            CourseName = "Course", IsActive = true, SquadId = 1
+        });
+        await ctx.SaveChangesAsync();
+
+        var result = await CreateController(ctx).GetRolesByCoupon("TECH-1");
+
+        var ok = Assert.IsType<OkObjectResult>(result);
+        var json = JsonSerializer.Serialize(ok.Value);
+        Assert.Contains("\"source\":\"squad\"", json);
+        var doc = JsonDocument.Parse(json);
+        var roles = doc.RootElement.GetProperty("roles").EnumerateArray().ToList();
+        Assert.Contains(roles, r => r.GetProperty("id").GetInt32() == 200); // squad role wins
+        Assert.DoesNotContain(roles, r => r.GetProperty("id").GetInt32() == 100); // base role not returned
     }
 }

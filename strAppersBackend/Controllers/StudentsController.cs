@@ -1116,7 +1116,22 @@ public class StudentsController : ControllerBase
                 return Ok(new { source = "squad", roles = (object)squadRoles });
             }
 
-            // Fallback: no active template with a squad → return global (InstituteId=null) roles
+            // Scenario 2: no squad templates — check for institute-specific base roles
+            // (admin customised the global catalog for this institute via Roles Config).
+            var instituteId = projects.Select(p => p.InstituteId).FirstOrDefault();
+            if (instituteId > 0)
+            {
+                var baseRoles = await _context.Roles
+                    .Where(r => r.InstituteId == instituteId && r.SquadId == null && r.IsActive)
+                    .OrderBy(r => r.Name)
+                    .Select(r => new { id = r.Id, name = r.Name, type = r.Type, skillId = r.SkillId, isTechnical = r.IsTechnical, customerEngagement = r.CustomerEngagement })
+                    .ToListAsync();
+
+                if (baseRoles.Any())
+                    return Ok(new { source = "institute", roles = (object)baseRoles });
+            }
+
+            // Fallback: no institute base roles → return global (InstituteId=null) roles
             var defaultRoles = await _context.Roles
                 .Where(r => r.InstituteId == null)
                 .OrderBy(r => r.Name)
