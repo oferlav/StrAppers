@@ -219,7 +219,7 @@ public class CourseBoardBuilderService : ICourseBoardBuilderService
                 .AsNoTracking()
                 .Include(r => r.Skill)
                 .Where(r => effectiveRoleIds.Contains(r.Id)
-                         && r.InstituteId == instituteTemplate.InstituteId
+                         && (r.InstituteId == instituteTemplate.InstituteId || r.InstituteId == null)
                          && r.SquadId == null)
                 .ToListAsync();
 
@@ -230,7 +230,7 @@ public class CourseBoardBuilderService : ICourseBoardBuilderService
             roles = baseRoles.Select(r => new InstituteRole
             {
                 Id = r.Id,
-                InstituteId = r.InstituteId!.Value,
+                InstituteId = r.InstituteId ?? instituteTemplate.InstituteId,
                 Name = r.Name,
                 Description = r.Description,
                 Competencies = r.Competencies,
