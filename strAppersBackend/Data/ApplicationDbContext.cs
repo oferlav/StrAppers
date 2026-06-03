@@ -615,7 +615,7 @@ public class ApplicationDbContext : DbContext
             entity.Property(e => e.Description).HasMaxLength(500);
             entity.Property(e => e.Competencies).HasColumnType("text");
             entity.Property(e => e.Category).HasMaxLength(50);
-            entity.Property(e => e.Type).IsRequired().HasDefaultValue(0);
+            entity.Property(e => e.Type).IsRequired();
             entity.Property(e => e.CustomerEngagement).HasDefaultValue(false);
             entity.Property(e => e.IsTechnical).HasDefaultValue(false);
             entity.Property(e => e.CreatedAt).HasDefaultValueSql("CURRENT_TIMESTAMP");
@@ -674,7 +674,7 @@ public class ApplicationDbContext : DbContext
             entity.Property(e => e.Description).HasMaxLength(500);
             entity.Property(e => e.Competencies).HasColumnType("text");
             entity.Property(e => e.Category).HasMaxLength(50);
-            entity.Property(e => e.Type).IsRequired().HasDefaultValue(0);
+            entity.Property(e => e.Type).IsRequired();
             entity.Property(e => e.CustomerEngagement).HasDefaultValue(false);
             entity.Property(e => e.IsTechnical).HasDefaultValue(false);
             entity.Property(e => e.IsActive).HasDefaultValue(true);
