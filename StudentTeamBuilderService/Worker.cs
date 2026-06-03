@@ -381,7 +381,7 @@ public class Worker : BackgroundService
 
             // Per-project summary: how many pending students per InstituteProject
             var projectSql = @"
-                SELECT p.prjId AS ProjectId, ip.""Name"" AS ProjectName,
+                SELECT p.prjId AS ProjectId, ip.""Title"" AS ProjectName,
                        COUNT(*) AS TotalCount,
                        COUNT(*) FILTER (WHERE s.""Status"" = 1) AS PendingCount,
                        STRING_AGG(s.""Id""::text, ',' ORDER BY s.""Id"") AS StudentIds,
@@ -399,7 +399,7 @@ public class Worker : BackgroundService
                 LEFT JOIN ""StudentRoles"" sr ON sr.""StudentId"" = s.""Id"" AND sr.""IsActive"" = TRUE
                 LEFT JOIN ""Roles"" ro ON ro.""Id"" = sr.""RoleId""
                 WHERE p.prjId IS NOT NULL
-                GROUP BY p.prjId, ip.""Name""
+                GROUP BY p.prjId, ip.""Title""
                 ORDER BY p.prjId";
 
             var projects = (await conn.QueryAsync<InstituteProjectRow>(new CommandDefinition(projectSql, cancellationToken: ct))).ToList();
