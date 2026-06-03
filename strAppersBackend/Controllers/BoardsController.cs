@@ -2702,8 +2702,8 @@ public partial class BoardsController : ControllerBase
                                         if (!string.IsNullOrEmpty(environmentId))
                                         {
                                             domainUrl = await CreateRailwayServiceDomain(
-                                                railwayHttpClient, railwayApiUrl, railwayApiToken, 
-                                                railwayServiceId, environmentId, targetPort: targetPort);
+                                                railwayHttpClient, railwayApiUrl, railwayApiToken,
+                                                railwayServiceId, environmentId, targetPort: targetPort, debugLog: debugLog);
                                             
                                             if (!string.IsNullOrEmpty(domainUrl))
                                             {
@@ -7239,12 +7239,13 @@ INSERT INTO ""TestProjects"" (""Name"") VALUES
     /// <summary>
     /// Creates a public domain for a Railway service
     /// </summary>
-    private async Task<string?> CreateRailwayServiceDomain(HttpClient httpClient, string railwayApiUrl, string railwayApiToken, string serviceId, string environmentId, int targetPort = 8080)
+    private async Task<string?> CreateRailwayServiceDomain(HttpClient httpClient, string railwayApiUrl, string railwayApiToken, string serviceId, string environmentId, int targetPort = 8080, System.Text.StringBuilder? debugLog = null)
     {
         try
         {
             _logger.LogInformation("[RAILWAY] Creating public domain for service on port {Port}", targetPort);
-            
+            DbgLog(debugLog, $"[RAILWAY] serviceDomainCreate — serviceId={serviceId} environmentId={environmentId} targetPort={targetPort}");
+
             // Railway GraphQL mutation to create a service domain
             var createDomainMutation = new
             {
@@ -7266,27 +7267,30 @@ INSERT INTO ""TestProjects"" (""Name"") VALUES
                     }
                 }
             };
-            
+
             var mutationBody = System.Text.Json.JsonSerializer.Serialize(createDomainMutation);
             var mutationContent = new StringContent(mutationBody, System.Text.Encoding.UTF8, "application/json");
             var response = await httpClient.PostAsync(railwayApiUrl, mutationContent);
             var responseContent = await response.Content.ReadAsStringAsync();
-            
+
             if (response.IsSuccessStatusCode)
             {
                 var responseDoc = System.Text.Json.JsonDocument.Parse(responseContent);
-                
+
                 // Check for GraphQL errors
                 if (responseDoc.RootElement.TryGetProperty("errors", out var errorsProp))
                 {
+                    var errorMessages = new System.Text.StringBuilder();
                     foreach (var error in errorsProp.EnumerateArray())
                     {
                         var errorMsg = error.TryGetProperty("message", out var msgProp) ? msgProp.GetString() : "Unknown error";
                         _logger.LogWarning("[RAILWAY] GraphQL error creating domain: {ErrorMessage}", errorMsg);
+                        errorMessages.AppendLine(errorMsg);
                     }
+                    DbgLog(debugLog, $"[RAILWAY] serviceDomainCreate GraphQL errors (HTTP 200):\n{errorMessages}\nFull response: {responseContent}");
                     return null;
                 }
-                
+
                 if (responseDoc.RootElement.TryGetProperty("data", out var dataObj) &&
                     dataObj.TryGetProperty("serviceDomainCreate", out var domainObj))
                 {
@@ -7303,12 +7307,15 @@ INSERT INTO ""TestProjects"" (""Name"") VALUES
                         }
                     }
                 }
+
+                DbgLog(debugLog, $"[RAILWAY] serviceDomainCreate succeeded (HTTP 200) but domain field missing or empty. Full response: {responseContent}");
             }
             else
             {
                 _logger.LogWarning("[RAILWAY] Failed to create domain: {StatusCode}", response.StatusCode);
-                
+
                 // Try to parse and log GraphQL errors
+                var errorDetails = new System.Text.StringBuilder();
                 try
                 {
                     var errorDoc = System.Text.Json.JsonDocument.Parse(responseContent);
@@ -7318,20 +7325,24 @@ INSERT INTO ""TestProjects"" (""Name"") VALUES
                         {
                             var errorMsg = error.TryGetProperty("message", out var msgProp) ? msgProp.GetString() : "Unknown error";
                             _logger.LogError("[RAILWAY] GraphQL error: {ErrorMessage}", errorMsg);
+                            errorDetails.AppendLine(errorMsg);
                         }
                     }
                 }
                 catch (Exception parseEx)
                 {
                     _logger.LogWarning(parseEx, "⚠️ [RAILWAY] Could not parse error response");
+                    errorDetails.AppendLine($"(parse failed: {parseEx.Message})");
                 }
+                DbgLog(debugLog, $"[RAILWAY] serviceDomainCreate HTTP {(int)response.StatusCode} error.\nErrors: {errorDetails}\nFull response: {responseContent}");
             }
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "[RAILWAY] Error creating domain: {Message}", ex.Message);
+            DbgLog(debugLog, $"[RAILWAY] serviceDomainCreate exception: {ex.GetType().Name}: {ex.Message}\n{ex.StackTrace}");
         }
-        
+
         return null;
     }
     
