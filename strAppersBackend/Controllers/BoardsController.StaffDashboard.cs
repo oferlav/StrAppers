@@ -331,36 +331,46 @@ public partial class BoardsController
                 .Select(sq => sq.Id)
                 .ToListAsync(cancellationToken);
 
-            IList<(int Id, string Name)> roles = squadIds.Count > 0
-                ? (await _context.Roles
+            // Collect squad roles + global catalog together, deduplicate by name.
+            // Students can have global roles OR squad-scoped roles — both must appear in the filter.
+            var squadRoleNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var combined = new List<(int Id, string Name)>();
+
+            if (squadIds.Count > 0)
+            {
+                var squadRoles = await _context.Roles
                     .AsNoTracking()
                     .Where(r => r.SquadId != null && squadIds.Contains(r.SquadId.Value) && r.IsActive)
                     .Select(r => new { r.Id, r.Name })
                     .OrderBy(r => r.Name)
-                    .ToListAsync(cancellationToken))
-                    .Select(r => (r.Id, r.Name)).ToList()
-                : new List<(int, string)>();
-
-            // Fall back to global catalog when no squad roles are configured yet
-            if (roles.Count == 0)
-            {
-                var globalRoles = await _context.Roles
-                    .AsNoTracking()
-                    .Where(r => r.InstituteId == null && r.IsActive)
-                    .Select(r => new { id = r.Id, name = r.Name })
-                    .OrderBy(r => r.name)
                     .ToListAsync(cancellationToken);
-                return Ok(globalRoles.Cast<object>().ToList());
+                foreach (var r in squadRoles)
+                {
+                    if (squadRoleNames.Add(r.Name))
+                        combined.Add((r.Id, r.Name));
+                }
             }
 
-            var distinct = roles
-                .GroupBy(r => r.Name, StringComparer.OrdinalIgnoreCase)
-                .Select(g => new { id = g.First().Id, name = g.First().Name })
-                .OrderBy(r => r.name)
+            var globalRoles = await _context.Roles
+                .AsNoTracking()
+                .Where(r => r.InstituteId == null && r.IsActive)
+                .Select(r => new { r.Id, r.Name })
+                .OrderBy(r => r.Name)
+                .ToListAsync(cancellationToken);
+
+            foreach (var r in globalRoles)
+            {
+                if (!squadRoleNames.Contains(r.Name))
+                    combined.Add((r.Id, r.Name));
+            }
+
+            var result = combined
+                .OrderBy(r => r.Name, StringComparer.OrdinalIgnoreCase)
+                .Select(r => new { id = r.Id, name = r.Name })
                 .Cast<object>()
                 .ToList();
 
-            return Ok(distinct);
+            return Ok(result);
         }
         catch (Exception ex)
         {
