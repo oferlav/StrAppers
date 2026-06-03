@@ -226,23 +226,55 @@ public partial class MetricsController : ControllerBase
                 lines.Add("A required resource artifact was not completed or was not shared.");
         }
 
+        // --- Meeting attendance (always checked when meetings are scheduled for this sprint) ---
+        var studentEmail = student.Email?.Trim();
+        if (!string.IsNullOrEmpty(studentEmail))
+        {
+            var sprintLengthWeeks = _configuration.GetValue("BusinessLogicConfig:SprintLengthInWeeks", 1);
+            var sprintMerge = await _context.ProjectBoardSprintMerges.AsNoTracking()
+                .FirstOrDefaultAsync(m => m.ProjectBoardId == boardId && m.SprintNumber == request.SprintNumber, cancellationToken);
+            var haveWindow =
+                SprintPlanDateResolver.TryGetInclusiveUtcRangeFromSprintMerge(sprintMerge, request.SprintNumber, sprintLengthWeeks, out var meetWindowStart, out var meetWindowEnd)
+                || SprintPlanDateResolver.TryGetSprintInclusiveUtcRange(board.SprintPlan, board.StartDate, request.SprintNumber, out meetWindowStart, out meetWindowEnd);
+
+            if (haveWindow)
+            {
+                var emailLower = studentEmail.ToLowerInvariant();
+                var sprintMeetings = await _context.BoardMeetings.AsNoTracking()
+                    .Where(bm => bm.BoardId == boardId
+                              && bm.StudentEmail != null
+                              && bm.StudentEmail.ToLower() == emailLower
+                              && bm.MeetingTime >= meetWindowStart
+                              && bm.MeetingTime <= meetWindowEnd)
+                    .ToListAsync(cancellationToken);
+
+                if (sprintMeetings.Count > 0)
+                {
+                    var attended = sprintMeetings.Any(m => m.Attended);
+                    if (!attended)
+                        lines.Add("No team meeting was attended for this sprint.");
+                    criteriaResults.Add(("Meeting attendance", attended));
+                }
+            }
+        }
+
+        // --- Customer engagement (checked when the role has CustomerEngagement enabled) ---
+        if (activeRole?.Role?.CustomerEngagement == true)
+        {
+            var hasChat = await _context.CustomerChatHistory.AsNoTracking()
+                .AnyAsync(h => h.StudentId == request.StudentId && h.SprintId == request.SprintNumber, cancellationToken);
+            if (!hasChat)
+                lines.Add("No customer engagement chat was recorded for this sprint.");
+            criteriaResults.Add(("Customer engagement", hasChat));
+        }
+
         var reviewContent = string.Join(Environment.NewLine, lines.Where(l => !string.IsNullOrWhiteSpace(l)));
 
         if (string.IsNullOrWhiteSpace(reviewContent))
         {
-            if (!requiredSkill && !effectiveRequiredResource)
-            {
-                reviewContent = "No required deliverables were set for this sprint (Required Skill Data and Required Resource Data were not checked on the sprint card).";
-            }
-            else
-            {
-                var met = new List<string>();
-                if (requiredSkill) met.Add(AdherenceSkillDeliverable(roleName));
-                if (effectiveRequiredResource) met.Add("resource artifact shared");
-                reviewContent = met.Count == 1
-                    ? $"All adherence criteria met. {met[0]} was completed for this sprint."
-                    : $"All adherence criteria met. {string.Join(" and ", met)} were completed for this sprint.";
-            }
+            reviewContent = criteriaResults.Count == 0
+                ? "No required deliverables were set for this sprint (Required Skill Data and Required Resource Data were not checked on the sprint card)."
+                : $"All adherence criteria met ({criteriaResults.Count} criterion/criteria passed).";
         }
 
         // Skill checks log via GitHubService; resource uses DB only — this line is the only place to see why the resource sentence was skipped.
