@@ -194,7 +194,7 @@ public class CourseBoardBuilderService : ICourseBoardBuilderService
             roles = squadRoles.Select(sr => new InstituteRole
             {
                 Id = sr.Id,
-                InstituteId = sr.InstituteId,
+                InstituteId = sr.InstituteId!.Value,
                 Name = sr.Name,
                 Description = sr.Description,
                 Competencies = sr.Competencies,
@@ -230,7 +230,7 @@ public class CourseBoardBuilderService : ICourseBoardBuilderService
             roles = baseRoles.Select(r => new InstituteRole
             {
                 Id = r.Id,
-                InstituteId = r.InstituteId,
+                InstituteId = r.InstituteId!.Value,
                 Name = r.Name,
                 Description = r.Description,
                 Competencies = r.Competencies,
