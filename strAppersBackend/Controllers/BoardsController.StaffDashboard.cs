@@ -352,16 +352,13 @@ public partial class BoardsController
     }
 
     /// <summary>
-    /// Sprint numbers that have real Trello data: all merge rows EXCEPT the last (highest-numbered) one,
-    /// which is always pre-created for the upcoming sprint before any data exists.
+    /// Sprint numbers from all existing SprintMerge rows, ordered ascending.
     /// </summary>
     private static List<int> GetRealMergedSprintNumbers(ProjectBoard pb) =>
         pb.SprintMerges
             .Select(m => m.SprintNumber)
             .Distinct()
             .OrderBy(n => n)
-            .ToList()
-            .SkipLast(1)
             .ToList();
 
     /// <summary>End of the highest-numbered sprint window (merge row preferred, else plan).</summary>
