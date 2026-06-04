@@ -217,7 +217,7 @@ public class GoogleAuthController : ControllerBase
                 ("organizationId", organization.Id.ToString())));
         }
 
-        // Institute contacts (same email must not exist on both Students and Institutes)
+        // Institute contacts — if userTypeHint=student and a student record also exists, fall through
         var institute = await _db.Institutes
             .AsNoTracking()
             .FirstOrDefaultAsync(i =>
@@ -226,27 +226,34 @@ public class GoogleAuthController : ControllerBase
 
         if (institute != null)
         {
-            var studentWithSameEmail = await _db.Students
-                .AsNoTracking()
-                .AnyAsync(s =>
-                    s.Email != null &&
-                    s.Email.ToLower() == normalizedEmail.ToLower());
-
-            if (studentWithSameEmail)
+            if (userTypeHint == "student")
             {
-                _logger.LogWarning(
-                    "Google login: email {Email} exists on both Student and Institute",
-                    normalizedEmail);
-                return Redirect(BuildGoogleCallbackUrl(frontendBase,
-                    ("status", "error"),
-                    ("message", "institute_student_email_conflict")));
+                var studentExists = await _db.Students
+                    .AsNoTracking()
+                    .AnyAsync(s => s.Email != null && s.Email.ToLower() == normalizedEmail.ToLower());
+                if (studentExists)
+                {
+                    _logger.LogInformation(
+                        "Google login: userTypeHint=student overrides institute contact record for {Email}", normalizedEmail);
+                    // fall through to student lookup below
+                }
+                else
+                {
+                    return Redirect(BuildGoogleCallbackUrl(frontendBase,
+                        ("status", "ok"),
+                        ("userType", "institute"),
+                        ("email", normalizedEmail),
+                        ("instituteId", institute.Id.ToString())));
+                }
             }
-
-            return Redirect(BuildGoogleCallbackUrl(frontendBase,
-                ("status", "ok"),
-                ("userType", "institute"),
-                ("email", normalizedEmail),
-                ("instituteId", institute.Id.ToString())));
+            else
+            {
+                return Redirect(BuildGoogleCallbackUrl(frontendBase,
+                    ("status", "ok"),
+                    ("userType", "institute"),
+                    ("email", normalizedEmail),
+                    ("instituteId", institute.Id.ToString())));
+            }
         }
 
         // Teacher accounts (individual staff, not the institute contact email)
