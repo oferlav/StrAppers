@@ -1033,6 +1033,7 @@ public class StudentsController : ControllerBase
                     p.ExtendedDescription,
                     p.Priority,
                     p.IsAvailable,
+                    p.Logo,
                     p.CreatedAt,
                     p.UpdatedAt
                 })
