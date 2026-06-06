@@ -534,7 +534,7 @@ public class StudentsController : ControllerBase
 
             // Validate institute coupon and resolve InstituteId
             int? resolvedInstituteId = 1; // default institute
-            string? resolvedCoupon = null;
+            string? resolvedCoupon = "1";
             if (!string.IsNullOrWhiteSpace(request.InstituteCoupon))
             {
                 _logger.LogInformation("Validating institute coupon: {Coupon}", request.InstituteCoupon);
