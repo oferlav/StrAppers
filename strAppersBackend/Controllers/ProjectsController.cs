@@ -5554,20 +5554,33 @@ Staff request:
                 ip.IsAvailable = true;
                 ip.UpdatedAt = DateTime.UtcNow;
 
-                // Set coupon on first activation: use active template's coupon when available,
-                // otherwise fall back to InstituteId (built-in projects).
+                // Set coupon on first activation: InstituteName-SquadId when a template squad exists,
+                // otherwise InstituteId (built-in projects with no custom template).
                 if (string.IsNullOrEmpty(ip.Coupon))
                 {
-                    var activeTemplateCoupon = await _context.InstituteTemplates
+                    var activeTemplateSquadId = await _context.InstituteTemplates
                         .AsNoTracking()
                         .Where(t => t.InstituteId == instActivate
                                     && (t.InstituteProjectId == ip.Id
                                         || (ip.BaseProjectId.HasValue && t.ProjectId == ip.BaseProjectId.Value))
                                     && t.IsActive
-                                    && t.Coupon != null && t.Coupon != "")
-                        .Select(t => t.Coupon)
+                                    && t.SquadId != null)
+                        .Select(t => t.SquadId)
                         .FirstOrDefaultAsync();
-                    ip.Coupon = activeTemplateCoupon ?? instActivate.ToString();
+
+                    if (activeTemplateSquadId.HasValue)
+                    {
+                        var instituteName = await _context.Institutes
+                            .AsNoTracking()
+                            .Where(i => i.Id == instActivate)
+                            .Select(i => i.Name)
+                            .FirstOrDefaultAsync() ?? instActivate.ToString();
+                        ip.Coupon = instituteName.Replace(" ", "") + "-" + activeTemplateSquadId.Value;
+                    }
+                    else
+                    {
+                        ip.Coupon = instActivate.ToString();
+                    }
                 }
 
                 await _context.SaveChangesAsync();
