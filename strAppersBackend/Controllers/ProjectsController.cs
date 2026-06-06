@@ -5554,9 +5554,8 @@ Staff request:
                 ip.IsAvailable = true;
                 ip.UpdatedAt = DateTime.UtcNow;
 
-                // Set coupon on first activation: InstituteName-SquadId when a template squad exists,
-                // otherwise InstituteId (built-in projects with no custom template).
-                if (string.IsNullOrEmpty(ip.Coupon))
+                // Always recompute coupon on activation so it reflects the current active course:
+                // InstituteName-SquadId when a template squad exists, otherwise InstituteId.
                 {
                     var activeTemplateSquadId = await _context.InstituteTemplates
                         .AsNoTracking()
