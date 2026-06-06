@@ -533,6 +533,26 @@ public partial class ProjectsController : ControllerBase
                 resolvedTitle = BuildCopyLikeTitle(defaultBaseTitle, n, titleLimit);
             }
 
+            var hasModuleType2 = await _context.ModuleTypes
+                .AsNoTracking()
+                .AnyAsync(mt => mt.Id == 2);
+
+            using var transaction = await _context.Database.BeginTransactionAsync();
+
+            // Step 1: create a placeholder Projects row so InstituteProject.BaseProjectId is always set.
+            // IsAvailable=false / InUse=false keeps it out of all B2C project listings.
+            var placeholder = new Project
+            {
+                Title = resolvedTitle,
+                InstituteId = instituteId.Value,
+                IsAvailable = false,
+                InUse = false,
+                CreatedAt = DateTime.UtcNow,
+            };
+            _context.Projects.Add(placeholder);
+            await _context.SaveChangesAsync(); // resolves placeholder.Id
+
+            // Step 2: create InstituteProject with BaseProjectId already set — no separate UPDATE needed.
             var project = new InstituteProject
             {
                 Title = resolvedTitle,
@@ -541,15 +561,13 @@ public partial class ProjectsController : ControllerBase
                 IsAvailable = false,
                 InUse = true,
                 Priority = "Medium",
+                BaseProjectId = placeholder.Id,
                 CreatedAt = DateTime.UtcNow,
             };
-
             _context.InstituteProjects.Add(project);
-            await _context.SaveChangesAsync();
+            await _context.SaveChangesAsync(); // resolves project.Id
 
-            var hasModuleType2 = await _context.ModuleTypes
-                .AsNoTracking()
-                .AnyAsync(mt => mt.Id == 2);
+            // Step 3: create default module.
             if (hasModuleType2)
             {
                 _context.InstituteProjectModules.Add(new InstituteProjectModule
@@ -572,10 +590,10 @@ public partial class ProjectsController : ControllerBase
                     project.Id);
             }
 
+            await transaction.CommitAsync();
             _logger.LogInformation(
-                "CreateEmptyProjectDesign: saved InstituteProjectId={ProjectId}, Title={Title}",
-                project.Id,
-                project.Title);
+                "CreateEmptyProjectDesign: committed. PlaceholderProjectId={PlaceholderId}, InstituteProjectId={IpId}, Title={Title}",
+                placeholder.Id, project.Id, project.Title);
 
             return Ok(new ProjectDesignsListItemDto
             {
