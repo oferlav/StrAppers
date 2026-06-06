@@ -546,6 +546,48 @@ public class InstitutesController : ControllerBase
             return StatusCode(500, new { Success = false, Message = "An error occurred" });
         }
     }
+
+    /// <summary>
+    /// Get the institute logo (public — used by the student-facing project selection page).
+    /// GET /api/Institutes/{id}/logo
+    /// </summary>
+    [HttpGet("{id}/logo")]
+    public async Task<ActionResult<object>> GetInstituteLogo(int id)
+    {
+        var logo = await _context.Institutes
+            .Where(i => i.Id == id)
+            .Select(i => i.Logo)
+            .FirstOrDefaultAsync();
+
+        return Ok(new { logo });
+    }
+
+    /// <summary>
+    /// Update the institute logo (base64 or URL).
+    /// PATCH /api/Institutes/{id}/logo
+    /// </summary>
+    [HttpPatch("{id}/logo")]
+    public async Task<ActionResult<object>> UpdateInstituteLogo(int id, [FromBody] UpdateInstituteLogoRequest request)
+    {
+        try
+        {
+            var institute = await _context.Institutes.FindAsync(id);
+            if (institute == null)
+                return NotFound(new { Success = false, Message = "Institute not found" });
+
+            institute.Logo = request.Logo;
+            institute.UpdatedAt = DateTime.UtcNow;
+            await _context.SaveChangesAsync();
+
+            _logger.LogInformation("Logo updated for institute {InstituteId}", id);
+            return Ok(new { Success = true, logo = institute.Logo });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error updating logo for institute {InstituteId}", id);
+            return StatusCode(500, new { Success = false, Message = "An error occurred while updating the logo" });
+        }
+    }
 }
 
 public class InstituteJoinMeetingRequest
@@ -600,4 +642,9 @@ public class AcceptInviteRequest
     [Required]
     [MinLength(8)]
     public string Password { get; set; } = string.Empty;
+}
+
+public class UpdateInstituteLogoRequest
+{
+    public string? Logo { get; set; }
 }
