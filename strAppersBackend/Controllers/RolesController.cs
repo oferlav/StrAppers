@@ -263,6 +263,7 @@ namespace strAppersBackend.Controllers
                     await _context.SaveChangesAsync();
 
                     template.SquadId = squad.Id;
+                    template.Coupon = institute.Name.Replace(" ", "") + "-" + squad.Id.ToString();
 
                     var existingSquadRoles = await _context.Roles
                         .Where(r => r.InstituteId == request.InstituteId && r.SquadId == squad.Id)

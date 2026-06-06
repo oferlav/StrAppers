@@ -270,6 +270,8 @@ public partial class ProjectsController : ControllerBase
         /// <summary>True when the row is stored in <c>InstituteProjects</c>.</summary>
         public bool InstituteProject { get; set; }
         public int? BaseProjectId { get; set; }
+        /// <summary>Coupon code for student registration. Set on activation.</summary>
+        public string? Coupon { get; set; }
     }
 
     public sealed class DuplicateProjectRequest
@@ -1510,6 +1512,7 @@ public partial class ProjectsController : ControllerBase
                     UpdatedAt = p.UpdatedAt,
                     InstituteProject = true,
                     BaseProjectId = p.BaseProjectId,
+                    Coupon = p.Coupon,
                 })
                 .ToListAsync();
 
@@ -5550,10 +5553,27 @@ Staff request:
 
                 ip.IsAvailable = true;
                 ip.UpdatedAt = DateTime.UtcNow;
+
+                // Set coupon on first activation: use active template's coupon when available,
+                // otherwise fall back to InstituteId (built-in projects).
+                if (string.IsNullOrEmpty(ip.Coupon))
+                {
+                    var activeTemplateCoupon = await _context.InstituteTemplates
+                        .AsNoTracking()
+                        .Where(t => t.InstituteId == instActivate
+                                    && (t.InstituteProjectId == ip.Id
+                                        || (ip.BaseProjectId.HasValue && t.ProjectId == ip.BaseProjectId.Value))
+                                    && t.IsActive
+                                    && t.Coupon != null && t.Coupon != "")
+                        .Select(t => t.Coupon)
+                        .FirstOrDefaultAsync();
+                    ip.Coupon = activeTemplateCoupon ?? instActivate.ToString();
+                }
+
                 await _context.SaveChangesAsync();
 
                 _logger.LogInformation("InstituteProject {InstituteProjectId} activated successfully", id);
-                return Ok(new { Success = true, Message = "Project activated successfully.", Id = id, InstituteProject = true });
+                return Ok(new { Success = true, Message = "Project activated successfully.", Id = id, InstituteProject = true, Coupon = ip.Coupon });
             }
 
             var project = await _context.Projects.FindAsync(id);

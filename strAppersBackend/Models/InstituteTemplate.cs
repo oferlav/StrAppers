@@ -106,4 +106,11 @@ public class InstituteTemplate
     /// User Story data source in BoardRoom instead of the Trello User Stories list.
     /// </summary>
     public bool VisableModuleDesign { get; set; } = false;
+
+    /// <summary>
+    /// Auto-generated coupon for this course: Institute.Name (no spaces) + "-" + SquadId.
+    /// Set when the roles config is saved (SquadId assigned). Students enter this at registration.
+    /// </summary>
+    [MaxLength(100)]
+    public string? Coupon { get; set; }
 }
