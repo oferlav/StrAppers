@@ -356,7 +356,7 @@ public class Worker : BackgroundService
                        s.""InstitutePriority1"", s.""InstitutePriority2"",
                        s.""InstitutePriority3"", s.""InstitutePriority4"",
                        ro.""Id"" AS RoleId, ro.""Name"" AS RoleName, ro.""Type"" AS RoleType,
-                       s.""StartPendingAt""
+                       s.""StartPendingAt"", s.""Coupon""
                 FROM ""Students"" s
                 LEFT JOIN ""StudentRoles"" sr ON sr.""StudentId"" = s.""Id"" AND sr.""IsActive"" = TRUE
                 LEFT JOIN ""Roles"" ro ON ro.""Id"" = sr.""RoleId""
@@ -371,11 +371,12 @@ public class Worker : BackgroundService
             foreach (var s in students)
             {
                 _logger.LogInformation(
-                    "[INSTITUTE-CANDIDATES]   StudentId={StudentId} Status={Status} InstituteId={InstituteId} RoleIndex={RoleIndex} RoleId={RoleId} RoleName={RoleName} RoleType={RoleType} P1={P1} P2={P2} P3={P3} P4={P4} StartPendingAt={StartPendingAt}",
+                    "[INSTITUTE-CANDIDATES]   StudentId={StudentId} Status={Status} InstituteId={InstituteId} RoleIndex={RoleIndex} RoleId={RoleId} RoleName={RoleName} RoleType={RoleType} P1={P1} P2={P2} P3={P3} P4={P4} Coupon={Coupon} StartPendingAt={StartPendingAt}",
                     s.StudentId, s.Status, s.InstituteId?.ToString() ?? "NULL", s.RoleIndex,
                     s.RoleId?.ToString() ?? "NULL", s.RoleName ?? "NULL", s.RoleType?.ToString() ?? "NULL",
                     s.InstitutePriority1?.ToString() ?? "NULL", s.InstitutePriority2?.ToString() ?? "NULL",
                     s.InstitutePriority3?.ToString() ?? "NULL", s.InstitutePriority4?.ToString() ?? "NULL",
+                    s.Coupon ?? "NULL",
                     s.StartPendingAt?.ToString("u") ?? "NULL");
             }
 
@@ -891,6 +892,7 @@ public record InstituteStudentRow
     public string? RoleName { get; init; }
     public int? RoleType { get; init; }
     public DateTime? StartPendingAt { get; init; }
+    public string? Coupon { get; init; }
 }
 
 public record InstituteProjectRow
