@@ -18,7 +18,8 @@
 SELECT
     COUNT(*)                                              AS total_students,
     COUNT(*) FILTER (WHERE "InstituteId" IS NULL)        AS b2c_students_to_update,
-    COUNT(*) FILTER (WHERE "InstituteId" IS NOT NULL)    AS institute_students_unchanged;
+    COUNT(*) FILTER (WHERE "InstituteId" IS NOT NULL)    AS institute_students_unchanged
+FROM "Students";
 
 
 -- -----------------------------------------------------------------------------
