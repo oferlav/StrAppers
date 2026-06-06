@@ -558,7 +558,7 @@ public class ApplicationDbContext : DbContext
             entity.Property(e => e.Name).IsRequired().HasMaxLength(100);
             entity.Property(e => e.Description).HasMaxLength(500);
             entity.Property(e => e.Category).HasMaxLength(50);
-            entity.Property(e => e.Type).IsRequired().HasDefaultValue(0);
+            entity.Property(e => e.Type).IsRequired();
             entity.Property(e => e.CustomerEngagement).HasDefaultValue(false);
             entity.Property(e => e.CreatedAt).HasDefaultValueSql("CURRENT_TIMESTAMP");
 
@@ -575,6 +575,24 @@ public class ApplicationDbContext : DbContext
                   .OnDelete(DeleteBehavior.SetNull);
 
             entity.HasIndex(e => e.SkillId);
+
+            entity.Property(e => e.InstituteId).IsRequired(false);
+            entity.Property(e => e.IsTechnical).HasDefaultValue(false);
+            entity.Property(e => e.Competencies).HasColumnType("text");
+
+            entity.HasOne(e => e.Institute)
+                  .WithMany()
+                  .HasForeignKey(e => e.InstituteId)
+                  .IsRequired(false)
+                  .OnDelete(DeleteBehavior.Cascade);
+
+            entity.HasOne(e => e.Squad)
+                  .WithMany(s => s.Roles)
+                  .HasForeignKey(e => e.SquadId)
+                  .OnDelete(DeleteBehavior.SetNull);
+
+            entity.HasIndex(e => e.InstituteId);
+            entity.HasIndex(e => e.SquadId);
 
             // Note: Seed data removed from HasData() to prevent overwriting production data
             // Roles are seeded via migration (20250127000000_EnsureRolesDataWithoutOverwrite) 
@@ -597,7 +615,7 @@ public class ApplicationDbContext : DbContext
             entity.Property(e => e.Description).HasMaxLength(500);
             entity.Property(e => e.Competencies).HasColumnType("text");
             entity.Property(e => e.Category).HasMaxLength(50);
-            entity.Property(e => e.Type).IsRequired().HasDefaultValue(0);
+            entity.Property(e => e.Type).IsRequired();
             entity.Property(e => e.CustomerEngagement).HasDefaultValue(false);
             entity.Property(e => e.IsTechnical).HasDefaultValue(false);
             entity.Property(e => e.CreatedAt).HasDefaultValueSql("CURRENT_TIMESTAMP");
@@ -656,14 +674,14 @@ public class ApplicationDbContext : DbContext
             entity.Property(e => e.Description).HasMaxLength(500);
             entity.Property(e => e.Competencies).HasColumnType("text");
             entity.Property(e => e.Category).HasMaxLength(50);
-            entity.Property(e => e.Type).IsRequired().HasDefaultValue(0);
+            entity.Property(e => e.Type).IsRequired();
             entity.Property(e => e.CustomerEngagement).HasDefaultValue(false);
             entity.Property(e => e.IsTechnical).HasDefaultValue(false);
             entity.Property(e => e.IsActive).HasDefaultValue(true);
             entity.Property(e => e.CreatedAt).HasDefaultValueSql("CURRENT_TIMESTAMP");
 
             entity.HasOne(e => e.Squad)
-                .WithMany(s => s.Roles)
+                .WithMany()
                 .HasForeignKey(e => e.SquadId)
                 .OnDelete(DeleteBehavior.Cascade);
 

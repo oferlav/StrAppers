@@ -14,7 +14,7 @@ public class Role
     public string? Description { get; set; }
     
     [MaxLength(50)]
-    public string? Category { get; set; } // e.g., "Development", "Design", "Management"
+    public string Category { get; set; } = string.Empty;
     
     /// <summary>
     /// FK to <see cref="RoleType"/> (<see cref="RoleType.Id"/>).
@@ -31,12 +31,31 @@ public class Role
     public virtual Skill? Skill { get; set; }
 
     public bool CustomerEngagement { get; set; } = false;
-    
+
+    /// <summary>
+    /// Null → global/B2C role (never modified). Non-null → institute-specific or squad-scoped role.
+    /// </summary>
+    public int? InstituteId { get; set; }
+
+    public Institute? Institute { get; set; }
+
+    /// <summary>
+    /// When set, this role is scoped to a specific squad (replaces InstituteSquadRole).
+    /// Null = base institute role (or global when InstituteId is null).
+    /// </summary>
+    public int? SquadId { get; set; }
+
+    public InstituteSquad? Squad { get; set; }
+
+    public bool IsTechnical { get; set; } = false;
+
+    public string? Competencies { get; set; }
+
     public bool IsActive { get; set; } = true;
-    
+
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
     public DateTime? UpdatedAt { get; set; }
-    
+
     // Navigation properties
     public ICollection<StudentRole> StudentRoles { get; set; } = new List<StudentRole>();
 }

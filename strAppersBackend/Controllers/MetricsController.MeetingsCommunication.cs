@@ -163,21 +163,31 @@ public partial class MetricsController
         {
             _logger.LogInformation("MeetingsCommunication: fetching transcript for meeting {Id} ({Url})",
                 latestMeeting.Id, latestMeeting.ActualMeetingUrl);
-
-            var (transcriptId, fetchedVtt, fetchError) =
-                await _graphService.FetchLatestTranscriptVttAsync(latestMeeting.ActualMeetingUrl!);
-
-            if (!string.IsNullOrEmpty(fetchedVtt) && !string.IsNullOrEmpty(transcriptId))
+            try
             {
-                vttContent = fetchedVtt;
-                vttTranscriptId = transcriptId;
-                transcriptSource = $"fetched from Graph API (meeting {latestMeeting.MeetingTime:yyyy-MM-dd})";
-                // VTT will be stored below only on confirmed-attendee rows
+                var (transcriptId, fetchedVtt, fetchError) =
+                    await _graphService.FetchLatestTranscriptVttAsync(latestMeeting.ActualMeetingUrl!);
+
+                if (!string.IsNullOrEmpty(fetchedVtt) && !string.IsNullOrEmpty(transcriptId))
+                {
+                    vttContent = fetchedVtt;
+                    vttTranscriptId = transcriptId;
+                    transcriptSource = $"fetched from Graph API (meeting {latestMeeting.MeetingTime:yyyy-MM-dd})";
+                    // VTT will be stored below only on confirmed-attendee rows
+                }
+                else
+                {
+                    _logger.LogWarning("MeetingsCommunication: transcript not available — {Error}", fetchError);
+                    var msg = $"Meeting transcript is not yet available for this sprint ({fetchError ?? "no transcripts found"}). Try again after the meeting ends and transcription has processed.";
+                    await UpsertCacheMetricsAsync(boardId, request.StudentId, request.SprintNumber,
+                        MeetingsCommunicationMetricId, msg, null, cancellationToken);
+                    return Ok(new { success = true, metricId = MeetingsCommunicationMetricId, skippedLlm = true, reviewContent = msg });
+                }
             }
-            else
+            catch (Exception ex)
             {
-                _logger.LogWarning("MeetingsCommunication: transcript not available — {Error}", fetchError);
-                var msg = $"Meeting transcript is not yet available for this sprint ({fetchError ?? "no transcripts found"}). Try again after the meeting ends and transcription has processed.";
+                _logger.LogWarning(ex, "MeetingsCommunication: Graph API fetch threw for meeting {Id}", latestMeeting.Id);
+                var msg = $"Meeting transcript could not be retrieved for this sprint (Graph API error: {ex.Message}). Try again later.";
                 await UpsertCacheMetricsAsync(boardId, request.StudentId, request.SprintNumber,
                     MeetingsCommunicationMetricId, msg, null, cancellationToken);
                 return Ok(new { success = true, metricId = MeetingsCommunicationMetricId, skippedLlm = true, reviewContent = msg });

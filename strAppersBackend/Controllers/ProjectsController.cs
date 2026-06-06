@@ -34,6 +34,7 @@ public partial class ProjectsController : ControllerBase
     private readonly IWebHostEnvironment _environment;
     private readonly IOptions<ProjectsInstituteMaxLengthFieldsOptions> _headerFieldWordOptions;
     private readonly IAzureBlobStorageService _azureBlobStorage;
+    private readonly ISmtpEmailService _smtpEmailService;
 
     /// <summary>Project name max words; from <c>ProjectsInstitute:MaxLengthFields:ProjectNameWords</c> (min 1).</summary>
     private int EffectiveHeaderProjectNameWords => Math.Max(1, _headerFieldWordOptions.Value.ProjectNameWords);
@@ -55,7 +56,8 @@ public partial class ProjectsController : ControllerBase
         IChatCompletionService chatCompletionService,
         IWebHostEnvironment environment,
         IOptions<ProjectsInstituteMaxLengthFieldsOptions> headerFieldWordOptions,
-        IAzureBlobStorageService azureBlobStorage)
+        IAzureBlobStorageService azureBlobStorage,
+        ISmtpEmailService smtpEmailService)
     {
         _context = context;
         _logger = logger;
@@ -70,6 +72,7 @@ public partial class ProjectsController : ControllerBase
         _environment = environment;
         _headerFieldWordOptions = headerFieldWordOptions;
         _azureBlobStorage = azureBlobStorage;
+        _smtpEmailService = smtpEmailService;
     }
 
     private async Task<int?> ResolveInstituteIdFromAuthContextAsync()
@@ -267,6 +270,8 @@ public partial class ProjectsController : ControllerBase
         /// <summary>True when the row is stored in <c>InstituteProjects</c>.</summary>
         public bool InstituteProject { get; set; }
         public int? BaseProjectId { get; set; }
+        /// <summary>Coupon code for student registration. Set on activation.</summary>
+        public string? Coupon { get; set; }
     }
 
     public sealed class DuplicateProjectRequest
@@ -530,6 +535,26 @@ public partial class ProjectsController : ControllerBase
                 resolvedTitle = BuildCopyLikeTitle(defaultBaseTitle, n, titleLimit);
             }
 
+            var hasModuleType2 = await _context.ModuleTypes
+                .AsNoTracking()
+                .AnyAsync(mt => mt.Id == 2);
+
+            using var transaction = await _context.Database.BeginTransactionAsync();
+
+            // Step 1: create a placeholder Projects row so InstituteProject.BaseProjectId is always set.
+            // IsAvailable=false / InUse=false keeps it out of all B2C project listings.
+            var placeholder = new Project
+            {
+                Title = resolvedTitle,
+                InstituteId = instituteId.Value,
+                IsAvailable = false,
+                InUse = false,
+                CreatedAt = DateTime.UtcNow,
+            };
+            _context.Projects.Add(placeholder);
+            await _context.SaveChangesAsync(); // resolves placeholder.Id
+
+            // Step 2: create InstituteProject with BaseProjectId already set — no separate UPDATE needed.
             var project = new InstituteProject
             {
                 Title = resolvedTitle,
@@ -538,15 +563,13 @@ public partial class ProjectsController : ControllerBase
                 IsAvailable = false,
                 InUse = true,
                 Priority = "Medium",
+                BaseProjectId = placeholder.Id,
                 CreatedAt = DateTime.UtcNow,
             };
-
             _context.InstituteProjects.Add(project);
-            await _context.SaveChangesAsync();
+            await _context.SaveChangesAsync(); // resolves project.Id
 
-            var hasModuleType2 = await _context.ModuleTypes
-                .AsNoTracking()
-                .AnyAsync(mt => mt.Id == 2);
+            // Step 3: create default module.
             if (hasModuleType2)
             {
                 _context.InstituteProjectModules.Add(new InstituteProjectModule
@@ -569,10 +592,10 @@ public partial class ProjectsController : ControllerBase
                     project.Id);
             }
 
+            await transaction.CommitAsync();
             _logger.LogInformation(
-                "CreateEmptyProjectDesign: saved InstituteProjectId={ProjectId}, Title={Title}",
-                project.Id,
-                project.Title);
+                "CreateEmptyProjectDesign: committed. PlaceholderProjectId={PlaceholderId}, InstituteProjectId={IpId}, Title={Title}",
+                placeholder.Id, project.Id, project.Title);
 
             return Ok(new ProjectDesignsListItemDto
             {
@@ -1284,8 +1307,8 @@ public partial class ProjectsController : ControllerBase
             if (student == null)
                 return NotFound($"Student with ID {studentId} not found.");
 
-            if (student.InstituteId == null || student.InstituteId <= 1)
-                return BadRequest("Student does not belong to an institute (InstituteId must be > 1).");
+            if (student.InstituteId == null || student.InstituteId <= 0)
+                return BadRequest("Student does not have a valid institute assignment (InstituteId must be >= 1).");
 
             // Filter by coupon when present (student registered with a specific coupon)
             var projects = await _context.InstituteProjects
@@ -1306,7 +1329,7 @@ public partial class ProjectsController : ControllerBase
                     p.Logo,
                     p.CreatedAt,
                     p.UpdatedAt,
-                    ApplicantsCount = _context.Students.Count(s => s.Status == 1 && (
+                    ApplicantsCount = _context.Students.Count(s => s.Status.HasValue && s.Status <= 1 && (
                         s.InstitutePriority1 == p.Id ||
                         s.InstitutePriority2 == p.Id ||
                         s.InstitutePriority3 == p.Id ||
@@ -1315,7 +1338,71 @@ public partial class ProjectsController : ControllerBase
                 })
                 .ToListAsync();
 
-            return Ok(projects);
+            // Load squad roles + template metadata for all returned projects
+            var projectIds = projects.Select(p => p.Id).ToList();
+
+            var squadRolesFlat = await _context.InstituteTemplates
+                .Where(t => t.InstituteProjectId != null &&
+                            projectIds.Contains(t.InstituteProjectId.Value) &&
+                            t.IsActive &&
+                            t.SquadId != null)
+                .SelectMany(t => _context.Roles
+                    .Where(r => r.SquadId == t.SquadId && r.IsActive)
+                    .Select(r => new { ProjectId = t.InstituteProjectId!.Value, r.Name, r.Type }))
+                .ToListAsync();
+
+            var templateMetadata = await _context.InstituteTemplates
+                .Where(t => t.InstituteProjectId != null &&
+                            projectIds.Contains(t.InstituteProjectId.Value) &&
+                            t.IsActive)
+                .Select(t => new
+                {
+                    ProjectId = t.InstituteProjectId!.Value,
+                    RequireDeveloperRule = t.Squad != null && t.Squad.RequireDeveloperRule,
+                    t.CourseType,
+                    t.RoleCount,
+                })
+                .ToListAsync();
+
+            var squadRolesByProject = squadRolesFlat
+                .GroupBy(r => r.ProjectId)
+                .ToDictionary(
+                    g => g.Key,
+                    g => (IEnumerable<object>)g
+                        .GroupBy(r => r.Name, StringComparer.OrdinalIgnoreCase)
+                        .Select(ng => (object)new { ng.First().Name, ng.First().Type })
+                        .ToList()
+                );
+
+            var metaByProject = templateMetadata
+                .GroupBy(m => m.ProjectId)
+                .ToDictionary(g => g.Key, g => g.First());
+
+            return Ok(projects.Select(p =>
+            {
+                var meta = metaByProject.GetValueOrDefault(p.Id);
+                return new
+                {
+                    p.Id,
+                    p.Title,
+                    p.Mission,
+                    p.OneLiner,
+                    p.Description,
+                    p.ExtendedDescription,
+                    p.ShortBrief,
+                    p.Priority,
+                    p.IsAvailable,
+                    p.InUse,
+                    p.Logo,
+                    p.CreatedAt,
+                    p.UpdatedAt,
+                    p.ApplicantsCount,
+                    SquadRoles = squadRolesByProject.GetValueOrDefault(p.Id, Enumerable.Empty<object>()),
+                    RequireDeveloperRule = meta?.RequireDeveloperRule ?? false,
+                    CourseType = meta?.CourseType,
+                    RoleCount = meta?.RoleCount,
+                };
+            }));
         }
         catch (Exception ex)
         {
@@ -1425,6 +1512,7 @@ public partial class ProjectsController : ControllerBase
                     UpdatedAt = p.UpdatedAt,
                     InstituteProject = true,
                     BaseProjectId = p.BaseProjectId,
+                    Coupon = p.Coupon,
                 })
                 .ToListAsync();
 
@@ -4174,13 +4262,10 @@ Staff request:
                         .AnyAsync(t =>
                             t.InstituteId == instituteId &&
                             t.Id != row.Id &&
-                            t.CourseName.ToLower() == newName.ToLower() &&
-                            (instituteProject
-                                ? t.InstituteProjectId == projectId && t.ProjectId == null
-                                : t.ProjectId == projectId && t.InstituteProjectId == null));
+                            t.CourseName.ToLower() == newName.ToLower());
                     if (taken)
                     {
-                        return Conflict($"A template named \"{newName}\" already exists for this project.");
+                        return Conflict($"A template named \"{newName}\" already exists for this institute.");
                     }
 
                     row.CourseName = newName;
@@ -4215,16 +4300,14 @@ Staff request:
             }
 
             var insertName = ClampName(effectiveCourseName!);
+            // Check against the DB unique constraint: (InstituteId, CourseName) is unique across all projects.
             var insertNameTaken = await _context.InstituteTemplates.AsNoTracking()
                 .AnyAsync(t =>
                     t.InstituteId == instituteId &&
-                    t.CourseName.ToLower() == insertName.ToLower() &&
-                    (instituteProject
-                        ? t.InstituteProjectId == projectId && t.ProjectId == null
-                        : t.ProjectId == projectId && t.InstituteProjectId == null));
+                    t.CourseName.ToLower() == insertName.ToLower());
             if (insertNameTaken)
             {
-                return Conflict($"A template named \"{insertName}\" already exists for this project.");
+                return Conflict($"A template named \"{insertName}\" already exists for this institute.");
             }
 
             var newRow = new InstituteTemplate
@@ -4260,6 +4343,19 @@ Staff request:
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error saving Trello template for InstituteId={InstituteId}, ProjectId={ProjectId}", instituteId, projectId);
+            // DEBUG — remove after diagnosis
+            try
+            {
+                var body = $"AddInstituteTemplate 500 DEBUG\n" +
+                           $"projectId={projectId} instituteId={instituteId} instituteProject={instituteProject}\n" +
+                           $"CourseName={request?.CourseName} InstituteTemplateId={request?.InstituteTemplateId}\n" +
+                           $"Exception: {ex.Message}\n" +
+                           $"Inner: {ex.InnerException?.Message ?? "none"}\n" +
+                           $"Stack:\n{ex.StackTrace}";
+                await _smtpEmailService.SendPlainEmailAsync("ofer@skill-in.com", "[CourseBuilder Debug] AddInstituteTemplate 500", body);
+            }
+            catch { /* ignore debug errors */ }
+            // END DEBUG
             return StatusCode(500, "An error occurred while saving the template.");
         }
     }
@@ -4304,15 +4400,16 @@ Staff request:
                 "Getting students for project {ProjectId} with Status < 2 (MultiRolesPerProject={MultiRoles}, CandidateRoleId={CandidateRoleId}, CurrentStudentId={CurrentStudentId})",
                 id, _kickoffConfig.MultiRolesPerProject, candidateRoleId, currentStudentId);
 
-            // Validate project exists
-            var projectExists = await _context.Projects.AnyAsync(p => p.Id == id);
+            // Accept both B2C Projects and InstituteProjects ids
+            var projectExists = await _context.Projects.AnyAsync(p => p.Id == id)
+                             || await _context.InstituteProjects.AnyAsync(p => p.Id == id);
             if (!projectExists)
             {
                 _logger.LogWarning("Project {ProjectId} not found", id);
                 return NotFound($"Project with ID {id} not found.");
             }
 
-            // Get students where any ProjectPriority field equals projectId AND Status < 2
+            // Get students where any ProjectPriority or InstitutePriority field equals projectId AND Status < 2
             var students = await _context.Students
                 .Include(s => s.Major)
                 .Include(s => s.Year)
@@ -4322,7 +4419,11 @@ Staff request:
                     s.ProjectPriority1 == id ||
                     s.ProjectPriority2 == id ||
                     s.ProjectPriority3 == id ||
-                    s.ProjectPriority4 == id
+                    s.ProjectPriority4 == id ||
+                    s.InstitutePriority1 == id ||
+                    s.InstitutePriority2 == id ||
+                    s.InstitutePriority3 == id ||
+                    s.InstitutePriority4 == id
                 ))
                 .Select(s => new
                 {
@@ -5457,10 +5558,39 @@ Staff request:
 
                 ip.IsAvailable = true;
                 ip.UpdatedAt = DateTime.UtcNow;
+
+                // Always recompute coupon on activation so it reflects the current active course:
+                // InstituteName-SquadId when a template squad exists, otherwise InstituteId.
+                {
+                    var activeTemplateSquadId = await _context.InstituteTemplates
+                        .AsNoTracking()
+                        .Where(t => t.InstituteId == instActivate
+                                    && (t.InstituteProjectId == ip.Id
+                                        || (ip.BaseProjectId.HasValue && t.ProjectId == ip.BaseProjectId.Value))
+                                    && t.IsActive
+                                    && t.SquadId != null)
+                        .Select(t => t.SquadId)
+                        .FirstOrDefaultAsync();
+
+                    if (activeTemplateSquadId.HasValue)
+                    {
+                        var instituteName = await _context.Institutes
+                            .AsNoTracking()
+                            .Where(i => i.Id == instActivate)
+                            .Select(i => i.Name)
+                            .FirstOrDefaultAsync() ?? instActivate.ToString();
+                        ip.Coupon = instituteName.Replace(" ", "") + "-" + activeTemplateSquadId.Value;
+                    }
+                    else
+                    {
+                        ip.Coupon = instActivate.ToString();
+                    }
+                }
+
                 await _context.SaveChangesAsync();
 
                 _logger.LogInformation("InstituteProject {InstituteProjectId} activated successfully", id);
-                return Ok(new { Success = true, Message = "Project activated successfully.", Id = id, InstituteProject = true });
+                return Ok(new { Success = true, Message = "Project activated successfully.", Id = id, InstituteProject = true, Coupon = ip.Coupon });
             }
 
             var project = await _context.Projects.FindAsync(id);

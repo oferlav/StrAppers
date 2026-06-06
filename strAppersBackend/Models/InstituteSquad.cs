@@ -28,7 +28,7 @@ public class InstituteSquad
 
     public DateTime? UpdatedAt { get; set; }
 
-    public ICollection<InstituteSquadRole> Roles { get; set; } = new List<InstituteSquadRole>();
+    public ICollection<Role> Roles { get; set; } = new List<Role>();
 
     public ICollection<InstituteTemplate> InstituteTemplates { get; set; } = new List<InstituteTemplate>();
 }

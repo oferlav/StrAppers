@@ -109,11 +109,23 @@ public partial class ProjectsController
         int instituteId,
         CancellationToken cancellationToken = default)
     {
-        // Only an explicit InstituteTemplates selection counts as a course assignment.
-        // TrelloBoardJson on the InstituteProjects row is NOT sufficient — modules may have diverged after copy.
-        return await _context.InstituteTemplates
+        // Explicit InstituteTemplates row linked to this institute project.
+        if (await _context.InstituteTemplates
+                .AsNoTracking()
+                .AnyAsync(t => t.InstituteId == instituteId && t.InstituteProjectId == instituteProjectId, cancellationToken))
+            return true;
+
+        // SetProjectDesignActiveTemplate only writes TrelloBoardJson after successful validation
+        // and module remapping (and clears it on failure), so a non-empty value means a course
+        // was properly assigned — even when the active template row links via ProjectId (base project)
+        // rather than InstituteProjectId (the copy).
+        return await _context.InstituteProjects
             .AsNoTracking()
-            .AnyAsync(t => t.InstituteId == instituteId && t.InstituteProjectId == instituteProjectId, cancellationToken);
+            .AnyAsync(ip => ip.Id == instituteProjectId
+                            && ip.InstituteId == instituteId
+                            && ip.TrelloBoardJson != null
+                            && ip.TrelloBoardJson.Trim() != "",
+                      cancellationToken);
     }
 
     /// <summary>

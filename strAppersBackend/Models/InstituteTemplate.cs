@@ -106,4 +106,5 @@ public class InstituteTemplate
     /// User Story data source in BoardRoom instead of the Trello User Stories list.
     /// </summary>
     public bool VisableModuleDesign { get; set; } = false;
+
 }

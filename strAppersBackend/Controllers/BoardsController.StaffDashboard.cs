@@ -314,7 +314,8 @@ public partial class BoardsController
     }
 
     /// <summary>
-    /// Distinct roles present in InstituteSquadRoles for the given institute, matched to main Roles by name.
+    /// Distinct active roles actually assigned to students in the institute's boards.
+    /// Returns only roles in use — scoped to visible squads, correct IDs for filtering.
     /// Route: GET /api/Boards/use/institute-squad-roles?instituteId={id}
     /// </summary>
     [HttpGet("institute-squad-roles")]
@@ -325,41 +326,32 @@ public partial class BoardsController
             if (!instituteId.HasValue || instituteId.Value <= 0)
                 return Ok(Array.Empty<object>());
 
-            var squadIds = await _context.InstituteSquads
+            var boardIds = await _context.ProjectBoards
                 .AsNoTracking()
-                .Where(sq => sq.InstituteId == instituteId.Value && sq.IsActive)
-                .Select(sq => sq.Id)
+                .Where(pb => !pb.IsSystemBoard && pb.InstituteId == instituteId.Value && pb.Project.IsAvailable)
+                .Select(pb => pb.Id)
                 .ToListAsync(cancellationToken);
 
-            if (squadIds.Count == 0)
+            if (boardIds.Count == 0)
                 return Ok(Array.Empty<object>());
 
-            var squadRoleNames = await _context.InstituteSquadRoles
+            var roles = await _context.StudentRoles
                 .AsNoTracking()
-                .Where(sr => squadIds.Contains(sr.SquadId) && sr.IsActive)
-                .Select(sr => sr.Name)
+                .Where(sr => sr.IsActive
+                    && sr.Role != null
+                    && sr.Student.IsAvailable
+                    && sr.Student.BoardId != null
+                    && boardIds.Contains(sr.Student.BoardId))
+                .Select(sr => new { sr.Role!.Id, sr.Role!.Name })
                 .Distinct()
+                .OrderBy(r => r.Name)
                 .ToListAsync(cancellationToken);
 
-            if (squadRoleNames.Count == 0)
-                return Ok(Array.Empty<object>());
-
-            var namesToMatch = squadRoleNames.Select(n => n.ToLowerInvariant()).ToList();
-            var matchedRoles = await _context.Roles
-                .AsNoTracking()
-                .Where(r => namesToMatch.Contains(r.Name.ToLower()))
-                .ToListAsync(cancellationToken);
-
-            var result = squadRoleNames
-                .Select(sn => new
-                {
-                    squadName = sn,
-                    role = matchedRoles.FirstOrDefault(r => string.Equals(r.Name, sn, StringComparison.OrdinalIgnoreCase)),
-                })
-                .Where(x => x.role != null)
-                .DistinctBy(x => x.role!.Id)
-                .OrderBy(x => x.squadName)
-                .Select(x => (object)new { id = x.role!.Id, name = x.squadName })
+            var result = roles
+                .DistinctBy(r => r.Id)
+                .OrderBy(r => r.Name, StringComparer.OrdinalIgnoreCase)
+                .Select(r => new { id = r.Id, name = r.Name })
+                .Cast<object>()
                 .ToList();
 
             return Ok(result);
@@ -372,16 +364,13 @@ public partial class BoardsController
     }
 
     /// <summary>
-    /// Sprint numbers that have real Trello data: all merge rows EXCEPT the last (highest-numbered) one,
-    /// which is always pre-created for the upcoming sprint before any data exists.
+    /// Sprint numbers from all existing SprintMerge rows, ordered ascending.
     /// </summary>
     private static List<int> GetRealMergedSprintNumbers(ProjectBoard pb) =>
         pb.SprintMerges
             .Select(m => m.SprintNumber)
             .Distinct()
             .OrderBy(n => n)
-            .ToList()
-            .SkipLast(1)
             .ToList();
 
     /// <summary>End of the highest-numbered sprint window (merge row preferred, else plan).</summary>

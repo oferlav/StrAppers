@@ -15,17 +15,20 @@ namespace strAppersBackend.Controllers
         private readonly ILogger<RolesController> _logger;
         private readonly KickoffConfig _kickoffConfig;
         private readonly IAIService _aiService;
+        private readonly ISmtpEmailService _smtpEmailService;
 
         public RolesController(
             ApplicationDbContext context,
             ILogger<RolesController> logger,
             IOptions<KickoffConfig> kickoffConfig,
-            IAIService aiService)
+            IAIService aiService,
+            ISmtpEmailService smtpEmailService)
         {
             _context = context;
             _logger = logger;
             _kickoffConfig = kickoffConfig.Value;
             _aiService = aiService;
+            _smtpEmailService = smtpEmailService;
         }
 
         /// <summary>
@@ -60,10 +63,10 @@ namespace strAppersBackend.Controllers
 
         /// <summary>
         /// Institute-scoped role rows for the roles configuration UI.
-        /// Optional <paramref name="templateId"/> filters to roles saved for that institute template.
+        /// Optional <paramref name="templateId"/> filters to roles saved for that institute template's squad.
         /// </summary>
         [HttpGet("use/institute/{instituteId:int}")]
-        public async Task<ActionResult<IEnumerable<InstituteRole>>> GetInstituteRoles(
+        public async Task<ActionResult<IEnumerable<Role>>> GetInstituteRoles(
             int instituteId,
             [FromQuery] int? templateId = null)
         {
@@ -83,41 +86,20 @@ namespace strAppersBackend.Controllers
 
                     if (template.SquadId is > 0)
                     {
-                        var squadRoles = await _context.InstituteSquadRoles
+                        var squadRoles = await _context.Roles
                             .AsNoTracking()
-                            .Where(sr => sr.SquadId == template.SquadId.Value)
-                            .OrderBy(sr => sr.Name)
+                            .Where(r => r.InstituteId == instituteId && r.SquadId == template.SquadId.Value)
+                            .OrderBy(r => r.Name)
                             .ToListAsync();
-
-                        // Keep API shape backward-compatible for existing frontend code.
-                        var mapped = squadRoles.Select(sr => new InstituteRole
-                        {
-                            Id = sr.Id,
-                            InstituteId = instituteId,
-                            TemplateId = templateId.Value,
-                            Name = sr.Name,
-                            Description = sr.Description,
-                            Competencies = sr.Competencies,
-                            Category = sr.Category,
-                            Type = sr.Type,
-                            SkillId = sr.SkillId,
-                            CustomerEngagement = sr.CustomerEngagement,
-                            IsTechnical = sr.IsTechnical,
-                            IsActive = sr.IsActive,
-                            CreatedAt = sr.CreatedAt,
-                            UpdatedAt = sr.UpdatedAt,
-                        }).ToList();
-
-                        return Ok(mapped);
+                        return Ok(squadRoles);
                     }
 
-                    // Squad-based source of truth: template-scoped role rows are represented by InstituteSquadRoles.
-                    return Ok(new List<InstituteRole>());
+                    return Ok(new List<Role>());
                 }
 
-                var list = await _context.InstituteRoles.AsNoTracking()
-                    .Where(ir => ir.InstituteId == instituteId && ir.TemplateId == null)
-                    .OrderBy(ir => ir.Name)
+                var list = await _context.Roles.AsNoTracking()
+                    .Where(r => r.InstituteId == instituteId && r.SquadId == null)
+                    .OrderBy(r => r.Name)
                     .ToListAsync();
                 return Ok(list);
             }
@@ -141,20 +123,14 @@ namespace strAppersBackend.Controllers
                 if (!exists)
                     return NotFound($"Institute with ID {instituteId} not found");
 
-                var fromSquadTemplates = await _context.InstituteSquadRoles
+                var fromSquadTemplates = await _context.Roles
                     .AsNoTracking()
-                    .Join(
-                        _context.InstituteSquads.AsNoTracking(),
-                        sr => sr.SquadId,
-                        s => s.Id,
-                        (sr, s) => new { sr.Name, s.InstituteId, s.Id })
+                    .Where(r => r.InstituteId == instituteId && r.SquadId != null)
                     .Join(
                         _context.InstituteTemplates.AsNoTracking().Where(t => t.SquadId != null),
-                        x => x.Id,
-                        t => t.SquadId!.Value,
-                        (x, t) => new { x.Name, x.InstituteId })
-                    .Where(x => x.InstituteId == instituteId)
-                    .Select(x => x.Name)
+                        r => r.SquadId,
+                        t => t.SquadId,
+                        (r, t) => r.Name)
                     .ToListAsync();
 
                 var names = fromSquadTemplates
@@ -200,9 +176,11 @@ namespace strAppersBackend.Controllers
                     .ToListAsync())
                     .ToHashSet();
 
-                var baseInstituteRoleIdSet = (await _context.InstituteRoles.AsNoTracking()
-                    .Where(ir => ir.InstituteId == request.InstituteId && ir.TemplateId == null)
-                    .Select(ir => ir.Id)
+                // Accept both institute-specific base roles and global (null) roles as valid BaseInstituteRoleId.
+                // When no institute rows exist, the frontend falls back to global catalog IDs.
+                var baseInstituteRoleIdSet = (await _context.Roles.AsNoTracking()
+                    .Where(r => (r.InstituteId == request.InstituteId || r.InstituteId == null) && r.SquadId == null)
+                    .Select(r => r.Id)
                     .ToListAsync())
                     .ToHashSet();
 
@@ -286,8 +264,8 @@ namespace strAppersBackend.Controllers
 
                     template.SquadId = squad.Id;
 
-                    var existingSquadRoles = await _context.InstituteSquadRoles
-                        .Where(sr => sr.SquadId == squad.Id)
+                    var existingSquadRoles = await _context.Roles
+                        .Where(r => r.InstituteId == request.InstituteId && r.SquadId == squad.Id)
                         .ToListAsync();
                     var existingSquadIds = existingSquadRoles.Select(er => er.Id).ToHashSet();
                     var payloadSquadIds = request.Roles
@@ -301,49 +279,40 @@ namespace strAppersBackend.Controllers
                         if (name.Length == 0)
                             continue;
 
-                        InstituteSquadRole? row = null;
+                        Role? row = null;
                         if (dto.Id.HasValue && dto.Id.Value > 0 && existingSquadIds.Contains(dto.Id.Value))
                         {
                             row = existingSquadRoles.FirstOrDefault(er => er.Id == dto.Id.Value);
                             if (row == null)
                             {
                                 await tx.RollbackAsync();
-                                return BadRequest($"InstituteSquadRole Id {dto.Id} not found for this squad scope.");
+                                return BadRequest($"Role Id {dto.Id} not found for this squad scope.");
                             }
                         }
-
-                        int? baseRoleId = null;
-                        if (dto.BaseInstituteRoleId is > 0 && baseInstituteRoleIdSet.Contains(dto.BaseInstituteRoleId.Value))
-                            baseRoleId = dto.BaseInstituteRoleId.Value;
-                        else if (row == null && dto.Id.HasValue && dto.Id.Value > 0 &&
-                                 baseInstituteRoleIdSet.Contains(dto.Id.Value))
-                            baseRoleId = dto.Id.Value;
 
                         if (row != null)
                         {
                             row.Name = name;
                             row.Description = dto.Description;
                             row.Competencies = dto.Competencies;
-                            row.Category = dto.Category;
+                            row.Category = dto.Category ?? string.Empty;
                             row.Type = dto.Type;
                             row.SkillId = dto.SkillId is > 0 ? dto.SkillId : null;
                             row.CustomerEngagement = dto.CustomerEngagement;
                             row.IsTechnical = dto.IsTechnical;
                             row.IsActive = dto.IsActive;
                             row.UpdatedAt = now;
-                            if (row.BaseInstituteRoleId == null && baseRoleId.HasValue)
-                                row.BaseInstituteRoleId = baseRoleId;
                         }
                         else
                         {
-                            await _context.InstituteSquadRoles.AddAsync(new InstituteSquadRole
+                            await _context.Roles.AddAsync(new Role
                             {
+                                InstituteId = request.InstituteId,
                                 SquadId = squad.Id,
-                                BaseInstituteRoleId = baseRoleId,
                                 Name = name,
                                 Description = dto.Description,
                                 Competencies = dto.Competencies,
-                                Category = dto.Category,
+                                Category = dto.Category ?? string.Empty,
                                 Type = dto.Type,
                                 SkillId = dto.SkillId is > 0 ? dto.SkillId : null,
                                 CustomerEngagement = dto.CustomerEngagement,
@@ -357,31 +326,14 @@ namespace strAppersBackend.Controllers
 
                     var toRemoveSquad = existingSquadRoles.Where(er => !payloadSquadIds.Contains(er.Id)).ToList();
                     if (toRemoveSquad.Count > 0)
-                        _context.InstituteSquadRoles.RemoveRange(toRemoveSquad);
+                        _context.Roles.RemoveRange(toRemoveSquad);
 
                     await _context.SaveChangesAsync();
                     await tx.CommitAsync();
 
-                    var savedSquadRoles = await _context.InstituteSquadRoles.AsNoTracking()
-                        .Where(sr => sr.SquadId == squad.Id)
-                        .OrderBy(sr => sr.Name)
-                        .Select(sr => new InstituteRole
-                        {
-                            Id = sr.Id,
-                            InstituteId = request.InstituteId,
-                            TemplateId = templateScopeId,
-                            Name = sr.Name,
-                            Description = sr.Description,
-                            Competencies = sr.Competencies,
-                            Category = sr.Category,
-                            Type = sr.Type,
-                            SkillId = sr.SkillId,
-                            CustomerEngagement = sr.CustomerEngagement,
-                            IsTechnical = sr.IsTechnical,
-                            IsActive = sr.IsActive,
-                            CreatedAt = sr.CreatedAt,
-                            UpdatedAt = sr.UpdatedAt,
-                        })
+                    var savedSquadRoles = await _context.Roles.AsNoTracking()
+                        .Where(r => r.InstituteId == request.InstituteId && r.SquadId == squad.Id)
+                        .OrderBy(r => r.Name)
                         .ToListAsync();
 
                     return Ok(new
@@ -395,13 +347,10 @@ namespace strAppersBackend.Controllers
                     });
                 }
 
-                IQueryable<InstituteRole> existingQuery = _context.InstituteRoles
-                    .Where(ir => ir.InstituteId == request.InstituteId);
-                // Base Roles Config save should only affect institute-level rows.
-                // Template-scoped rows are now represented by squads.
-                existingQuery = existingQuery.Where(ir => ir.TemplateId == null);
-
-                var existingForInstitute = await existingQuery.ToListAsync();
+                // Base path: only base-scoped rows (SquadId=null) for this institute.
+                var existingForInstitute = await _context.Roles
+                    .Where(r => r.InstituteId == request.InstituteId && r.SquadId == null)
+                    .ToListAsync();
 
                 foreach (var dto in request.Roles)
                 {
@@ -409,27 +358,25 @@ namespace strAppersBackend.Controllers
                     if (name.Length == 0)
                         continue;
 
-                    InstituteRole? row = null;
+                    Role? row = null;
                     if (dto.Id.HasValue && dto.Id.Value > 0)
                     {
                         row = existingForInstitute.FirstOrDefault(er => er.Id == dto.Id.Value);
-                        if (row == null)
-                        {
-                            await tx.RollbackAsync();
-                            return BadRequest($"InstituteRole Id {dto.Id} not found for this scope.");
-                        }
+                        // dto.Id may be a global role Id (InstituteId=null) — not in existingForInstitute,
+                        // so row stays null and a new institute-specific row is created instead.
                     }
-
-                    // Base Roles Config save should never write template-scoped rows.
-                    int? assignedTemplate = null;
+                    // Fallback: match by name to prevent duplicates when the same role
+                    // appears twice in the payload or a stale save re-sends negative IDs.
+                    if (row == null)
+                        row = existingForInstitute.FirstOrDefault(er =>
+                            string.Equals(er.Name.Trim(), name, StringComparison.OrdinalIgnoreCase));
 
                     if (row != null)
                     {
                         row.Name = name;
                         row.Description = dto.Description;
                         row.Competencies = dto.Competencies;
-                        row.Category = dto.Category;
-                        row.TemplateId = assignedTemplate;
+                        row.Category = dto.Category ?? string.Empty;
                         row.Type = dto.Type;
                         row.SkillId = dto.SkillId is > 0 ? dto.SkillId : null;
                         row.CustomerEngagement = dto.CustomerEngagement;
@@ -439,14 +386,14 @@ namespace strAppersBackend.Controllers
                     }
                     else
                     {
-                        await _context.InstituteRoles.AddAsync(new InstituteRole
+                        await _context.Roles.AddAsync(new Role
                         {
                             InstituteId = request.InstituteId,
+                            SquadId = null,
                             Name = name,
                             Description = dto.Description,
                             Competencies = dto.Competencies,
-                            Category = dto.Category,
-                            TemplateId = assignedTemplate,
+                            Category = dto.Category ?? string.Empty,
                             Type = dto.Type,
                             SkillId = dto.SkillId is > 0 ? dto.SkillId : null,
                             CustomerEngagement = dto.CustomerEngagement,
@@ -460,14 +407,14 @@ namespace strAppersBackend.Controllers
 
                 var toRemove = existingForInstitute.Where(er => !payloadPositiveIds.Contains(er.Id)).ToList();
                 if (toRemove.Count > 0)
-                    _context.InstituteRoles.RemoveRange(toRemove);
+                    _context.Roles.RemoveRange(toRemove);
 
                 await _context.SaveChangesAsync();
                 await tx.CommitAsync();
 
-                var saved = await _context.InstituteRoles.AsNoTracking()
-                    .Where(ir => ir.InstituteId == request.InstituteId)
-                    .OrderBy(ir => ir.Name)
+                var saved = await _context.Roles.AsNoTracking()
+                    .Where(r => r.InstituteId == request.InstituteId && r.SquadId == null)
+                    .OrderBy(r => r.Name)
                     .ToListAsync();
 
                 return Ok(new
@@ -481,6 +428,26 @@ namespace strAppersBackend.Controllers
             catch (DbUpdateException ex)
             {
                 _logger.LogError(ex, "DB error saving institute roles for institute {InstituteId}", request.InstituteId);
+                // DEBUG — remove after diagnosis
+                try
+                {
+                    var inner = ex.InnerException?.Message ?? "no inner";
+                    var rolesSnapshot = string.Join("\n", request.Roles.Select(r =>
+                        $"  id={r.Id?.ToString() ?? "null"} name={r.Name} type={r.Type} skillId={r.SkillId} active={r.IsActive}"));
+                    var nullCount    = await _context.Roles.CountAsync(r => r.InstituteId == null);
+                    var instCount    = await _context.Roles.CountAsync(r => r.InstituteId == request.InstituteId);
+                    var body = $"SaveInstituteRoles 409 DEBUG\n" +
+                               $"InstituteId={request.InstituteId}\n" +
+                               $"TemplateScopeId={request.TemplateScopeId}\n" +
+                               $"Exception: {ex.Message}\n" +
+                               $"Inner: {inner}\n\n" +
+                               $"DB null-InstituteId roles={nullCount}\n" +
+                               $"DB InstituteId={request.InstituteId} roles={instCount}\n\n" +
+                               $"Payload roles:\n{rolesSnapshot}";
+                    await _smtpEmailService.SendPlainEmailAsync("ofer@skill-in.com", "[RolesConfig Debug] SaveInstituteRoles 409", body);
+                }
+                catch { /* ignore debug errors */ }
+                // END DEBUG
                 return Conflict("Could not save institute roles (constraint violation). Check RoleTypes and duplicates.");
             }
             catch (Exception ex)
@@ -499,17 +466,17 @@ namespace strAppersBackend.Controllers
         {
             try
             {
-                var row = await _context.InstituteRoles
-                    .FirstOrDefaultAsync(r => r.Id == roleId && r.InstituteId == instituteId && r.TemplateId == null);
+                var row = await _context.Roles
+                    .FirstOrDefaultAsync(r => r.Id == roleId && r.InstituteId == instituteId && r.SquadId == null);
                 if (row == null)
                     return NotFound($"Institute base role {roleId} was not found for institute {instituteId}.");
 
-                var roleName = (row.Name ?? string.Empty).Trim();
+                var roleName = row.Name.Trim();
                 if (!string.IsNullOrWhiteSpace(roleName))
                 {
                     var isGlobalCatalogRole = await _context.Roles
                         .AsNoTracking()
-                        .AnyAsync(r => r.Name.ToLower() == roleName.ToLower());
+                        .AnyAsync(r => r.InstituteId == null && r.Name.ToLower() == roleName.ToLower());
                     if (isGlobalCatalogRole)
                     {
                         return BadRequest(
@@ -517,33 +484,19 @@ namespace strAppersBackend.Controllers
                     }
                 }
 
-                var usedByBaseLink = await _context.InstituteSquadRoles
-                    .AsNoTracking()
-                    .Join(
-                        _context.InstituteSquads.AsNoTracking().Where(s => s.InstituteId == instituteId),
-                        sr => sr.SquadId,
-                        s => s.Id,
-                        (sr, s) => sr)
-                    .AnyAsync(sr => sr.BaseInstituteRoleId == roleId);
-
-                var usedByNameFallback =
-                    !string.IsNullOrWhiteSpace(roleName) &&
-                    await _context.InstituteSquadRoles
+                var usedBySquad = !string.IsNullOrWhiteSpace(roleName) &&
+                    await _context.Roles
                         .AsNoTracking()
-                        .Join(
-                            _context.InstituteSquads.AsNoTracking().Where(s => s.InstituteId == instituteId),
-                            sr => sr.SquadId,
-                            s => s.Id,
-                            (sr, s) => sr)
-                        .AnyAsync(sr => sr.Name != null && sr.Name.Trim().ToLower() == roleName.ToLower());
+                        .AnyAsync(r => r.InstituteId == instituteId && r.SquadId != null &&
+                                       r.Name.Trim().ToLower() == roleName.ToLower());
 
-                if (usedByBaseLink || usedByNameFallback)
+                if (usedBySquad)
                 {
                     return BadRequest(
                         $"Role \"{row.Name}\" is used in one or more squads. Remove it from those squad(s) first, then delete it.");
                 }
 
-                _context.InstituteRoles.Remove(row);
+                _context.Roles.Remove(row);
                 await _context.SaveChangesAsync();
                 return Ok(new { success = true, message = $"Role \"{row.Name}\" deleted." });
             }
@@ -643,7 +596,7 @@ Return only the final competencies text.
             try
             {
                 var roles = await _context.Roles
-                    .Where(r => r.IsActive)
+                    .Where(r => r.InstituteId == null && r.IsActive)
                     .OrderBy(r => r.Name)
                     .ToListAsync();
 
@@ -665,8 +618,26 @@ Return only the final competencies text.
             try
             {
                 var roles = await _context.Roles
+                    .Where(r => r.InstituteId == null)
                     .OrderBy(r => r.Name)
                     .ToListAsync();
+
+                // DEBUG — remove after diagnosis
+                try
+                {
+                    var nullCount    = await _context.Roles.CountAsync(r => r.InstituteId == null);
+                    var nonNullCount = await _context.Roles.CountAsync(r => r.InstituteId != null);
+                    var sample       = await _context.Roles.OrderBy(r => r.Id).Take(3)
+                                           .Select(r => new { r.Id, r.Name, r.InstituteId }).ToListAsync();
+                    var body = $"GetAllRoles DEBUG\n" +
+                               $"returned={roles.Count}\n" +
+                               $"DB null InstituteId={nullCount}\n" +
+                               $"DB non-null InstituteId={nonNullCount}\n" +
+                               $"First 3 rows: {string.Join(", ", sample.Select(r => $"Id={r.Id} Name={r.Name} InstituteId={r.InstituteId?.ToString() ?? "NULL"}"))}";
+                    await _smtpEmailService.SendPlainEmailAsync("ofer@skill-in.com", "[RolesConfig Debug] GetAllRoles", body);
+                }
+                catch { /* ignore debug errors */ }
+                // END DEBUG
 
                 return Ok(roles);
             }
@@ -710,7 +681,7 @@ Return only the final competencies text.
             try
             {
                 var roles = await _context.Roles
-                    .Where(r => r.Category == category && r.IsActive)
+                    .Where(r => r.InstituteId == null && r.Category == category && r.IsActive)
                     .OrderBy(r => r.Name)
                     .ToListAsync();
 

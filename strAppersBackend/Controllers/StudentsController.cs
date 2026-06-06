@@ -534,7 +534,7 @@ public class StudentsController : ControllerBase
 
             // Validate institute coupon and resolve InstituteId
             int? resolvedInstituteId = 1; // default institute
-            string? resolvedCoupon = null;
+            string? resolvedCoupon = "1";
             if (!string.IsNullOrWhiteSpace(request.InstituteCoupon))
             {
                 _logger.LogInformation("Validating institute coupon: {Coupon}", request.InstituteCoupon);
@@ -919,6 +919,28 @@ public class StudentsController : ControllerBase
     // the original ProjectPriority endpoints above — these are institute-only.
     // ──────────────────────────────────────────────────────────────────────────
 
+    /// <summary>
+    /// Confirms institute checkout: sets Status=1 (Pending) if the student is not already pending or active.
+    /// Called by the Checkout page for institute students instead of AllocateWithPriority.
+    /// </summary>
+    [HttpPost("use/institute/confirm-checkout/{studentId}")]
+    public async Task<ActionResult> ConfirmInstituteCheckout(int studentId)
+    {
+        var student = await _context.Students.FindAsync(studentId);
+        if (student == null)
+            return NotFound($"Student with ID {studentId} not found.");
+
+        if (student.Status is null or 0)
+        {
+            student.Status = 1;
+            student.StartPendingAt = DateTime.UtcNow;
+            student.UpdatedAt = DateTime.UtcNow;
+            await _context.SaveChangesAsync();
+        }
+
+        return Ok(new { Success = true, Status = student.Status, StartPendingAt = student.StartPendingAt });
+    }
+
     [HttpPost("use/institute/allocate/{instituteProjectId}/{studentId}")]
     public async Task<ActionResult> AllocateStudentToInstituteProject(int instituteProjectId, int studentId, [FromBody] AllocateStudentRequest request)
     {
@@ -943,11 +965,10 @@ public class StudentsController : ControllerBase
             else
                 return BadRequest("Student already has all 4 institute project priorities set.");
 
-            if (student.Status is null or 0)
-            {
-                student.Status = 1;
-                student.StartPendingAt = DateTime.UtcNow;
-            }
+            // Status stays 0 until checkout (ConfirmInstituteCheckout sets Status=1).
+            // Explicitly set 0 when null so the student appears in Status.HasValue queries.
+            if (student.Status is null)
+                student.Status = 0;
             student.UpdatedAt = DateTime.UtcNow;
 
             await _context.SaveChangesAsync();
@@ -1033,6 +1054,7 @@ public class StudentsController : ControllerBase
                     p.ExtendedDescription,
                     p.Priority,
                     p.IsAvailable,
+                    p.Logo,
                     p.CreatedAt,
                     p.UpdatedAt
                 })
@@ -1109,29 +1131,31 @@ public class StudentsController : ControllerBase
 
             if (distinctSquadRoles.Any())
             {
-                // Map to global Role IDs by name — StudentRole.RoleId must reference Roles.Id.
-                // TryBuildSquadTeam also matches by name, so this is required for team building.
-                var squadRoleNames = distinctSquadRoles.Select(r => r.Name).ToList();
-                var globalRoles = await _context.Roles
-                    .Where(r => squadRoleNames.Contains(r.Name))
-                    .ToListAsync();
-
                 var squadRoles = distinctSquadRoles
-                    .Select(sr =>
-                    {
-                        var global = globalRoles.FirstOrDefault(r =>
-                            string.Equals(r.Name, sr.Name, StringComparison.OrdinalIgnoreCase));
-                        return global == null ? null : new { id = global.Id, name = global.Name, type = sr.Type };
-                    })
-                    .Where(r => r != null)
+                    .Select(r => new { id = r.Id, name = r.Name, type = r.Type, skillId = r.SkillId, isTechnical = r.IsTechnical, customerEngagement = r.CustomerEngagement })
                     .ToList();
 
-                if (squadRoles.Any())
-                    return Ok(new { source = "squad", roles = (object)squadRoles });
+                return Ok(new { source = "squad", roles = (object)squadRoles });
             }
 
-            // Fallback: no active template with a squad → return global roles
+            // Scenario 2: no squad templates — check for institute-specific base roles
+            // (admin customised the global catalog for this institute via Roles Config).
+            var instituteId = projects.Select(p => p.InstituteId).FirstOrDefault();
+            if (instituteId > 0)
+            {
+                var baseRoles = await _context.Roles
+                    .Where(r => r.InstituteId == instituteId && r.SquadId == null && r.IsActive)
+                    .OrderBy(r => r.Name)
+                    .Select(r => new { id = r.Id, name = r.Name, type = r.Type, skillId = r.SkillId, isTechnical = r.IsTechnical, customerEngagement = r.CustomerEngagement })
+                    .ToListAsync();
+
+                if (baseRoles.Any())
+                    return Ok(new { source = "institute", roles = (object)baseRoles });
+            }
+
+            // Fallback: no institute base roles → return global (InstituteId=null) roles
             var defaultRoles = await _context.Roles
+                .Where(r => r.InstituteId == null)
                 .OrderBy(r => r.Name)
                 .Select(r => new { id = r.Id, name = r.Name, type = r.Type })
                 .ToListAsync();
@@ -1447,6 +1471,8 @@ public class StudentsController : ControllerBase
                 ProgrammingLanguageName = student.ProgrammingLanguage?.Name,
                 RoleId = roleInfo?.RoleId,
                 RoleName = roleInfo?.Role?.Name,
+                RoleSkillId = roleInfo?.Role?.SkillId,
+                RoleType = roleInfo?.Role?.Type,
                 CreatedAt = student.CreatedAt,
                 UpdatedAt = student.UpdatedAt,
                 MinutesToWork = student.MinutesToWork,

@@ -57,7 +57,7 @@ public partial class MetricsController
 
         var activeRole = student.StudentRoles?.FirstOrDefault(sr => sr.IsActive);
         var roleName = activeRole?.Role?.Name?.Trim() ?? "Team Member";
-        var hasCustomerEngagement = await ResolveCustomerEngagementAsync(activeRole?.Role, roleName, student.InstituteId, cancellationToken);
+        var hasCustomerEngagement = ResolveCustomerEngagement(activeRole?.Role);
         var isDeveloper = ContainsDeveloper(roleName);
         _logger.LogInformation(
             "CustomerEngagement gate: studentId={StudentId} roleName={RoleName} instituteId={InstId} hasCustomerEngagement={CE} isDeveloper={Dev} → willSkip={Skip}",

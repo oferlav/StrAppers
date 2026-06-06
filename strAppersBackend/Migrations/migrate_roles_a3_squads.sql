@@ -76,7 +76,7 @@ SELECT
     sr."Name",
     sr."Description",
     sr."Competencies",
-    sr."Category",
+    COALESCE(sr."Category", ''),
     sr."Type",
     sr."SkillId",
     sr."CustomerEngagement",
