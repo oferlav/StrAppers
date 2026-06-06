@@ -554,12 +554,12 @@ public class InstitutesController : ControllerBase
     [HttpGet("{id}/logo")]
     public async Task<ActionResult<object>> GetInstituteLogo(int id)
     {
-        var logo = await _context.Institutes
+        var row = await _context.Institutes
             .Where(i => i.Id == id)
-            .Select(i => i.Logo)
+            .Select(i => new { i.Logo, i.Website })
             .FirstOrDefaultAsync();
 
-        return Ok(new { logo });
+        return Ok(new { logo = row?.Logo, website = row?.Website });
     }
 
     /// <summary>
