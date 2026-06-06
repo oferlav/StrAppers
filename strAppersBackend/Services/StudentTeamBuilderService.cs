@@ -214,94 +214,106 @@ namespace strAppersBackend.Services
                             continue;
                         }
 
-                        if (template == null)
+                        // Partition candidates by coupon: students with a coupon only team with
+                        // same-coupon students; students without a coupon form their own pool.
+                        var couponGroups = candidates
+                            .GroupBy(s => string.IsNullOrWhiteSpace(s.Coupon) ? (string?)null : s.Coupon)
+                            .ToList();
+
+                        foreach (var couponGroup in couponGroups)
                         {
-                            // No active template — handle as built-in project using institute base roles
-                            if (!ip.IsAvailable)
+                            var couponCandidates = couponGroup.ToList();
+                            var couponLabel = couponGroup.Key ?? "(no coupon)";
+
+                            if (template == null)
                             {
-                                _logger.LogInformation("[INSTITUTE-TEAM-BUILDER] Institute {InstituteId}, IpId {IpId}: no template and project not available, skipping.", instituteId, ipId);
+                                // No active template — handle as built-in project using institute base roles
+                                if (!ip.IsAvailable)
+                                {
+                                    _logger.LogInformation("[INSTITUTE-TEAM-BUILDER] Institute {InstituteId}, IpId {IpId}: no template and project not available, skipping.", instituteId, ipId);
+                                    continue;
+                                }
+                                _logger.LogInformation("[INSTITUTE-TEAM-BUILDER] Institute {InstituteId}, IpId {IpId}, Coupon={Coupon}: no active template, attempting built-in team build.", instituteId, ipId, couponLabel);
+                                var builtInTeam = TryBuildBuiltInTeam(couponCandidates, baseRoles, instituteId, ipId, ref skipped);
+                                if (builtInTeam == null || builtInTeam.Count == 0) continue;
+                                var builtInBoard = await CallCreateBoardAsync(ip.BaseProjectId.Value, ip.Id, builtInTeam, false, ip.Title);
+                                if (builtInBoard.Success)
+                                {
+                                    created++;
+                                    foreach (var s in builtInTeam) processedStudentIds.Add(s.Id);
+                                    var msg = $"Institute {instituteId}, IpId {ipId}, Coupon={couponLabel} (built-in): board created for {builtInTeam.Count} student(s).";
+                                    messages.Add(msg);
+                                    _logger.LogInformation("[INSTITUTE-TEAM-BUILDER] {Message}", msg);
+                                }
+                                else
+                                {
+                                    skipped++;
+                                    var msg = $"Institute {instituteId}, IpId {ipId}, Coupon={couponLabel} (built-in): CreateBoard failed — {builtInBoard.Error}";
+                                    messages.Add(msg);
+                                    _logger.LogWarning("[INSTITUTE-TEAM-BUILDER] {Message}", msg);
+                                }
                                 continue;
                             }
-                            _logger.LogInformation("[INSTITUTE-TEAM-BUILDER] Institute {InstituteId}, IpId {IpId}: no active template, attempting built-in team build.", instituteId, ipId);
-                            var builtInTeam = TryBuildBuiltInTeam(candidates, baseRoles, instituteId, ipId, ref skipped);
-                            if (builtInTeam == null || builtInTeam.Count == 0) continue;
-                            var builtInBoard = await CallCreateBoardAsync(ip.BaseProjectId.Value, ip.Id, builtInTeam, false, ip.Title);
-                            if (builtInBoard.Success)
+
+                            if (string.IsNullOrWhiteSpace(ip.TrelloBoardJson))
+                            {
+                                _logger.LogWarning("[INSTITUTE-TEAM-BUILDER] Institute {InstituteId}, IpId {IpId}: TrelloBoardJson is empty, skipping.", instituteId, ipId);
+                                skipped++;
+                                continue;
+                            }
+
+                            List<Student>? team = null;
+                            var isSingleRole = false;
+
+                            if (string.Equals(template.CourseType, "Role", StringComparison.OrdinalIgnoreCase))
+                            {
+                                (team, isSingleRole) = TryBuildRoleTeam(couponCandidates, template, instituteId, ipId, ref skipped);
+                            }
+                            else
+                            {
+                                team = TryBuildSquadTeam(couponCandidates, template, instituteId, ipId, ref skipped);
+                            }
+
+                            if (team == null || team.Count == 0) continue;
+
+                            // Assign RoleIndex for role-based courses before calling CreateBoard
+                            if (isSingleRole)
+                            {
+                                for (var i = 0; i < team.Count; i++)
+                                {
+                                    team[i].RoleIndex = i + 1;
+                                    team[i].UpdatedAt = DateTime.UtcNow;
+                                    _context.Entry(team[i]).Property(x => x.RoleIndex).IsModified = true;
+                                }
+                                try { await _context.SaveChangesAsync(); }
+                                catch (Exception ex)
+                                {
+                                    _logger.LogError(ex, "[INSTITUTE-TEAM-BUILDER] Failed to save RoleIndex assignments for IpId {IpId}.", ipId);
+                                    skipped++;
+                                    continue;
+                                }
+                                _logger.LogInformation("[INSTITUTE-TEAM-BUILDER] Assigned RoleIndex 1..{Count} for IpId {IpId}.", team.Count, ipId);
+                            }
+
+                            var boardCreated = await CallCreateBoardAsync(ip.BaseProjectId.Value, ip.Id, team, isSingleRole, ip.Title);
+                            if (boardCreated.Success)
                             {
                                 created++;
-                                foreach (var s in builtInTeam) processedStudentIds.Add(s.Id);
-                                var msg = $"Institute {instituteId}, IpId {ipId} (built-in): board created for {builtInTeam.Count} student(s).";
+                                foreach (var s in team) processedStudentIds.Add(s.Id);
+                                var msg = $"Institute {instituteId}, IpId {ipId}, Coupon={couponLabel}: board created for {team.Count} student(s).";
                                 messages.Add(msg);
                                 _logger.LogInformation("[INSTITUTE-TEAM-BUILDER] {Message}", msg);
                             }
                             else
                             {
                                 skipped++;
-                                var msg = $"Institute {instituteId}, IpId {ipId} (built-in): CreateBoard failed — {builtInBoard.Error}";
+                                var msg = $"Institute {instituteId}, IpId {ipId}, Coupon={couponLabel}: CreateBoard failed — {boardCreated.Error}";
                                 messages.Add(msg);
                                 _logger.LogWarning("[INSTITUTE-TEAM-BUILDER] {Message}", msg);
+                                // Note: RoleIndex is NOT reverted on failure. The HTTP call to BoardsController
+                                // can time out (Azure 230s request limit) while the board is still being created
+                                // server-side. Reverting would clobber a valid assignment.
                             }
-                            continue;
-                        }
-
-                        if (string.IsNullOrWhiteSpace(ip.TrelloBoardJson))
-                        {
-                            _logger.LogWarning("[INSTITUTE-TEAM-BUILDER] Institute {InstituteId}, IpId {IpId}: TrelloBoardJson is empty, skipping.", instituteId, ipId);
-                            skipped++;
-                            continue;
-                        }
-
-                        List<Student>? team = null;
-                        var isSingleRole = false;
-
-                        if (string.Equals(template.CourseType, "Role", StringComparison.OrdinalIgnoreCase))
-                        {
-                            (team, isSingleRole) = TryBuildRoleTeam(candidates, template, instituteId, ipId, ref skipped);
-                        }
-                        else
-                        {
-                            team = TryBuildSquadTeam(candidates, template, instituteId, ipId, ref skipped);
-                        }
-
-                        if (team == null || team.Count == 0) continue;
-
-                        // Assign RoleIndex for role-based courses before calling CreateBoard
-                        if (isSingleRole)
-                        {
-                            for (var i = 0; i < team.Count; i++)
-                            {
-                                team[i].RoleIndex = i + 1;
-                                team[i].UpdatedAt = DateTime.UtcNow;
-                                _context.Entry(team[i]).Property(x => x.RoleIndex).IsModified = true;
-                            }
-                            try { await _context.SaveChangesAsync(); }
-                            catch (Exception ex)
-                            {
-                                _logger.LogError(ex, "[INSTITUTE-TEAM-BUILDER] Failed to save RoleIndex assignments for IpId {IpId}.", ipId);
-                                skipped++;
-                                continue;
-                            }
-                            _logger.LogInformation("[INSTITUTE-TEAM-BUILDER] Assigned RoleIndex 1..{Count} for IpId {IpId}.", team.Count, ipId);
-                        }
-
-                        var boardCreated = await CallCreateBoardAsync(ip.BaseProjectId.Value, ip.Id, team, isSingleRole, ip.Title);
-                        if (boardCreated.Success)
-                        {
-                            created++;
-                            foreach (var s in team) processedStudentIds.Add(s.Id);
-                            var msg = $"Institute {instituteId}, IpId {ipId}: board created for {team.Count} student(s).";
-                            messages.Add(msg);
-                            _logger.LogInformation("[INSTITUTE-TEAM-BUILDER] {Message}", msg);
-                        }
-                        else
-                        {
-                            skipped++;
-                            var msg = $"Institute {instituteId}, IpId {ipId}: CreateBoard failed — {boardCreated.Error}";
-                            messages.Add(msg);
-                            _logger.LogWarning("[INSTITUTE-TEAM-BUILDER] {Message}", msg);
-                            // Note: RoleIndex is NOT reverted on failure. The HTTP call to BoardsController
-                            // can time out (Azure 230s request limit) while the board is still being created
-                            // server-side. Reverting would clobber a valid assignment.
                         }
                     }
                 }
