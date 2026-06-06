@@ -684,21 +684,15 @@ public partial class ProjectsController : ControllerBase
                     return Forbid();
                 }
 
-                // Copies from catalog share BaseProjectId with the global Project row. Student.Project* FK targets Projects.Id,
-                // so selections may store the catalog id. Only block delete when *this institute's* students still reference
-                // that catalog id — not global ProjectInstances or other institutes (those must not block removing the copy).
-                if (ip.BaseProjectId is int catalogPid)
+                // Block delete if any student in this institute still has this InstituteProject in their selection slots.
+                if (await _context.Students.AsNoTracking().AnyAsync(s =>
+                        s.InstituteId == authInstituteId.Value
+                        && (s.InstitutePriority1 == id
+                            || s.InstitutePriority2 == id
+                            || s.InstitutePriority3 == id
+                            || s.InstitutePriority4 == id)))
                 {
-                    if (await _context.Students.AsNoTracking().AnyAsync(s =>
-                            s.InstituteId == authInstituteId.Value
-                            && (s.ProjectId == catalogPid
-                                || s.ProjectPriority1 == catalogPid
-                                || s.ProjectPriority2 == catalogPid
-                                || s.ProjectPriority3 == catalogPid
-                                || s.ProjectPriority4 == catalogPid)))
-                    {
-                        return Conflict("This project is still used in student project selections and cannot be deleted yet.");
-                    }
+                    return Conflict("This project is still used in student project selections and cannot be deleted yet.");
                 }
 
                 _context.InstituteProjects.Remove(ip);
@@ -1741,7 +1735,11 @@ public partial class ProjectsController : ControllerBase
                     Id = p.Id,
                     Title = p.Title,
                     Logo = p.InstituteId == null
-                        ? (!string.IsNullOrEmpty(p.Logo) ? p.Logo : (p.Organization != null ? p.Organization.Logo : null))
+                        ? (_context.InstituteProjects
+                            .Where(ip => ip.BaseProjectId == p.Id && ip.InstituteId == instituteId.Value && ip.Logo != null && ip.Logo != "")
+                            .Select(ip => ip.Logo)
+                            .FirstOrDefault()
+                           ?? (!string.IsNullOrEmpty(p.Logo) ? p.Logo : (p.Organization != null ? p.Organization.Logo : null)))
                         : p.Logo,
                     Mission = p.Mission,
                     ShortBrief = p.ShortBrief,
