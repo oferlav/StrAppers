@@ -1321,6 +1321,7 @@ public partial class ProjectsController : ControllerBase
                     p.IsAvailable,
                     p.InUse,
                     p.Logo,
+                    p.BuiltInCourseName,
                     p.CreatedAt,
                     p.UpdatedAt,
                     ApplicantsCount = _context.Students.Count(s => s.Status.HasValue && s.Status <= 1 && (
@@ -1388,6 +1389,7 @@ public partial class ProjectsController : ControllerBase
                     p.IsAvailable,
                     p.InUse,
                     p.Logo,
+                    p.BuiltInCourseName,
                     p.CreatedAt,
                     p.UpdatedAt,
                     p.ApplicantsCount,
