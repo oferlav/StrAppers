@@ -82,7 +82,11 @@ public class Worker : BackgroundService
                                (s.""ProjectPriority3"", 3),
                                (s.""ProjectPriority4"", 4)
                     ) AS p(prjId, prio)
-                    WHERE s.""Status"" = 1 AND p.prjId IS NOT NULL";
+                    WHERE s.""Status"" = 1 AND p.prjId IS NOT NULL
+                      AND s.""InstitutePriority1"" IS NULL
+                      AND s.""InstitutePriority2"" IS NULL
+                      AND s.""InstitutePriority3"" IS NULL
+                      AND s.""InstitutePriority4"" IS NULL";
 
         var all = (await conn.QueryAsync<StudentCandidate>(new CommandDefinition(sql, cancellationToken: ct))).ToList();
         _logger.LogInformation("[CANDIDATES] Total rows (by project priority expansion): {Count}", all.Count);
