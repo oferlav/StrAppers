@@ -965,11 +965,10 @@ public class StudentsController : ControllerBase
             else
                 return BadRequest("Student already has all 4 institute project priorities set.");
 
-            if (student.Status is null or 0)
-            {
-                student.Status = 1;
-                student.StartPendingAt = DateTime.UtcNow;
-            }
+            // Status stays 0 until checkout (ConfirmInstituteCheckout sets Status=1).
+            // Explicitly set 0 when null so the student appears in Status.HasValue queries.
+            if (student.Status is null)
+                student.Status = 0;
             student.UpdatedAt = DateTime.UtcNow;
 
             await _context.SaveChangesAsync();

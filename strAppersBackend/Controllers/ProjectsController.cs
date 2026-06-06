@@ -1329,7 +1329,7 @@ public partial class ProjectsController : ControllerBase
                     p.Logo,
                     p.CreatedAt,
                     p.UpdatedAt,
-                    ApplicantsCount = _context.Students.Count(s => s.Status == 1 && (
+                    ApplicantsCount = _context.Students.Count(s => s.Status.HasValue && s.Status <= 1 && (
                         s.InstitutePriority1 == p.Id ||
                         s.InstitutePriority2 == p.Id ||
                         s.InstitutePriority3 == p.Id ||
@@ -4400,15 +4400,16 @@ Staff request:
                 "Getting students for project {ProjectId} with Status < 2 (MultiRolesPerProject={MultiRoles}, CandidateRoleId={CandidateRoleId}, CurrentStudentId={CurrentStudentId})",
                 id, _kickoffConfig.MultiRolesPerProject, candidateRoleId, currentStudentId);
 
-            // Validate project exists
-            var projectExists = await _context.Projects.AnyAsync(p => p.Id == id);
+            // Accept both B2C Projects and InstituteProjects ids
+            var projectExists = await _context.Projects.AnyAsync(p => p.Id == id)
+                             || await _context.InstituteProjects.AnyAsync(p => p.Id == id);
             if (!projectExists)
             {
                 _logger.LogWarning("Project {ProjectId} not found", id);
                 return NotFound($"Project with ID {id} not found.");
             }
 
-            // Get students where any ProjectPriority field equals projectId AND Status < 2
+            // Get students where any ProjectPriority or InstitutePriority field equals projectId AND Status < 2
             var students = await _context.Students
                 .Include(s => s.Major)
                 .Include(s => s.Year)
@@ -4418,7 +4419,11 @@ Staff request:
                     s.ProjectPriority1 == id ||
                     s.ProjectPriority2 == id ||
                     s.ProjectPriority3 == id ||
-                    s.ProjectPriority4 == id
+                    s.ProjectPriority4 == id ||
+                    s.InstitutePriority1 == id ||
+                    s.InstitutePriority2 == id ||
+                    s.InstitutePriority3 == id ||
+                    s.InstitutePriority4 == id
                 ))
                 .Select(s => new
                 {
