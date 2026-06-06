@@ -919,6 +919,28 @@ public class StudentsController : ControllerBase
     // the original ProjectPriority endpoints above — these are institute-only.
     // ──────────────────────────────────────────────────────────────────────────
 
+    /// <summary>
+    /// Confirms institute checkout: sets Status=1 (Pending) if the student is not already pending or active.
+    /// Called by the Checkout page for institute students instead of AllocateWithPriority.
+    /// </summary>
+    [HttpPost("use/institute/confirm-checkout/{studentId}")]
+    public async Task<ActionResult> ConfirmInstituteCheckout(int studentId)
+    {
+        var student = await _context.Students.FindAsync(studentId);
+        if (student == null)
+            return NotFound($"Student with ID {studentId} not found.");
+
+        if (student.Status is null or 0)
+        {
+            student.Status = 1;
+            student.StartPendingAt = DateTime.UtcNow;
+            student.UpdatedAt = DateTime.UtcNow;
+            await _context.SaveChangesAsync();
+        }
+
+        return Ok(new { Success = true, Status = student.Status, StartPendingAt = student.StartPendingAt });
+    }
+
     [HttpPost("use/institute/allocate/{instituteProjectId}/{studentId}")]
     public async Task<ActionResult> AllocateStudentToInstituteProject(int instituteProjectId, int studentId, [FromBody] AllocateStudentRequest request)
     {
