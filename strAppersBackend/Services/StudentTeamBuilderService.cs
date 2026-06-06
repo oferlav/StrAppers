@@ -207,6 +207,13 @@ namespace strAppersBackend.Services
                             skipped++;
                             continue;
                         }
+                        if (!ip.BaseProjectId.HasValue)
+                        {
+                            _logger.LogWarning("[INSTITUTE-TEAM-BUILDER] Institute {InstituteId}, IpId {IpId}: no BaseProjectId, skipping.", instituteId, ipId);
+                            skipped++;
+                            continue;
+                        }
+
                         // Partition candidates by coupon: students with a coupon only team with
                         // same-coupon students; students without a coupon form their own pool.
                         var couponGroups = candidates
@@ -229,7 +236,7 @@ namespace strAppersBackend.Services
                                 _logger.LogInformation("[INSTITUTE-TEAM-BUILDER] Institute {InstituteId}, IpId {IpId}, Coupon={Coupon}: no active template, attempting built-in team build.", instituteId, ipId, couponLabel);
                                 var builtInTeam = TryBuildBuiltInTeam(couponCandidates, baseRoles, instituteId, ipId, ref skipped);
                                 if (builtInTeam == null || builtInTeam.Count == 0) continue;
-                                var builtInBoard = await CallCreateBoardAsync(ip.Id, ip.Id, builtInTeam, false, ip.Title);
+                                var builtInBoard = await CallCreateBoardAsync(ip.BaseProjectId.Value, ip.Id, builtInTeam, false, ip.Title);
                                 if (builtInBoard.Success)
                                 {
                                     created++;
@@ -288,7 +295,7 @@ namespace strAppersBackend.Services
                                 _logger.LogInformation("[INSTITUTE-TEAM-BUILDER] Assigned RoleIndex 1..{Count} for IpId {IpId}.", team.Count, ipId);
                             }
 
-                            var boardCreated = await CallCreateBoardAsync(ip.Id, ip.Id, team, isSingleRole, ip.Title);
+                            var boardCreated = await CallCreateBoardAsync(ip.BaseProjectId.Value, ip.Id, team, isSingleRole, ip.Title);
                             if (boardCreated.Success)
                             {
                                 created++;
