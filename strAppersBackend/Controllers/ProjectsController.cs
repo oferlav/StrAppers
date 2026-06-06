@@ -1741,7 +1741,7 @@ public partial class ProjectsController : ControllerBase
                     Id = p.Id,
                     Title = p.Title,
                     Logo = p.InstituteId == null
-                        ? (p.Organization != null ? p.Organization.Logo : null)
+                        ? (!string.IsNullOrEmpty(p.Logo) ? p.Logo : (p.Organization != null ? p.Organization.Logo : null))
                         : p.Logo,
                     Mission = p.Mission,
                     ShortBrief = p.ShortBrief,
@@ -2539,7 +2539,21 @@ Staff request:
 
             if (project.InstituteId == null)
             {
-                return StatusCode(StatusCodes.Status403Forbidden, "System projects are read-only.");
+                // Catalog projects: only the logo field is editable
+                project.Logo = string.IsNullOrWhiteSpace(request.Logo) ? null : request.Logo.Trim();
+                project.UpdatedAt = DateTime.UtcNow;
+                await _context.SaveChangesAsync();
+                return Ok(new ProjectHeaderDto
+                {
+                    Id = project.Id,
+                    Title = project.Title ?? string.Empty,
+                    Logo = project.Logo,
+                    Mission = project.Mission,
+                    ShortBrief = project.ShortBrief,
+                    OneLiner = project.OneLiner,
+                    Description = project.Description,
+                    CustomerPastStory = project.CustomerPastStory,
+                });
             }
 
             const int titleMax = 200;
