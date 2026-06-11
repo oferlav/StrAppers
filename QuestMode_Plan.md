@@ -47,37 +47,115 @@ The feature is a **non-breaking switch** — all existing squad/course functiona
 
 ## Phase 2 — Board Creation Infra 🔄
 
-Currently each squad shares one board (one Trello board, one GitHub repo, one Railway instance, one Neon DB). In QuestMode, each student gets their **own** isolated environment within the same squad.
+Currently each squad shares one board (one Trello board, one GitHub repo, one Railway instance, one Neon DB).
+In QuestMode, each student gets their **own** isolated GitHub/Railway/Neon environment, all linked to a single shared Trello board.
 
 ### 2.0 Data Model ✅
-- `QuestBoards` table created: `Id`, `StudentId` (FK→Students), `BoardId` (FK→ProjectBoards), `PublishUrl`, `GithubFrontendUrl`, `GithubBackendUrl`, `WebApiUrl`, `DBPassword`, `NeonBranchId`, `NeonProjectId`, `CreatedAt`, `UpdatedAt`
+- `QuestBoards` table: `Id`, `StudentId` (FK→Students), `BoardId` (FK→ProjectBoards), `PublishUrl`, `GithubFrontendUrl`, `GithubBackendUrl`, `WebApiUrl`, `DBPassword`, `NeonBranchId`, `NeonProjectId`, `CreatedAt`, `UpdatedAt`
 - Unique constraint on `(StudentId, BoardId)`
 - SQL script: `Scripts/AddQuestBoardsTable_PostgreSQL.sql`
 
-### 2.1 Trello
-- Create one Trello board **per student** when a QuestMode board is provisioned
-- All boards are seeded with the same quest cards (from the Quest Generator output)
-- Board naming convention: `{ProjectName} — {StudentFirstName} {StudentLastName}`
+---
 
-### 2.2 GitHub
-- Create one GitHub repo **per student** (forked or freshly created from quest template)
-- Repo naming convention: `{projectSlug}-{studentFirstName}-{studentLastName}`
-- Students get write access only to their own repo
-- Read-only access to employer's reference repo (OAuth, already in scope for Quest Generator)
+### 2.1 Board Creation Changes ⬜
 
-### 2.3 Railway
-- Provision one Railway deployment **per student**
-- Link each deployment to the student's GitHub repo
-- Return individual `publishUrl` per student
+**Context (from codebase analysis):**
+- Single endpoint: `POST /api/Boards/use/create` in `BoardsController.cs`
+- Called by `StudentTeamBuilderService/Worker.cs` → `TryCreateBoardsAsync()` after group selection
+- Currently provisions: 1× Trello board, 1× GitHub BE repo, 1× GitHub FE repo, 1× Railway service+domain, 1× Neon project+branch — all stored in `ProjectBoards`
+- Worker already knows the institute from the students; it can check `Institute.QuestMode`
 
-### 2.4 Neon (PostgreSQL)
-- Create one Neon database **per student** (branch from template or fresh)
-- Return individual connection string per student
+**Plan:**
 
-### 2.5 Backend / Data Model Changes
-- `ProjectBoards` — add per-student rows (currently one per squad); needs `StudentId` FK when in QuestMode
-- Board provisioning controller logic to loop over squad members when `QuestMode = true`
-- Student's `BoardId` points to their own board row, not the squad-shared one
+**Step A — Worker.cs:** When building the `CreateBoardRequest`, include `IsQuestMode = institute.QuestMode` (load institute via `Students[0].InstituteId`).
+
+**Step B — CreateBoardRequest:** Add `bool IsQuestMode` field.
+
+**Step C — BoardsController.cs `CreateBoard()`:**
+When `IsQuestMode = true`:
+1. **Trello** — create a **single shared** Trello board as today (all students see the same cards). No change here.
+2. **Per-student loop** — after Trello creation, loop over each student in `StudentIds` and for each:
+   - **GitHub:** Create two repos:
+     - Backend: `backend_{boardId}_{studentId}` (e.g. `backend_abc123_42`)
+     - Frontend: `{boardId}_{studentId}`
+     - Add only that student as collaborator (not the whole squad)
+     - Call `CreateBackendOnlyCommitAsync()` / `CreateFrontendOnlyCommitAsync()` with per-student Neon connection string
+   - **Neon:** Create one project + branch per student (same flow as today, just N times)
+     - Project name: `Quest-{boardId}-{studentId}`
+   - **Railway:** Create one service + domain per student
+     - Service name: `{boardId}-{studentId}`
+     - Deploy from the student's own GitHub repos
+   - **Write `QuestBoards` row** for this student with all the resulting URLs
+3. **ProjectBoards** — still created as today for the squad-level record (Trello board, SquadName, etc.) but GitHub/Railway/Neon fields left null (they live in QuestBoards now).
+
+**Naming conventions:**
+| Resource | Name pattern |
+|---|---|
+| GitHub BE repo | `backend_{boardId}_{studentId}` |
+| GitHub FE repo | `{boardId}_{studentId}` |
+| Neon project | `Quest-{boardId}-{studentId}` |
+| Railway service | `{boardId}-{studentId}` |
+
+---
+
+### 2.2 Boardroom URL Retrieval ⬜
+
+**Context (from codebase analysis):**
+- `BoardRoom.jsx` calls `GET /api/Boards/use/stats/{boardId}` → `boardStats`
+- Lines 1499-1540: extracts `githubBackendUrl`, `githubFrontendUrl`, `webApiUrl`, `publishUrl` from `boardStats`
+- These come from `ProjectBoards` fields in the existing stats endpoint
+- These are passed to `BoardActionButtons` (Live Project, GitHub BE/FE, API buttons)
+
+**Plan:**
+
+**New API endpoint:** `GET /api/QuestBoards/{boardId}/me` (authenticated by `?studentId=` query param or student email header — same auth pattern used elsewhere)
+- Looks up `QuestBoards` WHERE `BoardId = boardId AND StudentId = studentId`
+- Returns: `PublishUrl`, `GithubFrontendUrl`, `GithubBackendUrl`, `WebApiUrl`, `DBPassword`
+
+**BoardRoom.jsx changes (QuestMode only):**
+- After loading `boardStats`, if `questMode = true`, call the new `GET /api/QuestBoards/{boardId}/me` endpoint
+- Override the URL state variables (`publishUrl`, `repositoryBackendUrl`, `repositoryFrontendUrl`, `webApiUrl`) with the QuestBoards values
+- Non-QuestMode flow unchanged — still reads from `boardStats` as today
+
+**New `api/questBoardStrAppers.js` file** with `getMyQuestBoard(boardId, studentId)` function.
+
+---
+
+### 2.3 AI Mentor Context — GitHub URL Changes ⬜
+
+**Context (from codebase analysis):**
+- `ChatSidebar.jsx` imports: `fetchBoardGitStatusesDual()`, `fetchGitRowDual()`, `createGithubBranchDual()`, `createGithubPRDual()`, `mergeGithubBranchDual()`, `reviewCodeDual()`
+- These Git operations use the board-level GitHub URLs (from `ProjectBoards`)
+- The mentor backend (`MentorController`) receives repo URLs and uses them for code review, gap analysis, commit fetching via `GitHubService`
+- `SprintAssessmentService` fetches commits/PRs per student using the board's GitHub repos
+
+**Plan:**
+
+**Backend — `MentorController`:** Each mentor endpoint that accepts a `boardId` should also accept an optional `questBoardId` or `studentId`. When provided (and `QuestMode = true` for that board's institute), look up `QuestBoards` and use the student's personal `GithubBackendUrl` / `GithubFrontendUrl` instead of `ProjectBoards` fields.
+
+**Backend — `SprintAssessmentService`:** When fetching commits for assessment, check if a `QuestBoards` row exists for the student. If yes, use those GitHub URLs; otherwise fall back to `ProjectBoards`.
+
+**Frontend — `ChatSidebar.jsx`:**
+- In QuestMode, pass the student's own QuestBoard GitHub URLs (loaded via `getMyQuestBoard()`) into the Git operation calls
+- Git branch creation, PR creation, merge, code review — all target the student's personal repo, not the squad repo
+- The `devPanel` (branch status, PR status) should query the student's personal repo
+
+---
+
+### 2.4 Build Order for Phase 2 ⬜
+
+| Step | What | File(s) |
+|---|---|---|
+| 2.1a | Add `IsQuestMode` to `CreateBoardRequest` | `BoardsController.cs` |
+| 2.1b | Worker passes `IsQuestMode` from institute | `Worker.cs` |
+| 2.1c | Per-student provisioning loop in `CreateBoard()` | `BoardsController.cs` |
+| 2.1d | Write `QuestBoards` rows after provisioning | `BoardsController.cs` |
+| 2.2a | New `GET /api/QuestBoards/{boardId}/me` endpoint | New `QuestBoardsController.cs` |
+| 2.2b | `getMyQuestBoard()` API function | `api/questBoardStrAppers.js` |
+| 2.2c | BoardRoom fetches + overrides URLs in QuestMode | `BoardRoom.jsx` |
+| 2.3a | Mentor endpoints accept per-student repo override | `MentorController.cs` |
+| 2.3b | Assessment uses QuestBoards GitHub URLs | `SprintAssessmentService.cs` |
+| 2.3c | ChatSidebar passes QuestBoard URLs to Git ops | `ChatSidebar.jsx` |
 
 ---
 
