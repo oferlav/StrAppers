@@ -5874,8 +5874,8 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                         var sprint1B = $"1-B{devIdx}";
                         var sprint1F = $"1-F{devIdx}";
                         bool? branch1B = null, branch1F = null;
-                        if (checkBackend) branch1B = await BranchExistsForBoardAsync(student.BoardId, sprint1B, true);
-                        if (checkFrontend) branch1F = await BranchExistsForBoardAsync(student.BoardId, sprint1F, false);
+                        if (checkBackend) branch1B = await BranchExistsForBoardAsync(student.BoardId, sprint1B, true, student.Id);
+                        if (checkFrontend) branch1F = await BranchExistsForBoardAsync(student.BoardId, sprint1F, false, student.Id);
                         var parts = new List<string>();
                         if (branch1B.HasValue) parts.Add($"{sprint1B}: {(branch1B.Value ? "exists (initialized)" : "not created")}");
                         if (branch1F.HasValue) parts.Add($"{sprint1F}: {(branch1F.Value ? "exists (initialized)" : "not created")}");
@@ -9518,6 +9518,7 @@ Your intelligence is strictly tethered to the Current Project Context and the us
             public string BoardId { get; set; } = string.Empty;
             public string GithubBranch { get; set; } = string.Empty;
             public string? AIServiceName { get; set; } // Model Name from GET /api/Mentor/use/get-models
+            public int StudentId { get; set; } = 0;
         }
 
         /// <summary>
@@ -9793,6 +9794,15 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                 var isBackend = roleLetter == "B";
                 var isFrontend = roleLetter == "F";
                 var githubUrl = isBackend ? board.GithubBackendUrl : board.GithubFrontendUrl;
+
+                // QuestMode: board-level URLs are null; resolve per-student URL from QuestBoards
+                if (string.IsNullOrEmpty(githubUrl) && request.StudentId > 0)
+                {
+                    var qb = await _context.QuestBoards.AsNoTracking()
+                        .FirstOrDefaultAsync(q => q.BoardId == request.BoardId && q.StudentId == request.StudentId);
+                    if (qb != null)
+                        githubUrl = isBackend ? qb.GithubBackendUrl : qb.GithubFrontendUrl;
+                }
 
                 if (string.IsNullOrEmpty(githubUrl))
                 {
@@ -12124,7 +12134,7 @@ APPROVAL: no    (request changes before merge)";
         /// Returns true only if there is an open PR for the branch and the GitHub "Mentor-Validation" commit status is success. Returns false if no open PR, or status is missing/pending/failure.
         /// </summary>
         [HttpGet("use/pr-status")]
-        public async Task<ActionResult<bool>> GetPRStatus([FromQuery] string boardId, [FromQuery] string branchName, [FromQuery] bool isBackend = false)
+        public async Task<ActionResult<bool>> GetPRStatus([FromQuery] string boardId, [FromQuery] string branchName, [FromQuery] bool isBackend = false, [FromQuery] int studentId = 0)
         {
             if (string.IsNullOrWhiteSpace(boardId))
             {
@@ -12143,6 +12153,16 @@ APPROVAL: no    (request changes before merge)";
                 return Ok(false);
             }
             var githubUrl = isBackend ? board.GithubBackendUrl : board.GithubFrontendUrl;
+
+            // QuestMode: board-level URLs are null; resolve per-student URL from QuestBoards
+            if (string.IsNullOrEmpty(githubUrl) && studentId > 0)
+            {
+                var qb = await _context.QuestBoards.AsNoTracking()
+                    .FirstOrDefaultAsync(q => q.BoardId == boardId && q.StudentId == studentId);
+                if (qb != null)
+                    githubUrl = isBackend ? qb.GithubBackendUrl : qb.GithubFrontendUrl;
+            }
+
             if (string.IsNullOrEmpty(githubUrl))
             {
                 _logger.LogInformation("[PR-STATUS] Returning false: GitHub {Type} URL not configured for board {BoardId}", isBackend ? "backend" : "frontend", boardId);
@@ -12229,6 +12249,16 @@ APPROVAL: no    (request changes before merge)";
 
                 // Determine GitHub URL based on isBackend
                 var githubUrl = request.IsBackend ? board.GithubBackendUrl : board.GithubFrontendUrl;
+
+                // QuestMode: board-level URLs are null; resolve per-student URL from QuestBoards
+                if (string.IsNullOrEmpty(githubUrl) && request.StudentId > 0)
+                {
+                    var qb = await _context.QuestBoards.AsNoTracking()
+                        .FirstOrDefaultAsync(q => q.BoardId == request.BoardId && q.StudentId == request.StudentId);
+                    if (qb != null)
+                        githubUrl = request.IsBackend ? qb.GithubBackendUrl : qb.GithubFrontendUrl;
+                }
+
                 if (string.IsNullOrEmpty(githubUrl))
                 {
                     return BadRequest(new { Success = false, Message = $"GitHub {(request.IsBackend ? "backend" : "frontend")} URL not found for board" });
@@ -12402,6 +12432,7 @@ APPROVAL: no    (request changes before merge)";
             public string BoardId { get; set; } = string.Empty;
             public string BranchName { get; set; } = string.Empty;
             public bool IsBackend { get; set; }
+            public int StudentId { get; set; } = 0;
         }
 
         /// <summary>
@@ -12438,6 +12469,16 @@ APPROVAL: no    (request changes before merge)";
 
                 // Determine GitHub URL based on isBackend
                 var githubUrl = request.IsBackend ? board.GithubBackendUrl : board.GithubFrontendUrl;
+
+                // QuestMode: board-level URLs are null; resolve per-student URL from QuestBoards
+                if (string.IsNullOrEmpty(githubUrl) && request.StudentId > 0)
+                {
+                    var qb = await _context.QuestBoards.AsNoTracking()
+                        .FirstOrDefaultAsync(q => q.BoardId == request.BoardId && q.StudentId == request.StudentId);
+                    if (qb != null)
+                        githubUrl = request.IsBackend ? qb.GithubBackendUrl : qb.GithubFrontendUrl;
+                }
+
                 if (string.IsNullOrEmpty(githubUrl))
                 {
                     return BadRequest(new { Success = false, Message = $"GitHub {(request.IsBackend ? "backend" : "frontend")} URL not found for board" });
@@ -12915,7 +12956,7 @@ APPROVAL: no    (request changes before merge)";
         /// <summary>
         /// Returns true if the given branch exists in the board's GitHub repo (for mentor prompt branch status).
         /// </summary>
-        private async Task<bool> BranchExistsForBoardAsync(string boardId, string branchName, bool isBackend)
+        private async Task<bool> BranchExistsForBoardAsync(string boardId, string branchName, bool isBackend, int studentId = 0)
         {
             if (string.IsNullOrWhiteSpace(boardId) || string.IsNullOrWhiteSpace(branchName))
                 return false;
@@ -12924,6 +12965,16 @@ APPROVAL: no    (request changes before merge)";
                 var board = await _context.ProjectBoards.FirstOrDefaultAsync(pb => pb.Id == boardId);
                 if (board == null) return false;
                 var githubUrl = isBackend ? board.GithubBackendUrl : board.GithubFrontendUrl;
+
+                // QuestMode: board-level URLs are null; resolve per-student URL from QuestBoards
+                if (string.IsNullOrEmpty(githubUrl) && studentId > 0)
+                {
+                    var qb = await _context.QuestBoards.AsNoTracking()
+                        .FirstOrDefaultAsync(q => q.BoardId == boardId && q.StudentId == studentId);
+                    if (qb != null)
+                        githubUrl = isBackend ? qb.GithubBackendUrl : qb.GithubFrontendUrl;
+                }
+
                 if (string.IsNullOrEmpty(githubUrl)) return false;
                 var uri = new Uri(githubUrl);
                 var pathParts = uri.AbsolutePath.TrimStart('/').Split('/');
@@ -12947,7 +12998,7 @@ APPROVAL: no    (request changes before merge)";
         /// Checks if a branch exists and is unmerged (has commits not in main)
         /// </summary>
         [HttpGet("use/is-open-branch")]
-        public async Task<ActionResult<object>> IsOpenBranch([FromQuery] string boardId, [FromQuery] string branchName, [FromQuery] bool isBackend)
+        public async Task<ActionResult<object>> IsOpenBranch([FromQuery] string boardId, [FromQuery] string branchName, [FromQuery] bool isBackend, [FromQuery] int studentId = 0)
         {
             try
             {
@@ -12975,6 +13026,16 @@ APPROVAL: no    (request changes before merge)";
 
                 // Determine GitHub URL based on isBackend
                 var githubUrl = isBackend ? board.GithubBackendUrl : board.GithubFrontendUrl;
+
+                // QuestMode: board-level URLs are null; resolve per-student URL from QuestBoards
+                if (string.IsNullOrEmpty(githubUrl) && studentId > 0)
+                {
+                    var qb = await _context.QuestBoards.AsNoTracking()
+                        .FirstOrDefaultAsync(q => q.BoardId == boardId && q.StudentId == studentId);
+                    if (qb != null)
+                        githubUrl = isBackend ? qb.GithubBackendUrl : qb.GithubFrontendUrl;
+                }
+
                 if (string.IsNullOrEmpty(githubUrl))
                 {
                     return BadRequest(new { Success = false, Message = $"GitHub {(isBackend ? "backend" : "frontend")} URL not found for board" });
