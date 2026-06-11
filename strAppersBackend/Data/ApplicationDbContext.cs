@@ -64,6 +64,7 @@ public class ApplicationDbContext : DbContext
     public DbSet<InstituteProject> InstituteProjects { get; set; }
     public DbSet<InstituteAssistantChatHistory> InstituteAssistantChatHistory { get; set; }
     public DbSet<TeacherInviteToken> TeacherInviteTokens { get; set; }
+    public DbSet<QuestBoard> QuestBoards { get; set; }
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -1580,6 +1581,37 @@ public class ApplicationDbContext : DbContext
             entity.HasIndex(e => e.BranchName);
             entity.HasIndex(e => e.PRStatus);
             entity.HasIndex(e => e.BranchStatus);
+        });
+
+        modelBuilder.Entity<QuestBoard>(entity =>
+        {
+            entity.ToTable("QuestBoards");
+            entity.HasKey(e => e.Id);
+            entity.Property(e => e.Id).ValueGeneratedOnAdd();
+            entity.Property(e => e.BoardId).IsRequired().HasMaxLength(50);
+            entity.Property(e => e.PublishUrl).HasMaxLength(500);
+            entity.Property(e => e.GithubFrontendUrl).HasMaxLength(1000);
+            entity.Property(e => e.GithubBackendUrl).HasMaxLength(1000);
+            entity.Property(e => e.WebApiUrl).HasMaxLength(1000);
+            entity.Property(e => e.DBPassword).HasMaxLength(200);
+            entity.Property(e => e.NeonBranchId).HasMaxLength(100);
+            entity.Property(e => e.NeonProjectId).HasMaxLength(100);
+            entity.Property(e => e.CreatedAt).HasDefaultValueSql("CURRENT_TIMESTAMP");
+
+            entity.HasOne(e => e.Student)
+                .WithMany()
+                .HasForeignKey(e => e.StudentId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            entity.HasOne(e => e.ProjectBoard)
+                .WithMany()
+                .HasForeignKey(e => e.BoardId)
+                .HasPrincipalKey(pb => pb.Id)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            entity.HasIndex(e => e.StudentId);
+            entity.HasIndex(e => e.BoardId);
+            entity.HasIndex(e => new { e.StudentId, e.BoardId }).IsUnique();
         });
     }
 }
