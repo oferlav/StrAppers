@@ -152,6 +152,13 @@ public class Worker : BackgroundService
             // database setup, GitHub repos, Railway deployment, etc.
             client.Timeout = TimeSpan.FromMinutes(20);
 
+            // Log InstituteId for each student so we can verify the join will find QuestMode
+            var studentInstitutes = await conn.QueryAsync<(int Id, int? InstituteId)>(new CommandDefinition(
+                @"SELECT ""Id"", ""InstituteId"" FROM ""Students"" WHERE ""Id"" = ANY(@Ids)",
+                new { Ids = ids }, cancellationToken: ct));
+            foreach (var si in studentInstitutes)
+                _logger.LogInformation("[QUEST-DEBUG] StudentId={StudentId} InstituteId={InstituteId}", si.Id, si.InstituteId?.ToString() ?? "NULL");
+
             // Detect if the institute for these students has QuestMode enabled
             var isQuestMode = await conn.ExecuteScalarAsync<bool>(new CommandDefinition(
                 @"SELECT COALESCE(i.""QuestMode"", false) FROM ""Students"" s
@@ -159,6 +166,15 @@ public class Worker : BackgroundService
                   WHERE s.""Id"" = ANY(@Ids) AND i.""QuestMode"" = true LIMIT 1",
                 new { Ids = ids }, cancellationToken: ct));
             _logger.LogInformation("[QUEST] IsQuestMode={IsQuestMode} for students=[{Ids}]", isQuestMode, string.Join(",", ids));
+
+            // Also log the raw institute QuestMode value to confirm column is read correctly
+            var instituteQuestFlags = await conn.QueryAsync<(int InstituteId, bool QuestMode)>(new CommandDefinition(
+                @"SELECT DISTINCT i.""Id"", i.""QuestMode"" FROM ""Students"" s
+                  JOIN ""Institutes"" i ON i.""Id"" = s.""InstituteId""
+                  WHERE s.""Id"" = ANY(@Ids)",
+                new { Ids = ids }, cancellationToken: ct));
+            foreach (var f in instituteQuestFlags)
+                _logger.LogInformation("[QUEST-DEBUG] InstituteId={InstituteId} QuestMode={QuestMode}", f.InstituteId, f.QuestMode);
 
             var body = new CreateBoardRequest
             {
