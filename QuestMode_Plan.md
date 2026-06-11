@@ -236,6 +236,12 @@ The existing Course Builder generates `TrelloBoardJson`, role assignments, and m
   - Include employer questions as a "completion checklist" card in Sprint1
 - Output `TrelloBoardJson` is reused by Phase 2 board creation (one copy per student)
 
+### 5.2 ⚠️ Note — Identical Tasks Across All Candidates
+In QuestMode the Course Builder must generate **identical tasks for every candidate**, regardless of role index (Full Stack Developer 1, Full Stack Developer 2, etc. all get the same task set). This is the opposite of the normal squad behaviour where tasks are distributed across roles.
+- The same `TrelloBoardJson` is seeded into every student's Trello board unchanged
+- No per-role card filtering or distribution
+- Ensure the board creation loop (Phase 2.1c) does **not** apply the existing role-based card filtering logic (`OverrideSprintOnBoardAsync` role filter) when `IsQuestMode = true`
+
 ---
 
 ## Phase 6 — Mentor Context (QuestMode Adjustment) ⬜
