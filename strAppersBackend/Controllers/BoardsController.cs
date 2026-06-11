@@ -8769,6 +8769,7 @@ INSERT INTO ""TestProjects"" (""Name"") VALUES
                                             var fp = new Uri(feUrlCopy).AbsolutePath.TrimStart('/').Split('/');
                                             if (fp.Length >= 2)
                                                 try { await _gitHubService.UpdateFrontendReadmeWithWebApiUrlsAsync(fp[0], fp[1], project.Title, domain, githubToken); } catch { }
+                                            try { await UpdateConfigJsWithServiceUrl(feUrlCopy, domain, githubToken); } catch { }
                                         }
                                     });
                                 }
