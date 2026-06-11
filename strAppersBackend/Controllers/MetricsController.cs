@@ -409,8 +409,15 @@ public partial class MetricsController : ControllerBase
                 return [];
             }
 
+            // QuestMode: board URLs may be null; resolve per-student URLs from QuestBoards
             var backendUrl = board.GithubBackendUrl;
             var frontendUrl = board.GithubFrontendUrl;
+            if (string.IsNullOrEmpty(backendUrl) && studentId > 0)
+            {
+                var qb = await _context.QuestBoards.AsNoTracking()
+                    .FirstOrDefaultAsync(q => q.BoardId == boardId && q.StudentId == studentId, cancellationToken);
+                if (qb != null) { backendUrl = qb.GithubBackendUrl; frontendUrl = qb.GithubFrontendUrl; }
+            }
 
             if (IsFullStackRole(rn))
             {

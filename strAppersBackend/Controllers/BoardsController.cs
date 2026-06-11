@@ -866,6 +866,128 @@ public partial class BoardsController : ControllerBase
                 }
             }
 
+            // ─── QuestMode: per-student infrastructure ────────────────────────────
+            if (request.IsQuestMode)
+            {
+                _logger.LogInformation("[QUEST] QuestMode board {BoardId}: provisioning per-student infra for {Count} student(s)", trelloBoardId, students.Count);
+
+                var qmAdminStudent = students.FirstOrDefault(s => s.IsAdmin) ?? students.FirstOrDefault();
+                var qmDeveloperStudent = students.FirstOrDefault(s =>
+                    s.StudentRoles?.Any(sr => sr.IsActive && (sr.Role?.Type == 1 || sr.Role?.Type == 2)) ?? false);
+                var qmProgrammingLanguage = qmDeveloperStudent?.ProgrammingLanguage?.Name;
+                var qmVisableModuleDesign = !students
+                    .SelectMany(s => s.StudentRoles ?? Enumerable.Empty<StudentRole>())
+                    .Any(sr => sr.Role?.CustomerEngagement == true);
+
+                // SystemBoard record if Trello created one
+                if (!string.IsNullOrEmpty(trelloResponse.SystemBoardId))
+                {
+                    var qmSystemBoard = new ProjectBoard
+                    {
+                        Id = trelloResponse.SystemBoardId,
+                        ProjectId = request.ProjectId,
+                        StartDate = DateTime.UtcNow,
+                        DueDate = DateTime.UtcNow.AddDays(projectLengthWeeks * 7),
+                        StatusId = 1,
+                        AdminId = qmAdminStudent?.Id,
+                        SprintPlan = sprintPlanForStorage != null ? System.Text.Json.JsonSerializer.Serialize(sprintPlanForStorage) : null,
+                        BoardUrl = trelloResponse.SystemBoardUrl,
+                        IsSystemBoard = true,
+                        GithubBackendUrl = null, GithubFrontendUrl = null, WebApiUrl = null,
+                        PublishUrl = null, DBPassword = null, NeonProjectId = null, NeonBranchId = null,
+                        VisableModuleDesign = qmVisableModuleDesign,
+                        CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow
+                    };
+                    _context.ProjectBoards.Add(qmSystemBoard);
+                    await _context.SaveChangesAsync();
+                }
+
+                // ProjectBoard: null infra URLs — per-student infra stored in QuestBoards table
+                var qmProjectBoard = new ProjectBoard
+                {
+                    Id = trelloBoardId,
+                    ProjectId = request.ProjectId,
+                    IsSystemBoard = false,
+                    StartDate = DateTime.UtcNow,
+                    DueDate = DateTime.UtcNow.AddDays(projectLengthWeeks * 7),
+                    StatusId = 1,
+                    AdminId = qmAdminStudent?.Id,
+                    SprintPlan = sprintPlanForStorage != null ? System.Text.Json.JsonSerializer.Serialize(sprintPlanForStorage) : null,
+                    BoardUrl = trelloResponse.BoardUrl,
+                    SystemBoardId = trelloResponse.SystemBoardId,
+                    NextMeetingTime = kickoffUtc,
+                    NextMeetingUrl = null,
+                    GithubBackendUrl = null, GithubFrontendUrl = null, WebApiUrl = null,
+                    PublishUrl = null, DBPassword = null, NeonProjectId = null, NeonBranchId = null,
+                    VisableModuleDesign = qmVisableModuleDesign,
+                    IsSingleRole = request.IsSingleRole,
+                    InstituteId = instituteProject?.InstituteId,
+                    InstituteProjectId = instituteProject?.Id,
+                    CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow
+                };
+                _context.ProjectBoards.Add(qmProjectBoard);
+
+                foreach (var s in students)
+                {
+                    s.BoardId = trelloBoardId;
+                    s.ProjectId = request.ProjectId;
+                    s.Status = 3;
+                    s.UpdatedAt = DateTime.UtcNow;
+                }
+
+                await _context.SaveChangesAsync();
+                await transaction.CommitAsync();
+                _logger.LogInformation("[QUEST] ProjectBoard saved, transaction committed. Starting parallel per-student provisioning.");
+
+                // Provision all students in parallel (Neon + Railway + GitHub each)
+                try
+                {
+                    var provisionTasks = students
+                        .Select(s => ProvisionQuestStudentInfraAsync(s, trelloBoardId, project, qmProgrammingLanguage))
+                        .ToList();
+                    var results = await Task.WhenAll(provisionTasks);
+
+                    for (int qi = 0; qi < students.Count; qi++)
+                    {
+                        var qr = results[qi];
+                        if (qr != null)
+                        {
+                            _context.QuestBoards.Add(new QuestBoard
+                            {
+                                BoardId = trelloBoardId,
+                                StudentId = students[qi].Id,
+                                GithubFrontendUrl = qr.FrontendUrl,
+                                GithubBackendUrl = qr.BackendUrl,
+                                WebApiUrl = qr.WebApiUrl,
+                                PublishUrl = qr.PublishUrl,
+                                DBPassword = qr.DBPassword,
+                                NeonProjectId = qr.NeonProjectId,
+                                NeonBranchId = qr.NeonBranchId,
+                                CreatedAt = DateTime.UtcNow
+                            });
+                        }
+                    }
+
+                    if (_context.ChangeTracker.HasChanges())
+                        await _context.SaveChangesAsync();
+
+                    _logger.LogInformation("[QUEST] All per-student provisioning complete for board {BoardId}.", trelloBoardId);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "❌ [QUEST] Per-student provisioning failed for board {BoardId}", trelloBoardId);
+                }
+
+                DbgLog(debugLog, $"QuestMode board complete: BoardId={trelloBoardId} Students={students.Count}");
+                return Ok(new CreateBoardResponse
+                {
+                    Success = true,
+                    BoardId = trelloBoardId,
+                    Message = $"QuestMode board created with {students.Count} candidate(s)."
+                });
+            }
+            // ─── End QuestMode branch ──────────────────────────────────────────────
+
             // Create Neon database for the project
             string? dbConnectionString = null;
             string? dbPassword = null;
@@ -8299,6 +8421,473 @@ INSERT INTO ""TestProjects"" (""Name"") VALUES
             s = s[..100];
         return char.ToUpperInvariant(s[0]) + s[1..].ToLowerInvariant();
     }
+
+    // ────────────────────────────────────────────────────────────────────────────
+    // QuestMode: per-student infra provisioning
+    // ────────────────────────────────────────────────────────────────────────────
+
+    private class QuestStudentInfraResult
+    {
+        public string? FrontendUrl { get; set; }
+        public string? BackendUrl { get; set; }
+        public string? WebApiUrl { get; set; }
+        public string? PublishUrl { get; set; }
+        public string? DBPassword { get; set; }
+        public string? NeonProjectId { get; set; }
+        public string? NeonBranchId { get; set; }
+    }
+
+    /// <summary>
+    /// Provisions individual Neon + Railway + GitHub infra for one student in QuestMode.
+    /// Naming convention: {boardId}s{studentId} for FE, backend_{boardId}s{studentId} for BE,
+    /// WebApi_{boardId}s{studentId} for Railway, Quest-{boardId}s{studentId} for Neon project.
+    /// </summary>
+    private async Task<QuestStudentInfraResult?> ProvisionQuestStudentInfraAsync(
+        Student student, string boardId, Project project, string? programmingLanguage)
+    {
+        var suffix = $"{boardId}s{student.Id}";
+        var neonApiKey = _configuration["Neon:ApiKey"];
+        var neonBaseUrl = _configuration["Neon:BaseUrl"];
+        var neonDefaultOwnerName = _configuration["Neon:DefaultOwnerName"] ?? "neondb_owner";
+        var githubToken = _configuration["GitHub:AccessToken"];
+        var railwayApiToken = _configuration["Railway:ApiToken"];
+        var railwayApiUrl = _configuration["Railway:ApiUrl"];
+        var railwaySharedProjectId = _configuration["Railway:SharedProjectId"];
+
+        string? questNeonProjectId = null;
+        string? questNeonBranchId = null;
+        string? questDbPassword = null;
+        string? questDbConnectionString = null;
+        string? questRailwayServiceId = null;
+        string? questEnvironmentId = null;
+        string? questFrontendUrl = null;
+        string? questBackendUrl = null;
+        string? questWebApiUrl = null;
+        string? questPublishUrl = null;
+
+        _logger.LogInformation("[QUEST] Starting provisioning for student {StudentId} (suffix={Suffix})", student.Id, suffix);
+
+        try
+        {
+            // ── NEON ─────────────────────────────────────────────────────────────
+            if (!string.IsNullOrWhiteSpace(neonApiKey) && neonApiKey != "your-neon-api-key-here" && !string.IsNullOrWhiteSpace(neonBaseUrl))
+            {
+                var dbName = $"AppDB_{suffix}";
+                var projectName = $"Quest-{suffix}";
+
+                // Step 1: Create project
+                var projectResult = await CreateNeonProjectAsync(neonApiKey, neonBaseUrl, projectName);
+                if (!projectResult.Success || string.IsNullOrEmpty(projectResult.ProjectId))
+                    throw new InvalidOperationException($"[QUEST/NEON] Failed to create project: {projectResult.ErrorMessage}");
+
+                questNeonProjectId = projectResult.ProjectId;
+                _logger.LogInformation("✅ [QUEST/NEON] Project created: {ProjectId}", questNeonProjectId);
+
+                // Step 1.5: Wait for project ops
+                await WaitForNeonOperationsAsync(neonApiKey, neonBaseUrl, questNeonProjectId, projectResult.OperationIds, "project-init");
+
+                // Step 2: Create branch
+                var branchResult = await CreateNeonBranchAsync(neonApiKey, neonBaseUrl, questNeonProjectId, parentBranchId: projectResult.DefaultBranchId);
+                if (!branchResult.Success || string.IsNullOrEmpty(branchResult.BranchId))
+                    throw new InvalidOperationException($"[QUEST/NEON] Failed to create branch: {branchResult.ErrorMessage}");
+
+                questNeonBranchId = branchResult.BranchId;
+                var endpointHost = branchResult.EndpointHost;
+                _logger.LogInformation("✅ [QUEST/NEON] Branch created: {BranchId}", questNeonBranchId);
+
+                // Step 2.5: Wait for branch ops
+                await WaitForNeonOperationsAsync(neonApiKey, neonBaseUrl, questNeonProjectId, branchResult.OperationIds, "branch-init");
+
+                if (string.IsNullOrEmpty(endpointHost))
+                    endpointHost = await GetNeonBranchEndpointHostAsync(neonApiKey, neonBaseUrl, questNeonProjectId, questNeonBranchId);
+
+                if (string.IsNullOrEmpty(endpointHost))
+                    throw new InvalidOperationException("[QUEST/NEON] Branch endpoint host not available after waiting.");
+
+                // Step 3: Create database
+                using var neonHttp = _httpClientFactory.CreateClient();
+                neonHttp.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", neonApiKey);
+                neonHttp.DefaultRequestHeaders.Accept.Add(new System.Net.Http.Headers.MediaTypeWithQualityHeaderValue("application/json"));
+
+                var dbApiUrl = $"{neonBaseUrl}/projects/{questNeonProjectId}/branches/{Uri.EscapeDataString(questNeonBranchId)}/databases";
+                var dbBody = System.Text.Json.JsonSerializer.Serialize(new { database = new { name = dbName, owner_name = neonDefaultOwnerName } });
+                var dbResp = await neonHttp.PostAsync(dbApiUrl, new StringContent(dbBody, System.Text.Encoding.UTF8, "application/json"));
+                for (int r = 0; r < 5 && dbResp.StatusCode == System.Net.HttpStatusCode.Locked; r++)
+                {
+                    await Task.Delay(3000);
+                    dbResp = await neonHttp.PostAsync(dbApiUrl, new StringContent(dbBody, System.Text.Encoding.UTF8, "application/json"));
+                }
+                if (!dbResp.IsSuccessStatusCode)
+                    throw new InvalidOperationException($"[QUEST/NEON] Failed to create database: {dbResp.StatusCode}");
+
+                _logger.LogInformation("✅ [QUEST/NEON] Database '{DbName}' created.", dbName);
+
+                // Step 4: Get password from connection_uri
+                string? extractedPassword = null;
+                var connApiUrl = $"{neonBaseUrl}/projects/{questNeonProjectId}/connection_uri" +
+                    $"?database_name={Uri.EscapeDataString(dbName)}&role_name={Uri.EscapeDataString(neonDefaultOwnerName)}&branch_id={Uri.EscapeDataString(questNeonBranchId)}&pooled=false";
+
+                for (int pwR = 0; pwR < 5 && string.IsNullOrEmpty(extractedPassword); pwR++)
+                {
+                    try
+                    {
+                        var connResp = await neonHttp.GetAsync(connApiUrl);
+                        if (connResp.IsSuccessStatusCode)
+                        {
+                            var connDoc = System.Text.Json.JsonDocument.Parse(await connResp.Content.ReadAsStringAsync());
+                            if (connDoc.RootElement.TryGetProperty("uri", out var uriProp))
+                            {
+                                var tempUri = uriProp.GetString();
+                                if (!string.IsNullOrEmpty(tempUri))
+                                {
+                                    var parsed = new Uri(tempUri);
+                                    var userInfo = parsed.UserInfo.Split(':');
+                                    if (userInfo.Length > 1) extractedPassword = Uri.UnescapeDataString(userInfo[1]);
+                                }
+                            }
+                        }
+                    }
+                    catch { }
+                    if (string.IsNullOrEmpty(extractedPassword)) await Task.Delay(2000);
+                }
+
+                if (string.IsNullOrEmpty(extractedPassword))
+                    throw new InvalidOperationException("[QUEST/NEON] Failed to retrieve DB password.");
+
+                var ownerConnStr = $"Host={endpointHost};Port=5432;Database={dbName};Username={neonDefaultOwnerName};Password={extractedPassword};SSL Mode=Require;Trust Server Certificate=true;";
+
+                // Step 5: Isolated role + schema
+                var roleResult = await CreateIsolatedDatabaseRole(ownerConnStr, dbName);
+                if (roleResult != null && !string.IsNullOrEmpty(roleResult.ConnectionString))
+                {
+                    questDbConnectionString = roleResult.ConnectionString;
+                    questDbPassword = roleResult.Password;
+                }
+                await ExecuteInitialDatabaseSchema(ownerConnStr, dbName, roleResult?.RoleName);
+                _logger.LogInformation("✅ [QUEST/NEON] Isolated role and schema ready for student {StudentId}", student.Id);
+            }
+
+            // ── RAILWAY ──────────────────────────────────────────────────────────
+            if (!string.IsNullOrWhiteSpace(railwayApiToken) && railwayApiToken != "your-railway-api-token-here"
+                && !string.IsNullOrWhiteSpace(railwayApiUrl) && !string.IsNullOrWhiteSpace(railwaySharedProjectId))
+            {
+                using var rHttp = _httpClientFactory.CreateClient();
+                rHttp.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", railwayApiToken);
+                rHttp.DefaultRequestHeaders.Accept.Add(new System.Net.Http.Headers.MediaTypeWithQualityHeaderValue("application/json"));
+                rHttp.DefaultRequestHeaders.Add("User-Agent", "StrAppersBackend/1.0");
+
+                var svcName = System.Text.RegularExpressions.Regex.Replace($"webapi-{suffix}".ToLowerInvariant(), @"[^a-z0-9-_]", "-");
+
+                // Create service
+                var createSvc = new { query = "mutation CreateService($projectId: String!, $name: String) { serviceCreate(input: { projectId: $projectId, name: $name }) { id } }", variables = new { projectId = railwaySharedProjectId, name = svcName } };
+                var svcResp = await rHttp.PostAsync(railwayApiUrl, new StringContent(System.Text.Json.JsonSerializer.Serialize(createSvc), System.Text.Encoding.UTF8, "application/json"));
+                if (svcResp.IsSuccessStatusCode)
+                {
+                    var svcDoc = System.Text.Json.JsonDocument.Parse(await svcResp.Content.ReadAsStringAsync());
+                    if (svcDoc.RootElement.TryGetProperty("data", out var sd) && sd.TryGetProperty("serviceCreate", out var sc) && sc.TryGetProperty("id", out var sid))
+                        questRailwayServiceId = sid.GetString();
+                }
+
+                if (!string.IsNullOrEmpty(questRailwayServiceId))
+                {
+                    _logger.LogInformation("✅ [QUEST/RAILWAY] Service created: {ServiceId}", questRailwayServiceId);
+
+                    // Get environment ID
+                    var getEnv = new { query = "query GetProject($projectId: String!) { project(id: $projectId) { environments { edges { node { id } } } } }", variables = new { projectId = railwaySharedProjectId } };
+                    var envResp = await rHttp.PostAsync(railwayApiUrl, new StringContent(System.Text.Json.JsonSerializer.Serialize(getEnv), System.Text.Encoding.UTF8, "application/json"));
+                    if (envResp.IsSuccessStatusCode)
+                    {
+                        var envDoc = System.Text.Json.JsonDocument.Parse(await envResp.Content.ReadAsStringAsync());
+                        if (envDoc.RootElement.TryGetProperty("data", out var ed) && ed.TryGetProperty("project", out var pr)
+                            && pr.TryGetProperty("environments", out var envs) && envs.TryGetProperty("edges", out var edges))
+                        {
+                            var first = edges.EnumerateArray().FirstOrDefault();
+                            if (first.ValueKind != System.Text.Json.JsonValueKind.Undefined && first.TryGetProperty("node", out var node) && node.TryGetProperty("id", out var envId))
+                                questEnvironmentId = envId.GetString();
+                        }
+                    }
+
+                    // Set DATABASE_URL
+                    if (!string.IsNullOrEmpty(questEnvironmentId) && !string.IsNullOrEmpty(questDbConnectionString))
+                    {
+                        var setDb = new { query = "mutation SetVariable($projectId: String!, $environmentId: String!, $serviceId: String!, $name: String!, $value: String!) { variableUpsert(input: { projectId: $projectId environmentId: $environmentId serviceId: $serviceId name: $name value: $value }) }", variables = new { projectId = railwaySharedProjectId, environmentId = questEnvironmentId, serviceId = questRailwayServiceId, name = "DATABASE_URL", value = questDbConnectionString } };
+                        await rHttp.PostAsync(railwayApiUrl, new StringContent(System.Text.Json.JsonSerializer.Serialize(setDb), System.Text.Encoding.UTF8, "application/json"));
+                        _logger.LogInformation("✅ [QUEST/RAILWAY] DATABASE_URL set on service {ServiceId}", questRailwayServiceId);
+                    }
+
+                    // Set GOOGLE_API_KEY
+                    var googleKey = _configuration["GoogleApis:StudentBackendApiKey"] ?? Environment.GetEnvironmentVariable("GOOGLE_API_KEY");
+                    if (!string.IsNullOrEmpty(googleKey) && !string.IsNullOrEmpty(questEnvironmentId))
+                    {
+                        var setGoogle = new { query = "mutation SetVariable($projectId: String!, $environmentId: String!, $serviceId: String!, $name: String!, $value: String!) { variableUpsert(input: { projectId: $projectId environmentId: $environmentId serviceId: $serviceId name: $name value: $value }) }", variables = new { projectId = railwaySharedProjectId, environmentId = questEnvironmentId, serviceId = questRailwayServiceId, name = "GOOGLE_API_KEY", value = googleKey } };
+                        await rHttp.PostAsync(railwayApiUrl, new StringContent(System.Text.Json.JsonSerializer.Serialize(setGoogle), System.Text.Encoding.UTF8, "application/json"));
+                    }
+                }
+                else
+                {
+                    _logger.LogWarning("⚠️ [QUEST/RAILWAY] Service creation failed for student {StudentId}", student.Id);
+                }
+            }
+
+            // ── GITHUB ───────────────────────────────────────────────────────────
+            if (!string.IsNullOrWhiteSpace(githubToken))
+            {
+                var collabs = new List<string>();
+                if (!string.IsNullOrWhiteSpace(student.GithubUser)) collabs.Add(student.GithubUser!);
+
+                var webhookSecret = _configuration["GitHub:WebhookSecret"];
+                var apiBaseUrl = _configuration["ApiBaseUrl"] ?? "https://dev.skill-in.com";
+                var webhookUrl = $"{apiBaseUrl}/api/Mentor/github-webhook";
+
+                // ── FE repo
+                var feRepoName = suffix;
+                var feReq = new CreateRepositoryRequest
+                {
+                    Name = feRepoName,
+                    Description = SanitizeRepoDescription($"Frontend repository for {project.Title}"),
+                    IsPrivate = false,
+                    Collaborators = collabs,
+                    ProjectTitle = project.Title,
+                    WebApiUrl = null
+                };
+                var feResp = await _gitHubService.CreateRepositoryAsync(feReq);
+                if (feResp.Success && !string.IsNullOrEmpty(feResp.RepositoryUrl))
+                {
+                    questFrontendUrl = feResp.RepositoryUrl;
+                    var feParts = new Uri(questFrontendUrl).AbsolutePath.TrimStart('/').Split('/');
+                    if (feParts.Length >= 2)
+                    {
+                        var feOwner = feParts[0]; var feRepo = feParts[1];
+                        if (!string.IsNullOrEmpty(webhookSecret))
+                            await _gitHubService.CreateWebhookAsync(feOwner, feRepo, webhookUrl, webhookSecret, githubToken);
+                        await _gitHubService.CreateBranchProtectionAsync(feOwner, feRepo, "main", githubToken);
+                        await _gitHubService.CreateRepositoryRulesetAsync(feOwner, feRepo, "Frontend", githubToken);
+
+                        var useHardcodedFe = _configuration["GitHub:UseHardcodedFrontendTemplate"]?.Trim() != "false";
+                        bool feReady = false;
+                        if (useHardcodedFe)
+                            feReady = await _gitHubService.CreateRichFrontendOnlyCommitAsync(feOwner, feRepo, project.Title, githubToken, null, project.Organization?.Logo);
+                        else
+                        {
+                            await _gitHubService.CreateInitialReadmeAsync(feOwner, feRepo, project.Title, githubToken, isFrontend: true, webApiUrl: null);
+                            feReady = true;
+                        }
+
+                        if (feReady)
+                        {
+                            try
+                            {
+                                var deployer = new DeploymentController(_loggerFactory.CreateLogger<DeploymentController>(), _gitHubService, _httpClientFactory, _configuration);
+                                var deployResp = await deployer.DeployFrontendRepositoryAsync(questFrontendUrl);
+                                if (deployResp.Success && !string.IsNullOrEmpty(deployResp.DeploymentUrl))
+                                {
+                                    questPublishUrl = deployResp.DeploymentUrl;
+                                    _logger.LogInformation("✅ [QUEST/GITHUB] FE deployed to Pages: {PagesUrl}", questPublishUrl);
+                                }
+                            }
+                            catch (Exception ex) { _logger.LogWarning(ex, "⚠️ [QUEST/GITHUB] FE deploy failed for student {StudentId}", student.Id); }
+                        }
+                        _logger.LogInformation("✅ [QUEST/GITHUB] FE repo ready: {Url}", questFrontendUrl);
+                    }
+                }
+
+                // ── BE repo
+                var beRepoName = $"backend_{suffix}";
+                var beReq = new CreateRepositoryRequest
+                {
+                    Name = beRepoName,
+                    Description = SanitizeRepoDescription($"Backend API repository for {project.Title}"),
+                    IsPrivate = false,
+                    Collaborators = collabs,
+                    ProjectTitle = project.Title,
+                    DatabaseConnectionString = questDbConnectionString,
+                    WebApiUrl = null,
+                    ProgrammingLanguage = programmingLanguage
+                };
+                var beResp = await _gitHubService.CreateRepositoryAsync(beReq);
+                if (beResp.Success && !string.IsNullOrEmpty(beResp.RepositoryUrl))
+                {
+                    questBackendUrl = beResp.RepositoryUrl;
+                    var beParts = new Uri(questBackendUrl).AbsolutePath.TrimStart('/').Split('/');
+                    if (beParts.Length >= 2)
+                    {
+                        var beOwner = beParts[0]; var beRepo = beParts[1];
+                        await _gitHubService.CreateInitialReadmeAsync(beOwner, beRepo, project.Title, githubToken, isFrontend: false, webApiUrl: null, databaseConnectionString: questDbConnectionString);
+                        if (!string.IsNullOrEmpty(webhookSecret))
+                            await _gitHubService.CreateWebhookAsync(beOwner, beRepo, webhookUrl, webhookSecret, githubToken);
+                        await _gitHubService.CreateBranchProtectionAsync(beOwner, beRepo, "main", githubToken);
+                        await _gitHubService.CreateRepositoryRulesetAsync(beOwner, beRepo, "Backend", githubToken);
+                        await _gitHubService.CreateBackendOnlyCommitAsync(beOwner, beRepo, project.Title, githubToken, programmingLanguage ?? "c#", questDbConnectionString, null, null);
+
+                        if (!string.IsNullOrEmpty(questRailwayServiceId) && !string.IsNullOrEmpty(railwayApiToken) && !string.IsNullOrEmpty(railwayApiUrl))
+                        {
+                            await _gitHubService.CreateOrUpdateRepositorySecretAsync(beOwner, beRepo, "RAILWAY_TOKEN", railwayApiToken, githubToken);
+                            await _gitHubService.CreateOrUpdateRepositorySecretAsync(beOwner, beRepo, "RAILWAY_SERVICE_ID", questRailwayServiceId, githubToken);
+
+                            using var rHttp2 = _httpClientFactory.CreateClient();
+                            rHttp2.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", railwayApiToken);
+                            rHttp2.DefaultRequestHeaders.Accept.Add(new System.Net.Http.Headers.MediaTypeWithQualityHeaderValue("application/json"));
+                            rHttp2.DefaultRequestHeaders.Add("User-Agent", "StrAppersBackend/1.0");
+
+                            await ConnectGitHubRepositoryToRailway(rHttp2, railwayApiUrl, railwayApiToken, questRailwayServiceId, questBackendUrl);
+
+                            if (!string.IsNullOrEmpty(questEnvironmentId) && !string.IsNullOrEmpty(railwaySharedProjectId) && !string.IsNullOrEmpty(programmingLanguage))
+                                await SetRailwayBuildSettings(rHttp2, railwayApiUrl, railwayApiToken, railwaySharedProjectId, questRailwayServiceId, questEnvironmentId, programmingLanguage, boardId);
+
+                            if (!string.IsNullOrEmpty(questEnvironmentId))
+                            {
+                                int port = GetDefaultPortForLanguage(programmingLanguage);
+                                var domain = await CreateRailwayServiceDomain(rHttp2, railwayApiUrl, railwayApiToken, questRailwayServiceId, questEnvironmentId, port);
+                                if (!string.IsNullOrEmpty(domain))
+                                {
+                                    questWebApiUrl = domain;
+                                    _logger.LogInformation("✅ [QUEST/RAILWAY] Domain created: {Domain}", domain);
+                                    // Async README updates
+                                    var beOwnerCopy = beOwner; var beRepoCopy = beRepo;
+                                    var feUrlCopy = questFrontendUrl;
+                                    _ = Task.Run(async () =>
+                                    {
+                                        try { await _gitHubService.UpdateBackendReadmeWithWebApiUrlsAsync(beOwnerCopy, beRepoCopy, project.Title, questDbConnectionString, domain, $"{domain}/swagger", githubToken); } catch { }
+                                        if (!string.IsNullOrEmpty(feUrlCopy))
+                                        {
+                                            var fp = new Uri(feUrlCopy).AbsolutePath.TrimStart('/').Split('/');
+                                            if (fp.Length >= 2)
+                                                try { await _gitHubService.UpdateFrontendReadmeWithWebApiUrlsAsync(fp[0], fp[1], project.Title, domain, githubToken); } catch { }
+                                        }
+                                    });
+                                }
+                            }
+                        }
+                        _logger.LogInformation("✅ [QUEST/GITHUB] BE repo ready: {Url}", questBackendUrl);
+                    }
+                }
+            }
+
+            _logger.LogInformation("✅ [QUEST] Provisioning complete for student {StudentId}: FE={Fe} BE={Be} API={Api}", student.Id, questFrontendUrl ?? "(none)", questBackendUrl ?? "(none)", questWebApiUrl ?? "(none)");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "❌ [QUEST] Provisioning failed for student {StudentId} on board {BoardId}: {Error}", student.Id, boardId, ex.Message);
+        }
+
+        return new QuestStudentInfraResult
+        {
+            FrontendUrl = questFrontendUrl,
+            BackendUrl = questBackendUrl,
+            WebApiUrl = questWebApiUrl,
+            PublishUrl = questPublishUrl,
+            DBPassword = questDbPassword,
+            NeonProjectId = questNeonProjectId,
+            NeonBranchId = questNeonBranchId
+        };
+    }
+
+    private async Task WaitForNeonOperationsAsync(string neonApiKey, string neonBaseUrl, string projectId, List<string> operationIds, string context)
+    {
+        if (operationIds.Count == 0) return;
+
+        using var httpClient = _httpClientFactory.CreateClient();
+        httpClient.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", neonApiKey);
+        httpClient.DefaultRequestHeaders.Accept.Add(new System.Net.Http.Headers.MediaTypeWithQualityHeaderValue("application/json"));
+
+        var opsUrl = $"{neonBaseUrl}/projects/{projectId}/operations";
+        for (int i = 0; i < 60; i++)
+        {
+            try
+            {
+                var resp = await httpClient.GetAsync(opsUrl);
+                if (resp.IsSuccessStatusCode)
+                {
+                    var doc = System.Text.Json.JsonDocument.Parse(await resp.Content.ReadAsStringAsync());
+                    if (doc.RootElement.TryGetProperty("operations", out var ops) && ops.ValueKind == System.Text.Json.JsonValueKind.Array)
+                    {
+                        var statuses = new Dictionary<string, string>();
+                        foreach (var op in ops.EnumerateArray())
+                            if (op.TryGetProperty("id", out var oid) && operationIds.Contains(oid.GetString() ?? ""))
+                                statuses[oid.GetString()!] = op.TryGetProperty("status", out var st) ? st.GetString() ?? "" : "";
+
+                        if (operationIds.All(id => statuses.TryGetValue(id, out var s) && (s == "finished" || s == "completed")))
+                        {
+                            _logger.LogInformation("✅ [QUEST/NEON] {Context} operations ready after {Polls} poll(s)", context, i + 1);
+                            return;
+                        }
+                    }
+                }
+            }
+            catch (Exception ex) { _logger.LogWarning(ex, "⚠️ [QUEST/NEON] Error polling {Context} ops (poll {Poll})", context, i + 1); }
+            await Task.Delay(2000);
+        }
+        _logger.LogWarning("⚠️ [QUEST/NEON] {Context} ops timed out, proceeding anyway", context);
+    }
+
+    private async Task<string?> GetNeonBranchEndpointHostAsync(string neonApiKey, string neonBaseUrl, string projectId, string branchId)
+    {
+        using var httpClient = _httpClientFactory.CreateClient();
+        httpClient.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", neonApiKey);
+        httpClient.DefaultRequestHeaders.Accept.Add(new System.Net.Http.Headers.MediaTypeWithQualityHeaderValue("application/json"));
+
+        for (int i = 0; i < 10; i++)
+        {
+            try
+            {
+                var resp = await httpClient.GetAsync($"{neonBaseUrl}/projects/{projectId}/endpoints");
+                if (resp.IsSuccessStatusCode)
+                {
+                    var doc = System.Text.Json.JsonDocument.Parse(await resp.Content.ReadAsStringAsync());
+                    if (doc.RootElement.TryGetProperty("endpoints", out var eps) && eps.ValueKind == System.Text.Json.JsonValueKind.Array)
+                        foreach (var ep in eps.EnumerateArray())
+                            if (ep.TryGetProperty("branch_id", out var bid) && bid.GetString() == branchId && ep.TryGetProperty("host", out var h))
+                                return h.GetString();
+                }
+            }
+            catch { }
+            await Task.Delay(3000);
+        }
+        return null;
+    }
+
+    // ────────────────────────────────────────────────────────────────────────────
+    // QuestMode test endpoint
+    // ────────────────────────────────────────────────────────────────────────────
+
+    [HttpGet("use/test/questmode/{boardId}")]
+    public async Task<ActionResult<object>> TestQuestMode(string boardId)
+    {
+        var board = await _context.ProjectBoards.AsNoTracking().FirstOrDefaultAsync(b => b.Id == boardId);
+        if (board == null)
+            return NotFound(new { success = false, message = $"Board {boardId} not found." });
+
+        var questBoards = await _context.QuestBoards.AsNoTracking()
+            .Where(qb => qb.BoardId == boardId)
+            .Include(qb => qb.Student)
+            .ToListAsync();
+
+        var studentCount = await _context.Students.AsNoTracking()
+            .CountAsync(s => s.BoardId == boardId && s.Status == 3);
+
+        return Ok(new
+        {
+            success = true,
+            boardId,
+            isQuestMode = !string.IsNullOrEmpty(questBoards.Any() ? questBoards[0].GithubBackendUrl : null) || questBoards.Any(),
+            boardHasSharedInfra = !string.IsNullOrEmpty(board.GithubBackendUrl),
+            questBoardCount = questBoards.Count,
+            expectedStudentCount = studentCount,
+            allStudentsProvisioned = studentCount > 0 && questBoards.Count >= studentCount,
+            questBoards = questBoards.Select(qb => new
+            {
+                studentId = qb.StudentId,
+                studentName = $"{qb.Student?.FirstName} {qb.Student?.LastName}",
+                githubFrontendUrl = qb.GithubFrontendUrl,
+                githubBackendUrl = qb.GithubBackendUrl,
+                webApiUrl = qb.WebApiUrl,
+                publishUrl = qb.PublishUrl,
+                neonProjectId = qb.NeonProjectId,
+                neonBranchId = qb.NeonBranchId,
+                hasAllUrls = !string.IsNullOrEmpty(qb.GithubFrontendUrl) && !string.IsNullOrEmpty(qb.GithubBackendUrl) && !string.IsNullOrEmpty(qb.WebApiUrl)
+            })
+        });
+    }
 }
 
 // Request/Response DTOs
@@ -8313,6 +8902,8 @@ public class CreateBoardRequest
     public int? InstituteProjectId { get; set; }
     /// <summary>When true, marks the board as role-based; each student gets a unique RoleIndex suffix on branch names.</summary>
     public bool IsSingleRole { get; set; }
+    /// <summary>When true, each student gets their own GitHub/Neon/Railway infra; URLs stored in QuestBoards table.</summary>
+    public bool IsQuestMode { get; set; }
 }
 
 public class CreateBoardResponse

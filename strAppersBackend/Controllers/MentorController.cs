@@ -534,7 +534,7 @@ namespace strAppersBackend.Controllers
                 object? githubCommitSummary = null;
                 
                 // Get appropriate repository URL(s) based on role
-                var (frontendRepoUrl, backendRepoUrl, isFullstack) = GetRepositoryUrlsByRole(student);
+                var (frontendRepoUrl, backendRepoUrl, isFullstack) = await GetRepositoryUrlsByRoleAsync(student);
                 
                 // Determine which repos to fetch based on role
                 var reposToFetch = new List<(string Url, string Type)>();
@@ -807,47 +807,51 @@ namespace strAppersBackend.Controllers
         }
 
         /// <summary>
-        /// Gets the appropriate GitHub repository URL(s) based on the student's role
-        /// Returns: Frontend URL for Frontend Developer, Backend URL for Backend Developer, or both for Fullstack Developer
+        /// Gets the appropriate GitHub repository URL(s) based on the student's role.
+        /// In QuestMode, questBoard overrides ProjectBoard URLs (per-student infra).
+        /// Returns: Frontend URL for Frontend Developer, Backend URL for Backend Developer, or both for Fullstack Developer.
         /// </summary>
-        private (string? FrontendRepoUrl, string? BackendRepoUrl, bool IsFullstack) GetRepositoryUrlsByRole(Student student)
+        private (string? FrontendRepoUrl, string? BackendRepoUrl, bool IsFullstack) GetRepositoryUrlsByRole(Student student, Models.QuestBoard? questBoard = null)
         {
-            if (student?.ProjectBoard == null)
-            {
+            if (student?.ProjectBoard == null && questBoard == null)
                 return (null, null, false);
-            }
 
-            var activeRole = student.StudentRoles?.FirstOrDefault(sr => sr.IsActive);
+            // QuestMode: use per-student infra URLs; fall back to ProjectBoard
+            var effectiveFe = questBoard?.GithubFrontendUrl ?? student?.ProjectBoard?.GithubFrontendUrl;
+            var effectiveBe = questBoard?.GithubBackendUrl ?? student?.ProjectBoard?.GithubBackendUrl;
+
+            var activeRole = student?.StudentRoles?.FirstOrDefault(sr => sr.IsActive);
             var roleName = activeRole?.Role?.Name ?? "";
 
             if (string.IsNullOrEmpty(roleName))
-            {
-                // Default to backend if no role specified (backward compatibility)
-                return (null, student.ProjectBoard.GithubBackendUrl, false);
-            }
+                return (null, effectiveBe, false);
 
             var roleNameLower = roleName.ToLowerInvariant();
 
-            // Check for Fullstack/Full Stack Developer
-            if (roleNameLower.Contains("full") && (roleNameLower.Contains("stack") || roleNameLower.Contains("stack")))
-            {
-                return (student.ProjectBoard.GithubFrontendUrl, student.ProjectBoard.GithubBackendUrl, true);
-            }
+            if (roleNameLower.Contains("full") && roleNameLower.Contains("stack"))
+                return (effectiveFe, effectiveBe, true);
 
-            // Check for Frontend Developer
             if (roleNameLower.Contains("frontend"))
-            {
-                return (student.ProjectBoard.GithubFrontendUrl, null, false);
-            }
+                return (effectiveFe, null, false);
 
-            // Check for Backend Developer
             if (roleNameLower.Contains("backend"))
-            {
-                return (null, student.ProjectBoard.GithubBackendUrl, false);
-            }
+                return (null, effectiveBe, false);
 
-            // Default: use backend repo for backward compatibility
-            return (null, student.ProjectBoard.GithubBackendUrl, false);
+            return (null, effectiveBe, false);
+        }
+
+        /// <summary>
+        /// Async version: resolves per-student QuestBoard URLs when the board has QuestMode infra.
+        /// </summary>
+        private async Task<(string? FrontendRepoUrl, string? BackendRepoUrl, bool IsFullstack)> GetRepositoryUrlsByRoleAsync(Student student)
+        {
+            Models.QuestBoard? questBoard = null;
+            if (student?.ProjectBoard != null && string.IsNullOrEmpty(student.ProjectBoard.GithubBackendUrl) && !string.IsNullOrEmpty(student.BoardId))
+            {
+                questBoard = await _context.QuestBoards.AsNoTracking()
+                    .FirstOrDefaultAsync(qb => qb.BoardId == student.BoardId && qb.StudentId == student.Id);
+            }
+            return GetRepositoryUrlsByRole(student, questBoard);
         }
 
         /// <summary>
@@ -4536,7 +4540,7 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                 }
 
                 // Get appropriate repository URL(s) based on role
-                var (frontendRepoUrl, backendRepoUrl, isFullstack) = GetRepositoryUrlsByRole(student);
+                var (frontendRepoUrl, backendRepoUrl, isFullstack) = await GetRepositoryUrlsByRoleAsync(student);
                 
                 // For code review, use the primary repo based on role (or backend as default)
                 var githubRepoUrl = !string.IsNullOrEmpty(backendRepoUrl) ? backendRepoUrl : frontendRepoUrl;
@@ -5358,7 +5362,7 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                     .Any(sr => sr.IsActive && (sr.Role?.Type == 1 || sr.Role?.Type == 2)) ?? false;
 
                 // Get appropriate repository URL(s) based on role
-                var (frontendRepoUrl, backendRepoUrl, isFullstack) = GetRepositoryUrlsByRole(student);
+                var (frontendRepoUrl, backendRepoUrl, isFullstack) = await GetRepositoryUrlsByRoleAsync(student);
                 
                 // Use the primary repo for help text (backend for backend/fullstack, frontend for frontend)
                 var githubRepoUrl = !string.IsNullOrEmpty(backendRepoUrl) ? backendRepoUrl : frontendRepoUrl ?? "";
@@ -5601,7 +5605,7 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                 {
                     try
                     {
-                        var (frontendRepoUrl, backendRepoUrl, isFullStack) = GetRepositoryUrlsByRole(student);
+                        var (frontendRepoUrl, backendRepoUrl, isFullStack) = await GetRepositoryUrlsByRoleAsync(student);
                         var hasAnyCommits = false;
 
                         // If context already has commit summary with HasCommits true, trust it (avoids false "no commits" when API check uses wrong branch or author)
@@ -5708,7 +5712,7 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                     try
                     {
                         // Get appropriate repository URL based on role
-                        var (frontendRepoUrl, backendRepoUrl, _) = GetRepositoryUrlsByRole(student);
+                        var (frontendRepoUrl, backendRepoUrl, _) = await GetRepositoryUrlsByRoleAsync(student);
                         var githubRepoUrl = !string.IsNullOrEmpty(backendRepoUrl) ? backendRepoUrl : frontendRepoUrl;
                         
                         if (!string.IsNullOrEmpty(student.GithubUser) && !string.IsNullOrEmpty(githubRepoUrl))
@@ -5783,7 +5787,7 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                 if (student != null && isDeveloperRole)
                 {
                     var githubUser = student.GithubUser ?? "";
-                    var (frontendRepoUrl, backendRepoUrl, isFullstackForGitHub) = GetRepositoryUrlsByRole(student);
+                    var (frontendRepoUrl, backendRepoUrl, isFullstackForGitHub) = await GetRepositoryUrlsByRoleAsync(student);
                     var githubRepoUrl = !string.IsNullOrEmpty(backendRepoUrl) ? backendRepoUrl : frontendRepoUrl ?? "";
 
                     // Always add GitHub info for developer roles, especially if asking about GitHub or repeating instructions
@@ -6632,7 +6636,7 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                 var githubFiles = new List<string>();
                 object? githubCommitSummary = null;
                 
-                var (frontendRepoUrl, backendRepoUrl, isFullstack) = GetRepositoryUrlsByRole(student);
+                var (frontendRepoUrl, backendRepoUrl, isFullstack) = await GetRepositoryUrlsByRoleAsync(student);
                 
                 // Determine which repos to fetch based on role
                 var reposToFetch = new List<(string Url, string Type)>();

@@ -152,13 +152,22 @@ public class Worker : BackgroundService
             // database setup, GitHub repos, Railway deployment, etc.
             client.Timeout = TimeSpan.FromMinutes(20);
 
+            // Detect if the institute for these students has QuestMode enabled
+            var isQuestMode = await conn.ExecuteScalarAsync<bool>(new CommandDefinition(
+                @"SELECT COALESCE(i.""QuestMode"", false) FROM ""Students"" s
+                  JOIN ""Institutes"" i ON i.""Id"" = s.""InstituteId""
+                  WHERE s.""Id"" = ANY(@Ids) AND i.""QuestMode"" = true LIMIT 1",
+                new { Ids = ids }, cancellationToken: ct));
+            _logger.LogInformation("[QUEST] IsQuestMode={IsQuestMode} for students=[{Ids}]", isQuestMode, string.Join(",", ids));
+
             var body = new CreateBoardRequest
             {
                 ProjectId = projectId,
                 StudentIds = ids.ToList(),
                 Title = $"{projectTitle} Kickoff meeting",
                 DateTime = NextDayNoonUtc().ToString("yyyy-MM-ddTHH:mm:ssZ"),
-                DurationMinutes = 30
+                DurationMinutes = 30,
+                IsQuestMode = isQuestMode
             };
 
             try
@@ -874,6 +883,7 @@ public class CreateBoardRequest
     public string? Title { get; set; }
     public string? DateTime { get; set; }
     public int? DurationMinutes { get; set; }
+    public bool IsQuestMode { get; set; }
 }
 
 public record ProjectInfo
