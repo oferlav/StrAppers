@@ -7316,6 +7316,15 @@ Your intelligence is strictly tethered to the Current Project Context and the us
 
                 var githubUrl = request.IsBackend ? board.GithubBackendUrl : board.GithubFrontendUrl;
 
+                // QuestMode: board-level URLs are null; resolve per-student URL from QuestBoards
+                if (string.IsNullOrEmpty(githubUrl) && request.StudentId > 0)
+                {
+                    var qb = await _context.QuestBoards.AsNoTracking()
+                        .FirstOrDefaultAsync(q => q.BoardId == request.BoardId && q.StudentId == request.StudentId);
+                    if (qb != null)
+                        githubUrl = request.IsBackend ? qb.GithubBackendUrl : qb.GithubFrontendUrl;
+                }
+
                 if (string.IsNullOrEmpty(githubUrl))
                 {
                     return BadRequest($"GitHub {(request.IsBackend ? "backend" : "frontend")} URL not found for board {request.BoardId}");
