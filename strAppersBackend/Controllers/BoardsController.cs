@@ -184,7 +184,7 @@ public partial class BoardsController : ControllerBase
         // DEBUG LOG — must be outside try so catch block can access and flush it
         System.Text.StringBuilder? debugLog = DebugBoardCreation ? new System.Text.StringBuilder() : null;
         string debugBoardId = "unknown";
-        DbgLog(debugLog, $"=== CreateBoard START === ProjectId={request.ProjectId} InstituteProjectId={request.InstituteProjectId} IsSingleRole={request.IsSingleRole} Title={request.Title} DurationMinutes={request.DurationMinutes} StudentIds=[{string.Join(",", request.StudentIds)}]");
+        DbgLog(debugLog, $"=== CreateBoard START === ProjectId={request.ProjectId} InstituteProjectId={request.InstituteProjectId} IsSingleRole={request.IsSingleRole} IsQuestMode={request.IsQuestMode} Title={request.Title} DurationMinutes={request.DurationMinutes} StudentIds=[{string.Join(",", request.StudentIds)}]");
         try
         {
             _logger.LogInformation("Starting board creation for project {ProjectId} with {StudentCount} students",
