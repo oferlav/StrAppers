@@ -867,8 +867,10 @@ public partial class BoardsController : ControllerBase
             }
 
             // ─── QuestMode: per-student infrastructure ────────────────────────────
+            DbgLog(debugLog, $"[QUEST-CHECK] request.IsQuestMode={request.IsQuestMode}");
             if (request.IsQuestMode)
             {
+                DbgLog(debugLog, $"[QUEST] Entering QuestMode branch — skipping shared Neon/Railway/GitHub");
                 _logger.LogInformation("[QUEST] QuestMode board {BoardId}: provisioning per-student infra for {Count} student(s)", trelloBoardId, students.Count);
 
                 var qmAdminStudent = students.FirstOrDefault(s => s.IsAdmin) ?? students.FirstOrDefault();
@@ -988,6 +990,7 @@ public partial class BoardsController : ControllerBase
             }
             // ─── End QuestMode branch ──────────────────────────────────────────────
 
+            DbgLog(debugLog, $"[QUEST-CHECK] IsQuestMode=False — taking standard shared-infra path");
             // Create Neon database for the project
             string? dbConnectionString = null;
             string? dbPassword = null;
