@@ -1433,6 +1433,7 @@ public class StudentsController : ControllerBase
                 .Include(s => s.StudentRoles)
                     .ThenInclude(sr => sr.Role)
                 .Include(s => s.ProjectBoard)
+                .Include(s => s.Institute)
                 .FirstOrDefaultAsync(s => s.Email == email);
 
             if (student == null)
@@ -1493,6 +1494,7 @@ public class StudentsController : ControllerBase
                 RoleIndex = student.RoleIndex,
                 IsSingleRole = student.ProjectBoard?.IsSingleRole ?? false,
                 InstituteId = student.InstituteId,
+                QuestMode = student.Institute?.QuestMode ?? false,
                 Coupon = student.Coupon
             });
         }

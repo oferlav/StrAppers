@@ -484,7 +484,7 @@ public class InstitutesController : ControllerBase
                 })
                 .ToListAsync();
 
-            return Ok(new { Success = true, InstituteName = institute.Name, Teachers = teachers });
+            return Ok(new { Success = true, InstituteName = institute.Name, QuestMode = institute.QuestMode, Teachers = teachers });
         }
         catch (Exception ex)
         {
@@ -588,6 +588,33 @@ public class InstitutesController : ControllerBase
             return StatusCode(500, new { Success = false, Message = "An error occurred while updating the logo" });
         }
     }
+
+    /// <summary>
+    /// Update institute feature settings (e.g. QuestMode).
+    /// PATCH /api/Institutes/{id}/settings
+    /// </summary>
+    [HttpPatch("{id}/settings")]
+    public async Task<ActionResult<object>> UpdateInstituteSettings(int id, [FromBody] UpdateInstituteSettingsRequest request)
+    {
+        try
+        {
+            var institute = await _context.Institutes.FindAsync(id);
+            if (institute == null)
+                return NotFound(new { Success = false, Message = "Institute not found" });
+
+            institute.QuestMode = request.QuestMode;
+            institute.UpdatedAt = DateTime.UtcNow;
+            await _context.SaveChangesAsync();
+
+            _logger.LogInformation("Settings updated for institute {InstituteId}: QuestMode={QuestMode}", id, institute.QuestMode);
+            return Ok(new { Success = true, QuestMode = institute.QuestMode });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error updating settings for institute {InstituteId}", id);
+            return StatusCode(500, new { Success = false, Message = "An error occurred while updating settings" });
+        }
+    }
 }
 
 public class InstituteJoinMeetingRequest
@@ -647,4 +674,9 @@ public class AcceptInviteRequest
 public class UpdateInstituteLogoRequest
 {
     public string? Logo { get; set; }
+}
+
+public class UpdateInstituteSettingsRequest
+{
+    public bool QuestMode { get; set; }
 }

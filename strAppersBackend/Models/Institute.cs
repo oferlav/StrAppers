@@ -54,6 +54,8 @@ public class Institute
     [MaxLength(100)]
     public string? Coupon { get; set; }
 
+    public bool QuestMode { get; set; } = false;
+
     public ICollection<Student> Students { get; set; } = new List<Student>();
 
     public ICollection<Teacher> Teachers { get; set; } = new List<Teacher>();
