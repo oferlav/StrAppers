@@ -10373,6 +10373,7 @@ APPROVAL: no    (request changes before merge)";
                 string? owner = null;
                 string? repo = null;
                 string? boardId = null;
+                int questStudentId = 0; // non-zero when board is found via QuestBoards (QuestMode)
 
                 if (payload.TryGetProperty("repository", out var repoProp))
                 {
@@ -10389,29 +10390,41 @@ APPROVAL: no    (request changes before merge)";
                     var githubUrl = $"https://github.com/{owner}/{repo}";
                     var board = await _context.ProjectBoards
                         .FirstOrDefaultAsync(pb => pb.GithubBackendUrl == githubUrl || pb.GithubFrontendUrl == githubUrl);
-                    
+
                     if (board != null)
                     {
                         boardId = board.Id;
-                        _logger.LogInformation("Found ProjectBoard: BoardId={BoardId}, CreatedAt={CreatedAt}, TimeSinceCreation={TimeSinceCreation} seconds", 
+                        _logger.LogInformation("Found ProjectBoard: BoardId={BoardId}, CreatedAt={CreatedAt}, TimeSinceCreation={TimeSinceCreation} seconds",
                             board.Id, board.CreatedAt, (DateTime.UtcNow - board.CreatedAt).TotalSeconds);
                     }
                     else
                     {
-                        // Check for potential timing issues
-                        var recentBoards = await _context.ProjectBoards
-                            .Where(pb => pb.CreatedAt >= DateTime.UtcNow.AddMinutes(-5))
-                            .OrderByDescending(pb => pb.CreatedAt)
-                            .Select(pb => new { pb.Id, pb.GithubBackendUrl, pb.GithubFrontendUrl, pb.CreatedAt })
-                            .Take(10)
-                            .ToListAsync();
-                        
-                        _logger.LogWarning("ProjectBoard not found for GitHub URL: {GithubUrl}. " +
-                            "Recent boards created in last 5 minutes: {RecentBoardCount}. " +
-                            "Recent board URLs: {RecentBoardUrls}", 
-                            githubUrl,
-                            recentBoards.Count,
-                            string.Join(", ", recentBoards.Select(b => $"Backend: {b.GithubBackendUrl}, Frontend: {b.GithubFrontendUrl}")));
+                        // QuestMode: board-level URLs are null; per-student repos are stored in QuestBoards
+                        var qb = await _context.QuestBoards.AsNoTracking()
+                            .FirstOrDefaultAsync(q => q.GithubBackendUrl == githubUrl || q.GithubFrontendUrl == githubUrl);
+                        if (qb != null)
+                        {
+                            boardId = qb.BoardId;
+                            questStudentId = qb.StudentId;
+                            _logger.LogInformation("Found QuestBoard (QuestMode): BoardId={BoardId}, StudentId={StudentId}", qb.BoardId, qb.StudentId);
+                        }
+                        else
+                        {
+                            // Check for potential timing issues
+                            var recentBoards = await _context.ProjectBoards
+                                .Where(pb => pb.CreatedAt >= DateTime.UtcNow.AddMinutes(-5))
+                                .OrderByDescending(pb => pb.CreatedAt)
+                                .Select(pb => new { pb.Id, pb.GithubBackendUrl, pb.GithubFrontendUrl, pb.CreatedAt })
+                                .Take(10)
+                                .ToListAsync();
+
+                            _logger.LogWarning("ProjectBoard not found for GitHub URL: {GithubUrl}. " +
+                                "Recent boards created in last 5 minutes: {RecentBoardCount}. " +
+                                "Recent board URLs: {RecentBoardUrls}",
+                                githubUrl,
+                                recentBoards.Count,
+                                string.Join(", ", recentBoards.Select(b => $"Backend: {b.GithubBackendUrl}, Frontend: {b.GithubFrontendUrl}")));
+                        }
                     }
                 }
 
@@ -10479,6 +10492,17 @@ APPROVAL: no    (request changes before merge)";
                         var githubUrl = $"https://github.com/{owner}/{repo}";
                         var isBackend = string.Equals(board.GithubBackendUrl, githubUrl, StringComparison.OrdinalIgnoreCase);
                         var isFrontend = string.Equals(board.GithubFrontendUrl, githubUrl, StringComparison.OrdinalIgnoreCase);
+                        if (!isBackend && !isFrontend && questStudentId > 0)
+                        {
+                            // QuestMode: board-level URLs are null; resolve per-student URLs from QuestBoards
+                            var questPushBoard = await _context.QuestBoards.AsNoTracking()
+                                .FirstOrDefaultAsync(q => q.BoardId == boardId && q.StudentId == questStudentId);
+                            if (questPushBoard != null)
+                            {
+                                isBackend = string.Equals(questPushBoard.GithubBackendUrl, githubUrl, StringComparison.OrdinalIgnoreCase);
+                                isFrontend = string.Equals(questPushBoard.GithubFrontendUrl, githubUrl, StringComparison.OrdinalIgnoreCase);
+                            }
+                        }
                         if (!isBackend && !isFrontend)
                         {
                             _logger.LogWarning("📥 [WEBHOOK] Push repo does not match board backend or frontend URL, skipping");
