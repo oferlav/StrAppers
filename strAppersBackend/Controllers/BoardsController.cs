@@ -204,6 +204,19 @@ public partial class BoardsController : ControllerBase
                 students.Count, request.StudentIds.Count);
             DbgLog(debugLog, $"Students validated: found={students.Count} requested={request.StudentIds.Count} names=[{string.Join(", ", students.Select(s => $"{s.FirstName} {s.LastName}"))}]");
 
+            // Auto-detect QuestMode from the students' institute (overrides whatever the caller sent)
+            if (!request.IsQuestMode)
+            {
+                var instituteIds = students.Select(s => s.InstituteId).Where(id => id.HasValue).Select(id => id!.Value).Distinct().ToList();
+                if (instituteIds.Any())
+                    request.IsQuestMode = await _context.Institutes.AnyAsync(i => instituteIds.Contains(i.Id) && i.QuestMode);
+                DbgLog(debugLog, $"[QUEST-CHECK] Auto-detected IsQuestMode={request.IsQuestMode} from InstituteIds=[{string.Join(",", instituteIds)}]");
+            }
+            else
+            {
+                DbgLog(debugLog, $"[QUEST-CHECK] IsQuestMode=True (set by caller)");
+            }
+
             if (students.Count != request.StudentIds.Count)
             {
                 _logger.LogWarning("Student validation failed. Found {FoundCount}, requested {RequestedCount}",
