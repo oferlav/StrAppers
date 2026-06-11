@@ -3263,7 +3263,7 @@ public partial class BoardsController : ControllerBase
 
             // Create Teams meeting AFTER ProjectBoard is committed (so TeamsController can find it)
             // Use the create-meeting-smtp-for-board-auth endpoint which handles custom URLs and tracking
-            if (!string.IsNullOrEmpty(request.Title) && request.DurationMinutes.HasValue)
+            if (!string.IsNullOrEmpty(request.Title) && request.DurationMinutes.HasValue && !request.IsQuestMode)
             {
                 try
                 {
