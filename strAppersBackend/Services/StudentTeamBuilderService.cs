@@ -232,22 +232,36 @@ namespace strAppersBackend.Services
                             // SingleQuest: QuestMode institute where each student gets their own board immediately
                             if (isSingleQuestMode)
                             {
-                                foreach (var student in couponCandidates.Where(s => !processedStudentIds.Contains(s.Id)))
+                                var eligible = couponCandidates.Where(s => !processedStudentIds.Contains(s.Id)).ToList();
+                                var sem = new SemaphoreSlim(5);
+                                var localMessages = new System.Collections.Concurrent.ConcurrentBag<(bool Success, int StudentId, string Msg)>();
+
+                                await Task.WhenAll(eligible.Select(async student =>
                                 {
-                                    var singleBoard = await CallCreateBoardAsync(ip.BaseProjectId.Value, ip.Id, new List<Student> { student }, false, ip.Title);
-                                    if (singleBoard.Success)
+                                    await sem.WaitAsync();
+                                    try
+                                    {
+                                        var singleBoard = await CallCreateBoardAsync(ip.BaseProjectId.Value, ip.Id, new List<Student> { student }, false, ip.Title);
+                                        localMessages.Add((singleBoard.Success, student.Id,
+                                            singleBoard.Success
+                                                ? $"Institute {instituteId}, IpId {ipId}, Coupon={couponLabel} (SingleQuest): board created for student {student.Id}."
+                                                : $"Institute {instituteId}, IpId {ipId}, Coupon={couponLabel} (SingleQuest): CreateBoard failed for student {student.Id} — {singleBoard.Error}"));
+                                    }
+                                    finally { sem.Release(); }
+                                }));
+
+                                foreach (var (success, studentId, msg) in localMessages)
+                                {
+                                    messages.Add(msg);
+                                    if (success)
                                     {
                                         created++;
-                                        processedStudentIds.Add(student.Id);
-                                        var msg = $"Institute {instituteId}, IpId {ipId}, Coupon={couponLabel} (SingleQuest): board created for student {student.Id}.";
-                                        messages.Add(msg);
+                                        processedStudentIds.Add(studentId);
                                         _logger.LogInformation("[INSTITUTE-TEAM-BUILDER] {Message}", msg);
                                     }
                                     else
                                     {
                                         skipped++;
-                                        var msg = $"Institute {instituteId}, IpId {ipId}, Coupon={couponLabel} (SingleQuest): CreateBoard failed for student {student.Id} — {singleBoard.Error}";
-                                        messages.Add(msg);
                                         _logger.LogWarning("[INSTITUTE-TEAM-BUILDER] {Message}", msg);
                                     }
                                 }
