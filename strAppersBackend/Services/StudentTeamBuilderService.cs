@@ -159,6 +159,10 @@ namespace strAppersBackend.Services
                 var instituteId = instituteGroup.Key;
                 var instituteStudents = instituteGroup.ToList();
 
+                var institute = await _context.Institutes.AsNoTracking()
+                    .FirstOrDefaultAsync(i => i.Id == instituteId);
+                var isSingleQuestMode = institute != null && institute.QuestMode && institute.SingleQuest;
+
                 var activeTemplates = await _context.InstituteTemplates
                     .Include(t => t.Squad)
                         .ThenInclude(sq => sq.Roles)
@@ -224,6 +228,31 @@ namespace strAppersBackend.Services
                         {
                             var couponCandidates = couponGroup.ToList();
                             var couponLabel = couponGroup.Key ?? "(no coupon)";
+
+                            // SingleQuest: QuestMode institute where each student gets their own board immediately
+                            if (isSingleQuestMode)
+                            {
+                                foreach (var student in couponCandidates.Where(s => !processedStudentIds.Contains(s.Id)))
+                                {
+                                    var singleBoard = await CallCreateBoardAsync(ip.BaseProjectId.Value, ip.Id, new List<Student> { student }, false, ip.Title);
+                                    if (singleBoard.Success)
+                                    {
+                                        created++;
+                                        processedStudentIds.Add(student.Id);
+                                        var msg = $"Institute {instituteId}, IpId {ipId}, Coupon={couponLabel} (SingleQuest): board created for student {student.Id}.";
+                                        messages.Add(msg);
+                                        _logger.LogInformation("[INSTITUTE-TEAM-BUILDER] {Message}", msg);
+                                    }
+                                    else
+                                    {
+                                        skipped++;
+                                        var msg = $"Institute {instituteId}, IpId {ipId}, Coupon={couponLabel} (SingleQuest): CreateBoard failed for student {student.Id} — {singleBoard.Error}";
+                                        messages.Add(msg);
+                                        _logger.LogWarning("[INSTITUTE-TEAM-BUILDER] {Message}", msg);
+                                    }
+                                }
+                                continue;
+                            }
 
                             if (template == null)
                             {

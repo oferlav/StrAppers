@@ -56,6 +56,9 @@ public class Institute
 
     public bool QuestMode { get; set; } = false;
 
+    /// <summary>Only meaningful when QuestMode=true. When true, board creation kicks off for each eligible student individually (no team required).</summary>
+    public bool SingleQuest { get; set; } = true;
+
     public ICollection<Student> Students { get; set; } = new List<Student>();
 
     public ICollection<Teacher> Teachers { get; set; } = new List<Teacher>();
