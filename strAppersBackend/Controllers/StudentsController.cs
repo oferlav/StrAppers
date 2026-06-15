@@ -1495,6 +1495,7 @@ public class StudentsController : ControllerBase
                 IsSingleRole = student.ProjectBoard?.IsSingleRole ?? false,
                 InstituteId = student.InstituteId,
                 QuestMode = student.Institute?.QuestMode ?? false,
+                SingleQuest = student.Institute?.SingleQuest ?? true,
                 Coupon = student.Coupon
             });
         }
