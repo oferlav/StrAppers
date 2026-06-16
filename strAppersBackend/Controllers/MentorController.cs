@@ -534,7 +534,7 @@ namespace strAppersBackend.Controllers
                 object? githubCommitSummary = null;
                 
                 // Get appropriate repository URL(s) based on role
-                var (frontendRepoUrl, backendRepoUrl, isFullstack) = GetRepositoryUrlsByRole(student);
+                var (frontendRepoUrl, backendRepoUrl, isFullstack) = await GetRepositoryUrlsByRoleAsync(student);
                 
                 // Determine which repos to fetch based on role
                 var reposToFetch = new List<(string Url, string Type)>();
@@ -807,47 +807,51 @@ namespace strAppersBackend.Controllers
         }
 
         /// <summary>
-        /// Gets the appropriate GitHub repository URL(s) based on the student's role
-        /// Returns: Frontend URL for Frontend Developer, Backend URL for Backend Developer, or both for Fullstack Developer
+        /// Gets the appropriate GitHub repository URL(s) based on the student's role.
+        /// In QuestMode, questBoard overrides ProjectBoard URLs (per-student infra).
+        /// Returns: Frontend URL for Frontend Developer, Backend URL for Backend Developer, or both for Fullstack Developer.
         /// </summary>
-        private (string? FrontendRepoUrl, string? BackendRepoUrl, bool IsFullstack) GetRepositoryUrlsByRole(Student student)
+        private (string? FrontendRepoUrl, string? BackendRepoUrl, bool IsFullstack) GetRepositoryUrlsByRole(Student student, Models.QuestBoard? questBoard = null)
         {
-            if (student?.ProjectBoard == null)
-            {
+            if (student?.ProjectBoard == null && questBoard == null)
                 return (null, null, false);
-            }
 
-            var activeRole = student.StudentRoles?.FirstOrDefault(sr => sr.IsActive);
+            // QuestMode: use per-student infra URLs; fall back to ProjectBoard
+            var effectiveFe = questBoard?.GithubFrontendUrl ?? student?.ProjectBoard?.GithubFrontendUrl;
+            var effectiveBe = questBoard?.GithubBackendUrl ?? student?.ProjectBoard?.GithubBackendUrl;
+
+            var activeRole = student?.StudentRoles?.FirstOrDefault(sr => sr.IsActive);
             var roleName = activeRole?.Role?.Name ?? "";
 
             if (string.IsNullOrEmpty(roleName))
-            {
-                // Default to backend if no role specified (backward compatibility)
-                return (null, student.ProjectBoard.GithubBackendUrl, false);
-            }
+                return (null, effectiveBe, false);
 
             var roleNameLower = roleName.ToLowerInvariant();
 
-            // Check for Fullstack/Full Stack Developer
-            if (roleNameLower.Contains("full") && (roleNameLower.Contains("stack") || roleNameLower.Contains("stack")))
-            {
-                return (student.ProjectBoard.GithubFrontendUrl, student.ProjectBoard.GithubBackendUrl, true);
-            }
+            if (roleNameLower.Contains("full") && roleNameLower.Contains("stack"))
+                return (effectiveFe, effectiveBe, true);
 
-            // Check for Frontend Developer
             if (roleNameLower.Contains("frontend"))
-            {
-                return (student.ProjectBoard.GithubFrontendUrl, null, false);
-            }
+                return (effectiveFe, null, false);
 
-            // Check for Backend Developer
             if (roleNameLower.Contains("backend"))
-            {
-                return (null, student.ProjectBoard.GithubBackendUrl, false);
-            }
+                return (null, effectiveBe, false);
 
-            // Default: use backend repo for backward compatibility
-            return (null, student.ProjectBoard.GithubBackendUrl, false);
+            return (null, effectiveBe, false);
+        }
+
+        /// <summary>
+        /// Async version: resolves per-student QuestBoard URLs when the board has QuestMode infra.
+        /// </summary>
+        private async Task<(string? FrontendRepoUrl, string? BackendRepoUrl, bool IsFullstack)> GetRepositoryUrlsByRoleAsync(Student student)
+        {
+            Models.QuestBoard? questBoard = null;
+            if (student?.ProjectBoard != null && string.IsNullOrEmpty(student.ProjectBoard.GithubBackendUrl) && !string.IsNullOrEmpty(student.BoardId))
+            {
+                questBoard = await _context.QuestBoards.AsNoTracking()
+                    .FirstOrDefaultAsync(qb => qb.BoardId == student.BoardId && qb.StudentId == student.Id);
+            }
+            return GetRepositoryUrlsByRole(student, questBoard);
         }
 
         /// <summary>
@@ -4536,7 +4540,7 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                 }
 
                 // Get appropriate repository URL(s) based on role
-                var (frontendRepoUrl, backendRepoUrl, isFullstack) = GetRepositoryUrlsByRole(student);
+                var (frontendRepoUrl, backendRepoUrl, isFullstack) = await GetRepositoryUrlsByRoleAsync(student);
                 
                 // For code review, use the primary repo based on role (or backend as default)
                 var githubRepoUrl = !string.IsNullOrEmpty(backendRepoUrl) ? backendRepoUrl : frontendRepoUrl;
@@ -5358,7 +5362,7 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                     .Any(sr => sr.IsActive && (sr.Role?.Type == 1 || sr.Role?.Type == 2)) ?? false;
 
                 // Get appropriate repository URL(s) based on role
-                var (frontendRepoUrl, backendRepoUrl, isFullstack) = GetRepositoryUrlsByRole(student);
+                var (frontendRepoUrl, backendRepoUrl, isFullstack) = await GetRepositoryUrlsByRoleAsync(student);
                 
                 // Use the primary repo for help text (backend for backend/fullstack, frontend for frontend)
                 var githubRepoUrl = !string.IsNullOrEmpty(backendRepoUrl) ? backendRepoUrl : frontendRepoUrl ?? "";
@@ -5601,7 +5605,7 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                 {
                     try
                     {
-                        var (frontendRepoUrl, backendRepoUrl, isFullStack) = GetRepositoryUrlsByRole(student);
+                        var (frontendRepoUrl, backendRepoUrl, isFullStack) = await GetRepositoryUrlsByRoleAsync(student);
                         var hasAnyCommits = false;
 
                         // If context already has commit summary with HasCommits true, trust it (avoids false "no commits" when API check uses wrong branch or author)
@@ -5708,7 +5712,7 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                     try
                     {
                         // Get appropriate repository URL based on role
-                        var (frontendRepoUrl, backendRepoUrl, _) = GetRepositoryUrlsByRole(student);
+                        var (frontendRepoUrl, backendRepoUrl, _) = await GetRepositoryUrlsByRoleAsync(student);
                         var githubRepoUrl = !string.IsNullOrEmpty(backendRepoUrl) ? backendRepoUrl : frontendRepoUrl;
                         
                         if (!string.IsNullOrEmpty(student.GithubUser) && !string.IsNullOrEmpty(githubRepoUrl))
@@ -5783,7 +5787,7 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                 if (student != null && isDeveloperRole)
                 {
                     var githubUser = student.GithubUser ?? "";
-                    var (frontendRepoUrl, backendRepoUrl, isFullstackForGitHub) = GetRepositoryUrlsByRole(student);
+                    var (frontendRepoUrl, backendRepoUrl, isFullstackForGitHub) = await GetRepositoryUrlsByRoleAsync(student);
                     var githubRepoUrl = !string.IsNullOrEmpty(backendRepoUrl) ? backendRepoUrl : frontendRepoUrl ?? "";
 
                     // Always add GitHub info for developer roles, especially if asking about GitHub or repeating instructions
@@ -5870,8 +5874,8 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                         var sprint1B = $"1-B{devIdx}";
                         var sprint1F = $"1-F{devIdx}";
                         bool? branch1B = null, branch1F = null;
-                        if (checkBackend) branch1B = await BranchExistsForBoardAsync(student.BoardId, sprint1B, true);
-                        if (checkFrontend) branch1F = await BranchExistsForBoardAsync(student.BoardId, sprint1F, false);
+                        if (checkBackend) branch1B = await BranchExistsForBoardAsync(student.BoardId, sprint1B, true, student.Id);
+                        if (checkFrontend) branch1F = await BranchExistsForBoardAsync(student.BoardId, sprint1F, false, student.Id);
                         var parts = new List<string>();
                         if (branch1B.HasValue) parts.Add($"{sprint1B}: {(branch1B.Value ? "exists (initialized)" : "not created")}");
                         if (branch1F.HasValue) parts.Add($"{sprint1F}: {(branch1F.Value ? "exists (initialized)" : "not created")}");
@@ -6632,7 +6636,7 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                 var githubFiles = new List<string>();
                 object? githubCommitSummary = null;
                 
-                var (frontendRepoUrl, backendRepoUrl, isFullstack) = GetRepositoryUrlsByRole(student);
+                var (frontendRepoUrl, backendRepoUrl, isFullstack) = await GetRepositoryUrlsByRoleAsync(student);
                 
                 // Determine which repos to fetch based on role
                 var reposToFetch = new List<(string Url, string Type)>();
@@ -7311,6 +7315,15 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                 }
 
                 var githubUrl = request.IsBackend ? board.GithubBackendUrl : board.GithubFrontendUrl;
+
+                // QuestMode: board-level URLs are null; resolve per-student URL from QuestBoards
+                if (string.IsNullOrEmpty(githubUrl) && request.StudentId > 0)
+                {
+                    var qb = await _context.QuestBoards.AsNoTracking()
+                        .FirstOrDefaultAsync(q => q.BoardId == request.BoardId && q.StudentId == request.StudentId);
+                    if (qb != null)
+                        githubUrl = request.IsBackend ? qb.GithubBackendUrl : qb.GithubFrontendUrl;
+                }
 
                 if (string.IsNullOrEmpty(githubUrl))
                 {
@@ -9505,6 +9518,7 @@ Your intelligence is strictly tethered to the Current Project Context and the us
             public string BoardId { get; set; } = string.Empty;
             public string GithubBranch { get; set; } = string.Empty;
             public string? AIServiceName { get; set; } // Model Name from GET /api/Mentor/use/get-models
+            public int StudentId { get; set; } = 0;
         }
 
         /// <summary>
@@ -9780,6 +9794,15 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                 var isBackend = roleLetter == "B";
                 var isFrontend = roleLetter == "F";
                 var githubUrl = isBackend ? board.GithubBackendUrl : board.GithubFrontendUrl;
+
+                // QuestMode: board-level URLs are null; resolve per-student URL from QuestBoards
+                if (string.IsNullOrEmpty(githubUrl) && request.StudentId > 0)
+                {
+                    var qb = await _context.QuestBoards.AsNoTracking()
+                        .FirstOrDefaultAsync(q => q.BoardId == request.BoardId && q.StudentId == request.StudentId);
+                    if (qb != null)
+                        githubUrl = isBackend ? qb.GithubBackendUrl : qb.GithubFrontendUrl;
+                }
 
                 if (string.IsNullOrEmpty(githubUrl))
                 {
@@ -10350,6 +10373,7 @@ APPROVAL: no    (request changes before merge)";
                 string? owner = null;
                 string? repo = null;
                 string? boardId = null;
+                int questStudentId = 0; // non-zero when board is found via QuestBoards (QuestMode)
 
                 if (payload.TryGetProperty("repository", out var repoProp))
                 {
@@ -10366,29 +10390,41 @@ APPROVAL: no    (request changes before merge)";
                     var githubUrl = $"https://github.com/{owner}/{repo}";
                     var board = await _context.ProjectBoards
                         .FirstOrDefaultAsync(pb => pb.GithubBackendUrl == githubUrl || pb.GithubFrontendUrl == githubUrl);
-                    
+
                     if (board != null)
                     {
                         boardId = board.Id;
-                        _logger.LogInformation("Found ProjectBoard: BoardId={BoardId}, CreatedAt={CreatedAt}, TimeSinceCreation={TimeSinceCreation} seconds", 
+                        _logger.LogInformation("Found ProjectBoard: BoardId={BoardId}, CreatedAt={CreatedAt}, TimeSinceCreation={TimeSinceCreation} seconds",
                             board.Id, board.CreatedAt, (DateTime.UtcNow - board.CreatedAt).TotalSeconds);
                     }
                     else
                     {
-                        // Check for potential timing issues
-                        var recentBoards = await _context.ProjectBoards
-                            .Where(pb => pb.CreatedAt >= DateTime.UtcNow.AddMinutes(-5))
-                            .OrderByDescending(pb => pb.CreatedAt)
-                            .Select(pb => new { pb.Id, pb.GithubBackendUrl, pb.GithubFrontendUrl, pb.CreatedAt })
-                            .Take(10)
-                            .ToListAsync();
-                        
-                        _logger.LogWarning("ProjectBoard not found for GitHub URL: {GithubUrl}. " +
-                            "Recent boards created in last 5 minutes: {RecentBoardCount}. " +
-                            "Recent board URLs: {RecentBoardUrls}", 
-                            githubUrl,
-                            recentBoards.Count,
-                            string.Join(", ", recentBoards.Select(b => $"Backend: {b.GithubBackendUrl}, Frontend: {b.GithubFrontendUrl}")));
+                        // QuestMode: board-level URLs are null; per-student repos are stored in QuestBoards
+                        var qb = await _context.QuestBoards.AsNoTracking()
+                            .FirstOrDefaultAsync(q => q.GithubBackendUrl == githubUrl || q.GithubFrontendUrl == githubUrl);
+                        if (qb != null)
+                        {
+                            boardId = qb.BoardId;
+                            questStudentId = qb.StudentId;
+                            _logger.LogInformation("Found QuestBoard (QuestMode): BoardId={BoardId}, StudentId={StudentId}", qb.BoardId, qb.StudentId);
+                        }
+                        else
+                        {
+                            // Check for potential timing issues
+                            var recentBoards = await _context.ProjectBoards
+                                .Where(pb => pb.CreatedAt >= DateTime.UtcNow.AddMinutes(-5))
+                                .OrderByDescending(pb => pb.CreatedAt)
+                                .Select(pb => new { pb.Id, pb.GithubBackendUrl, pb.GithubFrontendUrl, pb.CreatedAt })
+                                .Take(10)
+                                .ToListAsync();
+
+                            _logger.LogWarning("ProjectBoard not found for GitHub URL: {GithubUrl}. " +
+                                "Recent boards created in last 5 minutes: {RecentBoardCount}. " +
+                                "Recent board URLs: {RecentBoardUrls}",
+                                githubUrl,
+                                recentBoards.Count,
+                                string.Join(", ", recentBoards.Select(b => $"Backend: {b.GithubBackendUrl}, Frontend: {b.GithubFrontendUrl}")));
+                        }
                     }
                 }
 
@@ -10456,6 +10492,17 @@ APPROVAL: no    (request changes before merge)";
                         var githubUrl = $"https://github.com/{owner}/{repo}";
                         var isBackend = string.Equals(board.GithubBackendUrl, githubUrl, StringComparison.OrdinalIgnoreCase);
                         var isFrontend = string.Equals(board.GithubFrontendUrl, githubUrl, StringComparison.OrdinalIgnoreCase);
+                        if (!isBackend && !isFrontend && questStudentId > 0)
+                        {
+                            // QuestMode: board-level URLs are null; resolve per-student URLs from QuestBoards
+                            var questPushBoard = await _context.QuestBoards.AsNoTracking()
+                                .FirstOrDefaultAsync(q => q.BoardId == boardId && q.StudentId == questStudentId);
+                            if (questPushBoard != null)
+                            {
+                                isBackend = string.Equals(questPushBoard.GithubBackendUrl, githubUrl, StringComparison.OrdinalIgnoreCase);
+                                isFrontend = string.Equals(questPushBoard.GithubFrontendUrl, githubUrl, StringComparison.OrdinalIgnoreCase);
+                            }
+                        }
                         if (!isBackend && !isFrontend)
                         {
                             _logger.LogWarning("📥 [WEBHOOK] Push repo does not match board backend or frontend URL, skipping");
@@ -12111,7 +12158,7 @@ APPROVAL: no    (request changes before merge)";
         /// Returns true only if there is an open PR for the branch and the GitHub "Mentor-Validation" commit status is success. Returns false if no open PR, or status is missing/pending/failure.
         /// </summary>
         [HttpGet("use/pr-status")]
-        public async Task<ActionResult<bool>> GetPRStatus([FromQuery] string boardId, [FromQuery] string branchName, [FromQuery] bool isBackend = false)
+        public async Task<ActionResult<bool>> GetPRStatus([FromQuery] string boardId, [FromQuery] string branchName, [FromQuery] bool isBackend = false, [FromQuery] int studentId = 0)
         {
             if (string.IsNullOrWhiteSpace(boardId))
             {
@@ -12130,6 +12177,16 @@ APPROVAL: no    (request changes before merge)";
                 return Ok(false);
             }
             var githubUrl = isBackend ? board.GithubBackendUrl : board.GithubFrontendUrl;
+
+            // QuestMode: board-level URLs are null; resolve per-student URL from QuestBoards
+            if (string.IsNullOrEmpty(githubUrl) && studentId > 0)
+            {
+                var qb = await _context.QuestBoards.AsNoTracking()
+                    .FirstOrDefaultAsync(q => q.BoardId == boardId && q.StudentId == studentId);
+                if (qb != null)
+                    githubUrl = isBackend ? qb.GithubBackendUrl : qb.GithubFrontendUrl;
+            }
+
             if (string.IsNullOrEmpty(githubUrl))
             {
                 _logger.LogInformation("[PR-STATUS] Returning false: GitHub {Type} URL not configured for board {BoardId}", isBackend ? "backend" : "frontend", boardId);
@@ -12216,6 +12273,16 @@ APPROVAL: no    (request changes before merge)";
 
                 // Determine GitHub URL based on isBackend
                 var githubUrl = request.IsBackend ? board.GithubBackendUrl : board.GithubFrontendUrl;
+
+                // QuestMode: board-level URLs are null; resolve per-student URL from QuestBoards
+                if (string.IsNullOrEmpty(githubUrl) && request.StudentId > 0)
+                {
+                    var qb = await _context.QuestBoards.AsNoTracking()
+                        .FirstOrDefaultAsync(q => q.BoardId == request.BoardId && q.StudentId == request.StudentId);
+                    if (qb != null)
+                        githubUrl = request.IsBackend ? qb.GithubBackendUrl : qb.GithubFrontendUrl;
+                }
+
                 if (string.IsNullOrEmpty(githubUrl))
                 {
                     return BadRequest(new { Success = false, Message = $"GitHub {(request.IsBackend ? "backend" : "frontend")} URL not found for board" });
@@ -12389,6 +12456,7 @@ APPROVAL: no    (request changes before merge)";
             public string BoardId { get; set; } = string.Empty;
             public string BranchName { get; set; } = string.Empty;
             public bool IsBackend { get; set; }
+            public int StudentId { get; set; } = 0;
         }
 
         /// <summary>
@@ -12425,6 +12493,16 @@ APPROVAL: no    (request changes before merge)";
 
                 // Determine GitHub URL based on isBackend
                 var githubUrl = request.IsBackend ? board.GithubBackendUrl : board.GithubFrontendUrl;
+
+                // QuestMode: board-level URLs are null; resolve per-student URL from QuestBoards
+                if (string.IsNullOrEmpty(githubUrl) && request.StudentId > 0)
+                {
+                    var qb = await _context.QuestBoards.AsNoTracking()
+                        .FirstOrDefaultAsync(q => q.BoardId == request.BoardId && q.StudentId == request.StudentId);
+                    if (qb != null)
+                        githubUrl = request.IsBackend ? qb.GithubBackendUrl : qb.GithubFrontendUrl;
+                }
+
                 if (string.IsNullOrEmpty(githubUrl))
                 {
                     return BadRequest(new { Success = false, Message = $"GitHub {(request.IsBackend ? "backend" : "frontend")} URL not found for board" });
@@ -12902,7 +12980,7 @@ APPROVAL: no    (request changes before merge)";
         /// <summary>
         /// Returns true if the given branch exists in the board's GitHub repo (for mentor prompt branch status).
         /// </summary>
-        private async Task<bool> BranchExistsForBoardAsync(string boardId, string branchName, bool isBackend)
+        private async Task<bool> BranchExistsForBoardAsync(string boardId, string branchName, bool isBackend, int studentId = 0)
         {
             if (string.IsNullOrWhiteSpace(boardId) || string.IsNullOrWhiteSpace(branchName))
                 return false;
@@ -12911,6 +12989,16 @@ APPROVAL: no    (request changes before merge)";
                 var board = await _context.ProjectBoards.FirstOrDefaultAsync(pb => pb.Id == boardId);
                 if (board == null) return false;
                 var githubUrl = isBackend ? board.GithubBackendUrl : board.GithubFrontendUrl;
+
+                // QuestMode: board-level URLs are null; resolve per-student URL from QuestBoards
+                if (string.IsNullOrEmpty(githubUrl) && studentId > 0)
+                {
+                    var qb = await _context.QuestBoards.AsNoTracking()
+                        .FirstOrDefaultAsync(q => q.BoardId == boardId && q.StudentId == studentId);
+                    if (qb != null)
+                        githubUrl = isBackend ? qb.GithubBackendUrl : qb.GithubFrontendUrl;
+                }
+
                 if (string.IsNullOrEmpty(githubUrl)) return false;
                 var uri = new Uri(githubUrl);
                 var pathParts = uri.AbsolutePath.TrimStart('/').Split('/');
@@ -12934,7 +13022,7 @@ APPROVAL: no    (request changes before merge)";
         /// Checks if a branch exists and is unmerged (has commits not in main)
         /// </summary>
         [HttpGet("use/is-open-branch")]
-        public async Task<ActionResult<object>> IsOpenBranch([FromQuery] string boardId, [FromQuery] string branchName, [FromQuery] bool isBackend)
+        public async Task<ActionResult<object>> IsOpenBranch([FromQuery] string boardId, [FromQuery] string branchName, [FromQuery] bool isBackend, [FromQuery] int studentId = 0)
         {
             try
             {
@@ -12962,6 +13050,16 @@ APPROVAL: no    (request changes before merge)";
 
                 // Determine GitHub URL based on isBackend
                 var githubUrl = isBackend ? board.GithubBackendUrl : board.GithubFrontendUrl;
+
+                // QuestMode: board-level URLs are null; resolve per-student URL from QuestBoards
+                if (string.IsNullOrEmpty(githubUrl) && studentId > 0)
+                {
+                    var qb = await _context.QuestBoards.AsNoTracking()
+                        .FirstOrDefaultAsync(q => q.BoardId == boardId && q.StudentId == studentId);
+                    if (qb != null)
+                        githubUrl = isBackend ? qb.GithubBackendUrl : qb.GithubFrontendUrl;
+                }
+
                 if (string.IsNullOrEmpty(githubUrl))
                 {
                     return BadRequest(new { Success = false, Message = $"GitHub {(isBackend ? "backend" : "frontend")} URL not found for board" });

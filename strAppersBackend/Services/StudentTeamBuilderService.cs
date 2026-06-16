@@ -17,6 +17,7 @@ namespace strAppersBackend.Services
         private readonly IConfiguration _configuration;
         private readonly ILogger<StudentTeamBuilderService> _logger;
         private readonly KickoffConfig _kickoffConfig;
+        private readonly ISmtpEmailService _emailService;
 
         public StudentTeamBuilderService(
             ApplicationDbContext context,
@@ -25,7 +26,8 @@ namespace strAppersBackend.Services
             IHttpClientFactory httpClientFactory,
             IConfiguration configuration,
             ILogger<StudentTeamBuilderService> logger,
-            IOptions<KickoffConfig> kickoffConfig)
+            IOptions<KickoffConfig> kickoffConfig,
+            ISmtpEmailService emailService)
         {
             _context = context;
             _sprintMergeService = sprintMergeService;
@@ -34,6 +36,7 @@ namespace strAppersBackend.Services
             _configuration = configuration;
             _logger = logger;
             _kickoffConfig = kickoffConfig.Value;
+            _emailService = emailService;
         }
 
         /// <inheritdoc />
@@ -159,6 +162,10 @@ namespace strAppersBackend.Services
                 var instituteId = instituteGroup.Key;
                 var instituteStudents = instituteGroup.ToList();
 
+                var institute = await _context.Institutes.AsNoTracking()
+                    .FirstOrDefaultAsync(i => i.Id == instituteId);
+                var isSingleQuestMode = institute != null && institute.QuestMode && institute.SingleQuest;
+
                 var activeTemplates = await _context.InstituteTemplates
                     .Include(t => t.Squad)
                         .ThenInclude(sq => sq.Roles)
@@ -224,6 +231,77 @@ namespace strAppersBackend.Services
                         {
                             var couponCandidates = couponGroup.ToList();
                             var couponLabel = couponGroup.Key ?? "(no coupon)";
+
+                            // SingleQuest: QuestMode institute where each student gets their own board immediately
+                            if (isSingleQuestMode)
+                            {
+                                var eligible = couponCandidates.Where(s => !processedStudentIds.Contains(s.Id)).ToList();
+                                var batchStart = DateTime.UtcNow;
+                                _logger.LogInformation("[INSTITUTE-TEAM-BUILDER] SingleQuest batch start — Institute={InstituteId}, IpId={IpId}, Coupon={Coupon}, Students={Count}, Time={Time:O}",
+                                    instituteId, ipId, couponLabel, eligible.Count, batchStart);
+
+                                var sem = new SemaphoreSlim(5);
+                                var localMessages = new System.Collections.Concurrent.ConcurrentBag<(bool Success, int StudentId, string Msg, TimeSpan Elapsed)>();
+
+                                await Task.WhenAll(eligible.Select(async student =>
+                                {
+                                    await sem.WaitAsync();
+                                    var studentStart = DateTime.UtcNow;
+                                    _logger.LogInformation("[INSTITUTE-TEAM-BUILDER] SingleQuest provisioning start — StudentId={StudentId}, Time={Time:O}", student.Id, studentStart);
+                                    try
+                                    {
+                                        var singleBoard = await CallCreateBoardAsync(ip.BaseProjectId.Value, ip.Id, new List<Student> { student }, false, ip.Title);
+                                        var elapsed = DateTime.UtcNow - studentStart;
+                                        var msg = singleBoard.Success
+                                            ? $"Institute {instituteId}, IpId {ipId}, Coupon={couponLabel} (SingleQuest): board created for student {student.Id} in {elapsed.TotalSeconds:F1}s."
+                                            : $"Institute {instituteId}, IpId {ipId}, Coupon={couponLabel} (SingleQuest): CreateBoard FAILED for student {student.Id} after {elapsed.TotalSeconds:F1}s — {singleBoard.Error}";
+                                        _logger.LogInformation("[INSTITUTE-TEAM-BUILDER] SingleQuest provisioning end — StudentId={StudentId}, Success={Success}, ElapsedSeconds={Elapsed:F1}",
+                                            student.Id, singleBoard.Success, elapsed.TotalSeconds);
+                                        localMessages.Add((singleBoard.Success, student.Id, msg, elapsed));
+                                    }
+                                    finally { sem.Release(); }
+                                }));
+
+                                var batchElapsed = DateTime.UtcNow - batchStart;
+                                var successCount = localMessages.Count(r => r.Success);
+                                var failCount = localMessages.Count(r => !r.Success);
+
+                                _logger.LogInformation("[INSTITUTE-TEAM-BUILDER] SingleQuest batch end — Institute={InstituteId}, IpId={IpId}, Success={S}, Failed={F}, TotalSeconds={Elapsed:F1}",
+                                    instituteId, ipId, successCount, failCount, batchElapsed.TotalSeconds);
+
+                                foreach (var (success, studentId, msg, _) in localMessages)
+                                {
+                                    messages.Add(msg);
+                                    if (success) { created++; processedStudentIds.Add(studentId); _logger.LogInformation("[INSTITUTE-TEAM-BUILDER] {Message}", msg); }
+                                    else { skipped++; _logger.LogWarning("[INSTITUTE-TEAM-BUILDER] {Message}", msg); }
+                                }
+
+                                // Email timing report
+                                try
+                                {
+                                    var adminEmail = _configuration["AdminNotificationEmail"] ?? "oferlav@gmail.com";
+                                    var rows = localMessages
+                                        .OrderBy(r => r.StudentId)
+                                        .Select(r => $"  Student {r.StudentId}: {(r.Success ? "OK" : "FAILED")} — {r.Elapsed.TotalSeconds:F1}s  {(r.Success ? "" : r.Msg.Split('—').LastOrDefault()?.Trim())}");
+                                    var body = $"SingleQuest Provisioning Report\n" +
+                                               $"================================\n" +
+                                               $"Institute:    {instituteId}\n" +
+                                               $"Project:      {ip.Title} (IpId={ipId})\n" +
+                                               $"Coupon:       {couponLabel}\n" +
+                                               $"Started:      {batchStart:yyyy-MM-dd HH:mm:ss} UTC\n" +
+                                               $"Total time:   {batchElapsed.TotalSeconds:F1}s\n" +
+                                               $"Students:     {eligible.Count} total, {successCount} OK, {failCount} failed\n\n" +
+                                               $"Per-student timings:\n" +
+                                               string.Join("\n", rows);
+                                    await _emailService.SendPlainEmailAsync(adminEmail, $"[SingleQuest] {successCount}/{eligible.Count} boards created — {batchElapsed.TotalSeconds:F1}s", body);
+                                }
+                                catch (Exception emailEx)
+                                {
+                                    _logger.LogWarning(emailEx, "[INSTITUTE-TEAM-BUILDER] SingleQuest: failed to send timing email (non-critical)");
+                                }
+
+                                continue;
+                            }
 
                             if (template == null)
                             {

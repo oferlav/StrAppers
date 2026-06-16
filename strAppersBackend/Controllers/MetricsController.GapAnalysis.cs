@@ -847,9 +847,9 @@ public partial class MetricsController
                         .FirstOrDefaultAsync(s => s.Id == studentId, cancellationToken);
                     if (stu?.RoleIndex > 0) roleIndex = stu.RoleIndex;
                 }
-                await AppendGitHubDeveloperArtifactsAsync(sb, boardId, board, sprintNumber, trelloRoleLabel, isBackend, ghToken, cancellationToken, roleIndex);
+                await AppendGitHubDeveloperArtifactsAsync(sb, boardId, board, sprintNumber, trelloRoleLabel, isBackend, ghToken, cancellationToken, roleIndex, studentId);
                 if (includeBothRepos)
-                    await AppendGitHubDeveloperArtifactsAsync(sb, boardId, board, sprintNumber, trelloRoleLabel, !isBackend, ghToken, cancellationToken, roleIndex);
+                    await AppendGitHubDeveloperArtifactsAsync(sb, boardId, board, sprintNumber, trelloRoleLabel, !isBackend, ghToken, cancellationToken, roleIndex, studentId);
             }
         }
 
@@ -1043,6 +1043,7 @@ public partial class MetricsController
     /// <summary>
     /// Compares the sprint branch to the integration branch (usually <c>main</c>). Set <c>GitHub:GapAnalysisCompareBaseBranch</c> or legacy <c>GitHub:GapAnalysisBaseBranch</c>.
     /// When the sprint role card has a <c>BranchContext</c> custom field (e.g. <c>Bugs</c>), that overrides the default <c>{sprint}-B/F</c> or Bugs branch naming for this track.
+    /// In QuestMode the board-level GitHub URLs are null; per-student URLs come from the QuestBoards table.
     /// </summary>
     private async Task AppendGitHubDeveloperArtifactsAsync(
         StringBuilder sb,
@@ -1053,9 +1054,18 @@ public partial class MetricsController
         bool isBackend,
         string token,
         CancellationToken cancellationToken,
-        int roleIndex = 0)
+        int roleIndex = 0,
+        int studentId = 0)
     {
-        var repoUrl = isBackend ? board.GithubBackendUrl : board.GithubFrontendUrl;
+        // QuestMode: board URLs are null; resolve per-student URL from QuestBoards
+        string? repoUrl = isBackend ? board.GithubBackendUrl : board.GithubFrontendUrl;
+        if (string.IsNullOrEmpty(repoUrl) && studentId > 0)
+        {
+            var qb = await _context.QuestBoards.AsNoTracking()
+                .FirstOrDefaultAsync(q => q.BoardId == boardId && q.StudentId == studentId, cancellationToken);
+            if (qb != null)
+                repoUrl = isBackend ? qb.GithubBackendUrl : qb.GithubFrontendUrl;
+        }
         sb.AppendLine($"### Skill — GitHub ({(isBackend ? "Backend" : "Frontend")} repository)");
         if (string.IsNullOrWhiteSpace(repoUrl) || !TryParseOwnerRepo(repoUrl, out var owner, out var repo))
         {
