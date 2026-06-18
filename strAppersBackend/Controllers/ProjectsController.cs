@@ -3860,7 +3860,9 @@ Staff request:
                     IsActive = t.IsActive,
                     CourseType = t.CourseType,
                     RoleCount = t.RoleCount,
-                    ProjectLogo = t.InstituteProjectId != null ? t.InstituteProject!.Logo : t.Project!.Logo,
+                    ProjectLogo = t.InstituteProjectId != null
+                        ? (t.InstituteProject!.Logo ?? t.InstituteProject!.BaseProject!.Logo)
+                        : t.Project!.Logo,
                 })
                 .OrderByDescending(x => x.InstituteTemplateId)
                 .ToListAsync();
