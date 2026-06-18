@@ -231,6 +231,8 @@ public partial class ProjectsController : ControllerBase
         public string? CourseType { get; set; }
         /// <summary>Number of parallel students for Role-type courses (1–5). Only set for institute rows.</summary>
         public int? RoleCount { get; set; }
+        /// <summary>Logo/image URL of the linked project or institute project design.</summary>
+        public string? ProjectLogo { get; set; }
     }
 
     /// <summary>Project row for Courses &quot;Create Course&quot; project combo (institute-owned and optional global built-ins).</summary>
@@ -3858,6 +3860,7 @@ Staff request:
                     IsActive = t.IsActive,
                     CourseType = t.CourseType,
                     RoleCount = t.RoleCount,
+                    ProjectLogo = t.InstituteProjectId != null ? t.InstituteProject!.Logo : t.Project!.Logo,
                 })
                 .OrderByDescending(x => x.InstituteTemplateId)
                 .ToListAsync();
@@ -3888,6 +3891,7 @@ Staff request:
                     Name = p.CourseName ?? p.Title,
                     ProjectTitle = p.Title,
                     InUse = p.InUse,
+                    ProjectLogo = p.Logo,
                 })
                 .ToListAsync();
 
