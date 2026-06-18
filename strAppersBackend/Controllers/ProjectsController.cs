@@ -3862,7 +3862,12 @@ Staff request:
                     RoleCount = t.RoleCount,
                     ProjectLogo = t.InstituteProjectId != null
                         ? t.InstituteProject!.Logo
-                        : t.Project!.Organization!.Logo,
+                        : (_context.InstituteProjects
+                            .Where(ip => ip.BaseProjectId == t.ProjectId && ip.InstituteId == instituteId && ip.Logo != null && ip.Logo != "")
+                            .Select(ip => ip.Logo)
+                            .FirstOrDefault()
+                           ?? t.Project!.Logo
+                           ?? t.Project!.Organization!.Logo),
                 })
                 .OrderByDescending(x => x.InstituteTemplateId)
                 .ToListAsync();
