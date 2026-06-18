@@ -3861,8 +3861,8 @@ Staff request:
                     CourseType = t.CourseType,
                     RoleCount = t.RoleCount,
                     ProjectLogo = t.InstituteProjectId != null
-                        ? (t.InstituteProject!.Logo ?? t.InstituteProject!.BaseProject!.Logo)
-                        : t.Project!.Logo,
+                        ? t.InstituteProject!.Logo
+                        : t.Project!.Organization!.Logo,
                 })
                 .OrderByDescending(x => x.InstituteTemplateId)
                 .ToListAsync();
