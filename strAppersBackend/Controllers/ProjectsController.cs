@@ -1408,6 +1408,116 @@ public partial class ProjectsController : ControllerBase
     }
 
     /// <summary>
+    /// Returns available InstituteProjects for a given institute without requiring a student.
+    /// Intended for public/anonymous views (e.g. landing page). No coupon filtering is applied.
+    /// Route: GET /api/Projects/use/institute/available/by-institute/{instituteId}
+    /// </summary>
+    [HttpGet("use/institute/available/by-institute/{instituteId:int}")]
+    public async Task<ActionResult> GetAvailableInstituteProjectsByInstituteId(int instituteId)
+    {
+        try
+        {
+            var projects = await _context.InstituteProjects
+                .Where(p => p.InstituteId == instituteId && p.IsAvailable)
+                .Select(p => new
+                {
+                    p.Id,
+                    p.Title,
+                    p.Mission,
+                    p.OneLiner,
+                    p.Description,
+                    p.ExtendedDescription,
+                    p.ShortBrief,
+                    p.Priority,
+                    p.IsAvailable,
+                    p.InUse,
+                    p.Logo,
+                    p.BuiltInCourseName,
+                    p.CreatedAt,
+                    p.UpdatedAt,
+                    ApplicantsCount = _context.Students.Count(s => s.Status.HasValue && s.Status <= 1 && (
+                        s.InstitutePriority1 == p.Id ||
+                        s.InstitutePriority2 == p.Id ||
+                        s.InstitutePriority3 == p.Id ||
+                        s.InstitutePriority4 == p.Id
+                    ))
+                })
+                .ToListAsync();
+
+            var projectIds = projects.Select(p => p.Id).ToList();
+
+            var squadRolesFlat = await _context.InstituteTemplates
+                .Where(t => t.InstituteProjectId != null &&
+                            projectIds.Contains(t.InstituteProjectId.Value) &&
+                            t.IsActive &&
+                            t.SquadId != null)
+                .SelectMany(t => _context.Roles
+                    .Where(r => r.SquadId == t.SquadId && r.IsActive)
+                    .Select(r => new { ProjectId = t.InstituteProjectId!.Value, r.Name, r.Type }))
+                .ToListAsync();
+
+            var templateMetadata = await _context.InstituteTemplates
+                .Where(t => t.InstituteProjectId != null &&
+                            projectIds.Contains(t.InstituteProjectId.Value) &&
+                            t.IsActive)
+                .Select(t => new
+                {
+                    ProjectId = t.InstituteProjectId!.Value,
+                    RequireDeveloperRule = t.Squad != null && t.Squad.RequireDeveloperRule,
+                    t.CourseType,
+                    t.RoleCount,
+                })
+                .ToListAsync();
+
+            var squadRolesByProject = squadRolesFlat
+                .GroupBy(r => r.ProjectId)
+                .ToDictionary(
+                    g => g.Key,
+                    g => (IEnumerable<object>)g
+                        .GroupBy(r => r.Name, StringComparer.OrdinalIgnoreCase)
+                        .Select(ng => (object)new { ng.First().Name, ng.First().Type })
+                        .ToList()
+                );
+
+            var metaByProject = templateMetadata
+                .GroupBy(m => m.ProjectId)
+                .ToDictionary(g => g.Key, g => g.First());
+
+            return Ok(projects.Select(p =>
+            {
+                var meta = metaByProject.GetValueOrDefault(p.Id);
+                return new
+                {
+                    p.Id,
+                    p.Title,
+                    p.Mission,
+                    p.OneLiner,
+                    p.Description,
+                    p.ExtendedDescription,
+                    p.ShortBrief,
+                    p.Priority,
+                    p.IsAvailable,
+                    p.InUse,
+                    p.Logo,
+                    p.BuiltInCourseName,
+                    p.CreatedAt,
+                    p.UpdatedAt,
+                    p.ApplicantsCount,
+                    SquadRoles = squadRolesByProject.GetValueOrDefault(p.Id, Enumerable.Empty<object>()),
+                    RequireDeveloperRule = meta?.RequireDeveloperRule ?? false,
+                    CourseType = meta?.CourseType,
+                    RoleCount = meta?.RoleCount,
+                };
+            }));
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error retrieving institute projects for institute {InstituteId}", instituteId);
+            return StatusCode(500, "An error occurred while retrieving institute projects.");
+        }
+    }
+
+    /// <summary>
     /// Get all available projects for the given institute.
     /// Built-in catalog rows are always included (even when activated/copied into <c>InstituteProjects</c>).
     /// Route: GET /api/Projects/use/by-institute
