@@ -84,6 +84,26 @@ builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen(c =>
 {
     c.SchemaFilter<GapAnalysisRequestSchemaFilter>();
+    c.AddSecurityDefinition("BasicAuth", new Microsoft.OpenApi.Models.OpenApiSecurityScheme
+    {
+        Type   = Microsoft.OpenApi.Models.SecuritySchemeType.Http,
+        Scheme = "basic",
+        Description = "Greenhouse Basic Auth — enter API key as username, leave password blank"
+    });
+    c.AddSecurityRequirement(new Microsoft.OpenApi.Models.OpenApiSecurityRequirement
+    {
+        {
+            new Microsoft.OpenApi.Models.OpenApiSecurityScheme
+            {
+                Reference = new Microsoft.OpenApi.Models.OpenApiReference
+                {
+                    Type = Microsoft.OpenApi.Models.ReferenceType.SecurityScheme,
+                    Id   = "BasicAuth"
+                }
+            },
+            Array.Empty<string>()
+        }
+    });
 });
 
 // Add Entity Framework
