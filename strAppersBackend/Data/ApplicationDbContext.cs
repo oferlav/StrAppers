@@ -42,6 +42,9 @@ public class ApplicationDbContext : DbContext
         public DbSet<EmployerBoard> EmployerBoards { get; set; }
         public DbSet<EmployerAdd> EmployerAdds { get; set; }
         public DbSet<EmployerCandidate> EmployerCandidates { get; set; }
+        public DbSet<AtsConnection> AtsConnections { get; set; }
+        public DbSet<AtsJobPosting> AtsJobPostings { get; set; }
+        public DbSet<AtsAssessmentInstance> AtsAssessmentInstances { get; set; }
     public DbSet<AIModel> AIModels { get; set; }
     public DbSet<MentorChatHistory> MentorChatHistory { get; set; }
     public DbSet<BoardState> BoardStates { get; set; }
@@ -1613,6 +1616,94 @@ public class ApplicationDbContext : DbContext
             entity.HasIndex(e => e.StudentId);
             entity.HasIndex(e => e.BoardId);
             entity.HasIndex(e => new { e.StudentId, e.BoardId }).IsUnique();
+        });
+
+        // Configure AtsConnection entity
+        modelBuilder.Entity<AtsConnection>(entity =>
+        {
+            entity.HasKey(e => e.Id);
+            entity.Property(e => e.EmployerId).IsRequired();
+            entity.Property(e => e.Provider).IsRequired().HasMaxLength(50);
+            entity.Property(e => e.Mode).IsRequired().HasMaxLength(50);
+            entity.Property(e => e.ConnectionConfigJson).HasColumnType("text");
+            entity.Property(e => e.IsActive).HasDefaultValue(true);
+            entity.Property(e => e.CreatedAt).HasDefaultValueSql("CURRENT_TIMESTAMP");
+
+            entity.HasOne(e => e.Employer)
+                  .WithMany()
+                  .HasForeignKey(e => e.EmployerId)
+                  .OnDelete(DeleteBehavior.Cascade);
+
+            entity.HasIndex(e => e.EmployerId);
+            entity.HasIndex(e => new { e.EmployerId, e.Provider });
+        });
+
+        // Configure AtsJobPosting entity
+        modelBuilder.Entity<AtsJobPosting>(entity =>
+        {
+            entity.HasKey(e => e.Id);
+            entity.Property(e => e.EmployerId).IsRequired();
+            entity.Property(e => e.Provider).IsRequired().HasMaxLength(50).HasDefaultValue("manual");
+            entity.Property(e => e.ExternalJobId).HasMaxLength(100);
+            entity.Property(e => e.IsAtsSynced).HasDefaultValue(false);
+            entity.Property(e => e.Title).IsRequired().HasMaxLength(500);
+            entity.Property(e => e.Location).HasMaxLength(500);
+            entity.Property(e => e.Department).HasMaxLength(200);
+            entity.Property(e => e.EmploymentType).HasMaxLength(100);
+            entity.Property(e => e.Description).HasColumnType("text");
+            entity.Property(e => e.Challenge).HasColumnType("text");
+            entity.Property(e => e.Resource).HasMaxLength(1000);
+            entity.Property(e => e.ResourceGithubUrl).HasMaxLength(1000);
+            entity.Property(e => e.Expectations).HasColumnType("text");
+            entity.Property(e => e.QA).HasColumnType("text");
+            entity.Property(e => e.RawMetadataJson).HasColumnType("text");
+            entity.Property(e => e.IsPublic).HasDefaultValue(false);
+            entity.Property(e => e.IsActive).HasDefaultValue(true);
+            entity.Property(e => e.CreatedAt).HasDefaultValueSql("CURRENT_TIMESTAMP");
+
+            entity.HasOne(e => e.Employer)
+                  .WithMany()
+                  .HasForeignKey(e => e.EmployerId)
+                  .OnDelete(DeleteBehavior.Cascade);
+
+            entity.HasOne(e => e.AtsConnection)
+                  .WithMany()
+                  .HasForeignKey(e => e.AtsConnectionId)
+                  .OnDelete(DeleteBehavior.SetNull);
+
+            entity.HasIndex(e => e.EmployerId);
+            entity.HasIndex(e => new { e.ExternalJobId, e.EmployerId }).IsUnique()
+                  .HasFilter("\"ExternalJobId\" IS NOT NULL");
+        });
+
+        // Configure AtsAssessmentInstance entity
+        modelBuilder.Entity<AtsAssessmentInstance>(entity =>
+        {
+            entity.HasKey(e => e.Id);
+            entity.Property(e => e.Provider).IsRequired().HasMaxLength(50);
+            entity.Property(e => e.ExternalInterviewId).IsRequired().HasMaxLength(100);
+            entity.Property(e => e.ExternalTestId).IsRequired().HasMaxLength(100);
+            entity.Property(e => e.CandidateEmail).IsRequired().HasMaxLength(255);
+            entity.Property(e => e.CandidateFirstName).HasMaxLength(100);
+            entity.Property(e => e.CandidateLastName).HasMaxLength(100);
+            entity.Property(e => e.ExternalProfileUrl).HasMaxLength(1000);
+            entity.Property(e => e.CallbackUrl).HasMaxLength(1000);
+            entity.Property(e => e.Status).IsRequired().HasMaxLength(50).HasDefaultValue("not_started");
+            entity.Property(e => e.Score).HasColumnType("decimal(10,2)");
+            entity.Property(e => e.ProfileUrl).HasMaxLength(1000);
+            entity.Property(e => e.SentBy).HasMaxLength(255);
+            entity.Property(e => e.CreatedAt).HasDefaultValueSql("CURRENT_TIMESTAMP");
+
+            entity.HasOne(e => e.JobPosting)
+                  .WithMany(j => j.AssessmentInstances)
+                  .HasForeignKey(e => e.JobPostingId)
+                  .OnDelete(DeleteBehavior.SetNull);
+
+            entity.HasIndex(e => e.ExternalInterviewId).IsUnique();
+            entity.HasIndex(e => e.CandidateEmail);
+            entity.HasIndex(e => e.Status);
+            entity.HasIndex(e => e.StudentId);
+            entity.HasIndex(e => e.JobPostingId);
         });
     }
 }

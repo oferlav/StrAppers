@@ -186,6 +186,9 @@ builder.Services.AddScoped<IKickoffService, KickoffService>();
 // Add Password Hasher service
 builder.Services.AddScoped<IPasswordHasherService, PasswordHasherService>();
 
+// Greenhouse Assessment Partner integration
+builder.Services.AddScoped<GreenhouseAssessmentService>();
+
 // Add Affinda service
 builder.Services.AddScoped<IAffindaService, AffindaService>();
 
