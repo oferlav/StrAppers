@@ -25,6 +25,10 @@ public class GreenhouseAssessmentController : ControllerBase
         _configuration = configuration;
     }
 
+    // GET /api/greenhouse/assessment/ping — no auth, confirms deployment is live
+    [HttpGet("ping")]
+    public IActionResult Ping() => Ok(new { status = "ok" });
+
     // GET /api/greenhouse/assessment/list-tests
     // Greenhouse calls this to populate the test picker when a recruiter sets up an interview stage.
     [HttpGet("list-tests")]
