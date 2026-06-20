@@ -50,7 +50,7 @@ public class Worker : BackgroundService
                 var created = await TryCreateBoardsAsync(connectionString, baseUrl, stoppingToken);
                 _logger.LogInformation("[ITERATION] Completed at {Time}. Boards created: {Created}", DateTime.UtcNow, created);
 
-                await LogInstituteDiagnosticsAsync(connectionString, stoppingToken);
+                await LogInstituteDiagnosticsAsync(connectionString, baseUrl, stoppingToken);
                 await CallRunDueSprintMergesAsync(baseUrl, stoppingToken);
             }
             catch (Exception ex)
@@ -372,8 +372,11 @@ public class Worker : BackgroundService
         }
     }
 
-    private async Task LogInstituteDiagnosticsAsync(string connectionString, CancellationToken ct)
+    private async Task LogInstituteDiagnosticsAsync(string connectionString, string baseUrl, CancellationToken ct)
     {
+        var sb = new System.Text.StringBuilder();
+        sb.AppendLine($"[Institute Diagnostics] {DateTime.UtcNow:u}");
+        sb.AppendLine();
         try
         {
             using var conn = new NpgsqlConnection(connectionString);
@@ -397,16 +400,12 @@ public class Worker : BackgroundService
 
             var students = (await conn.QueryAsync<InstituteStudentRow>(new CommandDefinition(studentSql, cancellationToken: ct))).ToList();
             _logger.LogInformation("[INSTITUTE-CANDIDATES] Students with InstitutePriority set: {Count}", students.Count);
+            sb.AppendLine($"CANDIDATES ({students.Count}):");
             foreach (var s in students)
             {
-                _logger.LogInformation(
-                    "[INSTITUTE-CANDIDATES]   StudentId={StudentId} Status={Status} InstituteId={InstituteId} RoleIndex={RoleIndex} RoleId={RoleId} RoleName={RoleName} RoleType={RoleType} P1={P1} P2={P2} P3={P3} P4={P4} Coupon={Coupon} StartPendingAt={StartPendingAt}",
-                    s.StudentId, s.Status, s.InstituteId?.ToString() ?? "NULL", s.RoleIndex,
-                    s.RoleId?.ToString() ?? "NULL", s.RoleName ?? "NULL", s.RoleType?.ToString() ?? "NULL",
-                    s.InstitutePriority1?.ToString() ?? "NULL", s.InstitutePriority2?.ToString() ?? "NULL",
-                    s.InstitutePriority3?.ToString() ?? "NULL", s.InstitutePriority4?.ToString() ?? "NULL",
-                    s.Coupon ?? "NULL",
-                    s.StartPendingAt?.ToString("u") ?? "NULL");
+                var line = $"  StudentId={s.StudentId} Status={s.Status} InstituteId={s.InstituteId?.ToString() ?? "NULL"} RoleIndex={s.RoleIndex} RoleId={s.RoleId?.ToString() ?? "NULL"} RoleName={s.RoleName ?? "NULL"} RoleType={s.RoleType?.ToString() ?? "NULL"} P1={s.InstitutePriority1?.ToString() ?? "NULL"} P2={s.InstitutePriority2?.ToString() ?? "NULL"} P3={s.InstitutePriority3?.ToString() ?? "NULL"} P4={s.InstitutePriority4?.ToString() ?? "NULL"} Coupon={s.Coupon ?? "NULL"} StartPendingAt={s.StartPendingAt?.ToString("u") ?? "NULL"}";
+                _logger.LogInformation("[INSTITUTE-CANDIDATES]  {Line}", line);
+                sb.AppendLine(line);
             }
 
             // Per-project summary: how many pending students per InstituteProject
@@ -434,17 +433,32 @@ public class Worker : BackgroundService
 
             var projects = (await conn.QueryAsync<InstituteProjectRow>(new CommandDefinition(projectSql, cancellationToken: ct))).ToList();
             _logger.LogInformation("[INSTITUTE-GROUP] Institute projects with students: {Count}", projects.Count);
+            sb.AppendLine();
+            sb.AppendLine($"PROJECTS ({projects.Count}):");
             foreach (var p in projects)
             {
-                _logger.LogInformation(
-                    "[INSTITUTE-GROUP]   ProjectId={ProjectId} Name={Name} Total={Total} Pending(Status=1)={Pending} StudentIds=[{Ids}] Roles=[{Roles}] RoleIndexes=[{Indexes}] Statuses=[{Statuses}]",
-                    p.ProjectId, p.ProjectName ?? "Unknown", p.TotalCount, p.PendingCount,
-                    p.StudentIds ?? "", p.RoleNames ?? "", p.RoleIndexes ?? "", p.Statuses ?? "");
+                var line = $"  ProjectId={p.ProjectId} Name={p.ProjectName ?? "Unknown"} Total={p.TotalCount} Pending(Status=1)={p.PendingCount} StudentIds=[{p.StudentIds ?? ""}] Roles=[{p.RoleNames ?? ""}] RoleIndexes=[{p.RoleIndexes ?? ""}] Statuses=[{p.Statuses ?? ""}]";
+                _logger.LogInformation("[INSTITUTE-GROUP]  {Line}", line);
+                sb.AppendLine(line);
             }
         }
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "[INSTITUTE-CANDIDATES] Diagnostic query failed: {Message}", ex.Message);
+            sb.AppendLine($"ERROR: {ex.Message}");
+        }
+
+        // Email the diagnostics
+        try
+        {
+            var client = _httpClientFactory.CreateClient();
+            client.Timeout = TimeSpan.FromSeconds(15);
+            var payload = new { Subject = $"[TeamBuilder Institute Diagnostics] {DateTime.UtcNow:yyyy-MM-dd HH:mm}Z", Body = sb.ToString() };
+            await client.PostAsJsonAsync($"{baseUrl}/api/Email/use/send-debug", payload, ct);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[INSTITUTE-CANDIDATES] Failed to send diagnostics email: {Message}", ex.Message);
         }
     }
 

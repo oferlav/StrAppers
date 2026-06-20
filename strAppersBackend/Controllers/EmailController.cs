@@ -86,6 +86,16 @@ public class EmailController : ControllerBase
         return Ok(new { message = "Email sent successfully.", to = request.StudentEmail });
     }
 
+    /// <summary>Sends a plain-text debug email to ofer@skill-in.com. Used by internal services (e.g. StudentTeamBuilderService) that have no direct SMTP access.</summary>
+    [HttpPost("send-debug")]
+    public async Task<IActionResult> SendDebug([FromBody] SendDebugEmailRequest request)
+    {
+        if (string.IsNullOrWhiteSpace(request.Subject) || string.IsNullOrWhiteSpace(request.Body))
+            return BadRequest("Subject and Body are required.");
+        try { await _smtpEmailService.SendPlainEmailAsync("ofer@skill-in.com", request.Subject, request.Body); } catch { }
+        return Ok();
+    }
+
     /// <summary>Reads Assets/logo.png and returns a data URI for inline embedding, or null if file is missing.</summary>
     private string? GetInlineLogoDataUri()
     {
@@ -179,4 +189,10 @@ public class NotifyApplicantRequest
     public string StudentEmail { get; set; } = string.Empty;
     public string? EmailTitle { get; set; }
     public string? EmailBody { get; set; }
+}
+
+public class SendDebugEmailRequest
+{
+    public string Subject { get; set; } = string.Empty;
+    public string Body { get; set; } = string.Empty;
 }
