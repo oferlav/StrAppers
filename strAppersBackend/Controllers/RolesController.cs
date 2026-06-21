@@ -211,10 +211,6 @@ namespace strAppersBackend.Controllers
                 }
 
                 var now = DateTime.UtcNow;
-                var payloadPositiveIds = request.Roles
-                    .Where(r => r.Id.HasValue && r.Id.Value > 0)
-                    .Select(r => r.Id!.Value)
-                    .ToHashSet();
 
                 await using var tx = await _context.Database.BeginTransactionAsync();
 
@@ -352,6 +348,10 @@ namespace strAppersBackend.Controllers
                     .Where(r => r.InstituteId == request.InstituteId && r.SquadId == null)
                     .ToListAsync();
 
+                // Track every existing row that the payload touches (by ID or by name fallback)
+                // so that only truly omitted rows are deleted at the end.
+                var survivingIds = new HashSet<int>();
+
                 foreach (var dto in request.Roles)
                 {
                     var name = dto.Name.Trim();
@@ -383,6 +383,7 @@ namespace strAppersBackend.Controllers
                         row.IsTechnical = dto.IsTechnical;
                         row.IsActive = dto.IsActive;
                         row.UpdatedAt = now;
+                        survivingIds.Add(row.Id);
                     }
                     else
                     {
@@ -405,7 +406,7 @@ namespace strAppersBackend.Controllers
                     }
                 }
 
-                var toRemove = existingForInstitute.Where(er => !payloadPositiveIds.Contains(er.Id)).ToList();
+                var toRemove = existingForInstitute.Where(er => !survivingIds.Contains(er.Id)).ToList();
                 if (toRemove.Count > 0)
                     _context.Roles.RemoveRange(toRemove);
 
