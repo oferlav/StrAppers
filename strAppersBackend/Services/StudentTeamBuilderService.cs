@@ -134,9 +134,6 @@ namespace strAppersBackend.Services
             var created = 0;
             var skipped = 0;
             var processedStudentIds = new HashSet<int>();
-            var diagLog = new StringBuilder();
-            diagLog.AppendLine($"[Institute Team Builder] {DateTime.UtcNow:u}");
-            diagLog.AppendLine();
 
             // All institute students not yet on a board, with at least one priority set
             var eligibleStudents = await _context.Students
@@ -153,19 +150,10 @@ namespace strAppersBackend.Services
             if (!eligibleStudents.Any())
             {
                 _logger.LogInformation("[INSTITUTE-TEAM-BUILDER] No eligible institute students found.");
-                diagLog.AppendLine("No eligible institute students found.");
-                await SendDiagEmailAsync(diagLog, created, skipped);
                 return (0, 0, messages);
             }
 
             _logger.LogInformation("[INSTITUTE-TEAM-BUILDER] Found {Count} eligible institute students.", eligibleStudents.Count);
-            diagLog.AppendLine($"Eligible students ({eligibleStudents.Count}):");
-            foreach (var es in eligibleStudents)
-            {
-                var esRole = es.StudentRoles.FirstOrDefault(r => r.IsActive)?.Role;
-                diagLog.AppendLine($"  StudentId={es.Id} InstituteId={es.InstituteId} Status={es.Status} Role={esRole?.Name ?? "none"} RoleType={esRole?.Type?.ToString() ?? "?"} Coupon={es.Coupon ?? "null"} P1={es.InstitutePriority1} P2={es.InstitutePriority2} P3={es.InstitutePriority3} P4={es.InstitutePriority4}");
-            }
-            diagLog.AppendLine();
 
             var byInstitute = eligibleStudents.GroupBy(s => s.InstituteId!.Value);
 
@@ -223,14 +211,12 @@ namespace strAppersBackend.Services
                         if (ip == null)
                         {
                             _logger.LogWarning("[INSTITUTE-TEAM-BUILDER] Institute {InstituteId}, IpId {IpId}: InstituteProject not found, skipping.", instituteId, ipId);
-                            diagLog.AppendLine($"  SKIP IpId={ipId}: InstituteProject row not found in DB.");
                             skipped++;
                             continue;
                         }
                         if (!ip.BaseProjectId.HasValue)
                         {
                             _logger.LogWarning("[INSTITUTE-TEAM-BUILDER] Institute {InstituteId}, IpId {IpId}: no BaseProjectId, skipping.", instituteId, ipId);
-                            diagLog.AppendLine($"  SKIP IpId={ipId} ({ip.Title}): BaseProjectId is NULL — cannot call CreateBoard without a catalog project.");
                             skipped++;
                             continue;
                         }
@@ -317,25 +303,19 @@ namespace strAppersBackend.Services
                                 continue;
                             }
 
-                            diagLog.AppendLine($"  IpId={ipId} ({ip.Title}) BaseProjectId={ip.BaseProjectId} Coupon={couponLabel} Candidates=[{string.Join(",", couponCandidates.Select(s => s.Id))}] Template={(template != null ? $"Id={template.Id} CourseType={template.CourseType}" : "none")} TrelloBoardJsonPresent={!string.IsNullOrWhiteSpace(ip.TrelloBoardJson)} IsAvailable={ip.IsAvailable}");
-
                             if (template == null)
                             {
                                 // No active template — handle as built-in project using institute base roles
                                 if (!ip.IsAvailable)
                                 {
                                     _logger.LogInformation("[INSTITUTE-TEAM-BUILDER] Institute {InstituteId}, IpId {IpId}: no template and project not available, skipping.", instituteId, ipId);
-                                    diagLog.AppendLine($"    SKIP: no active template and IsAvailable=false.");
                                     continue;
                                 }
                                 _logger.LogInformation("[INSTITUTE-TEAM-BUILDER] Institute {InstituteId}, IpId {IpId}, Coupon={Coupon}: no active template, attempting built-in team build.", instituteId, ipId, couponLabel);
-                                diagLog.AppendLine($"    No active template — trying built-in path. BaseRoles=[{string.Join(",", baseRoles.Select(r => $"{r.Name}(Type={r.Type})"))}]");
                                 var builtInTeam = TryBuildBuiltInTeam(couponCandidates, baseRoles, instituteId, ipId, ref skipped);
                                 if (builtInTeam == null || builtInTeam.Count == 0)
-                                {
-                                    diagLog.AppendLine($"    SKIP: built-in team build failed (not enough matching roles). Candidates roles=[{string.Join(",", couponCandidates.Select(s => s.StudentRoles.FirstOrDefault(r => r.IsActive)?.Role?.Name ?? "none"))}]");
                                     continue;
-                                }
+
                                 var builtInBoard = await CallCreateBoardAsync(ip.BaseProjectId.Value, ip.Id, builtInTeam, false, ip.Title);
                                 if (builtInBoard.Success)
                                 {
@@ -343,7 +323,6 @@ namespace strAppersBackend.Services
                                     foreach (var s in builtInTeam) processedStudentIds.Add(s.Id);
                                     var msg = $"Institute {instituteId}, IpId {ipId}, Coupon={couponLabel} (built-in): board created for {builtInTeam.Count} student(s).";
                                     messages.Add(msg);
-                                    diagLog.AppendLine($"    CREATED: {msg}");
                                     _logger.LogInformation("[INSTITUTE-TEAM-BUILDER] {Message}", msg);
                                 }
                                 else
@@ -351,7 +330,6 @@ namespace strAppersBackend.Services
                                     skipped++;
                                     var msg = $"Institute {instituteId}, IpId {ipId}, Coupon={couponLabel} (built-in): CreateBoard failed — {builtInBoard.Error}";
                                     messages.Add(msg);
-                                    diagLog.AppendLine($"    SKIP: CreateBoard HTTP call failed — {builtInBoard.Error}");
                                     _logger.LogWarning("[INSTITUTE-TEAM-BUILDER] {Message}", msg);
                                 }
                                 continue;
@@ -360,7 +338,6 @@ namespace strAppersBackend.Services
                             if (string.IsNullOrWhiteSpace(ip.TrelloBoardJson))
                             {
                                 _logger.LogWarning("[INSTITUTE-TEAM-BUILDER] Institute {InstituteId}, IpId {IpId}: TrelloBoardJson is empty, skipping.", instituteId, ipId);
-                                diagLog.AppendLine($"    SKIP: TrelloBoardJson is empty.");
                                 skipped++;
                                 continue;
                             }
@@ -378,10 +355,7 @@ namespace strAppersBackend.Services
                             }
 
                             if (team == null || team.Count == 0)
-                            {
-                                diagLog.AppendLine($"    SKIP: {template.CourseType} team build failed (roles not satisfied).");
                                 continue;
-                            }
 
                             // Assign RoleIndex for role-based courses before calling CreateBoard
                             if (isSingleRole)
@@ -409,7 +383,6 @@ namespace strAppersBackend.Services
                                 foreach (var s in team) processedStudentIds.Add(s.Id);
                                 var msg = $"Institute {instituteId}, IpId {ipId}, Coupon={couponLabel}: board created for {team.Count} student(s).";
                                 messages.Add(msg);
-                                diagLog.AppendLine($"    CREATED: {msg}");
                                 _logger.LogInformation("[INSTITUTE-TEAM-BUILDER] {Message}", msg);
                             }
                             else
@@ -417,7 +390,6 @@ namespace strAppersBackend.Services
                                 skipped++;
                                 var msg = $"Institute {instituteId}, IpId {ipId}, Coupon={couponLabel}: CreateBoard failed — {boardCreated.Error}";
                                 messages.Add(msg);
-                                diagLog.AppendLine($"    SKIP: CreateBoard HTTP call failed — {boardCreated.Error}");
                                 _logger.LogWarning("[INSTITUTE-TEAM-BUILDER] {Message}", msg);
                                 // Note: RoleIndex is NOT reverted on failure. The HTTP call to BoardsController
                                 // can time out (Azure 230s request limit) while the board is still being created
@@ -429,26 +401,7 @@ namespace strAppersBackend.Services
             }
 
             _logger.LogInformation("[INSTITUTE-TEAM-BUILDER] Complete. Created: {Created}, Skipped: {Skipped}.", created, skipped);
-            diagLog.AppendLine();
-            diagLog.AppendLine($"Result: Created={created}, Skipped={skipped}");
-            await SendDiagEmailAsync(diagLog, created, skipped);
             return (created, skipped, messages);
-        }
-
-        private async Task SendDiagEmailAsync(StringBuilder diagLog, int created, int skipped)
-        {
-            try
-            {
-                var adminEmail = _configuration["AdminNotificationEmail"] ?? "ofer@skill-in.com";
-                await _emailService.SendPlainEmailAsync(
-                    adminEmail,
-                    $"[Institute Team Builder] Created={created} Skipped={skipped} {DateTime.UtcNow:yyyy-MM-dd HH:mm}Z",
-                    diagLog.ToString());
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "[INSTITUTE-TEAM-BUILDER] Failed to send diagnostics email.");
-            }
         }
 
         // ──────────────────────────────────────────────────────────────────
