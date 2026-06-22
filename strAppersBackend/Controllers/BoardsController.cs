@@ -812,7 +812,12 @@ public partial class BoardsController : ControllerBase
             else
             {
                 _logger.LogInformation("Calling Trello service to create board");
-                trelloResponse = await _trelloService.CreateProjectWithSprintsAsync(trelloRequest, project.Title);
+                var projectModules = await _context.ProjectModules
+                    .Where(pm => pm.ProjectId == request.ProjectId && pm.ModuleType != 3)
+                    .OrderBy(pm => pm.Sequence)
+                    .Select(pm => new ProjectModuleInfo { Id = pm.Id, Title = pm.Title })
+                    .ToListAsync();
+                trelloResponse = await _trelloService.CreateProjectWithSprintsAsync(trelloRequest, project.Title, projectModules);
                 
                 if (trelloResponse == null)
                 {
@@ -3128,6 +3133,8 @@ public partial class BoardsController : ControllerBase
                 SprintPlan = sprintPlanForStorage != null ? System.Text.Json.JsonSerializer.Serialize(sprintPlanForStorage) : null,
                 BoardUrl = trelloResponse.BoardUrl,
                 SystemBoardId = trelloResponse.SystemBoardId, // Store SystemBoardId if CreatePMEmptyBoard is enabled
+                UserStoryBoardId  = trelloResponse.UserStoryBoardId,
+                UserStoryBoardUrl = trelloResponse.UserStoryBoardUrl,
                 NextMeetingTime = nextMeetingTime,
                 NextMeetingUrl = meetingUrl, // Will be updated after Teams meeting is created
                 GithubBackendUrl = backendRepositoryUrl,
@@ -4153,6 +4160,7 @@ public partial class BoardsController : ControllerBase
                 ["projectId"] = projectBoard.ProjectId,
                 ["projectName"] = projectBoard.Project?.Title ?? "",
                 ["boardUrl"] = projectBoard.BoardUrl ?? "",
+                ["userStoryBoardUrl"] = projectBoard.UserStoryBoardUrl ?? "",
                 ["publishUrl"] = projectBoard.PublishUrl ?? "",
                 ["observed"] = projectBoard.Observed,
                 ["githubBackendUrl"] = projectBoard.GithubBackendUrl ?? "",
@@ -4201,6 +4209,11 @@ public partial class BoardsController : ControllerBase
 
         try
         {
+            // Resolve to User Story board when one exists; fall back to main board for legacy boards (UserStoryBoardId=null).
+            var board = await _context.ProjectBoards.AsNoTracking()
+                .FirstOrDefaultAsync(b => b.Id == boardId.Trim());
+            var effectiveBoardId = board?.UserStoryBoardId ?? boardId.Trim();
+
             if (studentId.HasValue && sprintNumber.HasValue)
             {
                 var student = await _context.Students
@@ -4221,13 +4234,13 @@ public partial class BoardsController : ControllerBase
                 var moduleId = await _trelloService.GetModuleIdFromSprintCardAsync(boardId.Trim(), sprintNumber.Value, roleName);
                 if (string.IsNullOrWhiteSpace(moduleId))
                     return NotFound(new { Success = false, Message = "No ModuleId on sprint card for this role." });
-                var singleResult = await _trelloService.GetUserStoryCardByModuleIdAsync(boardId.Trim(), moduleId);
+                var singleResult = await _trelloService.GetUserStoryCardByModuleIdAsync(effectiveBoardId, moduleId);
                 if (singleResult == null)
                     return StatusCode(500, new { Success = false, Message = "Failed to get User Story by ModuleId." });
                 return Ok(singleResult);
             }
 
-            var result = await _trelloService.GetUserStoriesListAsync(boardId.Trim());
+            var result = await _trelloService.GetUserStoriesListAsync(effectiveBoardId);
             if (result == null)
                 return StatusCode(500, new { Success = false, Message = "Failed to get User Stories list." });
             return Ok(result);
@@ -4605,6 +4618,7 @@ public partial class BoardsController : ControllerBase
                 ["projectId"] = projectBoard.ProjectId,
                 ["projectName"] = projectBoard.Project?.Title ?? "",
                 ["boardUrl"] = projectBoard.BoardUrl ?? "",
+                ["userStoryBoardUrl"] = projectBoard.UserStoryBoardUrl ?? "",
                 ["members"] = ToCamelCaseKeys(membersResultNode) ?? membersResultNode
             };
 

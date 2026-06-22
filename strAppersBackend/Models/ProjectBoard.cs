@@ -294,6 +294,20 @@ namespace strAppersBackend.Models
         public string? SystemBoardId { get; set; }
 
         /// <summary>
+        /// Trello board ID of the dedicated User Story board (created when CreateUserStoryBoard=true).
+        /// Null for legacy boards — those fall back to querying the main board for user stories.
+        /// </summary>
+        [MaxLength(50)]
+        [Column("UserStoryBoardId")]
+        public string? UserStoryBoardId { get; set; }
+
+        /// <summary>
+        /// Trello board URL of the dedicated User Story board.
+        /// </summary>
+        [Column("UserStoryBoardUrl")]
+        public string? UserStoryBoardUrl { get; set; }
+
+        /// <summary>
         /// True when this record is the SystemBoard (full template board); false for the EmptyBoard or single board.
         /// </summary>
         [Column("IsSystemBoard")]

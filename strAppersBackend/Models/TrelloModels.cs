@@ -48,6 +48,13 @@ namespace strAppersBackend.Models
         /// When true (default), add the "User Stories" list to the board template (Projects.TrelloBoardJson) when using the add-user-story-list utility.
         /// </summary>
         public bool UserStoryList { get; set; } = true;
+        /// <summary>
+        /// When true, board creation splits the "User Stories" list onto a dedicated Trello board separate from the main sprint board.
+        /// One card is generated per ProjectModule (ModuleType != 3) with name "User Story: {module.Title}", ModuleId set, and an "Acceptance Criteria" checklist.
+        /// PM members (filtered by SendInvitationToPMOnly) are invited to the User Story board only; the main board receives no User Story list and no PM invitation.
+        /// Null UserStoryBoardId on ProjectBoard = legacy board; get-user-stories falls back to the main board.
+        /// </summary>
+        public bool CreateUserStoryBoard { get; set; } = false;
     }
 
     public class TrelloUserRegistrationRequest
@@ -262,6 +269,8 @@ namespace strAppersBackend.Models
         public string? BoardName { get; set; }  // This will store the board name
         public string? SystemBoardId { get; set; }  // This will store the SystemBoard ID (full board) when CreatePMEmptyBoard is true
         public string? SystemBoardUrl { get; set; }  // This will store the SystemBoard URL when CreatePMEmptyBoard is true
+        public string? UserStoryBoardId { get; set; }   // Dedicated User Story board ID (when CreateUserStoryBoard=true)
+        public string? UserStoryBoardUrl { get; set; }  // Dedicated User Story board URL (when CreateUserStoryBoard=true)
         public List<TrelloCreatedCard> CreatedCards { get; set; } = new List<TrelloCreatedCard>();
         public List<TrelloInvitedUser> InvitedUsers { get; set; } = new List<TrelloInvitedUser>();
         public List<string> Errors { get; set; } = new List<string>();
