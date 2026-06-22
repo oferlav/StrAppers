@@ -104,10 +104,31 @@ public class GoogleAuthController : ControllerBase
     {
         var frontendBase = GetFrontendBaseUrl();
 
+        // Resolve the effective frontend base from the state URL (= the returnUrl the SPA sent).
+        // This lets staging / branch-preview deployments receive the callback on their own origin
+        // instead of always being redirected to the configured production FrontendBaseUrl.
+        // The origin is validated against CorsOriginHelper before use.
+        var effectiveFrontendBase = frontendBase;
+        if (!string.IsNullOrEmpty(state))
+        {
+            try
+            {
+                var stateUri = new Uri(state, UriKind.Absolute);
+                var port = stateUri.IsDefaultPort ? "" : $":{stateUri.Port}";
+                var stateOrigin = $"{stateUri.Scheme}://{stateUri.Host}{port}";
+                if (CorsOriginHelper.IsOriginAllowed(stateOrigin, null, Array.Empty<string>()))
+                {
+                    effectiveFrontendBase = stateOrigin;
+                    _logger.LogInformation("Google OAuth callback: using origin from state ({Origin})", stateOrigin);
+                }
+            }
+            catch { /* leave effectiveFrontendBase as configured frontendBase */ }
+        }
+
         if (!string.IsNullOrEmpty(error))
         {
             _logger.LogWarning("Google OAuth error query: {Error}", error);
-            return Redirect(BuildGoogleCallbackUrl(frontendBase,
+            return Redirect(BuildGoogleCallbackUrl(effectiveFrontendBase,
                 ("status", "error"),
                 ("message", error)));
         }
@@ -115,7 +136,7 @@ public class GoogleAuthController : ControllerBase
         if (string.IsNullOrEmpty(code))
         {
             _logger.LogWarning("Google OAuth callback missing code");
-            return Redirect(BuildGoogleCallbackUrl(frontendBase,
+            return Redirect(BuildGoogleCallbackUrl(effectiveFrontendBase,
                 ("status", "error"),
                 ("message", "missing_code")));
         }
@@ -127,7 +148,7 @@ public class GoogleAuthController : ControllerBase
         if (string.IsNullOrEmpty(clientId) || string.IsNullOrEmpty(clientSecret) || string.IsNullOrEmpty(redirectUri))
         {
             _logger.LogError("Google OAuth not fully configured for token exchange");
-            return Redirect(BuildGoogleCallbackUrl(frontendBase,
+            return Redirect(BuildGoogleCallbackUrl(effectiveFrontendBase,
                 ("status", "error"),
                 ("message", "server_misconfigured")));
         }
@@ -141,7 +162,7 @@ public class GoogleAuthController : ControllerBase
             if (string.IsNullOrEmpty(accessToken))
             {
                 _logger.LogError("Google token response missing access_token");
-                return Redirect(BuildGoogleCallbackUrl(frontendBase,
+                return Redirect(BuildGoogleCallbackUrl(effectiveFrontendBase,
                     ("status", "error"),
                     ("message", "token_exchange_failed")));
             }
@@ -152,14 +173,14 @@ public class GoogleAuthController : ControllerBase
 
             if (string.IsNullOrWhiteSpace(email))
             {
-                return Redirect(BuildGoogleCallbackUrl(frontendBase,
+                return Redirect(BuildGoogleCallbackUrl(effectiveFrontendBase,
                     ("status", "error"),
                     ("message", "no_email")));
             }
 
             if (userInfo.verifiedEmail == false)
             {
-                return Redirect(BuildGoogleCallbackUrl(frontendBase,
+                return Redirect(BuildGoogleCallbackUrl(effectiveFrontendBase,
                     ("status", "error"),
                     ("message", "email_not_verified")));
             }
@@ -167,7 +188,7 @@ public class GoogleAuthController : ControllerBase
         catch (Exception ex)
         {
             _logger.LogError(ex, "Google OAuth callback failed");
-            return Redirect(BuildGoogleCallbackUrl(frontendBase,
+            return Redirect(BuildGoogleCallbackUrl(effectiveFrontendBase,
                 ("status", "error"),
                 ("message", "oauth_failed")));
         }
@@ -195,7 +216,7 @@ public class GoogleAuthController : ControllerBase
 
         if (employer != null)
         {
-            return Redirect(BuildGoogleCallbackUrl(frontendBase,
+            return Redirect(BuildGoogleCallbackUrl(effectiveFrontendBase,
                 ("status", "ok"),
                 ("userType", "employer"),
                 ("email", normalizedEmail)));
@@ -210,7 +231,7 @@ public class GoogleAuthController : ControllerBase
 
         if (organization != null)
         {
-            return Redirect(BuildGoogleCallbackUrl(frontendBase,
+            return Redirect(BuildGoogleCallbackUrl(effectiveFrontendBase,
                 ("status", "ok"),
                 ("userType", "organization"),
                 ("email", normalizedEmail),
@@ -239,7 +260,7 @@ public class GoogleAuthController : ControllerBase
                 }
                 else
                 {
-                    return Redirect(BuildGoogleCallbackUrl(frontendBase,
+                    return Redirect(BuildGoogleCallbackUrl(effectiveFrontendBase,
                         ("status", "ok"),
                         ("userType", "institute"),
                         ("email", normalizedEmail),
@@ -248,7 +269,7 @@ public class GoogleAuthController : ControllerBase
             }
             else
             {
-                return Redirect(BuildGoogleCallbackUrl(frontendBase,
+                return Redirect(BuildGoogleCallbackUrl(effectiveFrontendBase,
                     ("status", "ok"),
                     ("userType", "institute"),
                     ("email", normalizedEmail),
@@ -280,7 +301,7 @@ public class GoogleAuthController : ControllerBase
                 }
                 else
                 {
-                    return Redirect(BuildGoogleCallbackUrl(frontendBase,
+                    return Redirect(BuildGoogleCallbackUrl(effectiveFrontendBase,
                         ("status", "ok"),
                         ("userType", "institute"),
                         ("email", normalizedEmail),
@@ -289,7 +310,7 @@ public class GoogleAuthController : ControllerBase
             }
             else
             {
-                return Redirect(BuildGoogleCallbackUrl(frontendBase,
+                return Redirect(BuildGoogleCallbackUrl(effectiveFrontendBase,
                     ("status", "ok"),
                     ("userType", "institute"),
                     ("email", normalizedEmail),
@@ -305,7 +326,7 @@ public class GoogleAuthController : ControllerBase
 
         if (student != null)
         {
-            return Redirect(BuildGoogleCallbackUrl(frontendBase,
+            return Redirect(BuildGoogleCallbackUrl(effectiveFrontendBase,
                 ("status", "ok"),
                 ("userType", "student"),
                 ("email", normalizedEmail),
@@ -315,7 +336,7 @@ public class GoogleAuthController : ControllerBase
         }
 
         // No local account — SPA decides signup vs error using session authMode
-        return Redirect(BuildGoogleCallbackUrl(frontendBase,
+        return Redirect(BuildGoogleCallbackUrl(effectiveFrontendBase,
             ("status", "no_account"),
             ("email", normalizedEmail),
             ("name", name ?? "")));
