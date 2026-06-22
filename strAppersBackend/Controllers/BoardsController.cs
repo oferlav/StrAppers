@@ -3457,6 +3457,76 @@ public partial class BoardsController : ControllerBase
     }
 
     /// <summary>
+    /// Admin backfill: creates a User Story board for an existing ProjectBoard that has UserStoryBoardId=null.
+    /// Fetches modules and PM team members from the database, then creates the board via Trello API.
+    /// </summary>
+    [HttpPost("admin/create-user-story-board/{boardId}")]
+    public async Task<IActionResult> AdminCreateUserStoryBoard(string boardId)
+    {
+        try
+        {
+            var projectBoard = await _context.ProjectBoards
+                .FirstOrDefaultAsync(b => b.Id == boardId.Trim());
+
+            if (projectBoard == null)
+                return NotFound(new { Success = false, Message = $"ProjectBoard '{boardId}' not found." });
+
+            if (!string.IsNullOrEmpty(projectBoard.UserStoryBoardId))
+                return Conflict(new { Success = false, Message = $"User Story board already exists: {projectBoard.UserStoryBoardId}" });
+
+            var project = await _context.Projects
+                .AsNoTracking()
+                .FirstOrDefaultAsync(p => p.Id == projectBoard.ProjectId);
+
+            if (project == null)
+                return NotFound(new { Success = false, Message = $"Project for board '{boardId}' not found." });
+
+            var modules = await _context.ProjectModules
+                .Where(pm => pm.ProjectId == project.Id && pm.ModuleType != 3)
+                .OrderBy(pm => pm.Sequence)
+                .Select(pm => new ProjectModuleInfo { Id = pm.Id, Title = pm.Title })
+                .ToListAsync();
+
+            var teamMembers = await _context.Students
+                .Where(s => s.BoardId == boardId.Trim())
+                .Include(s => s.StudentRoles!).ThenInclude(sr => sr.Role)
+                .Select(s => new TrelloTeamMember
+                {
+                    Email     = s.Email,
+                    FirstName = s.FirstName,
+                    LastName  = s.LastName,
+                    RoleName  = s.StudentRoles!.FirstOrDefault()!.Role!.Name ?? "Team Member"
+                })
+                .ToListAsync();
+
+            var boardName = $"{project.Title} — User Stories";
+            var (usBoardId, usBoardUrl, errors) = await _trelloService.CreateStandaloneUserStoryBoardAsync(
+                boardName, modules, teamMembers);
+
+            if (string.IsNullOrEmpty(usBoardId))
+                return StatusCode(500, new { Success = false, Errors = errors });
+
+            projectBoard.UserStoryBoardId  = usBoardId;
+            projectBoard.UserStoryBoardUrl = usBoardUrl;
+            await _context.SaveChangesAsync();
+
+            return Ok(new
+            {
+                Success           = true,
+                UserStoryBoardId  = usBoardId,
+                UserStoryBoardUrl = usBoardUrl,
+                ModulesCount      = modules.Count,
+                Errors            = errors
+            });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error in AdminCreateUserStoryBoard for board {BoardId}", boardId);
+            return StatusCode(500, new { Success = false, Message = ex.Message });
+        }
+    }
+
+    /// <summary>
     /// Set admin for a board
     /// </summary>
     [HttpPost("set-admin")]
