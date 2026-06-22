@@ -62,6 +62,7 @@ public partial class MentorController
             var board = await _context.ProjectBoards.AsNoTracking().FirstOrDefaultAsync(b => b.Id == boardId, cancellationToken);
             if (board == null)
                 return NotFound(new { success = false, message = $"Board {boardId} not found." });
+            var effectiveBoardId = board.UserStoryBoardId ?? boardId;
 
             var sprintLengthWeeks = _configuration.GetValue<int>("BusinessLogicConfig:SprintLengthInWeeks", 1);
             var sprintMerge = await _context.ProjectBoardSprintMerges.AsNoTracking()
@@ -145,7 +146,7 @@ public partial class MentorController
                 }
 
                 contextMd.AppendLine();
-                var usResult = await _trelloService.GetUserStoryCardByModuleIdAsync(boardId, moduleIdStr.Trim());
+                var usResult = await _trelloService.GetUserStoryCardByModuleIdAsync(effectiveBoardId, moduleIdStr.Trim());
                 var usCard = ExtractUserStoryCardFromResourceReviewResult(usResult);
                 if (usCard != null)
                 {

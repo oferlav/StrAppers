@@ -553,9 +553,6 @@ namespace strAppersBackend.Services
                             var checklistJson = await checklistResponse.Content.ReadAsStringAsync();
                             var checklistData = JsonSerializer.Deserialize<JsonElement>(checklistJson);
                             var checklistId = checklistData.GetProperty("id").GetString();
-
-                            var addItemUrl = $"https://api.trello.com/1/checklists/{checklistId}/checkItems?name=Add+Acceptance+Criteria+here&pos=1&key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
-                            await SendWithRateLimitRetryAsync(() => _httpClient.PostAsync(addItemUrl, null));
                         }
 
                         // ModuleId custom field

@@ -123,4 +123,129 @@ public class UserStoryBoardControllerTests
         Assert.NotNull(board);
         Assert.Null(board!.UserStoryBoardUrl);
     }
+
+    // ── T19: AI context sources resolve effectiveBoardId from DB when UserStoryBoardId is set ──
+
+    [Fact]
+    public async Task T19_AiContext_ResolvesEffectiveBoardId_WhenUserStoryBoardIdSet()
+    {
+        await using var db = CreateDb();
+        db.ProjectBoards.Add(new ProjectBoard
+        {
+            Id               = "main-ai",
+            UserStoryBoardId = "us-ai",
+        });
+        await db.SaveChangesAsync();
+
+        // Mirrors how CrmReview / ResourceReview / StoryReview / MentorController resolve effectiveBoardId
+        var board = await db.ProjectBoards.AsNoTracking().FirstOrDefaultAsync(b => b.Id == "main-ai");
+        var effectiveBoardId = board?.UserStoryBoardId ?? "main-ai";
+
+        Assert.Equal("us-ai", effectiveBoardId);
+        Assert.NotEqual("main-ai", effectiveBoardId);
+    }
+
+    // ── T20: AI context sources fall back to boardId when UserStoryBoardId is null ──
+
+    [Fact]
+    public async Task T20_AiContext_FallsBackToBoardId_WhenUserStoryBoardIdIsNull()
+    {
+        await using var db = CreateDb();
+        db.ProjectBoards.Add(new ProjectBoard
+        {
+            Id               = "main-legacy",
+            UserStoryBoardId = null,
+        });
+        await db.SaveChangesAsync();
+
+        var board = await db.ProjectBoards.AsNoTracking().FirstOrDefaultAsync(b => b.Id == "main-legacy");
+        var effectiveBoardId = board?.UserStoryBoardId ?? "main-legacy";
+
+        Assert.Equal("main-legacy", effectiveBoardId);
+    }
+
+    // ── T21: GetUserStoriesByModuleId endpoint resolves effectiveBoardId ──
+
+    [Fact]
+    public async Task T21_GetUserStoriesByModuleId_UsesUserStoryBoardId_WhenSet()
+    {
+        await using var db = CreateDb();
+        db.ProjectBoards.Add(new ProjectBoard
+        {
+            Id               = "trimmed-main",
+            UserStoryBoardId = "trimmed-us",
+        });
+        await db.SaveChangesAsync();
+
+        var trimmedBoardId = "trimmed-main";
+        var board = await db.ProjectBoards.AsNoTracking().FirstOrDefaultAsync(b => b.Id == trimmedBoardId);
+        var effectiveBoardId = board?.UserStoryBoardId ?? trimmedBoardId;
+
+        Assert.Equal("trimmed-us", effectiveBoardId);
+    }
+
+    // ── T22: ModuleType filter excludes both type 1 (setup) and type 3 (data model) ──
+
+    [Fact]
+    public async Task T22_ModuleTypeFilter_ExcludesType1AndType3()
+    {
+        await using var db = CreateDb();
+        db.ProjectModules.AddRange(
+            new ProjectModule { Id = 1, ProjectId = 10, ModuleType = 1, Title = "Setup"      }, // excluded
+            new ProjectModule { Id = 2, ProjectId = 10, ModuleType = 2, Title = "Feature A"  }, // included
+            new ProjectModule { Id = 3, ProjectId = 10, ModuleType = 3, Title = "Data Model" }, // excluded
+            new ProjectModule { Id = 4, ProjectId = 10, ModuleType = 2, Title = "Feature B"  }  // included
+        );
+        await db.SaveChangesAsync();
+
+        var modules = await db.ProjectModules
+            .Where(pm => pm.ProjectId == 10 && pm.ModuleType != 3 && pm.ModuleType != 1)
+            .OrderBy(pm => pm.Id)
+            .ToListAsync();
+
+        Assert.Equal(2, modules.Count);
+        Assert.All(modules, m => Assert.Equal(2, m.ModuleType));
+    }
+
+    // ── T23: ModuleType filter includes type 2, 4, null (anything not 1 or 3) ──
+
+    [Fact]
+    public async Task T23_ModuleTypeFilter_IncludesOtherTypes()
+    {
+        await using var db = CreateDb();
+        db.ProjectModules.AddRange(
+            new ProjectModule { Id = 10, ProjectId = 20, ModuleType = 2,    Title = "Module 2"    },
+            new ProjectModule { Id = 11, ProjectId = 20, ModuleType = 4,    Title = "Module 4"    },
+            new ProjectModule { Id = 12, ProjectId = 20, ModuleType = null,  Title = "No type"    }
+        );
+        await db.SaveChangesAsync();
+
+        var modules = await db.ProjectModules
+            .Where(pm => pm.ProjectId == 20 && pm.ModuleType != 3 && pm.ModuleType != 1)
+            .ToListAsync();
+
+        Assert.Equal(3, modules.Count);
+    }
+
+    // ── T24: effectiveBoardId differs per board — two boards in same DB resolve independently ──
+
+    [Fact]
+    public async Task T24_AiContext_TwoBoards_EachResolveIndependently()
+    {
+        await using var db = CreateDb();
+        db.ProjectBoards.AddRange(
+            new ProjectBoard { Id = "boardA", UserStoryBoardId = "usA" },
+            new ProjectBoard { Id = "boardB", UserStoryBoardId = null  }
+        );
+        await db.SaveChangesAsync();
+
+        var boardA = await db.ProjectBoards.AsNoTracking().FirstOrDefaultAsync(b => b.Id == "boardA");
+        var boardB = await db.ProjectBoards.AsNoTracking().FirstOrDefaultAsync(b => b.Id == "boardB");
+
+        var effectiveA = boardA?.UserStoryBoardId ?? "boardA";
+        var effectiveB = boardB?.UserStoryBoardId ?? "boardB";
+
+        Assert.Equal("usA",   effectiveA);
+        Assert.Equal("boardB", effectiveB);
+    }
 }

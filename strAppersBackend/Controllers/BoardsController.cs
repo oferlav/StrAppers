@@ -464,7 +464,7 @@ public partial class BoardsController : ControllerBase
             
             // Fetch ProjectModules for this project to pass module IDs to AI
             var projectModules = await _context.ProjectModules
-                .Where(pm => pm.ProjectId == request.ProjectId && pm.ModuleType != 3) // Exclude data model modules (ModuleType 3)
+                .Where(pm => pm.ProjectId == request.ProjectId && pm.ModuleType != 3 && pm.ModuleType != 1) // Exclude data model (3) and setup (1) modules
                 .OrderBy(pm => pm.Sequence)
                 .Select(pm => new strAppersBackend.Models.ProjectModuleInfo
                 {
@@ -813,7 +813,7 @@ public partial class BoardsController : ControllerBase
             {
                 _logger.LogInformation("Calling Trello service to create board");
                 var projectModules = await _context.ProjectModules
-                    .Where(pm => pm.ProjectId == request.ProjectId && pm.ModuleType != 3)
+                    .Where(pm => pm.ProjectId == request.ProjectId && pm.ModuleType != 3 && pm.ModuleType != 1)
                     .OrderBy(pm => pm.Sequence)
                     .Select(pm => new ProjectModuleInfo { Id = pm.Id, Title = pm.Title })
                     .ToListAsync();
@@ -3482,7 +3482,7 @@ public partial class BoardsController : ControllerBase
                 return NotFound(new { Success = false, Message = $"Project for board '{boardId}' not found." });
 
             var modules = await _context.ProjectModules
-                .Where(pm => pm.ProjectId == project.Id && pm.ModuleType != 3)
+                .Where(pm => pm.ProjectId == project.Id && pm.ModuleType != 3 && pm.ModuleType != 1)
                 .OrderBy(pm => pm.Sequence)
                 .Select(pm => new ProjectModuleInfo { Id = pm.Id, Title = pm.Title })
                 .ToListAsync();
@@ -4334,7 +4334,10 @@ public partial class BoardsController : ControllerBase
 
         try
         {
-            var result = await _trelloService.GetUserStoryCardByModuleIdAsync(boardId.Trim(), moduleId.ToString());
+            var trimmedBoardId = boardId.Trim();
+            var board = await _context.ProjectBoards.AsNoTracking().FirstOrDefaultAsync(b => b.Id == trimmedBoardId);
+            var effectiveBoardId = board?.UserStoryBoardId ?? trimmedBoardId;
+            var result = await _trelloService.GetUserStoryCardByModuleIdAsync(effectiveBoardId, moduleId.ToString());
             if (result == null)
                 return StatusCode(500, new { Success = false, Message = "Failed to get User Story by ModuleId." });
             return Ok(result);
