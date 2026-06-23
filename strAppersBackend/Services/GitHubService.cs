@@ -4603,6 +4603,9 @@ INSERT INTO ""TestProjects"" (""Name"") VALUES
     {
         var files = new Dictionary<string, string>();
 
+        _logger.LogInformation("[LANG-TRACE] GenerateBackendFiles: received programmingLanguage='{Language}' lowered='{Lowered}'",
+            programmingLanguage, programmingLanguage?.ToLowerInvariant());
+
         switch (programmingLanguage?.ToLowerInvariant())
         {
             case "c#":
@@ -11667,6 +11670,9 @@ jobs:
           dotnet restore Backend.csproj
           dotnet publish Backend.csproj -c Release -o ./out"
         };
+
+        _logger.LogInformation("[LANG-TRACE] GenerateRailwayDeploymentWorkflowAtRoot: programmingLanguage='{Language}' lowered='{Lowered}'",
+            programmingLanguage, programmingLanguage?.ToLowerInvariant());
 
         var testRunCommand = programmingLanguage?.ToLowerInvariant() switch
         {

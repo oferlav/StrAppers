@@ -895,6 +895,8 @@ public partial class BoardsController : ControllerBase
                 var qmDeveloperStudent = students.FirstOrDefault(s =>
                     s.StudentRoles?.Any(sr => sr.IsActive && (sr.Role?.Type == 1 || sr.Role?.Type == 2)) ?? false);
                 var qmProgrammingLanguage = qmDeveloperStudent?.ProgrammingLanguage?.Name;
+                _logger.LogInformation("[LANG-TRACE] QuestMode: developerStudent={StudentId} ProgrammingLanguageId={LangId} ProgrammingLanguage.Name='{LangName}' → qmProgrammingLanguage='{QmLang}'",
+                    qmDeveloperStudent?.Id, qmDeveloperStudent?.ProgrammingLanguageId, qmDeveloperStudent?.ProgrammingLanguage?.Name, qmProgrammingLanguage);
                 var qmVisableModuleDesign = !students
                     .SelectMany(s => s.StudentRoles ?? Enumerable.Empty<StudentRole>())
                     .Any(sr => sr.Role?.CustomerEngagement == true);
@@ -8551,6 +8553,7 @@ INSERT INTO ""TestProjects"" (""Name"") VALUES
         Student student, string boardId, Project project, string? programmingLanguage)
     {
         var suffix = $"{boardId}s{student.Id}";
+        _logger.LogInformation("[LANG-TRACE] ProvisionQuestStudentInfraAsync: studentId={StudentId} programmingLanguage='{Language}' (raw, before any normalization)", student.Id, programmingLanguage);
         var neonApiKey = _configuration["Neon:ApiKey"];
         var neonBaseUrl = _configuration["Neon:BaseUrl"];
         var neonDefaultOwnerName = _configuration["Neon:DefaultOwnerName"] ?? "neondb_owner";
