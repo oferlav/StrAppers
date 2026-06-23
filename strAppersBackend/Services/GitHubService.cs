@@ -5678,6 +5678,9 @@ catch (Exception startupEx)
     <PackageReference Include=""Npgsql"" Version=""8.0.0"" />
     <PackageReference Include=""Swashbuckle.AspNetCore"" Version=""6.5.0"" />
   </ItemGroup>
+  <ItemGroup>
+    <Compile Remove=""Tests/**"" />
+  </ItemGroup>
 </Project>
 ";
 
