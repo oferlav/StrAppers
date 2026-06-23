@@ -1967,9 +1967,11 @@ public partial class BoardsController : ControllerBase
             string? environmentId = null;
             string? programmingLanguage = null;
             
-            // Find the Backend/Fullstack developer and their programming language
-            var developerStudent = students.FirstOrDefault(s => 
-                s.StudentRoles?.Any(sr => sr.IsActive && (sr.Role?.Type == 1 || sr.Role?.Type == 2)) ?? false);
+            // Find the Backend/Fullstack developer — prefer pure Backend (type 1) over Fullstack (type 2)
+            // so a FE-focused type-2 student doesn't shadow a dedicated BE student
+            var developerStudent =
+                students.FirstOrDefault(s => s.StudentRoles?.Any(sr => sr.IsActive && sr.Role?.Type == 1) ?? false)
+                ?? students.FirstOrDefault(s => s.StudentRoles?.Any(sr => sr.IsActive && sr.Role?.Type == 2) ?? false);
             
             if (developerStudent != null)
             {
