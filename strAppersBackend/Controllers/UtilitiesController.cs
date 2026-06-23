@@ -1114,8 +1114,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install Railway CLI
-        run: npm install -g @railway/cli
+      - name: Setup Railway CLI
+        id: setup_railway
+        uses: bervProject/setup-railway@v2.0.0
+        with:
+          railway_token: ${{{{ secrets.RAILWAY_TOKEN }}}}
 
 {buildCommands}
 
@@ -1127,9 +1130,9 @@ jobs:
           {testRunCommand} 2>&1 | tee /tmp/test_out.txt
 
       - name: Deploy to Railway
+        id: deploy_railway
         env:
           RAILWAY_SERVICE_ID: ${{{{ secrets.RAILWAY_SERVICE_ID }}}}
-          RAILWAY_TOKEN: ${{{{ secrets.RAILWAY_TOKEN }}}}
         run: |
           railway up --service $RAILWAY_SERVICE_ID --detach
 ";

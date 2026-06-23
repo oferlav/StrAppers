@@ -11566,8 +11566,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
       
-      - name: Install Railway CLI
-        run: npm install -g @railway/cli
+      - name: Setup Railway CLI
+        uses: bervProject/setup-railway@v2.0.0
+        with:
+          railway_token: ${{{{ secrets.RAILWAY_TOKEN }}}}
 
 {buildCommands}
 
@@ -11575,7 +11577,6 @@ jobs:
         working-directory: ./backend
         env:
           RAILWAY_SERVICE_ID: ${{{{ secrets.RAILWAY_SERVICE_ID }}}}
-          RAILWAY_TOKEN: ${{{{ secrets.RAILWAY_TOKEN }}}}
         run: |
           railway up --service $RAILWAY_SERVICE_ID --detach
 ";
@@ -11627,14 +11628,16 @@ jobs:
         };
 
         var reportStep = !string.IsNullOrEmpty(boardId) ? $@"
-      - name: Report Test Results
+      - name: Report CI Results
         if: always()
         env:
           BOARD_ID: ""{boardId}""
           API_URL: ""{strAppersApiUrl}""
           TEST_OUTCOME: ${{{{ steps.run_tests.outcome }}}}
+          SETUP_OUTCOME: ${{{{ steps.setup_railway.outcome }}}}
+          DEPLOY_OUTCOME: ${{{{ steps.deploy_railway.outcome }}}}
         run: |
-          python3 -c ""import json,os,urllib.request as r; status='PASS' if os.environ.get('TEST_OUTCOME')=='success' else 'FAIL'; output=open('/tmp/test_out.txt').read()[:2000] if os.path.exists('/tmp/test_out.txt') else ''; body=json.dumps({{'boardId':os.environ['BOARD_ID'],'devRole':'Backend','status':status,'output':output}}).encode(); req=r.Request(os.environ['API_URL']+'/api/Mentor/test-results',data=body,headers={{'Content-Type':'application/json'}}); r.urlopen(req,timeout=10)"" || true" : "";
+          python3 -c ""import json,os,urllib.request as r; test_out=os.environ.get('TEST_OUTCOME','?'); setup_out=os.environ.get('SETUP_OUTCOME','?'); deploy_out=os.environ.get('DEPLOY_OUTCOME','?'); status='PASS' if test_out=='success' else 'FAIL'; output=open('/tmp/test_out.txt').read()[:1500] if os.path.exists('/tmp/test_out.txt') else ''; diag='[CI] setup='+setup_out+' tests='+test_out+' deploy='+deploy_out; final_output=(diag+chr(10)+output).strip(); body=json.dumps({{'boardId':os.environ['BOARD_ID'],'devRole':'Backend','status':status,'output':final_output}}).encode(); req=r.Request(os.environ['API_URL']+'/api/Mentor/test-results',data=body,headers={{'Content-Type':'application/json'}}); r.urlopen(req,timeout=10)"" || true" : "";
 
         return $@"name: Deploy Backend to Railway
 
@@ -11654,8 +11657,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install Railway CLI
-        run: npm install -g @railway/cli
+      - name: Setup Railway CLI
+        id: setup_railway
+        uses: bervProject/setup-railway@v2.0.0
+        with:
+          railway_token: ${{{{ secrets.RAILWAY_TOKEN }}}}
 
 {buildCommands}
 
@@ -11667,9 +11673,9 @@ jobs:
           {testRunCommand} 2>&1 | tee /tmp/test_out.txt
 {reportStep}
       - name: Deploy to Railway
+        id: deploy_railway
         env:
           RAILWAY_SERVICE_ID: ${{{{ secrets.RAILWAY_SERVICE_ID }}}}
-          RAILWAY_TOKEN: ${{{{ secrets.RAILWAY_TOKEN }}}}
         run: |
           railway up --service $RAILWAY_SERVICE_ID --detach
 ";
