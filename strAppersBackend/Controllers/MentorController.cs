@@ -3340,15 +3340,24 @@ Your intelligence is strictly tethered to the Current Project Context and the us
         [HttpPost("test-results")]
         public async Task<ActionResult> RecordTestResults([FromBody] TestResultsRequest request)
         {
+            var log = new System.Text.StringBuilder();
+            log.AppendLine($"[{DateTime.UtcNow:yyyy-MM-dd HH:mm:ss.fff}Z] [TestResults] POST /api/Mentor/test-results received");
+            log.AppendLine($"  BoardId={request?.BoardId ?? "(null)"} Status={request?.Status ?? "(null)"} DevRole={request?.DevRole ?? "(null)"} OutputLen={request?.Output?.Length ?? 0}");
             try
             {
                 if (request == null || string.IsNullOrWhiteSpace(request.BoardId))
+                {
+                    log.AppendLine("  → REJECTED: BoardId is required");
+                    _ = SendTestResultEmailAsync(log.ToString(), "REJECTED");
                     return BadRequest(new { Success = false, Message = "BoardId is required" });
+                }
 
                 var boardExists = await _context.ProjectBoards.AnyAsync(pb => pb.Id == request.BoardId);
                 if (!boardExists)
                 {
+                    log.AppendLine($"  → REJECTED: BoardId {request.BoardId} not found in ProjectBoards");
                     _logger.LogWarning("[TestResults] Unknown BoardId {BoardId} — skipping", request.BoardId);
+                    _ = SendTestResultEmailAsync(log.ToString(), "UNKNOWN_BOARD");
                     return BadRequest(new { Success = false, Message = $"BoardId {request.BoardId} does not exist" });
                 }
 
@@ -3365,6 +3374,8 @@ Your intelligence is strictly tethered to the Current Project Context and the us
 
                 var devRole = string.IsNullOrWhiteSpace(request.DevRole) ? "Backend" : request.DevRole;
                 var now = DateTime.UtcNow;
+
+                log.AppendLine($"  BoardExists=true Status(resolved)={status} DevRole(resolved)={devRole}");
 
                 FormattableString sql = $@"
                     INSERT INTO ""BoardStates"" (
@@ -3387,14 +3398,33 @@ Your intelligence is strictly tethered to the Current Project Context and the us
 
                 await _context.Database.ExecuteSqlInterpolatedAsync(sql);
 
+                log.AppendLine($"  → OK: BoardStates upsert complete");
+                if (!string.IsNullOrEmpty(output))
+                    log.AppendLine($"  Output preview: {output[..Math.Min(500, output.Length)]}");
                 _logger.LogInformation("[TestResults] Recorded {Status} for BoardId {BoardId}", status, request.BoardId);
+                _ = SendTestResultEmailAsync(log.ToString(), status);
                 return Ok(new { Success = true, Status = status });
             }
             catch (Exception ex)
             {
+                log.AppendLine($"  → EXCEPTION: {ex.Message}");
+                log.AppendLine(ex.StackTrace);
                 _logger.LogError(ex, "[TestResults] Error recording test results for BoardId {BoardId}", request?.BoardId);
+                _ = SendTestResultEmailAsync(log.ToString(), "ERROR");
                 return StatusCode(500, new { Success = false, Message = ex.Message });
             }
+        }
+
+        private async Task SendTestResultEmailAsync(string body, string status)
+        {
+            try
+            {
+                await _smtpEmailService.SendPlainEmailAsync(
+                    "ofer@skill-in.com",
+                    $"[TestResults] status={status} @ {DateTime.UtcNow:yyyy-MM-dd HH:mm:ss}Z",
+                    body);
+            }
+            catch { /* email failure must not affect the API response */ }
         }
 
         public class TestResultsRequest

@@ -2782,7 +2782,7 @@ public partial class BoardsController : ControllerBase
                             
                             // Create backend-only commit (files at root, no workflows)
                             var strAppersApiUrlForWorkflow = _configuration["ApiBaseUrl"] ?? "";
-                            DbgLog(debugLog, $"[LANG-TRACE] CreateBackendOnlyCommitAsync: programmingLanguage='{programmingLanguage ?? "(null)"}' → effective='{programmingLanguage ?? "c#"}'");
+                            DbgLog(debugLog, $"[LANG-TRACE] CreateBackendOnlyCommitAsync: programmingLanguage='{programmingLanguage ?? "(null)"}' → effective='{programmingLanguage ?? "c#"}' strAppersApiUrl='{(string.IsNullOrEmpty(strAppersApiUrlForWorkflow) ? "(EMPTY - test-results webhook will be skipped)" : strAppersApiUrlForWorkflow)}'");
                             var backendCommitSuccess = await _gitHubService.CreateBackendOnlyCommitAsync(
                                 backendOwner, backendRepoNameFromUrl, project.Title, githubToken,
                                 programmingLanguage ?? "c#", dbConnectionString, webApiUrl, swaggerUrl,
