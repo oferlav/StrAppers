@@ -1973,26 +1973,30 @@ public partial class BoardsController : ControllerBase
             
             if (developerStudent != null)
             {
-                _logger.LogInformation("Found developer student: StudentId={StudentId}, ProgrammingLanguageId={ProgrammingLanguageId}, HasProgrammingLanguage={HasProgrammingLanguage}", 
-                    developerStudent.Id, 
-                    developerStudent.ProgrammingLanguageId, 
+                _logger.LogInformation("Found developer student: StudentId={StudentId}, ProgrammingLanguageId={ProgrammingLanguageId}, HasProgrammingLanguage={HasProgrammingLanguage}",
+                    developerStudent.Id,
+                    developerStudent.ProgrammingLanguageId,
                     developerStudent.ProgrammingLanguage != null);
-                
+                DbgLog(debugLog, $"[LANG-TRACE] developer student found: StudentId={developerStudent.Id} ProgrammingLanguageId={developerStudent.ProgrammingLanguageId} HasProgrammingLanguage={developerStudent.ProgrammingLanguage != null}");
+
                 if (developerStudent.ProgrammingLanguage != null)
                 {
                     programmingLanguage = developerStudent.ProgrammingLanguage.Name;
-                    _logger.LogInformation("✅ Using programming language '{Language}' from student {StudentId}", 
+                    _logger.LogInformation("✅ Using programming language '{Language}' from student {StudentId}",
                         programmingLanguage, developerStudent.Id);
+                    DbgLog(debugLog, $"[LANG-TRACE] resolved programmingLanguage='{programmingLanguage}' from student {developerStudent.Id}");
                 }
                 else
                 {
-                    _logger.LogWarning("⚠️ Developer student {StudentId} found but ProgrammingLanguage is null (ProgrammingLanguageId={ProgrammingLanguageId}). Backend code generation will be skipped.", 
+                    _logger.LogWarning("⚠️ Developer student {StudentId} found but ProgrammingLanguage is null (ProgrammingLanguageId={ProgrammingLanguageId}). Backend code generation will be skipped.",
                         developerStudent.Id, developerStudent.ProgrammingLanguageId);
+                    DbgLog(debugLog, $"[LANG-TRACE] ProgrammingLanguage is null for studentId={developerStudent.Id} ProgrammingLanguageId={developerStudent.ProgrammingLanguageId} → will default to c#");
                 }
             }
             else
             {
                 _logger.LogWarning("⚠️ No Backend/Fullstack developer found. Checking students: {StudentCount} students", students.Count);
+                DbgLog(debugLog, $"[LANG-TRACE] no Backend/Fullstack developer found (role type 1 or 2) among {students.Count} students → will default to c#");
                 foreach (var student in students)
                 {
                     var roles = student.StudentRoles?
@@ -2000,6 +2004,7 @@ public partial class BoardsController : ControllerBase
                         .Select(sr => $"{sr.Role?.Name} (Type={sr.Role?.Type})")
                         .ToList() ?? new List<string>();
                     _logger.LogInformation("  Student {StudentId}: Roles=[{Roles}]", student.Id, string.Join(", ", roles));
+                    DbgLog(debugLog, $"[LANG-TRACE]   student {student.Id}: roles=[{string.Join(", ", roles)}]");
                 }
             }
             
@@ -2772,6 +2777,7 @@ public partial class BoardsController : ControllerBase
                             
                             // Create backend-only commit (files at root, no workflows)
                             var strAppersApiUrlForWorkflow = _configuration["ApiBaseUrl"] ?? "";
+                            DbgLog(debugLog, $"[LANG-TRACE] CreateBackendOnlyCommitAsync: programmingLanguage='{programmingLanguage ?? "(null)"}' → effective='{programmingLanguage ?? "c#"}'");
                             var backendCommitSuccess = await _gitHubService.CreateBackendOnlyCommitAsync(
                                 backendOwner, backendRepoNameFromUrl, project.Title, githubToken,
                                 programmingLanguage ?? "c#", dbConnectionString, webApiUrl, swaggerUrl,

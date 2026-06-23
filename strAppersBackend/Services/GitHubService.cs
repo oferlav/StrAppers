@@ -5687,16 +5687,59 @@ catch (Exception startupEx)
 </Project>
 ";
 
-        // Note: Railway configuration files are generated separately based on programming language in GenerateRailwayConfigFiles
-        // Structure:
-        // - nixpacks.toml at REPO ROOT (Railway expects this at root, build commands use 'cd backend &&' to access backend files)
+        // Starter test helper — pure function, no DB, safe to run in CI
+        files["backend/Helpers/Calculator.cs"] = @"namespace Backend.Helpers;
 
-        // Note: We don't create a backend-specific README.md here to avoid conflict with root README.md
-        // The root README.md contains project overview, backend-specific docs can be added later
+public static class Calculator
+{
+    public static int Add(int a, int b) => a + b;
+}
+";
+
+        // xUnit test project (separate from Backend.csproj — Backend.csproj excludes Tests/ via <Compile Remove>)
+        files["backend/Tests/Tests.csproj"] = @"<Project Sdk=""Microsoft.NET.Sdk"">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include=""Microsoft.NET.Test.Sdk"" Version=""17.8.0"" />
+    <PackageReference Include=""xunit"" Version=""2.6.2"" />
+    <PackageReference Include=""xunit.runner.visualstudio"" Version=""2.5.4"">
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+      <PrivateAssets>all</PrivateAssets>
+    </PackageReference>
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include=""../Backend.csproj"" />
+  </ItemGroup>
+</Project>
+";
+
+        files["backend/Tests/CalculatorTests.cs"] = @"using Backend.Helpers;
+
+namespace Tests;
+
+public class CalculatorTests
+{
+    [Fact]
+    public void Add_ReturnsSumOfTwoNumbers()
+    {
+        Assert.Equal(5, Calculator.Add(2, 3));
+    }
+
+    [Fact]
+    public void Add_WithNegativeNumbers_ReturnsCorrectSum()
+    {
+        Assert.Equal(-1, Calculator.Add(2, -3));
+    }
+}
+";
 
         return files;
     }
-    
+
     /// <summary>
     /// Generates Railway configuration files (nixpacks.toml) based on programming language
     /// </summary>
@@ -5714,9 +5757,6 @@ catch (Exception startupEx)
                 files["nixpacks.toml"] = @"# Nixpacks configuration for Railway - .NET/C# Backend
 # Backend files are in backend/ folder, so we cd into it for all commands
 
-[phases.setup]
-nixPkgs = { dotnet = ""8.0"" }
-
 [phases.install]
 cmds = [
   ""cd backend && dotnet restore Backend.csproj""
@@ -5731,16 +5771,12 @@ cmds = [
 cmd = ""dotnet /app/publish/Backend.dll""
 ";
                 break;
-                
+
             case "python":
                 // Python/FastAPI backend - backend files are in backend/ folder
                 // Railway expects nixpacks.toml at REPO ROOT
                 files["nixpacks.toml"] = @"# Nixpacks configuration for Railway - Python/FastAPI Backend
 # Railway will build from repo root, then cd into backend/ directory
-# Note: No detectors specified - we provide explicit phases
-
-[phases.setup]
-nixPkgs = { python = ""3.12"" }
 
 [phases.install]
 cmds = [
@@ -5757,7 +5793,7 @@ cmds = [
 cmd = ""cd backend && python check_syntax.py && uvicorn main:app --host 0.0.0.0 --port $PORT""
 ";
                 break;
-                
+
             case "nodejs":
             case "node.js":
             case "node":
@@ -5765,10 +5801,6 @@ cmd = ""cd backend && python check_syntax.py && uvicorn main:app --host 0.0.0.0 
                 // Railway expects nixpacks.toml at REPO ROOT
                 files["nixpacks.toml"] = @"# Nixpacks configuration for Railway - Node.js/Express Backend
 # Railway will build from repo root, then cd into backend/ directory
-# Note: No detectors specified - we provide explicit phases
-
-[phases.setup]
-nixPkgs = { node = ""18"" }
 
 [phases.install]
 cmds = [
@@ -5785,16 +5817,12 @@ cmds = [
 cmd = ""cd backend && node app.js""
 ";
                 break;
-                
+
             case "java":
                 // Java/Spring Boot backend - backend files are in backend/ folder
                 // Railway expects nixpacks.toml at REPO ROOT
                 files["nixpacks.toml"] = @"# Nixpacks configuration for Railway - Java/Spring Boot Backend
 # Railway will build from repo root, then cd into backend/ directory
-# Note: No detectors specified - we provide explicit phases
-
-[phases.setup]
-nixPkgs = { jdk = ""17"" }
 
 [phases.install]
 cmds = [
@@ -5810,14 +5838,11 @@ cmds = [
 cmd = ""cd backend && java -jar target/*.jar""
 ";
                 break;
-                
+
             case "php":
                 // PHP backend - backend files are in backend/ folder
                 files["nixpacks.toml"] = @"# Nixpacks configuration for Railway - PHP Backend
 # Backend files are in backend/ folder
-
-[phases.setup]
-nixPkgs = { php = ""8.2"" }
 
 [phases.install]
 cmds = [
@@ -5835,14 +5860,11 @@ cmds = [
 cmd = ""cd backend && php -d display_errors=1 -S 0.0.0.0:$PORT index.php""
 ";
                 break;
-                
+
             case "ruby":
                 // Ruby/Sinatra backend - backend files are in backend/ folder
                 files["nixpacks.toml"] = @"# Nixpacks configuration for Railway - Ruby/Sinatra Backend
 # Backend files are in backend/ folder
-
-[phases.setup]
-nixPkgs = { ruby = ""3.3"" }
 
 [phases.install]
 cmds = [
@@ -5858,20 +5880,15 @@ cmds = [
 cmd = ""cd backend && ruby app.rb""
 ";
                 break;
-                
+
             case "go":
             case "golang":
                 // Go backend - backend files are in backend/ folder
-                // Building to root level for Railway compatibility (Railway expects binaries at root)
-                // Disable auto-detection by providing explicit phases and providers
                 files["nixpacks.toml"] = @"# Nixpacks configuration for Railway - Go Backend
 # Backend files are in backend/ folder
 
 [variables]
 GO_VERSION = ""1.21""
-
-[phases.setup]
-nixPkgs = { go = ""1.21"" }
 
 [phases.install]
 cmds = [
@@ -5887,16 +5904,11 @@ cmds = [
 cmd = ""./backend""
 ";
                 break;
-                
+
             default:
                 // Default to .NET if language not recognized - backend files are in backend/ folder
-                // Railway expects nixpacks.toml at REPO ROOT
                 files["nixpacks.toml"] = @"# Nixpacks configuration for Railway - Default (.NET)
 # Railway will build from repo root, then cd into backend/ directory
-# Note: No detectors specified - we provide explicit phases
-
-[phases.setup]
-nixPkgs = { csharp = ""8.0"" }
 
 [phases.install]
 cmds = [
@@ -5913,7 +5925,7 @@ cmd = ""dotnet /app/publish/Backend.dll""
 ";
                 break;
         }
-        
+
         return files;
     }
 
@@ -5960,9 +5972,6 @@ cmd = ""dotnet /app/publish/Backend.dll""
                 files["nixpacks.toml"] = @"# Nixpacks configuration for Railway - .NET/C# Backend
 # Backend files are at root level
 
-[phases.setup]
-nixPkgs = { dotnet = ""8.0"" }
-
 [phases.install]
 cmds = [
   ""dotnet restore Backend.csproj""
@@ -5977,14 +5986,11 @@ cmds = [
 cmd = ""dotnet /app/publish/Backend.dll""
 ";
                 break;
-                
+
             case "python":
                 // Python/FastAPI backend - files are at root
                 files["nixpacks.toml"] = @"# Nixpacks configuration for Railway - Python/FastAPI Backend
 # Backend files are at root level
-
-[phases.setup]
-nixPkgs = { python = ""3.12"" }
 
 [phases.install]
 cmds = [
@@ -6001,16 +6007,13 @@ cmds = [
 cmd = ""python check_syntax.py && python -m uvicorn main:app --host 0.0.0.0 --port $PORT --lifespan on""
 ";
                 break;
-                
+
             case "nodejs":
             case "node.js":
             case "node":
                 // Node.js/Express backend - files are at root
                 files["nixpacks.toml"] = @"# Nixpacks configuration for Railway - Node.js/Express Backend
 # Backend files are at root level
-
-[phases.setup]
-nixPkgs = { node = ""18"" }
 
 [phases.install]
 cmds = [
@@ -6027,14 +6030,11 @@ cmds = [
 cmd = ""node app.js""
 ";
                 break;
-                
+
             case "java":
                 // Java/Spring Boot backend - files are at root
                 files["nixpacks.toml"] = @"# Nixpacks configuration for Railway - Java/Spring Boot Backend
 # Backend files are at root level
-
-[phases.setup]
-nixPkgs = { jdk = ""17"" }
 
 [phases.install]
 cmds = [
@@ -6050,14 +6050,11 @@ cmds = [
 cmd = ""java -jar target/*.jar""
 ";
                 break;
-                
+
             case "php":
                 // PHP backend - files are at root
                 files["nixpacks.toml"] = @"# Nixpacks configuration for Railway - PHP Backend
 # Backend files are at root level
-
-[phases.setup]
-nixPkgs = { php = ""8.2"" }
 
 [phases.install]
 cmds = [
@@ -6074,14 +6071,11 @@ cmds = [
 cmd = ""php -d display_errors=1 -S 0.0.0.0:$PORT index.php""
 ";
                 break;
-                
+
             case "ruby":
                 // Ruby/Sinatra backend - files are at root
                 files["nixpacks.toml"] = @"# Nixpacks configuration for Railway - Ruby/Sinatra Backend
 # Backend files are at root level
-
-[phases.setup]
-nixPkgs = { ruby = ""3.3"" }
 
 [phases.install]
 cmds = [
@@ -6098,20 +6092,15 @@ cmds = [
 cmd = ""ruby app.rb""
 ";
                 break;
-                
+
             case "go":
             case "golang":
                 // Go backend - files are at root
-                // Using relative paths for Railway compatibility
-                // Disable auto-detection by providing explicit phases
                 files["nixpacks.toml"] = @"# Nixpacks configuration for Railway - Go Backend
 # Backend files are at root level
 
 [variables]
 GO_VERSION = ""1.21""
-
-[phases.setup]
-nixPkgs = { go = ""1.21"" }
 
 [phases.install]
 cmds = [
@@ -6133,9 +6122,6 @@ cmd = ""./backend""
                 files["nixpacks.toml"] = @"# Nixpacks configuration for Railway - Default (.NET)
 # Backend files are at root level
 
-[phases.setup]
-nixPkgs = { dotnet = ""8.0"" }
-
 [phases.install]
 cmds = [
   ""dotnet restore Backend.csproj""
@@ -6152,55 +6138,10 @@ cmd = ""dotnet /app/publish/Backend.dll""
                 break;
         }
 
-        // Starter test helper (pure function, no DB — safe to test in CI)
-        files["backend/Helpers/Calculator.cs"] = @"namespace Backend.Helpers;
-
-public static class Calculator
-{
-    public static int Add(int a, int b) => a + b;
-}
-";
-
-        // xUnit test project
-        files["backend/Tests/Tests.csproj"] = @"<Project Sdk=""Microsoft.NET.Sdk"">
-  <PropertyGroup>
-    <TargetFramework>net8.0</TargetFramework>
-    <Nullable>enable</Nullable>
-    <IsPackable>false</IsPackable>
-  </PropertyGroup>
-  <ItemGroup>
-    <PackageReference Include=""Microsoft.NET.Test.Sdk"" Version=""17.8.0"" />
-    <PackageReference Include=""xunit"" Version=""2.6.2"" />
-    <PackageReference Include=""xunit.runner.visualstudio"" Version=""2.5.4"">
-      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
-      <PrivateAssets>all</PrivateAssets>
-    </PackageReference>
-  </ItemGroup>
-  <ItemGroup>
-    <ProjectReference Include=""../Backend.csproj"" />
-  </ItemGroup>
-</Project>
-";
-
-        files["backend/Tests/CalculatorTests.cs"] = @"using Backend.Helpers;
-
-namespace Tests;
-
-public class CalculatorTests
-{
-    [Fact]
-    public void Add_ReturnsSumOfTwoNumbers()
-    {
-        Assert.Equal(5, Calculator.Add(2, 3));
-    }
-
-    [Fact]
-    public void Add_WithNegativeNumbers_ReturnsCorrectSum()
-    {
-        Assert.Equal(-1, Calculator.Add(2, -3));
-    }
-}
-";
+        // C# test/helper files live in GenerateCSharpBackend() with "backend/" prefix.
+        // GenerateBackendFilesAtRoot() strips that prefix so they land at root.
+        // Do NOT add them here — duplicate paths would put backend/Tests/CalculatorTests.cs
+        // back into the repo, bypassing the <Compile Remove="Tests/**"> in root Backend.csproj.
 
         return files;
     }
