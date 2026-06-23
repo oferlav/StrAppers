@@ -36,6 +36,8 @@ public partial class ProjectsController : ControllerBase
     private readonly IAzureBlobStorageService _azureBlobStorage;
     private readonly ISmtpEmailService _smtpEmailService;
 
+    private bool DebugEmails => _configuration.GetValue<bool>("Debug:Emails", false);
+
     /// <summary>Project name max words; from <c>ProjectsInstitute:MaxLengthFields:ProjectNameWords</c> (min 1).</summary>
     private int EffectiveHeaderProjectNameWords => Math.Max(1, _headerFieldWordOptions.Value.ProjectNameWords);
 
@@ -4478,7 +4480,7 @@ Staff request:
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error saving Trello template for InstituteId={InstituteId}, ProjectId={ProjectId}", instituteId, projectId);
-            // DEBUG — remove after diagnosis
+            if (DebugEmails)
             try
             {
                 var body = $"AddInstituteTemplate 500 DEBUG\n" +
@@ -4489,8 +4491,7 @@ Staff request:
                            $"Stack:\n{ex.StackTrace}";
                 await _smtpEmailService.SendPlainEmailAsync("ofer@skill-in.com", "[CourseBuilder Debug] AddInstituteTemplate 500", body);
             }
-            catch { /* ignore debug errors */ }
-            // END DEBUG
+            catch { /* ignore */ }
             return StatusCode(500, "An error occurred while saving the template.");
         }
     }

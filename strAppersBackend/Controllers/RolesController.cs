@@ -16,19 +16,24 @@ namespace strAppersBackend.Controllers
         private readonly KickoffConfig _kickoffConfig;
         private readonly IAIService _aiService;
         private readonly ISmtpEmailService _smtpEmailService;
+        private readonly IConfiguration _configuration;
+
+        private bool DebugEmails => _configuration.GetValue<bool>("Debug:Emails", false);
 
         public RolesController(
             ApplicationDbContext context,
             ILogger<RolesController> logger,
             IOptions<KickoffConfig> kickoffConfig,
             IAIService aiService,
-            ISmtpEmailService smtpEmailService)
+            ISmtpEmailService smtpEmailService,
+            IConfiguration configuration)
         {
             _context = context;
             _logger = logger;
             _kickoffConfig = kickoffConfig.Value;
             _aiService = aiService;
             _smtpEmailService = smtpEmailService;
+            _configuration = configuration;
         }
 
         /// <summary>
@@ -429,7 +434,7 @@ namespace strAppersBackend.Controllers
             catch (DbUpdateException ex)
             {
                 _logger.LogError(ex, "DB error saving institute roles for institute {InstituteId}", request.InstituteId);
-                // DEBUG — remove after diagnosis
+                if (DebugEmails)
                 try
                 {
                     var inner = ex.InnerException?.Message ?? "no inner";
@@ -447,8 +452,7 @@ namespace strAppersBackend.Controllers
                                $"Payload roles:\n{rolesSnapshot}";
                     await _smtpEmailService.SendPlainEmailAsync("ofer@skill-in.com", "[RolesConfig Debug] SaveInstituteRoles 409", body);
                 }
-                catch { /* ignore debug errors */ }
-                // END DEBUG
+                catch { /* ignore */ }
                 return Conflict("Could not save institute roles (constraint violation). Check RoleTypes and duplicates.");
             }
             catch (Exception ex)
@@ -623,7 +627,7 @@ Return only the final competencies text.
                     .OrderBy(r => r.Name)
                     .ToListAsync();
 
-                // DEBUG — remove after diagnosis
+                if (DebugEmails)
                 try
                 {
                     var nullCount    = await _context.Roles.CountAsync(r => r.InstituteId == null);
@@ -637,8 +641,7 @@ Return only the final competencies text.
                                $"First 3 rows: {string.Join(", ", sample.Select(r => $"Id={r.Id} Name={r.Name} InstituteId={r.InstituteId?.ToString() ?? "NULL"}"))}";
                     await _smtpEmailService.SendPlainEmailAsync("ofer@skill-in.com", "[RolesConfig Debug] GetAllRoles", body);
                 }
-                catch { /* ignore debug errors */ }
-                // END DEBUG
+                catch { /* ignore */ }
 
                 return Ok(roles);
             }
