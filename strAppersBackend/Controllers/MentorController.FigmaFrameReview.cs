@@ -41,6 +41,7 @@ public partial class MentorController
             var board = await _context.ProjectBoards.AsNoTracking().FirstOrDefaultAsync(b => b.Id == boardId);
             if (board == null)
                 return NotFound(new { success = false, message = $"Board {boardId} not found." });
+            var effectiveBoardId = board.UserStoryBoardId ?? boardId;
 
             var template = LoadMentorPromptFile("FigmaFrameReviewSystem");
             if (string.IsNullOrWhiteSpace(template))
@@ -48,6 +49,7 @@ public partial class MentorController
 
             var sprintContext = await BuildFigmaFrameSprintContextMarkdownAsync(
                 boardId,
+                effectiveBoardId,
                 board.ProjectId,
                 request.StudentId,
                 request.SprintNumber,
@@ -197,6 +199,7 @@ public partial class MentorController
 
     private async Task<FigmaFrameSprintContextBuild> BuildFigmaFrameSprintContextMarkdownAsync(
         string boardId,
+        string effectiveBoardId,
         int projectId,
         int studentId,
         int sprintNumber,
@@ -240,7 +243,7 @@ public partial class MentorController
             }
             sb.AppendLine();
 
-            var usResult = await _trelloService.GetUserStoryCardByModuleIdAsync(boardId, moduleIdStr.Trim());
+            var usResult = await _trelloService.GetUserStoryCardByModuleIdAsync(effectiveBoardId, moduleIdStr.Trim());
             var usCard = ExtractUserStoryCardFromResult(usResult);
             if (usCard != null)
             {

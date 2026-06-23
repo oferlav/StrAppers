@@ -10,7 +10,7 @@ namespace strAppersBackend.Services
     {
         Task<TrelloUserRegistrationResponse> InviteUserToTrelloAsync(string email, string? fullName = null);
         Task<TrelloUserCheckResponse> CheckUserRegistrationAsync(string email);
-        Task<TrelloProjectCreationResponse> CreateProjectWithSprintsAsync(TrelloProjectCreationRequest request, string projectTitle);
+        Task<TrelloProjectCreationResponse> CreateProjectWithSprintsAsync(TrelloProjectCreationRequest request, string projectTitle, List<ProjectModuleInfo>? modules = null);
         Task<object> GetProjectStatsAsync(string trelloBoardId);
         /// <summary>Gets the "User Stories" list and all its cards (with checklists and custom fields) for a board. Returns null if the list is not found.</summary>
         Task<object?> GetUserStoriesListAsync(string boardId);
@@ -84,6 +84,12 @@ namespace strAppersBackend.Services
         Task<string> GetCardChecklistTextAsync(string trelloCardId);
         /// <summary>Counts checklist items on the given card. Returns (Done, Total) where Done = items with state "complete".</summary>
         Task<(int Done, int Total)> GetCardChecklistCountsAsync(string trelloCardId);
+        /// <summary>
+        /// Creates a standalone User Story board (backfill for existing projects that have UserStoryBoardId=null).
+        /// Resolves org from Trello internally. Invites PM members. Returns (BoardId, BoardUrl, Errors).
+        /// </summary>
+        Task<(string? UserStoryBoardId, string? UserStoryBoardUrl, List<string> Errors)> CreateStandaloneUserStoryBoardAsync(
+            string boardName, List<ProjectModuleInfo> modules, List<TrelloTeamMember> teamMembers);
     }
 
     public class TrelloService : ITrelloService
@@ -399,9 +405,180 @@ namespace strAppersBackend.Services
             return apiErrorResponse;
         }
 
+        private static bool IsPMRole(string? roleName) =>
+            !string.IsNullOrWhiteSpace(roleName) &&
+            (roleName.Contains("Product Manager", StringComparison.OrdinalIgnoreCase) ||
+             roleName.Contains("PM", StringComparison.OrdinalIgnoreCase));
+
+        private async Task DeleteBoardAsync(string? boardId)
+        {
+            if (string.IsNullOrEmpty(boardId)) return;
+            try
+            {
+                var url = $"https://api.trello.com/1/boards/{boardId}?key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
+                var resp = await _httpClient.DeleteAsync(url);
+                if (resp.IsSuccessStatusCode)
+                    _logger.LogInformation("🗑️ [TRELLO ROLLBACK] Deleted board {BoardId}", boardId);
+                else
+                    _logger.LogWarning("🗑️ [TRELLO ROLLBACK] Delete board {BoardId} returned {Status}", boardId, resp.StatusCode);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error deleting Trello board {BoardId} during rollback", boardId);
+            }
+        }
+
+        /// <inheritdoc/>
+        public async Task<(string? UserStoryBoardId, string? UserStoryBoardUrl, List<string> Errors)> CreateStandaloneUserStoryBoardAsync(
+            string boardName, List<ProjectModuleInfo> modules, List<TrelloTeamMember> teamMembers)
+        {
+            var organizationId = await GetUserOrganizationIdAsync();
+            return await CreateUserStoryBoardAsync(boardName, organizationId, modules, teamMembers);
+        }
+
         /// <summary>
-        /// Creates a Trello board with lists, cards, labels, and optionally invites members
+        /// Creates a dedicated Trello board containing only a "User Stories" list with one card per module.
+        /// PM members are invited (respects SendInvitationToPMOnly). Called when CreateUserStoryBoard=true.
         /// </summary>
+        private async Task<(string? BoardId, string? BoardUrl, List<string> Errors)> CreateUserStoryBoardAsync(
+            string boardName,
+            string? organizationId,
+            List<ProjectModuleInfo> modules,
+            List<TrelloTeamMember> teamMembers)
+        {
+            var errors = new List<string>();
+            string? boardId = null;
+            string? boardUrl = null;
+
+            try
+            {
+                // 1. Create the board
+                var createBoardUrl = $"https://api.trello.com/1/boards?name={Uri.EscapeDataString(boardName)}&defaultLists=false&prefs_permissionLevel=public&key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
+                if (!string.IsNullOrEmpty(organizationId))
+                    createBoardUrl += $"&idOrganization={organizationId}";
+
+                var boardResponse = await _httpClient.PostAsync(createBoardUrl, null);
+                if (!boardResponse.IsSuccessStatusCode)
+                {
+                    var err = await boardResponse.Content.ReadAsStringAsync();
+                    _logger.LogError("Failed to create User Story board: {Error}", err);
+                    errors.Add($"Failed to create User Story board: {err}");
+                    return (null, null, errors);
+                }
+
+                var boardJson = await boardResponse.Content.ReadAsStringAsync();
+                var boardData = JsonSerializer.Deserialize<JsonElement>(boardJson);
+                boardId  = boardData.GetProperty("id").GetString();
+                boardUrl = boardData.GetProperty("url").GetString();
+                _logger.LogInformation("🗂️ [USER-STORY-BOARD] Created board {BoardId}", boardId);
+
+                // 2. Invite PM members (Trello sends invitation email automatically)
+                var membersToInvite = _trelloConfig.SendInvitationToPMOnly
+                    ? teamMembers.Where(m => !string.IsNullOrWhiteSpace(m.RoleName) &&
+                          (m.RoleName.Contains("Product Manager", StringComparison.OrdinalIgnoreCase) ||
+                           m.RoleName.Contains("PM", StringComparison.OrdinalIgnoreCase))).ToList()
+                    : teamMembers;
+
+                foreach (var member in membersToInvite)
+                {
+                    try
+                    {
+                        var inviteUrl = $"https://api.trello.com/1/boards/{boardId}/members?email={Uri.EscapeDataString(member.Email)}&type=normal&allowBillableGuest=true&key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
+                        var inviteResponse = await _httpClient.PutAsync(inviteUrl, null);
+                        if (!inviteResponse.IsSuccessStatusCode)
+                        {
+                            var inviteErr = GetInviteErrorMessage(await inviteResponse.Content.ReadAsStringAsync());
+                            _logger.LogWarning("Failed to invite {Email} to User Story board: {Error}", member.Email, inviteErr);
+                            errors.Add($"Failed to invite {member.Email} to User Story board: {inviteErr}");
+                        }
+                        else
+                        {
+                            _logger.LogInformation("✅ [USER-STORY-BOARD] Invited {Email}", member.Email);
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogError(ex, "Error inviting {Email} to User Story board", member.Email);
+                        errors.Add($"Error inviting {member.Email}: {ex.Message}");
+                    }
+                }
+
+                // 3. Create "User Stories" list
+                var createListUrl = $"https://api.trello.com/1/lists?name=User+Stories&idBoard={boardId}&key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
+                var listResponse = await _httpClient.PostAsync(createListUrl, null);
+                if (!listResponse.IsSuccessStatusCode)
+                {
+                    var err = await listResponse.Content.ReadAsStringAsync();
+                    _logger.LogError("Failed to create 'User Stories' list on User Story board: {Error}", err);
+                    errors.Add($"Failed to create User Stories list: {err}");
+                    return (boardId, boardUrl, errors);
+                }
+
+                var listJson = await listResponse.Content.ReadAsStringAsync();
+                var listData = JsonSerializer.Deserialize<JsonElement>(listJson);
+                var listId = listData.GetProperty("id").GetString();
+
+                // 4. Ensure custom fields exist on the new board (needed for ModuleId)
+                var customFieldIds = await EnsureCustomFieldsExistAsync(boardId, errors);
+
+                // 5. Create one card per module
+                if (modules.Count == 0)
+                    _logger.LogWarning("🗂️ [USER-STORY-BOARD] No modules provided — User Story board will have an empty list");
+
+                foreach (var module in modules)
+                {
+                    try
+                    {
+                        var cardName = $"User Story: {module.Title}";
+                        var createCardUrl = $"https://api.trello.com/1/cards?name={Uri.EscapeDataString(cardName)}&idList={listId}&key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
+                        var cardResponse = await SendWithRateLimitRetryAsync(() => _httpClient.PostAsync(createCardUrl, null));
+
+                        if (!cardResponse.IsSuccessStatusCode)
+                        {
+                            var err = await cardResponse.Content.ReadAsStringAsync();
+                            _logger.LogWarning("Failed to create User Story card for module {ModuleId}: {Error}", module.Id, err);
+                            errors.Add($"Failed to create User Story card for module '{module.Title}': {err}");
+                            continue;
+                        }
+
+                        var cardJson = await cardResponse.Content.ReadAsStringAsync();
+                        var cardData2 = JsonSerializer.Deserialize<JsonElement>(cardJson);
+                        var cardId = cardData2.GetProperty("id").GetString();
+
+                        // Checklist: "Acceptance Criteria"
+                        var createChecklistUrl = $"https://api.trello.com/1/checklists?name=Acceptance+Criteria&idCard={cardId}&key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
+                        var checklistResponse = await SendWithRateLimitRetryAsync(() => _httpClient.PostAsync(createChecklistUrl, null));
+                        if (checklistResponse.IsSuccessStatusCode)
+                        {
+                            var checklistJson = await checklistResponse.Content.ReadAsStringAsync();
+                            var checklistData = JsonSerializer.Deserialize<JsonElement>(checklistJson);
+                            var checklistId = checklistData.GetProperty("id").GetString();
+                        }
+
+                        // ModuleId custom field
+                        var moduleCard = new TrelloCard { ModuleId = module.Id.ToString() };
+                        await SetCardCustomFieldsAsync(boardId, cardId, moduleCard, customFieldIds, errors);
+
+                        _logger.LogInformation("✅ [USER-STORY-BOARD] Created card for module {ModuleId} '{Title}'", module.Id, module.Title);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogError(ex, "Error creating User Story card for module {ModuleId}", module.Id);
+                        errors.Add($"Error creating card for module '{module.Title}': {ex.Message}");
+                    }
+                }
+
+                _logger.LogInformation("✅ [USER-STORY-BOARD] Done — {Count} cards created on board {BoardId}", modules.Count, boardId);
+                return (boardId, boardUrl, errors);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error creating User Story board");
+                errors.Add($"Error creating User Story board: {ex.Message}");
+                return (boardId, boardUrl, errors);
+            }
+        }
+
         private async Task<(string? BoardId, string? BoardUrl, string? BoardName, Dictionary<string, string> RoleLabelIds, Dictionary<string, string> ListIds, Dictionary<string, string> CustomFieldIds, List<string> Errors)> CreateBoardWithContentAsync(
             TrelloProjectCreationRequest request, 
             string boardName, 
@@ -575,7 +752,7 @@ namespace strAppersBackend.Services
             }
         }
 
-        public async Task<TrelloProjectCreationResponse> CreateProjectWithSprintsAsync(TrelloProjectCreationRequest request, string projectTitle)
+        public async Task<TrelloProjectCreationResponse> CreateProjectWithSprintsAsync(TrelloProjectCreationRequest request, string projectTitle, List<ProjectModuleInfo>? modules = null)
         {
             var response = new TrelloProjectCreationResponse();
             var errors = new List<string>();
@@ -588,7 +765,18 @@ namespace strAppersBackend.Services
 
                 // Get user's organizations to use with Standard plan
                 var organizationId = await GetUserOrganizationIdAsync();
-                
+
+                // When CreateUserStoryBoard=true, strip the "User Stories" list and its cards from the main board
+                // request before any board is created. The User Story board is created separately below.
+                if (_trelloConfig.CreateUserStoryBoard)
+                {
+                    request.SprintPlan?.Lists?.RemoveAll(l =>
+                        string.Equals(l.Name, "User Stories", StringComparison.OrdinalIgnoreCase));
+                    request.SprintPlan?.Cards?.RemoveAll(c =>
+                        string.Equals(c.ListName, "User Stories", StringComparison.OrdinalIgnoreCase));
+                    _logger.LogInformation("🗂️ [USER-STORY-BOARD] Stripped 'User Stories' list from main board request (will be created on dedicated board)");
+                }
+
                 // When MergeType=Add: create only one board (no SystemBoard). Otherwise when CreatePMEmptyBoard: SystemBoard + EmptyBoard.
                 var mergeType = string.Equals(_trelloConfig.MergeType, "Add", StringComparison.OrdinalIgnoreCase) ? "Add" : "Merge";
                 if (_trelloConfig.CreatePMEmptyBoard && mergeType != "Add")
@@ -634,17 +822,29 @@ namespace strAppersBackend.Services
                     response.BoardName = emptyBoardName;
                     errors.AddRange(emptyErrors);
                     
-                    // Invite members and track invitations
-                    var membersToInvite = request.TeamMembers;
-                    if (_trelloConfig.SendInvitationToPMOnly)
+                    // Invite members and track invitations.
+                    // When CreateUserStoryBoard=true: PMs go to User Story board only — exclude them here.
+                    // When CreateUserStoryBoard=false + SendInvitationToPMOnly: only PMs invited (legacy).
+                    List<TrelloTeamMember> membersToInvite;
+                    if (_trelloConfig.CreateUserStoryBoard)
                     {
                         membersToInvite = request.TeamMembers
-                            .Where(m => !string.IsNullOrWhiteSpace(m.RoleName) && 
-                                (m.RoleName.Contains("Product Manager", StringComparison.OrdinalIgnoreCase) || 
+                            .Where(m => !IsPMRole(m.RoleName)).ToList();
+                        _logger.LogInformation("📧 [TRELLO INVITATION] CreateUserStoryBoard: inviting non-PM members ({Count}) to main board", membersToInvite.Count);
+                    }
+                    else if (_trelloConfig.SendInvitationToPMOnly)
+                    {
+                        membersToInvite = request.TeamMembers
+                            .Where(m => !string.IsNullOrWhiteSpace(m.RoleName) &&
+                                (m.RoleName.Contains("Product Manager", StringComparison.OrdinalIgnoreCase) ||
                                  m.RoleName.Contains("PM", StringComparison.OrdinalIgnoreCase)))
                             .ToList();
                     }
-                    
+                    else
+                    {
+                        membersToInvite = request.TeamMembers;
+                    }
+
                     foreach (var member in membersToInvite)
                     {
                         try
@@ -654,7 +854,7 @@ namespace strAppersBackend.Services
                             var inviteUrl = $"https://api.trello.com/1/boards/{emptyBoardId}/members?email={Uri.EscapeDataString(member.Email)}&type=normal&allowBillableGuest=true&key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
                             var inviteResponse = await _httpClient.PutAsync(inviteUrl, null);
                             var inviteResponseContent = inviteResponse.IsSuccessStatusCode ? null : await inviteResponse.Content.ReadAsStringAsync();
-                            
+
                             if (inviteResponse.IsSuccessStatusCode)
                             {
                                 response.InvitedUsers.Add(new TrelloInvitedUser
@@ -683,16 +883,37 @@ namespace strAppersBackend.Services
                             errors.Add($"Error inviting {member.Email}: {ex.Message}");
                         }
                     }
-                    
+
                     // Create simplified cards on EmptyBoard
                     await CreateEmptyBoardCardsAsync(emptyBoardId, request, systemBoardId, emptyRoleLabelIds, emptyListIds, emptyCustomFieldIds, errors);
-                    
+
                     _logger.LogInformation("✅ [TRELLO] EmptyBoard created successfully: {EmptyBoardId}", emptyBoardId);
-                    
+
+                    // Create dedicated User Story board if enabled.
+                    // Failure is fatal: roll back both boards and return an error.
+                    if (_trelloConfig.CreateUserStoryBoard)
+                    {
+                        var (usBoardId, usBoardUrl, usErrors) = await CreateUserStoryBoardAsync(
+                            $"{boardName} — User Stories", organizationId, modules ?? new(), request.TeamMembers);
+                        if (string.IsNullOrEmpty(usBoardId))
+                        {
+                            _logger.LogError("User Story board creation failed — rolling back SystemBoard {SysId} and EmptyBoard {EmpId}", systemBoardId, emptyBoardId);
+                            await DeleteBoardAsync(emptyBoardId);
+                            await DeleteBoardAsync(systemBoardId);
+                            response.Success = false;
+                            response.Message = "Failed to create User Story board. All boards rolled back.";
+                            response.Errors = usErrors;
+                            return response;
+                        }
+                        response.UserStoryBoardId  = usBoardId;
+                        response.UserStoryBoardUrl = usBoardUrl;
+                        errors.AddRange(usErrors);
+                    }
+
                     response.Success = true;
                     response.Message = "Trello project created successfully with SystemBoard and EmptyBoard";
                     response.Errors = errors;
-                    
+
                     return response;
                 }
                 else
@@ -714,17 +935,29 @@ namespace strAppersBackend.Services
                     response.BoardName = trelloBoardName;
                     errors.AddRange(boardErrors);
                     
-                    // Invite members and track invitations
-                    var membersToInvite = request.TeamMembers;
-                    if (_trelloConfig.SendInvitationToPMOnly)
+                    // Invite members and track invitations.
+                    // When CreateUserStoryBoard=true: PMs go to User Story board only — exclude them here.
+                    // When CreateUserStoryBoard=false + SendInvitationToPMOnly: only PMs invited (legacy).
+                    List<TrelloTeamMember> membersToInvite;
+                    if (_trelloConfig.CreateUserStoryBoard)
                     {
                         membersToInvite = request.TeamMembers
-                            .Where(m => !string.IsNullOrWhiteSpace(m.RoleName) && 
-                                (m.RoleName.Contains("Product Manager", StringComparison.OrdinalIgnoreCase) || 
+                            .Where(m => !IsPMRole(m.RoleName)).ToList();
+                        _logger.LogInformation("📧 [TRELLO INVITATION] CreateUserStoryBoard: inviting non-PM members ({Count}) to main board", membersToInvite.Count);
+                    }
+                    else if (_trelloConfig.SendInvitationToPMOnly)
+                    {
+                        membersToInvite = request.TeamMembers
+                            .Where(m => !string.IsNullOrWhiteSpace(m.RoleName) &&
+                                (m.RoleName.Contains("Product Manager", StringComparison.OrdinalIgnoreCase) ||
                                  m.RoleName.Contains("PM", StringComparison.OrdinalIgnoreCase)))
                             .ToList();
                     }
-                    
+                    else
+                    {
+                        membersToInvite = request.TeamMembers;
+                    }
+
                     foreach (var member in membersToInvite)
                     {
                         try
@@ -734,7 +967,7 @@ namespace strAppersBackend.Services
                             var inviteUrl = $"https://api.trello.com/1/boards/{trelloBoardId}/members?email={Uri.EscapeDataString(member.Email)}&type=normal&allowBillableGuest=true&key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
                             var inviteResponse = await _httpClient.PutAsync(inviteUrl, null);
                             var inviteResponseContent = inviteResponse.IsSuccessStatusCode ? null : await inviteResponse.Content.ReadAsStringAsync();
-                            
+
                             if (inviteResponse.IsSuccessStatusCode)
                             {
                                 response.InvitedUsers.Add(new TrelloInvitedUser
@@ -766,14 +999,34 @@ namespace strAppersBackend.Services
 
                     // Create all cards on the board
                     await CreateCardsOnBoardAsync(trelloBoardId, request, roleLabelIds, listIds, customFieldIds, errors);
-                    
+
+                    // Create dedicated User Story board if enabled.
+                    // Failure is fatal: roll back the main board and return an error.
+                    if (_trelloConfig.CreateUserStoryBoard)
+                    {
+                        var (usBoardId, usBoardUrl, usErrors) = await CreateUserStoryBoardAsync(
+                            $"{boardName} — User Stories", organizationId, modules ?? new(), request.TeamMembers);
+                        if (string.IsNullOrEmpty(usBoardId))
+                        {
+                            _logger.LogError("User Story board creation failed — rolling back main board {BoardId}", trelloBoardId);
+                            await DeleteBoardAsync(trelloBoardId);
+                            response.Success = false;
+                            response.Message = "Failed to create User Story board. Main board rolled back.";
+                            response.Errors = usErrors;
+                            return response;
+                        }
+                        response.UserStoryBoardId  = usBoardId;
+                        response.UserStoryBoardUrl = usBoardUrl;
+                        errors.AddRange(usErrors);
+                    }
+
                     response.Success = true;
                     response.Message = "Trello project created successfully";
                     response.Errors = errors;
-                    
-                    _logger.LogInformation("Successfully created Trello project with BoardName {BoardName} and Trello BoardId {TrelloBoardId} with {LabelCount} role labels", 
+
+                    _logger.LogInformation("Successfully created Trello project with BoardName {BoardName} and Trello BoardId {TrelloBoardId} with {LabelCount} role labels",
                         boardName, response.BoardId, roleLabelIds.Count);
-                    
+
                     return response;
                 }
             }

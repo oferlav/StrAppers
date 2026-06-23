@@ -18,6 +18,8 @@ public class Worker : BackgroundService
     private readonly ProjectCriteriaConfig _criteriaConfig;
     private readonly Random _random = new();
 
+    private bool DebugDiagnostics => _configuration.GetValue<bool>("Debug:DiagnosticsEmail", false);
+
     public Worker(ILogger<Worker> logger, IHttpClientFactory httpClientFactory, IConfiguration configuration, IOptions<KickoffConfig> kickoffConfig, IOptions<ProjectCriteriaConfig> criteriaConfig)
     {
         _logger = logger;
@@ -50,7 +52,7 @@ public class Worker : BackgroundService
                 var created = await TryCreateBoardsAsync(connectionString, baseUrl, stoppingToken);
                 _logger.LogInformation("[ITERATION] Completed at {Time}. Boards created: {Created}", DateTime.UtcNow, created);
 
-                await LogInstituteDiagnosticsAsync(connectionString, baseUrl, stoppingToken);
+                await LogInstituteDiagnosticsAsync(connectionString, baseUrl, stoppingToken, DebugDiagnostics);
                 await CallRunDueSprintMergesAsync(baseUrl, stoppingToken);
             }
             catch (Exception ex)
@@ -91,14 +93,13 @@ public class Worker : BackgroundService
         var all = (await conn.QueryAsync<StudentCandidate>(new CommandDefinition(sql, cancellationToken: ct))).ToList();
         _logger.LogInformation("[CANDIDATES] Total rows (by project priority expansion): {Count}", all.Count);
         
-        // DEBUG: Log detailed candidate information from SQL query
         if (all.Any())
         {
             _logger.LogInformation("[CANDIDATES] Detailed candidate breakdown:");
             foreach (var candidate in all)
             {
                 _logger.LogInformation("[CANDIDATES]   StudentId={StudentId}, ProjectId={ProjectId}, RoleId={RoleId}, RoleType={RoleType}, RoleName={RoleName}, IsAdmin={IsAdmin}, PriorityRank={PriorityRank}",
-                    candidate.Id, candidate.ProjectId?.ToString() ?? "NULL", candidate.RoleId?.ToString() ?? "NULL", 
+                    candidate.Id, candidate.ProjectId?.ToString() ?? "NULL", candidate.RoleId?.ToString() ?? "NULL",
                     candidate.RoleType?.ToString() ?? "NULL", candidate.RoleName ?? "NULL", candidate.IsAdmin, candidate.PriorityRank);
             }
         }
@@ -372,7 +373,7 @@ public class Worker : BackgroundService
         }
     }
 
-    private async Task LogInstituteDiagnosticsAsync(string connectionString, string baseUrl, CancellationToken ct)
+    private async Task LogInstituteDiagnosticsAsync(string connectionString, string baseUrl, CancellationToken ct, bool sendEmail = false)
     {
         var sb = new System.Text.StringBuilder();
         sb.AppendLine($"[Institute Diagnostics] {DateTime.UtcNow:u}");
@@ -448,7 +449,7 @@ public class Worker : BackgroundService
             sb.AppendLine($"ERROR: {ex.Message}");
         }
 
-        // Email the diagnostics
+        if (sendEmail)
         try
         {
             var client = _httpClientFactory.CreateClient();

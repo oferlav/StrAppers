@@ -426,7 +426,10 @@ namespace strAppersBackend.Controllers
                             object? linkedUserStory = null;
                             var taskModuleId = GetModuleIdFromTaskCustomFields(customFields);
                             if (!string.IsNullOrEmpty(taskModuleId) && !string.IsNullOrEmpty(student.BoardId))
-                                linkedUserStory = await GetLinkedUserStoryCardAsync(student.BoardId, taskModuleId, linkedUserStoryByModuleId);
+                            {
+                                var effectiveBoardId = student.ProjectBoard?.UserStoryBoardId ?? student.BoardId;
+                                linkedUserStory = await GetLinkedUserStoryCardAsync(effectiveBoardId, taskModuleId, linkedUserStoryByModuleId);
+                            }
 
                             var taskDeveloperTrackPublic = GetSprintTaskDeveloperTrack(card);
                             userTasks.Add(new
@@ -6557,7 +6560,10 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                             object? linkedUserStory = null;
                             var taskModuleId = GetModuleIdFromTaskCustomFields(customFields);
                             if (!string.IsNullOrEmpty(taskModuleId) && !string.IsNullOrEmpty(student.BoardId))
-                                linkedUserStory = await GetLinkedUserStoryCardAsync(student.BoardId, taskModuleId, linkedUserStoryByModuleId);
+                            {
+                                var effectiveBoardId = student.ProjectBoard?.UserStoryBoardId ?? student.BoardId;
+                                linkedUserStory = await GetLinkedUserStoryCardAsync(effectiveBoardId, taskModuleId, linkedUserStoryByModuleId);
+                            }
 
                             var taskDeveloperTrack = GetSprintTaskDeveloperTrack(card);
                             userTasks.Add(new
