@@ -434,7 +434,6 @@ namespace strAppersBackend.Controllers
             catch (DbUpdateException ex)
             {
                 _logger.LogError(ex, "DB error saving institute roles for institute {InstituteId}", request.InstituteId);
-                if (DebugEmails)
                 try
                 {
                     var inner = ex.InnerException?.Message ?? "no inner";
@@ -450,7 +449,9 @@ namespace strAppersBackend.Controllers
                                $"DB null-InstituteId roles={nullCount}\n" +
                                $"DB InstituteId={request.InstituteId} roles={instCount}\n\n" +
                                $"Payload roles:\n{rolesSnapshot}";
-                    await _smtpEmailService.SendPlainEmailAsync("ofer@skill-in.com", "[RolesConfig Debug] SaveInstituteRoles 409", body);
+                    _logger.LogWarning("[RolesConfig Debug] SaveInstituteRoles 409: {Body}", body);
+                    if (DebugEmails)
+                        await _smtpEmailService.SendPlainEmailAsync("ofer@skill-in.com", "[RolesConfig Debug] SaveInstituteRoles 409", body);
                 }
                 catch { /* ignore */ }
                 return Conflict("Could not save institute roles (constraint violation). Check RoleTypes and duplicates.");
@@ -627,7 +628,6 @@ Return only the final competencies text.
                     .OrderBy(r => r.Name)
                     .ToListAsync();
 
-                if (DebugEmails)
                 try
                 {
                     var nullCount    = await _context.Roles.CountAsync(r => r.InstituteId == null);
@@ -639,7 +639,9 @@ Return only the final competencies text.
                                $"DB null InstituteId={nullCount}\n" +
                                $"DB non-null InstituteId={nonNullCount}\n" +
                                $"First 3 rows: {string.Join(", ", sample.Select(r => $"Id={r.Id} Name={r.Name} InstituteId={r.InstituteId?.ToString() ?? "NULL"}"))}";
-                    await _smtpEmailService.SendPlainEmailAsync("ofer@skill-in.com", "[RolesConfig Debug] GetAllRoles", body);
+                    _logger.LogInformation("[RolesConfig Debug] GetAllRoles: {Body}", body);
+                    if (DebugEmails)
+                        await _smtpEmailService.SendPlainEmailAsync("ofer@skill-in.com", "[RolesConfig Debug] GetAllRoles", body);
                 }
                 catch { /* ignore */ }
 
