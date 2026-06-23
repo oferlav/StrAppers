@@ -3334,6 +3334,78 @@ Your intelligence is strictly tethered to the Current Project Context and the us
         }
 
         /// <summary>
+        /// Receives test run results from GitHub Actions and records them in BoardStates.
+        /// Called by the "Report Test Results" step in each student backend's CI workflow.
+        /// </summary>
+        [HttpPost("test-results")]
+        public async Task<ActionResult> RecordTestResults([FromBody] TestResultsRequest request)
+        {
+            try
+            {
+                if (request == null || string.IsNullOrWhiteSpace(request.BoardId))
+                    return BadRequest(new { Success = false, Message = "BoardId is required" });
+
+                var boardExists = await _context.ProjectBoards.AnyAsync(pb => pb.Id == request.BoardId);
+                if (!boardExists)
+                {
+                    _logger.LogWarning("[TestResults] Unknown BoardId {BoardId} — skipping", request.BoardId);
+                    return BadRequest(new { Success = false, Message = $"BoardId {request.BoardId} does not exist" });
+                }
+
+                var status = request.Status?.ToUpperInvariant() switch
+                {
+                    "PASS" => "PASS",
+                    "FAIL" => "FAIL",
+                    _ => "NO_TESTS"
+                };
+
+                var output = string.IsNullOrEmpty(request.Output)
+                    ? null
+                    : request.Output.Length > 4000 ? request.Output[..4000] : request.Output;
+
+                var devRole = string.IsNullOrWhiteSpace(request.DevRole) ? "Backend" : request.DevRole;
+                var now = DateTime.UtcNow;
+
+                FormattableString sql = $@"
+                    INSERT INTO ""BoardStates"" (
+                        ""BoardId"", ""Source"", ""Webhook"", ""GithubBranch"",
+                        ""LastTestStatus"", ""LastTestOutput"", ""LastTestRunDate"",
+                        ""DevRole"", ""CreatedAt"", ""UpdatedAt""
+                    ) VALUES (
+                        {request.BoardId}, {"TestRunner"}, {false}, {""},
+                        {status}, {output}, {now},
+                        {devRole}, {now}, {now}
+                    )
+                    ON CONFLICT (""BoardId"", ""Source"", ""Webhook"", ""GithubBranch"")
+                    DO UPDATE SET
+                        ""LastTestStatus""  = EXCLUDED.""LastTestStatus"",
+                        ""LastTestOutput""  = EXCLUDED.""LastTestOutput"",
+                        ""LastTestRunDate"" = EXCLUDED.""LastTestRunDate"",
+                        ""DevRole""         = EXCLUDED.""DevRole"",
+                        ""UpdatedAt""       = EXCLUDED.""UpdatedAt""
+                    ";
+
+                await _context.Database.ExecuteSqlInterpolatedAsync(sql);
+
+                _logger.LogInformation("[TestResults] Recorded {Status} for BoardId {BoardId}", status, request.BoardId);
+                return Ok(new { Success = true, Status = status });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "[TestResults] Error recording test results for BoardId {BoardId}", request?.BoardId);
+                return StatusCode(500, new { Success = false, Message = ex.Message });
+            }
+        }
+
+        public class TestResultsRequest
+        {
+            public string BoardId { get; set; } = string.Empty;
+            public string? DevRole { get; set; }
+            public string? Status { get; set; }  // PASS, FAIL, NO_TESTS
+            public string? Output { get; set; }
+        }
+
+        /// <summary>
         /// Updates BoardStates table with GitHub Pages deployment status
         /// Called after deployment and from webhooks to track Pages build status
         /// </summary>

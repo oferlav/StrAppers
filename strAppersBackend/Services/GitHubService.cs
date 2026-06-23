@@ -38,7 +38,7 @@ public interface IGitHubService
     Task<bool> CreateFrontendOnlyCommitAsync(string owner, string repositoryName, string projectTitle, string accessToken, string? webApiUrl = null, string? organizationLogoUrl = null);
     /// <summary>Creates initial commit with hardcoded rich frontend (React + Vite). Use when GitHub:UseHardcodedFrontendTemplate is true.</summary>
     Task<bool> CreateRichFrontendOnlyCommitAsync(string owner, string repositoryName, string projectTitle, string accessToken, string? webApiUrl = null, string? organizationLogoUrl = null);
-    Task<bool> CreateBackendOnlyCommitAsync(string owner, string repositoryName, string projectTitle, string accessToken, string programmingLanguage, string? databaseConnectionString = null, string? webApiUrl = null, string? swaggerUrl = null);
+    Task<bool> CreateBackendOnlyCommitAsync(string owner, string repositoryName, string projectTitle, string accessToken, string programmingLanguage, string? databaseConnectionString = null, string? webApiUrl = null, string? swaggerUrl = null, string boardId = "", string strAppersApiUrl = "");
     Task<bool> CreateInitialReadmeAsync(string owner, string repositoryName, string projectTitle, string accessToken, bool isFrontend = false, string? webApiUrl = null, string? databaseConnectionString = null, string? swaggerUrl = null);
     /// <summary>Updates backend README.md with full Web API and Swagger URLs (e.g. after Railway domain is created).</summary>
     Task<bool> UpdateBackendReadmeWithWebApiUrlsAsync(string owner, string repositoryName, string projectTitle, string? databaseConnectionString, string? webApiUrl, string? swaggerUrl, string accessToken);
@@ -1312,7 +1312,7 @@ public class GitHubService : IGitHubService
     /// <summary>
     /// Creates initial commit with backend files only (at root level, no workflows)
     /// </summary>
-    public async Task<bool> CreateBackendOnlyCommitAsync(string owner, string repositoryName, string projectTitle, string accessToken, string programmingLanguage, string? databaseConnectionString = null, string? webApiUrl = null, string? swaggerUrl = null)
+    public async Task<bool> CreateBackendOnlyCommitAsync(string owner, string repositoryName, string projectTitle, string accessToken, string programmingLanguage, string? databaseConnectionString = null, string? webApiUrl = null, string? swaggerUrl = null, string boardId = "", string strAppersApiUrl = "")
     {
         try
         {
@@ -1362,7 +1362,7 @@ public class GitHubService : IGitHubService
             }
 
             // Create GitHub Actions workflow for deploying backend to Railway (root-level files)
-            var backendWorkflow = GenerateRailwayDeploymentWorkflowAtRoot(programmingLanguage);
+            var backendWorkflow = GenerateRailwayDeploymentWorkflowAtRoot(programmingLanguage, boardId, strAppersApiUrl);
             var backendWorkflowSha = await CreateBlobAsync(owner, repositoryName, backendWorkflow, accessToken);
             if (!string.IsNullOrEmpty(backendWorkflowSha))
             {
@@ -6145,7 +6145,57 @@ cmd = ""dotnet /app/publish/Backend.dll""
 ";
                 break;
         }
-        
+
+        // Starter test helper (pure function, no DB — safe to test in CI)
+        files["backend/Helpers/Calculator.cs"] = @"namespace Backend.Helpers;
+
+public static class Calculator
+{
+    public static int Add(int a, int b) => a + b;
+}
+";
+
+        // xUnit test project
+        files["backend/Tests/Tests.csproj"] = @"<Project Sdk=""Microsoft.NET.Sdk"">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include=""Microsoft.NET.Test.Sdk"" Version=""17.8.0"" />
+    <PackageReference Include=""xunit"" Version=""2.6.2"" />
+    <PackageReference Include=""xunit.runner.visualstudio"" Version=""2.5.4"">
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+      <PrivateAssets>all</PrivateAssets>
+    </PackageReference>
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include=""../Backend.csproj"" />
+  </ItemGroup>
+</Project>
+";
+
+        files["backend/Tests/CalculatorTests.cs"] = @"using Backend.Helpers;
+
+namespace Tests;
+
+public class CalculatorTests
+{
+    [Fact]
+    public void Add_ReturnsSumOfTwoNumbers()
+    {
+        Assert.Equal(5, Calculator.Add(2, 3));
+    }
+
+    [Fact]
+    public void Add_WithNegativeNumbers_ReturnsCorrectSum()
+    {
+        Assert.Equal(-1, Calculator.Add(2, -3));
+    }
+}
+";
+
         return files;
     }
 
@@ -6923,6 +6973,20 @@ if __name__ == '__main__':
 
         // Note: README.md is created at root level, not here to avoid conflicts
 
+        files["backend/tests/__init__.py"] = "";
+
+        files["backend/tests/test_calculator.py"] = @"def add(a, b):
+    return a + b
+
+
+def test_add_returns_sum():
+    assert add(2, 3) == 5
+
+
+def test_add_with_negative_numbers():
+    assert add(2, -3) == -1
+";
+
         return files;
     }
 
@@ -7602,7 +7666,8 @@ app.listen(PORT, '0.0.0.0', (err) => {
   ""main"": ""app.js"",
   ""scripts"": {
     ""start"": ""node app.js"",
-    ""dev"": ""nodemon app.js""
+    ""dev"": ""nodemon app.js"",
+    ""test"": ""jest""
   },
   ""dependencies"": {
     ""express"": ""^4.18.2"",
@@ -7613,9 +7678,23 @@ app.listen(PORT, '0.0.0.0', (err) => {
     ""winston"": ""^3.11.0""
   },
   ""devDependencies"": {
-    ""nodemon"": ""^3.0.2""
+    ""nodemon"": ""^3.0.2"",
+    ""jest"": ""^29.7.0""
   }
 }
+";
+
+        files["backend/tests/calculator.test.js"] = @"function add(a, b) {
+  return a + b;
+}
+
+test('add returns sum of two numbers', () => {
+  expect(add(2, 3)).toBe(5);
+});
+
+test('add with negative numbers returns correct sum', () => {
+  expect(add(2, -3)).toBe(-1);
+});
 ";
 
         // Note: README.md is created at root level, not here to avoid conflicts
@@ -7670,6 +7749,11 @@ app.listen(PORT, '0.0.0.0', (err) => {
             <groupId>org.springdoc</groupId>
             <artifactId>springdoc-openapi-starter-webmvc-ui</artifactId>
             <version>2.3.0</version>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
         </dependency>
     </dependencies>
 
@@ -8339,6 +8423,21 @@ app.listen(PORT, '0.0.0.0', (err) => {
 "springdoc.swagger-ui.path=/swagger\n";
 
         // Note: README.md is created at root level, not here to avoid conflicts
+
+        files["backend/src/test/java/com/backend/CalculatorTest.java"] = "package com.backend;\n\n" +
+"import org.junit.jupiter.api.Test;\n" +
+"import static org.junit.jupiter.api.Assertions.*;\n\n" +
+"class CalculatorTest {\n\n" +
+"    int add(int a, int b) { return a + b; }\n\n" +
+"    @Test\n" +
+"    void add_returnsSumOfTwoNumbers() {\n" +
+"        assertEquals(5, add(2, 3));\n" +
+"    }\n\n" +
+"    @Test\n" +
+"    void add_withNegativeNumbers_returnsCorrectSum() {\n" +
+"        assertEquals(-1, add(2, -3));\n" +
+"    }\n" +
+"}\n";
 
         return files;
     }
@@ -9100,6 +9199,9 @@ try {
         ""ext-pdo"": ""*"",
         ""ext-pdo_pgsql"": ""*""
     },
+    ""require-dev"": {
+        ""phpunit/phpunit"": ""^10.0""
+    },
     ""autoload"": {
         ""psr-4"": {
             ""App\\"": """"
@@ -9133,6 +9235,42 @@ require __DIR__ . '/vendor/autoload.php';
 require __DIR__ . '/index.php';
 
 echo ""BUILD OK\n"";
+";
+
+        files["backend/phpunit.xml"] = @"<?xml version=""1.0"" encoding=""UTF-8""?>
+<phpunit xmlns:xsi=""http://www.w3.org/2001/XMLSchema-instance""
+         xsi:noNamespaceSchemaLocation=""https://schema.phpunit.de/10.0/phpunit.xsd""
+         bootstrap=""vendor/autoload.php""
+         colors=""true"">
+    <testsuites>
+        <testsuite name=""Backend Test Suite"">
+            <directory>tests</directory>
+        </testsuite>
+    </testsuites>
+</phpunit>
+";
+
+        files["backend/tests/CalculatorTest.php"] = @"<?php
+
+use PHPUnit\Framework\TestCase;
+
+class CalculatorTest extends TestCase
+{
+    private function add(int $a, int $b): int
+    {
+        return $a + $b;
+    }
+
+    public function testAddReturnsSumOfTwoNumbers(): void
+    {
+        $this->assertEquals(5, $this->add(2, 3));
+    }
+
+    public function testAddWithNegativeNumbersReturnsCorrectSum(): void
+    {
+        $this->assertEquals(-1, $this->add(2, -3));
+    }
+}
 ";
 
         return files;
@@ -9947,6 +10085,7 @@ gem 'sinatra', '~> 3.0'
 gem 'pg', '>= 1.5'
 gem 'json'
 gem 'puma', '~> 6.0'
+gem 'rspec', '~> 3.0'
 ";
 
         // Procfile - Railway uses this if present
@@ -9970,6 +10109,7 @@ DEPENDENCIES
   json
   pg (>= 1.5)
   puma (~> 6.0)
+  rspec (~> 3.0)
   sinatra (~> 3.0)
 
 BUNDLED WITH
@@ -10002,6 +10142,21 @@ rescue Exception => e
   STDERR.puts ""BUILD FAILED: #{e.class} - #{e.message}""
   STDERR.puts e.backtrace.join(""\n"")
   exit(1)
+end
+";
+
+        files["backend/spec/calculator_spec.rb"] = @"def add(a, b)
+  a + b
+end
+
+RSpec.describe 'Calculator' do
+  it 'returns the sum of two numbers' do
+    expect(add(2, 3)).to eq(5)
+  end
+
+  it 'returns the correct sum with negative numbers' do
+    expect(add(2, -3)).to eq(-1)
+  end
 end
 ";
 
@@ -11153,6 +11308,27 @@ require (
 github.com/lib/pq v1.10.9/go.mod h1:AlVN5x4E4T544tWzH6hKfbfQvm3HdbOxrmggDNAPY9o=
 ";
 
+        files["backend/calculator_test.go"] = @"package main
+
+import ""testing""
+
+func add(a, b int) int {
+    return a + b
+}
+
+func TestAdd_ReturnsSumOfTwoNumbers(t *testing.T) {
+    if got := add(2, 3); got != 5 {
+        t.Errorf(""add(2, 3) = %d; want 5"", got)
+    }
+}
+
+func TestAdd_WithNegativeNumbers_ReturnsCorrectSum(t *testing.T) {
+    if got := add(2, -3); got != -1 {
+        t.Errorf(""add(2, -3) = %d; want -1"", got)
+    }
+}
+";
+
         return files;
     }
 
@@ -11462,7 +11638,10 @@ jobs:
     /// <summary>
     /// Generates GitHub Actions workflow for deploying backend to Railway (files at root level)
     /// </summary>
-    private string GenerateRailwayDeploymentWorkflowAtRoot(string programmingLanguage)
+    private string GenerateRailwayDeploymentWorkflowAtRoot(
+        string programmingLanguage,
+        string boardId = "",
+        string strAppersApiUrl = "")
     {
         // Build commands vary by programming language (files are at root, no backend/ directory)
         var buildCommands = programmingLanguage?.ToLowerInvariant() switch
@@ -11486,6 +11665,28 @@ jobs:
           dotnet publish Backend.csproj -c Release -o ./out"
         };
 
+        var testRunCommand = programmingLanguage?.ToLowerInvariant() switch
+        {
+            "c#" or "csharp"                 => "dotnet test Tests/Tests.csproj -v minimal",
+            "python"                          => "pip install pytest -q && pytest tests/ -q --tb=short",
+            "nodejs" or "node.js" or "node"  => "npm test -- --passWithNoTests",
+            "java"                            => "mvn test -q",
+            "php"                             => "composer install -q && ./vendor/bin/phpunit tests/",
+            "ruby"                            => "bundle exec rspec spec/ --format progress",
+            "go"                              => "go test ./...",
+            _                                 => "echo 'no test runner configured'"
+        };
+
+        var reportStep = !string.IsNullOrEmpty(boardId) ? $@"
+      - name: Report Test Results
+        if: always()
+        env:
+          BOARD_ID: ""{boardId}""
+          API_URL: ""{strAppersApiUrl}""
+          TEST_OUTCOME: ${{{{ steps.run_tests.outcome }}}}
+        run: |
+          python3 -c ""import json,os,urllib.request as r; status='PASS' if os.environ.get('TEST_OUTCOME')=='success' else 'FAIL'; output=open('/tmp/test_out.txt').read()[:2000] if os.path.exists('/tmp/test_out.txt') else ''; body=json.dumps({{'boardId':os.environ['BOARD_ID'],'devRole':'Backend','status':status,'output':output}}).encode(); req=r.Request(os.environ['API_URL']+'/api/Mentor/test-results',data=body,headers={{'Content-Type':'application/json'}}); r.urlopen(req,timeout=10)"" || true" : "";
+
         return $@"name: Deploy Backend to Railway
 
 on:
@@ -11503,14 +11704,21 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-      
+
       - name: Setup Railway CLI
         uses: bervProject/setup-railway@v2.0.0
         with:
           railway_token: ${{{{ secrets.RAILWAY_TOKEN }}}}
-      
+
 {buildCommands}
-      
+
+      - name: Run Tests
+        id: run_tests
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          {testRunCommand} 2>&1 | tee /tmp/test_out.txt
+{reportStep}
       - name: Deploy to Railway
         env:
           RAILWAY_SERVICE_ID: ${{{{ secrets.RAILWAY_SERVICE_ID }}}}

@@ -1084,6 +1084,18 @@ public class UtilitiesController : ControllerBase
           dotnet publish Backend.csproj -c Release -o ./out"
         };
 
+        var testRunCommand = programmingLanguage?.ToLowerInvariant() switch
+        {
+            "c#" or "csharp"                => "dotnet test Tests/Tests.csproj -v minimal",
+            "python"                         => "pip install pytest -q && pytest tests/ -q --tb=short",
+            "nodejs" or "node.js" or "node" => "npm test -- --passWithNoTests",
+            "java"                           => "mvn test -q",
+            "php"                            => "composer install -q && ./vendor/bin/phpunit tests/",
+            "ruby"                           => "bundle exec rspec spec/ --format progress",
+            "go"                             => "go test ./...",
+            _                                => "echo 'no test runner configured'"
+        };
+
         return $@"name: Deploy Backend to Railway
 
 on:
@@ -1101,14 +1113,21 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-      
+
       - name: Setup Railway CLI
         uses: bervProject/setup-railway@v2.0.0
         with:
           railway_token: ${{{{ secrets.RAILWAY_TOKEN }}}}
-      
+
 {buildCommands}
-      
+
+      - name: Run Tests
+        id: run_tests
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          {testRunCommand} 2>&1 | tee /tmp/test_out.txt
+
       - name: Deploy to Railway
         env:
           RAILWAY_SERVICE_ID: ${{{{ secrets.RAILWAY_SERVICE_ID }}}}

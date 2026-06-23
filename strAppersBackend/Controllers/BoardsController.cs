@@ -2768,9 +2768,11 @@ public partial class BoardsController : ControllerBase
                             }
                             
                             // Create backend-only commit (files at root, no workflows)
+                            var strAppersApiUrlForWorkflow = _configuration["ApiBaseUrl"] ?? "";
                             var backendCommitSuccess = await _gitHubService.CreateBackendOnlyCommitAsync(
-                                backendOwner, backendRepoNameFromUrl, project.Title, githubToken, 
-                                programmingLanguage ?? "c#", dbConnectionString, webApiUrl, swaggerUrl);
+                                backendOwner, backendRepoNameFromUrl, project.Title, githubToken,
+                                programmingLanguage ?? "c#", dbConnectionString, webApiUrl, swaggerUrl,
+                                trelloBoardId ?? "", strAppersApiUrlForWorkflow);
                             
                             if (backendCommitSuccess)
                             {
@@ -8820,7 +8822,7 @@ INSERT INTO ""TestProjects"" (""Name"") VALUES
                             await _gitHubService.CreateWebhookAsync(beOwner, beRepo, webhookUrl, webhookSecret, githubToken);
                         await _gitHubService.CreateBranchProtectionAsync(beOwner, beRepo, "main", githubToken);
                         await _gitHubService.CreateRepositoryRulesetAsync(beOwner, beRepo, "Backend", githubToken);
-                        await _gitHubService.CreateBackendOnlyCommitAsync(beOwner, beRepo, project.Title, githubToken, programmingLanguage ?? "c#", questDbConnectionString, null, null);
+                        await _gitHubService.CreateBackendOnlyCommitAsync(beOwner, beRepo, project.Title, githubToken, programmingLanguage ?? "c#", questDbConnectionString, null, null, boardId, _configuration["ApiBaseUrl"] ?? "");
 
                         if (!string.IsNullOrEmpty(questRailwayServiceId) && !string.IsNullOrEmpty(railwayApiToken) && !string.IsNullOrEmpty(railwayApiUrl))
                         {
