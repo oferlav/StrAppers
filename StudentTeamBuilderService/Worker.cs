@@ -52,7 +52,7 @@ public class Worker : BackgroundService
                 var created = await TryCreateBoardsAsync(connectionString, baseUrl, stoppingToken);
                 _logger.LogInformation("[ITERATION] Completed at {Time}. Boards created: {Created}", DateTime.UtcNow, created);
 
-                if (DebugDiagnostics) await LogInstituteDiagnosticsAsync(connectionString, baseUrl, stoppingToken);
+                await LogInstituteDiagnosticsAsync(connectionString, baseUrl, stoppingToken, DebugDiagnostics);
                 await CallRunDueSprintMergesAsync(baseUrl, stoppingToken);
             }
             catch (Exception ex)
@@ -93,7 +93,7 @@ public class Worker : BackgroundService
         var all = (await conn.QueryAsync<StudentCandidate>(new CommandDefinition(sql, cancellationToken: ct))).ToList();
         _logger.LogInformation("[CANDIDATES] Total rows (by project priority expansion): {Count}", all.Count);
         
-        if (DebugDiagnostics && all.Any())
+        if (all.Any())
         {
             _logger.LogInformation("[CANDIDATES] Detailed candidate breakdown:");
             foreach (var candidate in all)
@@ -157,9 +157,8 @@ public class Worker : BackgroundService
             var studentInstitutes = await conn.QueryAsync<(int Id, int? InstituteId)>(new CommandDefinition(
                 @"SELECT ""Id"", ""InstituteId"" FROM ""Students"" WHERE ""Id"" = ANY(@Ids)",
                 new { Ids = ids }, cancellationToken: ct));
-            if (DebugDiagnostics)
-                foreach (var si in studentInstitutes)
-                    _logger.LogInformation("[QUEST-DEBUG] StudentId={StudentId} InstituteId={InstituteId}", si.Id, si.InstituteId?.ToString() ?? "NULL");
+            foreach (var si in studentInstitutes)
+                _logger.LogInformation("[QUEST-DEBUG] StudentId={StudentId} InstituteId={InstituteId}", si.Id, si.InstituteId?.ToString() ?? "NULL");
 
             // Detect if the institute for these students has QuestMode enabled
             var isQuestMode = await conn.ExecuteScalarAsync<bool>(new CommandDefinition(
@@ -170,16 +169,13 @@ public class Worker : BackgroundService
             _logger.LogInformation("[QUEST] IsQuestMode={IsQuestMode} for students=[{Ids}]", isQuestMode, string.Join(",", ids));
 
             // Also log the raw institute QuestMode value to confirm column is read correctly
-            if (DebugDiagnostics)
-            {
-                var instituteQuestFlags = await conn.QueryAsync<(int InstituteId, bool QuestMode)>(new CommandDefinition(
-                    @"SELECT DISTINCT i.""Id"", i.""QuestMode"" FROM ""Students"" s
-                      JOIN ""Institutes"" i ON i.""Id"" = s.""InstituteId""
-                      WHERE s.""Id"" = ANY(@Ids)",
-                    new { Ids = ids }, cancellationToken: ct));
-                foreach (var f in instituteQuestFlags)
-                    _logger.LogInformation("[QUEST-DEBUG] InstituteId={InstituteId} QuestMode={QuestMode}", f.InstituteId, f.QuestMode);
-            }
+            var instituteQuestFlags = await conn.QueryAsync<(int InstituteId, bool QuestMode)>(new CommandDefinition(
+                @"SELECT DISTINCT i.""Id"", i.""QuestMode"" FROM ""Students"" s
+                  JOIN ""Institutes"" i ON i.""Id"" = s.""InstituteId""
+                  WHERE s.""Id"" = ANY(@Ids)",
+                new { Ids = ids }, cancellationToken: ct));
+            foreach (var f in instituteQuestFlags)
+                _logger.LogInformation("[QUEST-DEBUG] InstituteId={InstituteId} QuestMode={QuestMode}", f.InstituteId, f.QuestMode);
 
             var body = new CreateBoardRequest
             {
@@ -377,7 +373,7 @@ public class Worker : BackgroundService
         }
     }
 
-    private async Task LogInstituteDiagnosticsAsync(string connectionString, string baseUrl, CancellationToken ct)
+    private async Task LogInstituteDiagnosticsAsync(string connectionString, string baseUrl, CancellationToken ct, bool sendEmail = false)
     {
         var sb = new System.Text.StringBuilder();
         sb.AppendLine($"[Institute Diagnostics] {DateTime.UtcNow:u}");
@@ -453,7 +449,7 @@ public class Worker : BackgroundService
             sb.AppendLine($"ERROR: {ex.Message}");
         }
 
-        // Email the diagnostics
+        if (sendEmail)
         try
         {
             var client = _httpClientFactory.CreateClient();
