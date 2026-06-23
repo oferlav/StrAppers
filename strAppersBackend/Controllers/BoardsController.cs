@@ -895,8 +895,9 @@ public partial class BoardsController : ControllerBase
                 var qmDeveloperStudent = students.FirstOrDefault(s =>
                     s.StudentRoles?.Any(sr => sr.IsActive && (sr.Role?.Type == 1 || sr.Role?.Type == 2)) ?? false);
                 var qmProgrammingLanguage = qmDeveloperStudent?.ProgrammingLanguage?.Name;
-                _logger.LogInformation("[LANG-TRACE] QuestMode: developerStudent={StudentId} ProgrammingLanguageId={LangId} ProgrammingLanguage.Name='{LangName}' → qmProgrammingLanguage='{QmLang}'",
-                    qmDeveloperStudent?.Id, qmDeveloperStudent?.ProgrammingLanguageId, qmDeveloperStudent?.ProgrammingLanguage?.Name, qmProgrammingLanguage);
+                var langTraceMsg = $"[LANG-TRACE] QuestMode: developerStudent={qmDeveloperStudent?.Id} ProgrammingLanguageId={qmDeveloperStudent?.ProgrammingLanguageId} ProgrammingLanguage.Name='{qmDeveloperStudent?.ProgrammingLanguage?.Name}' → qmProgrammingLanguage='{qmProgrammingLanguage}'";
+                _logger.LogInformation("{Msg}", langTraceMsg);
+                DbgLog(debugLog, langTraceMsg);
                 var qmVisableModuleDesign = !students
                     .SelectMany(s => s.StudentRoles ?? Enumerable.Empty<StudentRole>())
                     .Any(sr => sr.Role?.CustomerEngagement == true);
