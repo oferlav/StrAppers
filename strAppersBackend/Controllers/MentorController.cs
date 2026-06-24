@@ -4436,6 +4436,30 @@ Your intelligence is strictly tethered to the Current Project Context and the us
             }
         }
         
+        [HttpGet("latest-test-message")]
+        public async Task<ActionResult<object>> GetLatestTestMessage([FromQuery] int studentId, [FromQuery] int sprintNumber)
+        {
+            try
+            {
+                var msg = await _context.MentorChatHistory
+                    .Where(h => h.StudentId == studentId
+                        && h.SprintId == sprintNumber
+                        && h.AIModelName != null
+                        && h.AIModelName.StartsWith("test:"))
+                    .OrderByDescending(h => h.CreatedAt)
+                    .Select(h => new { h.Role, h.Message, h.AIModelName, h.CreatedAt })
+                    .FirstOrDefaultAsync();
+
+                if (msg == null) return Ok(null);
+                return Ok(new { role = msg.Role, message = msg.Message, aiModelName = msg.AIModelName, createdAt = msg.CreatedAt });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error getting latest test message for StudentId: {StudentId}, SprintNumber: {SprintNumber}", studentId, sprintNumber);
+                return StatusCode(500, new { Success = false, Message = ex.Message });
+            }
+        }
+
         /// <summary>
         /// Parses error details from build output/logs
         /// Extracts ErrorMessage, File, Line, and StackTrace from common error formats
