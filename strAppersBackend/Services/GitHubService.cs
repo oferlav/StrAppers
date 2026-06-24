@@ -11645,6 +11645,9 @@ on:
   push:
     branches:
       - main
+      - '[0-9]+-B'
+      - '[0-9]+-B-*'
+      - 'Bugs-B'
   workflow_dispatch:
 
 permissions:
@@ -11671,6 +11674,7 @@ jobs:
 
       - name: Deploy to Railway
         id: deploy_railway
+        if: github.ref == 'refs/heads/main'
         continue-on-error: true
         env:
           RAILWAY_SERVICE_ID: ${{{{ secrets.RAILWAY_SERVICE_ID }}}}
