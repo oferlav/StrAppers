@@ -2072,6 +2072,7 @@ public partial class BoardsController : ControllerBase
                         {
                             var verifyDoc = System.Text.Json.JsonDocument.Parse(await verifyResponse.Content.ReadAsStringAsync());
                             if (verifyDoc.RootElement.TryGetProperty("data", out var verifyDataObj) &&
+                                verifyDataObj.ValueKind == System.Text.Json.JsonValueKind.Object &&
                                 verifyDataObj.TryGetProperty("project", out var verifyProjectObj) &&
                                 verifyProjectObj.ValueKind == System.Text.Json.JsonValueKind.Object &&
                                 verifyProjectObj.TryGetProperty("id", out var verifyIdProp))
@@ -2157,9 +2158,11 @@ public partial class BoardsController : ControllerBase
                                 var serviceJsonDoc = System.Text.Json.JsonDocument.Parse(serviceResponseContent);
                                 var serviceRoot = serviceJsonDoc.RootElement;
 
-                                if (serviceRoot.TryGetProperty("data", out var serviceDataObj))
+                                if (serviceRoot.TryGetProperty("data", out var serviceDataObj) &&
+                                    serviceDataObj.ValueKind == System.Text.Json.JsonValueKind.Object)
                                 {
-                                    if (serviceDataObj.TryGetProperty("serviceCreate", out var serviceObj))
+                                    if (serviceDataObj.TryGetProperty("serviceCreate", out var serviceObj) &&
+                                        serviceObj.ValueKind == System.Text.Json.JsonValueKind.Object)
                                     {
                                         if (serviceObj.TryGetProperty("id", out var serviceIdProp))
                                         {
@@ -2256,8 +2259,11 @@ public partial class BoardsController : ControllerBase
                                     {
                                         var queryDoc = System.Text.Json.JsonDocument.Parse(queryResponseContent);
                                         if (queryDoc.RootElement.TryGetProperty("data", out var queryDataObj) &&
+                                            queryDataObj.ValueKind == System.Text.Json.JsonValueKind.Object &&
                                             queryDataObj.TryGetProperty("project", out var projectObj) &&
+                                            projectObj.ValueKind == System.Text.Json.JsonValueKind.Object &&
                                             projectObj.TryGetProperty("environments", out var environmentsProp) &&
+                                            environmentsProp.ValueKind == System.Text.Json.JsonValueKind.Object &&
                                             environmentsProp.TryGetProperty("edges", out var edgesProp))
                                         {
                                             var edges = edgesProp.EnumerateArray().ToList();
