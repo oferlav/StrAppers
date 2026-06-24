@@ -2905,6 +2905,22 @@ public partial class BoardsController : ControllerBase
                                                                 var frontendUpdated = await _gitHubService.UpdateFrontendReadmeWithWebApiUrlsAsync(frontendOwner, frontendRepoNameFromUrl, project.Title, webApiUrl, githubToken);
                                                                 if (frontendUpdated)
                                                                     _logger.LogInformation("✅ [FRONTEND] README updated with Backend API URL");
+
+                                                                // Also patch config.js with the now-known API URL (it was committed with API_URL:"" at repo creation time)
+                                                                try
+                                                                {
+                                                                    var mentorApiBase = _configuration["ApiBaseUrl"];
+                                                                    var configJsContent = _gitHubService.GenerateConfigJs(webApiUrl, mentorApiBase);
+                                                                    var configUpdated = await _gitHubService.UpdateFileAsync(frontendOwner, frontendRepoNameFromUrl, "config.js", configJsContent, "chore: set API_URL in config.js after Railway domain assigned", githubToken);
+                                                                    if (configUpdated)
+                                                                        _logger.LogInformation("✅ [FRONTEND] config.js updated with API_URL={WebApiUrl}", webApiUrl);
+                                                                    else
+                                                                        _logger.LogWarning("⚠️ [FRONTEND] config.js update returned false for repo {Repo}", frontendRepoNameFromUrl);
+                                                                }
+                                                                catch (Exception cfgEx)
+                                                                {
+                                                                    _logger.LogWarning(cfgEx, "⚠️ [FRONTEND] Failed to update config.js with API URL (non-blocking)");
+                                                                }
                                                             }
                                                         }
                                                         catch (Exception feEx)
