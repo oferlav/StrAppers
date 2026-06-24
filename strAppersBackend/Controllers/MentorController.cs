@@ -3417,26 +3417,34 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                 if (!string.IsNullOrEmpty(output))
                     log.AppendLine($"  Output preview: {output[..Math.Min(500, output.Length)]}");
 
-                // Inject a system chat bubble into the student's mentor chat history
+                // Inject a system chat bubble into the student's mentor chat history.
+                // Use ProgrammingLanguageId != null to target the backend/fullstack developer,
+                // not a frontend-only student who shares the same board.
                 var student = await _context.Students.AsNoTracking()
-                    .FirstOrDefaultAsync(s => s.BoardId == request.BoardId);
+                    .FirstOrDefaultAsync(s => s.BoardId == request.BoardId && s.ProgrammingLanguageId != null);
                 if (student != null && sprintNumber.HasValue)
                 {
                     // Determine if this is the first test run for this branch (provisioned/initial run)
                     var isFirstRun = !await _context.BoardStates
                         .AnyAsync(bs => bs.BoardId == request.BoardId && bs.Source == "TestRunner" && bs.GithubBranch == branch);
 
-                    var icon = status == "PASS" ? "✅" : status == "FAIL" ? "❌" : "⚠️";
-                    var label = status == "PASS" ? "passed" : status == "FAIL" ? "FAILED" : "ran with no tests found";
-                    var msgText = $"{icon} **Automated tests {label}** on branch `{branch}`";
-                    if (status == "FAIL")
+                    string msgText;
+                    string aiModelTag;
+                    if (isFirstRun)
                     {
-                        if (isFirstRun)
-                            msgText += "\n\nThis is completely expected! 🎓 Your CI/CD pipeline is set up and running. The tests fail on the starter code — that's by design.\n\nWrite your solution on this branch and push your changes. The tests will run automatically and you'll see the results here.";
-                        else
-                            msgText += "\n\nCheck GitHub Actions for details, fix the failing tests, and push again.";
+                        // First run: always show a positive "CI ready" message regardless of outcome
+                        msgText = $"✅ **Your CI/CD pipeline is live!** on branch `{branch}`\n\nPush your code here and the tests will run automatically. You'll see the results in this chat.";
+                        aiModelTag = "test:passed";
                     }
-                    var aiModelTag = status == "PASS" ? "test:passed" : status == "FAIL" ? "test:failed" : "test:info";
+                    else
+                    {
+                        var icon = status == "PASS" ? "✅" : status == "FAIL" ? "❌" : "⚠️";
+                        var label = status == "PASS" ? "passed" : status == "FAIL" ? "FAILED" : "ran with no tests found";
+                        msgText = $"{icon} **Automated tests {label}** on branch `{branch}`";
+                        if (status == "FAIL")
+                            msgText += "\n\nCheck GitHub Actions for details, fix the failing tests, and push again.";
+                        aiModelTag = status == "PASS" ? "test:passed" : status == "FAIL" ? "test:failed" : "test:info";
+                    }
                     _context.MentorChatHistory.Add(new MentorChatHistory
                     {
                         StudentId = student.Id,
