@@ -5671,7 +5671,7 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                 // Get chat history for this student/sprint combination (BEFORE saving current message)
                 var chatHistoryLength = _promptConfig.Mentor.ChatHistoryLength;
                 var rawChatHistory = await _context.MentorChatHistory
-                    .Where(h => h.StudentId == request.StudentId && h.SprintId == request.SprintId)
+                    .Where(h => h.StudentId == request.StudentId && h.SprintId == request.SprintId && h.Role != "system")
                     .OrderByDescending(h => h.CreatedAt)
                     .Take(chatHistoryLength * 2) // Get last N pairs (user + assistant)
                     .OrderBy(h => h.CreatedAt) // Re-order chronologically
