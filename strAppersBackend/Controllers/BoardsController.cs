@@ -2906,16 +2906,16 @@ public partial class BoardsController : ControllerBase
                                                                 if (frontendUpdated)
                                                                     _logger.LogInformation("✅ [FRONTEND] README updated with Backend API URL");
 
-                                                                // Also patch config.js with the now-known API URL (it was committed with API_URL:"" at repo creation time)
+                                                                // Patch both config.js locations after README calls (which act as a timing buffer
+                                                                // for GitHub to index the initial commit before we try to read/update those files).
+                                                                // Non-Vite boards: config.js at root. Vite boards: public/config.js (copied to dist/ at build time).
                                                                 try
                                                                 {
                                                                     var mentorApiBase = _configuration["ApiBaseUrl"];
                                                                     var configJsContent = _gitHubService.GenerateConfigJs(webApiUrl, mentorApiBase);
-                                                                    var configUpdated = await _gitHubService.UpdateFileAsync(frontendOwner, frontendRepoNameFromUrl, "config.js", configJsContent, "chore: set API_URL in config.js after Railway domain assigned", githubToken);
-                                                                    if (configUpdated)
-                                                                        _logger.LogInformation("✅ [FRONTEND] config.js updated with API_URL={WebApiUrl}", webApiUrl);
-                                                                    else
-                                                                        _logger.LogWarning("⚠️ [FRONTEND] config.js update returned false for repo {Repo}", frontendRepoNameFromUrl);
+                                                                    var rootUpdated = await _gitHubService.UpdateFileAsync(frontendOwner, frontendRepoNameFromUrl, "config.js", configJsContent, "chore: set API_URL in config.js after Railway domain assigned", githubToken);
+                                                                    var publicUpdated = await _gitHubService.UpdateFileAsync(frontendOwner, frontendRepoNameFromUrl, "public/config.js", configJsContent, "chore: set API_URL in public/config.js after Railway domain assigned", githubToken);
+                                                                    _logger.LogInformation("✅ [FRONTEND] config.js updated: root={Root} public={Public} API_URL={WebApiUrl}", rootUpdated, publicUpdated, webApiUrl);
                                                                 }
                                                                 catch (Exception cfgEx)
                                                                 {
@@ -2951,23 +2951,8 @@ public partial class BoardsController : ControllerBase
                                                     _logger.LogWarning(updateEx, "⚠️ [PROJECTBOARD] Failed to update WebApiUrl, will be set when board is created");
                                                 }
                                                 
-                                                // Update config.js in frontend repo with the service URL
-                                                if (!string.IsNullOrEmpty(frontendRepositoryUrl))
-                                                {
-                                                    _ = Task.Run(async () =>
-                                                    {
-                                                        try
-                                                        {
-                                                            await UpdateConfigJsWithServiceUrl(
-                                                                frontendRepositoryUrl, domainUrl, githubToken);
-                                                            _logger.LogInformation("✅ [FRONTEND] Updated config.js with service URL");
-                                                        }
-                                                        catch (Exception ex)
-                                                        {
-                                                            _logger.LogWarning(ex, "⚠️ [FRONTEND] Failed to update config.js with service URL");
-                                                        }
-                                                    });
-                                                }
+                                                // config.js is now updated inside Task.Run above (after README calls provide
+                                                // the timing buffer needed for GitHub to index the initial commit).
                                             }
                                             else
                                             {
