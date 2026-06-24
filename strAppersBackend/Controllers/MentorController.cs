@@ -3387,6 +3387,14 @@ Your intelligence is strictly tethered to the Current Project Context and the us
 
                 log.AppendLine($"  BoardExists=true Status(resolved)={status} DevRole(resolved)={devRole} Branch={branch} SprintNumber={sprintNumber?.ToString() ?? "null"}");
 
+                // Capture previous status BEFORE the upsert so we can detect a change
+                var previousRecord = await _context.BoardStates.AsNoTracking()
+                    .FirstOrDefaultAsync(bs => bs.BoardId == request.BoardId
+                        && bs.Source == "TestRunner"
+                        && bs.GithubBranch == branch);
+                var previousStatus = previousRecord?.LastTestStatus;
+                log.AppendLine($"  PreviousStatus={previousStatus ?? "(none — first run)"}");
+
                 FormattableString sql = $@"
                     INSERT INTO ""BoardStates"" (
                         ""BoardId"", ""Source"", ""Webhook"", ""GithubBranch"",
@@ -3417,20 +3425,16 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                 if (!string.IsNullOrEmpty(output))
                     log.AppendLine($"  Output preview: {output[..Math.Min(500, output.Length)]}");
 
-                // Inject a system chat bubble into the student's mentor chat history.
+                // Inject a system chat bubble only when the test status changes (or on first run).
                 // Use ProgrammingLanguageId != null to target the backend/fullstack developer,
                 // not a frontend-only student who shares the same board.
                 var student = await _context.Students.AsNoTracking()
                     .FirstOrDefaultAsync(s => s.BoardId == request.BoardId && s.ProgrammingLanguageId != null);
-                if (student != null && sprintNumber.HasValue)
+                if (student != null && sprintNumber.HasValue && ShouldInjectTestResultBubble(previousStatus, status))
                 {
-                    // Determine if this is the first test run for this branch (provisioned/initial run)
-                    var isFirstRun = !await _context.BoardStates
-                        .AnyAsync(bs => bs.BoardId == request.BoardId && bs.Source == "TestRunner" && bs.GithubBranch == branch);
-
                     string msgText;
                     string aiModelTag;
-                    if (isFirstRun)
+                    if (previousStatus == null)
                     {
                         // First run: always show a positive "CI ready" message regardless of outcome
                         msgText = $"✅ **Your CI/CD pipeline is live!** on branch `{branch}`\n\nPush your code here and the tests will run automatically. You'll see the results in this chat.";
@@ -3438,6 +3442,7 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                     }
                     else
                     {
+                        // Status changed — notify the student
                         var icon = status == "PASS" ? "✅" : status == "FAIL" ? "❌" : "⚠️";
                         var label = status == "PASS" ? "passed" : status == "FAIL" ? "FAILED" : "ran with no tests found";
                         msgText = $"{icon} **Automated tests {label}** on branch `{branch}`";
@@ -3455,11 +3460,14 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                         CreatedAt = now
                     });
                     await _context.SaveChangesAsync();
-                    log.AppendLine($"  → Chat bubble injected: StudentId={student.Id} SprintId={sprintNumber} Tag={aiModelTag}");
+                    log.AppendLine($"  → Chat bubble injected: StudentId={student.Id} SprintId={sprintNumber} Tag={aiModelTag} (was={previousStatus ?? "none"} now={status})");
                 }
                 else
                 {
-                    log.AppendLine($"  → Chat bubble SKIPPED: student={(student == null ? "not found" : "found")} sprintNumber={sprintNumber?.ToString() ?? "null"}");
+                    var skipReason = student == null ? "student not found"
+                        : !sprintNumber.HasValue ? "no sprint number"
+                        : $"status unchanged ({status})";
+                    log.AppendLine($"  → Chat bubble SKIPPED: {skipReason}");
                 }
 
                 _logger.LogInformation("[TestResults] Recorded {Status} for BoardId {BoardId}", status, request.BoardId);
@@ -3510,6 +3518,15 @@ Your intelligence is strictly tethered to the Current Project Context and the us
             if (string.Equals(first, "Bugs", StringComparison.OrdinalIgnoreCase)) return 0;
             return null;
         }
+
+        /// <summary>
+        /// Returns true when a chat bubble should be injected for a test result:
+        /// always on the first run (previousStatus == null), and whenever the status changes.
+        /// Same-status repeat pushes (e.g. FAIL→FAIL) return false to avoid chat noise.
+        /// </summary>
+        public static bool ShouldInjectTestResultBubble(string? previousStatus, string newStatus)
+            => previousStatus == null
+            || !string.Equals(previousStatus, newStatus, StringComparison.OrdinalIgnoreCase);
 
         /// <summary>
         /// Updates BoardStates table with GitHub Pages deployment status
