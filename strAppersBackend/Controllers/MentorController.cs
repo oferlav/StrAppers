@@ -3373,25 +3373,32 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                     : request.Output.Length > 4000 ? request.Output[..4000] : request.Output;
 
                 var devRole = string.IsNullOrWhiteSpace(request.DevRole) ? "Backend" : request.DevRole;
+                var branch = request.Branch?.Trim() ?? "";
+                var sprintNumber = ParseSprintNumber(branch);
                 var now = DateTime.UtcNow;
 
-                log.AppendLine($"  BoardExists=true Status(resolved)={status} DevRole(resolved)={devRole}");
+                log.AppendLine($"  BoardExists=true Status(resolved)={status} DevRole(resolved)={devRole} Branch={branch} SprintNumber={sprintNumber?.ToString() ?? "null"}");
 
                 FormattableString sql = $@"
                     INSERT INTO ""BoardStates"" (
                         ""BoardId"", ""Source"", ""Webhook"", ""GithubBranch"",
+                        ""ServiceName"", ""Timestamp"",
                         ""LastTestStatus"", ""LastTestOutput"", ""LastTestRunDate"",
-                        ""DevRole"", ""CreatedAt"", ""UpdatedAt""
+                        ""SprintNumber"", ""DevRole"", ""CreatedAt"", ""UpdatedAt""
                     ) VALUES (
-                        {request.BoardId}, {"TestRunner"}, {false}, {""},
+                        {request.BoardId}, {"TestRunner"}, {false}, {branch},
+                        {"StudentTest"}, {now},
                         {status}, {output}, {now},
-                        {devRole}, {now}, {now}
+                        {sprintNumber}, {devRole}, {now}, {now}
                     )
                     ON CONFLICT (""BoardId"", ""Source"", ""Webhook"", ""GithubBranch"")
                     DO UPDATE SET
+                        ""ServiceName""     = EXCLUDED.""ServiceName"",
+                        ""Timestamp""       = EXCLUDED.""Timestamp"",
                         ""LastTestStatus""  = EXCLUDED.""LastTestStatus"",
                         ""LastTestOutput""  = EXCLUDED.""LastTestOutput"",
                         ""LastTestRunDate"" = EXCLUDED.""LastTestRunDate"",
+                        ""SprintNumber""    = EXCLUDED.""SprintNumber"",
                         ""DevRole""         = EXCLUDED.""DevRole"",
                         ""UpdatedAt""       = EXCLUDED.""UpdatedAt""
                     ";
@@ -3433,6 +3440,21 @@ Your intelligence is strictly tethered to the Current Project Context and the us
             public string? DevRole { get; set; }
             public string? Status { get; set; }  // PASS, FAIL, NO_TESTS
             public string? Output { get; set; }
+            public string? Branch { get; set; }  // GitHub branch name e.g. "1-B", "Bugs-B"
+        }
+
+        /// <summary>
+        /// Parses sprint number from a branch name following the platform convention:
+        /// "{sprint}-B" / "{sprint}-F" / "{sprint}-B-{roleIndex}" → sprint number.
+        /// "Bugs-B" / "Bugs-F" → 0. Anything else → null.
+        /// </summary>
+        public static int? ParseSprintNumber(string? branch)
+        {
+            if (string.IsNullOrWhiteSpace(branch)) return null;
+            var first = branch.Split('-')[0];
+            if (int.TryParse(first, out var n)) return n;
+            if (string.Equals(first, "Bugs", StringComparison.OrdinalIgnoreCase)) return 0;
+            return null;
         }
 
         /// <summary>
@@ -6034,6 +6056,7 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                             bs.Webhook,
                             bs.DevRole,
                             bs.GithubBranch,
+                            bs.SprintNumber,
                             bs.LastBuildStatus,
                             bs.PRStatus,
                             bs.BranchStatus,
@@ -6045,6 +6068,11 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                             LatestErrorSummary = bs.LatestErrorSummary != null && bs.LatestErrorSummary.Length > 500
                                 ? bs.LatestErrorSummary.Substring(0, 500) + "..."
                                 : bs.LatestErrorSummary,
+                            bs.LastTestStatus,
+                            bs.LastTestRunDate,
+                            LastTestOutput = bs.LastTestOutput != null && bs.LastTestOutput.Length > 500
+                                ? bs.LastTestOutput.Substring(0, 500) + "..."
+                                : bs.LastTestOutput,
                             bs.CreatedAt,
                             bs.UpdatedAt
                         })
@@ -6060,6 +6088,7 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                         bs.Webhook,
                         bs.DevRole,
                         bs.GithubBranch,
+                        bs.SprintNumber,
                         bs.LastBuildStatus,
                         bs.PRStatus,
                         bs.BranchStatus,
@@ -6067,6 +6096,9 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                         LatestCommitDescription = bs.LatestCommitDescription != null && bs.LatestCommitDescription.Length > 200 ? bs.LatestCommitDescription.Substring(0, 200) + "..." : bs.LatestCommitDescription,
                         ErrorMessage = bs.ErrorMessage != null && bs.ErrorMessage.Length > 400 ? bs.ErrorMessage.Substring(0, 400) + "..." : bs.ErrorMessage,
                         LatestErrorSummary = bs.LatestErrorSummary != null && bs.LatestErrorSummary.Length > 500 ? bs.LatestErrorSummary.Substring(0, 500) + "..." : bs.LatestErrorSummary,
+                        bs.LastTestStatus,
+                        bs.LastTestRunDate,
+                        LastTestOutput = bs.LastTestOutput != null && bs.LastTestOutput.Length > 500 ? bs.LastTestOutput.Substring(0, 500) + "..." : bs.LastTestOutput,
                         bs.CreatedAt,
                         bs.UpdatedAt
                     }).ToList();
