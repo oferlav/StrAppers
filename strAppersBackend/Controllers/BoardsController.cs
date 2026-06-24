@@ -783,6 +783,7 @@ public partial class BoardsController : ControllerBase
             string? frontendRepositoryUrl = null;
             string? webApiUrl = null;
             string? swaggerUrl = null;
+            bool googleApiKeySet = false;
             
             // Check if we should skip Trello API (for testing)
             _logger.LogInformation("[TESTING CONFIG] Before Trello API check - SkipTrelloApi: {SkipTrelloApi}", _testingConfig.Value.SkipTrelloApi);
@@ -2358,7 +2359,10 @@ public partial class BoardsController : ControllerBase
                                                 var googleEnvContent = new StringContent(googleEnvBody, System.Text.Encoding.UTF8, "application/json");
                                                 var googleEnvResponse = await httpClient.PostAsync(railwayApiUrl, googleEnvContent);
                                                 if (googleEnvResponse.IsSuccessStatusCode)
+                                                {
                                                     _logger.LogInformation("✅ [RAILWAY] Successfully set GOOGLE_API_KEY environment variable on Railway service {ServiceId}", railwayServiceId);
+                                                    googleApiKeySet = true;
+                                                }
                                                 else
                                                     _logger.LogWarning("⚠️ [RAILWAY] Failed to set GOOGLE_API_KEY: {StatusCode}", googleEnvResponse.StatusCode);
                                             }
@@ -3429,6 +3433,31 @@ public partial class BoardsController : ControllerBase
             {
                 _logger.LogWarning("⚠️ [RAILWAY] Railway service {ServiceId} was created but DATABASE_URL is not available. " +
                     "Connection string validation may have failed or is still in progress. Railway will deploy without database connection.", railwayServiceId);
+            }
+
+            // Late fallback: set GOOGLE_API_KEY if it was not set in the early block
+            // (happens when Neon DB was still provisioning at the time DATABASE_URL was first attempted,
+            // causing both DATABASE_URL and GOOGLE_API_KEY to be skipped; DATABASE_URL is retried above
+            // but GOOGLE_API_KEY has no other retry path).
+            // This block is guarded by googleApiKeySet so it NEVER runs for boards that already have the key.
+            if (!googleApiKeySet && !string.IsNullOrEmpty(railwayServiceId) && !string.IsNullOrEmpty(projectId))
+            {
+                try
+                {
+                    var googleApiKey = _configuration["GoogleApis:StudentBackendApiKey"]
+                        ?? Environment.GetEnvironmentVariable("GOOGLE_API_KEY");
+                    if (!string.IsNullOrWhiteSpace(googleApiKey))
+                    {
+                        _logger.LogInformation("🔄 [RAILWAY] Late fallback: setting GOOGLE_API_KEY on service {ServiceId} (was not set in early block)", railwayServiceId);
+                        await UpdateRailwayGoogleApiKey(railwayServiceId, googleApiKey, projectId, railwayApiToken, railwayApiUrl);
+                    }
+                    else
+                        _logger.LogWarning("⚠️ [RAILWAY] Late fallback: GOOGLE_API_KEY still not set — GoogleApis:StudentBackendApiKey not configured on this service.");
+                }
+                catch (Exception gEx)
+                {
+                    _logger.LogWarning(gEx, "⚠️ [RAILWAY] Late fallback: failed to set GOOGLE_API_KEY (non-blocking)");
+                }
             }
 
             _logger.LogInformation("Successfully created board {BoardId} for project {ProjectId}", trelloBoardId, request.ProjectId);
@@ -7322,6 +7351,64 @@ INSERT INTO ""TestProjects"" (""Name"") VALUES
         catch (Exception ex)
         {
             _logger.LogError(ex, "❌ [RAILWAY] Error updating DATABASE_URL on Railway service {ServiceId}", serviceId);
+            throw;
+        }
+    }
+
+    private async Task UpdateRailwayGoogleApiKey(string serviceId, string apiKey, string projectId, string apiToken, string apiUrl)
+    {
+        try
+        {
+            using var httpClient = _httpClientFactory.CreateClient();
+            httpClient.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", apiToken);
+            httpClient.DefaultRequestHeaders.Accept.Add(new System.Net.Http.Headers.MediaTypeWithQualityHeaderValue("application/json"));
+            httpClient.DefaultRequestHeaders.Add("User-Agent", "StrAppersBackend/1.0");
+
+            // Fetch environment ID (same approach as UpdateRailwayDatabaseUrl)
+            string? environmentId = null;
+            var getProjectQuery = new
+            {
+                query = @"query GetProject($projectId: String!) { project(id: $projectId) { environments { edges { node { id } } } } }",
+                variables = new { projectId = projectId }
+            };
+            var queryContent = new StringContent(System.Text.Json.JsonSerializer.Serialize(getProjectQuery), System.Text.Encoding.UTF8, "application/json");
+            var queryResponse = await httpClient.PostAsync(apiUrl, queryContent);
+            if (queryResponse.IsSuccessStatusCode)
+            {
+                var queryDoc = System.Text.Json.JsonDocument.Parse(await queryResponse.Content.ReadAsStringAsync());
+                if (queryDoc.RootElement.TryGetProperty("data", out var dataObj) &&
+                    dataObj.TryGetProperty("project", out var projectObj) &&
+                    projectObj.TryGetProperty("environments", out var envsProp) &&
+                    envsProp.TryGetProperty("edges", out var edgesProp))
+                {
+                    var edges = edgesProp.EnumerateArray().ToList();
+                    if (edges.Count > 0 && edges[0].TryGetProperty("node", out var nodeProp) &&
+                        nodeProp.TryGetProperty("id", out var envIdProp))
+                        environmentId = envIdProp.GetString();
+                }
+            }
+
+            if (string.IsNullOrEmpty(environmentId))
+            {
+                _logger.LogWarning("⚠️ [RAILWAY] UpdateRailwayGoogleApiKey: environment ID not found for project {ProjectId}", projectId);
+                return;
+            }
+
+            var setEnvMutation = new
+            {
+                query = @"mutation SetVariable($projectId: String!, $environmentId: String!, $serviceId: String!, $name: String!, $value: String!) { variableUpsert(input: { projectId: $projectId environmentId: $environmentId serviceId: $serviceId name: $name value: $value }) }",
+                variables = new { projectId = projectId, environmentId = environmentId, serviceId = serviceId, name = "GOOGLE_API_KEY", value = apiKey }
+            };
+            var envContent = new StringContent(System.Text.Json.JsonSerializer.Serialize(setEnvMutation), System.Text.Encoding.UTF8, "application/json");
+            var envResponse = await httpClient.PostAsync(apiUrl, envContent);
+            if (envResponse.IsSuccessStatusCode)
+                _logger.LogInformation("✅ [RAILWAY] Late fallback: GOOGLE_API_KEY set on service {ServiceId}", serviceId);
+            else
+                _logger.LogWarning("⚠️ [RAILWAY] Late fallback: failed to set GOOGLE_API_KEY: {StatusCode}", envResponse.StatusCode);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "❌ [RAILWAY] Error setting GOOGLE_API_KEY on Railway service {ServiceId}", serviceId);
             throw;
         }
     }
