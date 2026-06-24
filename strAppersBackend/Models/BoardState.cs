@@ -180,6 +180,15 @@ namespace strAppersBackend.Models
         [MaxLength(50)]
         public string? DevRole { get; set; }
 
+        [MaxLength(50)]
+        public string? LastTestStatus { get; set; }
+
+        [Column(TypeName = "text")]
+        public string? LastTestOutput { get; set; }
+
+        [Column(TypeName = "timestamp with time zone")]
+        public DateTime? LastTestRunDate { get; set; }
+
         /// <summary>
         /// Record creation timestamp
         /// </summary>

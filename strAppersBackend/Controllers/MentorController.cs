@@ -1833,6 +1833,14 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                 sb.Append("\n\n?? ROLE: BACKEND DEVELOPER (present only for this role; not for Full Stack):\n");
                 sb.Append("- When the user reports a crash or issue: first check BOARD STATES (**backend deployment** build status—internal JSON Source may be labeled Railway, RuntimeError, latest push) and state what you see **without naming hosting vendors** to the student. Do not give only generic troubleshooting without diagnosing from BOARD STATES first.\n");
                 sb.Append("- Provide the REST API (endpoints, request/response shapes) to whoever **implements the frontend**. If **TEAM MEMBERS** lists a **Frontend Developer**, use **that person's name** and **that exact role**—do **not** attribute implementation to **UI/UX**. If **no** Frontend Developer is on the roster, do **not** invent one; say integration is with whoever the roster/task dependencies indicate (may be **Full Stack** same person). Document the API (e.g. Swagger) as needed.\n");
+                sb.Append("\n5. AUTOMATED TESTING — how it works and what is expected\n");
+                sb.Append("- Every time you push to your sprint branch (e.g. **1-B**, **2-B**, **Bugs-B**), the platform automatically runs your test suite in the CI/CD pipeline and records whether it passed or failed. You do **not** need to trigger this manually — it fires on every `git push`.\n");
+                sb.Append("- **Sequence of events on a branch push:** (1) You push code to your sprint branch. (2) GitHub Actions picks it up within seconds. (3) Your tests run. (4) The result (PASS / FAIL) and test output are sent back to the platform and recorded against your branch. (5) The result is immediately visible here in your mentor session under BOARD STATES — look for **Source: StudentTest** with your branch name.\n");
+                sb.Append("- **On merge to main:** tests run again, and additionally the live backend API is redeployed with your latest code. This is why it is critical that tests pass on your sprint branch *before* you open a pull request — a clean test run on your branch is strong evidence that your code is ready for review.\n");
+                sb.Append("- **Where to write tests:** Add your test files inside the `tests/` folder of your repository. A starter test is already there to show the pattern. Write tests that verify the behaviour of your own API endpoints and business logic — not just the starter example. Each sprint is an opportunity to expand your test coverage alongside your feature work.\n");
+                sb.Append("- **What good tests look like:** A good test calls one of your API endpoints or functions, provides realistic input, and asserts on the expected output or status code. Tests should be independent of each other (no shared state between tests) and should not depend on external services being live.\n");
+                sb.Append("- **When tests fail:** Read the test output in BOARD STATES (`LastTestOutput`). It will tell you exactly which test failed and why. Fix the issue on your branch, push again, and the CI will re-run automatically. Do not open a pull request while tests are failing.\n");
+                sb.Append("- **Why this matters:** Automated tests are a core professional practice. In a real engineering team, code that breaks tests does not get merged. The platform enforces the same standard — treat a failing test as a blocker, not a warning.\n");
             }
             return sb.ToString();
         }
@@ -3331,6 +3339,159 @@ Your intelligence is strictly tethered to the Current Project Context and the us
             public int? Column { get; set; }
             public string? Stack { get; set; }
             public string Message { get; set; } = string.Empty;
+        }
+
+        /// <summary>
+        /// Receives test run results from GitHub Actions and records them in BoardStates.
+        /// Called by the "Report Test Results" step in each student backend's CI workflow.
+        /// </summary>
+        [HttpPost("test-results")]
+        public async Task<ActionResult> RecordTestResults([FromBody] TestResultsRequest request)
+        {
+            var log = new System.Text.StringBuilder();
+            log.AppendLine($"[{DateTime.UtcNow:yyyy-MM-dd HH:mm:ss.fff}Z] [TestResults] POST /api/Mentor/test-results received");
+            log.AppendLine($"  BoardId={request?.BoardId ?? "(null)"} Status={request?.Status ?? "(null)"} DevRole={request?.DevRole ?? "(null)"} OutputLen={request?.Output?.Length ?? 0}");
+            try
+            {
+                if (request == null || string.IsNullOrWhiteSpace(request.BoardId))
+                {
+                    log.AppendLine("  → REJECTED: BoardId is required");
+                    _ = SendTestResultEmailAsync(log.ToString(), "REJECTED");
+                    return BadRequest(new { Success = false, Message = "BoardId is required" });
+                }
+
+                var boardExists = await _context.ProjectBoards.AnyAsync(pb => pb.Id == request.BoardId);
+                if (!boardExists)
+                {
+                    log.AppendLine($"  → REJECTED: BoardId {request.BoardId} not found in ProjectBoards");
+                    _logger.LogWarning("[TestResults] Unknown BoardId {BoardId} — skipping", request.BoardId);
+                    _ = SendTestResultEmailAsync(log.ToString(), "UNKNOWN_BOARD");
+                    return BadRequest(new { Success = false, Message = $"BoardId {request.BoardId} does not exist" });
+                }
+
+                var status = request.Status?.ToUpperInvariant() switch
+                {
+                    "PASS" => "PASS",
+                    "FAIL" => "FAIL",
+                    _ => "NO_TESTS"
+                };
+
+                var output = string.IsNullOrEmpty(request.Output)
+                    ? null
+                    : request.Output.Length > 4000 ? request.Output[..4000] : request.Output;
+
+                var devRole = string.IsNullOrWhiteSpace(request.DevRole) ? "Backend" : request.DevRole;
+                var branch = request.Branch?.Trim() ?? "";
+                var sprintNumber = ParseSprintNumber(branch);
+                var now = DateTime.UtcNow;
+
+                log.AppendLine($"  BoardExists=true Status(resolved)={status} DevRole(resolved)={devRole} Branch={branch} SprintNumber={sprintNumber?.ToString() ?? "null"}");
+
+                FormattableString sql = $@"
+                    INSERT INTO ""BoardStates"" (
+                        ""BoardId"", ""Source"", ""Webhook"", ""GithubBranch"",
+                        ""ServiceName"", ""Timestamp"",
+                        ""LastTestStatus"", ""LastTestOutput"", ""LastTestRunDate"",
+                        ""SprintNumber"", ""DevRole"", ""CreatedAt"", ""UpdatedAt""
+                    ) VALUES (
+                        {request.BoardId}, {"TestRunner"}, {false}, {branch},
+                        {"StudentTest"}, {now},
+                        {status}, {output}, {now},
+                        {sprintNumber}, {devRole}, {now}, {now}
+                    )
+                    ON CONFLICT (""BoardId"", ""Source"", ""Webhook"", ""GithubBranch"")
+                    DO UPDATE SET
+                        ""ServiceName""     = EXCLUDED.""ServiceName"",
+                        ""Timestamp""       = EXCLUDED.""Timestamp"",
+                        ""LastTestStatus""  = EXCLUDED.""LastTestStatus"",
+                        ""LastTestOutput""  = EXCLUDED.""LastTestOutput"",
+                        ""LastTestRunDate"" = EXCLUDED.""LastTestRunDate"",
+                        ""SprintNumber""    = EXCLUDED.""SprintNumber"",
+                        ""DevRole""         = EXCLUDED.""DevRole"",
+                        ""UpdatedAt""       = EXCLUDED.""UpdatedAt""
+                    ";
+
+                await _context.Database.ExecuteSqlInterpolatedAsync(sql);
+
+                log.AppendLine($"  → OK: BoardStates upsert complete");
+                if (!string.IsNullOrEmpty(output))
+                    log.AppendLine($"  Output preview: {output[..Math.Min(500, output.Length)]}");
+
+                // Inject a system chat bubble into the student's mentor chat history
+                var student = await _context.Students.AsNoTracking()
+                    .FirstOrDefaultAsync(s => s.BoardId == request.BoardId);
+                if (student != null && sprintNumber.HasValue)
+                {
+                    var icon = status == "PASS" ? "✅" : status == "FAIL" ? "❌" : "⚠️";
+                    var label = status == "PASS" ? "passed" : status == "FAIL" ? "FAILED" : "ran with no tests found";
+                    var msgText = $"{icon} **Automated tests {label}** on branch `{branch}`";
+                    if (status == "FAIL")
+                        msgText += "\n\nCheck GitHub Actions for error details.";
+                    var aiModelTag = status == "PASS" ? "test:passed" : status == "FAIL" ? "test:failed" : "test:info";
+                    _context.MentorChatHistory.Add(new MentorChatHistory
+                    {
+                        StudentId = student.Id,
+                        SprintId = sprintNumber.Value,
+                        Role = "system",
+                        Message = msgText,
+                        AIModelName = aiModelTag,
+                        CreatedAt = now
+                    });
+                    await _context.SaveChangesAsync();
+                    log.AppendLine($"  → Chat bubble injected: StudentId={student.Id} SprintId={sprintNumber} Tag={aiModelTag}");
+                }
+                else
+                {
+                    log.AppendLine($"  → Chat bubble SKIPPED: student={(student == null ? "not found" : "found")} sprintNumber={sprintNumber?.ToString() ?? "null"}");
+                }
+
+                _logger.LogInformation("[TestResults] Recorded {Status} for BoardId {BoardId}", status, request.BoardId);
+                _ = SendTestResultEmailAsync(log.ToString(), status);
+                return Ok(new { Success = true, Status = status });
+            }
+            catch (Exception ex)
+            {
+                log.AppendLine($"  → EXCEPTION: {ex.Message}");
+                log.AppendLine(ex.StackTrace);
+                _logger.LogError(ex, "[TestResults] Error recording test results for BoardId {BoardId}", request?.BoardId);
+                _ = SendTestResultEmailAsync(log.ToString(), "ERROR");
+                return StatusCode(500, new { Success = false, Message = ex.Message });
+            }
+        }
+
+        private async Task SendTestResultEmailAsync(string body, string status)
+        {
+            try
+            {
+                await _smtpEmailService.SendPlainEmailAsync(
+                    "ofer@skill-in.com",
+                    $"[TestResults] status={status} @ {DateTime.UtcNow:yyyy-MM-dd HH:mm:ss}Z",
+                    body);
+            }
+            catch { /* email failure must not affect the API response */ }
+        }
+
+        public class TestResultsRequest
+        {
+            public string BoardId { get; set; } = string.Empty;
+            public string? DevRole { get; set; }
+            public string? Status { get; set; }  // PASS, FAIL, NO_TESTS
+            public string? Output { get; set; }
+            public string? Branch { get; set; }  // GitHub branch name e.g. "1-B", "Bugs-B"
+        }
+
+        /// <summary>
+        /// Parses sprint number from a branch name following the platform convention:
+        /// "{sprint}-B" / "{sprint}-F" / "{sprint}-B-{roleIndex}" → sprint number.
+        /// "Bugs-B" / "Bugs-F" → 0. Anything else → null.
+        /// </summary>
+        public static int? ParseSprintNumber(string? branch)
+        {
+            if (string.IsNullOrWhiteSpace(branch)) return null;
+            var first = branch.Split('-')[0];
+            if (int.TryParse(first, out var n)) return n;
+            if (string.Equals(first, "Bugs", StringComparison.OrdinalIgnoreCase)) return 0;
+            return null;
         }
 
         /// <summary>
@@ -5510,7 +5671,7 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                 // Get chat history for this student/sprint combination (BEFORE saving current message)
                 var chatHistoryLength = _promptConfig.Mentor.ChatHistoryLength;
                 var rawChatHistory = await _context.MentorChatHistory
-                    .Where(h => h.StudentId == request.StudentId && h.SprintId == request.SprintId)
+                    .Where(h => h.StudentId == request.StudentId && h.SprintId == request.SprintId && h.Role != "system")
                     .OrderByDescending(h => h.CreatedAt)
                     .Take(chatHistoryLength * 2) // Get last N pairs (user + assistant)
                     .OrderBy(h => h.CreatedAt) // Re-order chronologically
@@ -5932,6 +6093,7 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                             bs.Webhook,
                             bs.DevRole,
                             bs.GithubBranch,
+                            bs.SprintNumber,
                             bs.LastBuildStatus,
                             bs.PRStatus,
                             bs.BranchStatus,
@@ -5943,6 +6105,11 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                             LatestErrorSummary = bs.LatestErrorSummary != null && bs.LatestErrorSummary.Length > 500
                                 ? bs.LatestErrorSummary.Substring(0, 500) + "..."
                                 : bs.LatestErrorSummary,
+                            bs.LastTestStatus,
+                            bs.LastTestRunDate,
+                            LastTestOutput = bs.LastTestOutput != null && bs.LastTestOutput.Length > 500
+                                ? bs.LastTestOutput.Substring(0, 500) + "..."
+                                : bs.LastTestOutput,
                             bs.CreatedAt,
                             bs.UpdatedAt
                         })
@@ -5958,6 +6125,7 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                         bs.Webhook,
                         bs.DevRole,
                         bs.GithubBranch,
+                        bs.SprintNumber,
                         bs.LastBuildStatus,
                         bs.PRStatus,
                         bs.BranchStatus,
@@ -5965,6 +6133,9 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                         LatestCommitDescription = bs.LatestCommitDescription != null && bs.LatestCommitDescription.Length > 200 ? bs.LatestCommitDescription.Substring(0, 200) + "..." : bs.LatestCommitDescription,
                         ErrorMessage = bs.ErrorMessage != null && bs.ErrorMessage.Length > 400 ? bs.ErrorMessage.Substring(0, 400) + "..." : bs.ErrorMessage,
                         LatestErrorSummary = bs.LatestErrorSummary != null && bs.LatestErrorSummary.Length > 500 ? bs.LatestErrorSummary.Substring(0, 500) + "..." : bs.LatestErrorSummary,
+                        bs.LastTestStatus,
+                        bs.LastTestRunDate,
+                        LastTestOutput = bs.LastTestOutput != null && bs.LastTestOutput.Length > 500 ? bs.LastTestOutput.Substring(0, 500) + "..." : bs.LastTestOutput,
                         bs.CreatedAt,
                         bs.UpdatedAt
                     }).ToList();
@@ -13223,7 +13394,7 @@ APPROVAL: no    (request changes before merge)";
                 {
                     StudentId = request.StudentId,
                     SprintId = request.SprintId,
-                    Role = "assistant", // System messages are stored as assistant role
+                    Role = "system",
                     Message = request.Message.Trim(),
                     CreatedAt = DateTime.UtcNow
                 };

@@ -783,6 +783,7 @@ public partial class BoardsController : ControllerBase
             string? frontendRepositoryUrl = null;
             string? webApiUrl = null;
             string? swaggerUrl = null;
+            bool googleApiKeySet = false;
             
             // Check if we should skip Trello API (for testing)
             _logger.LogInformation("[TESTING CONFIG] Before Trello API check - SkipTrelloApi: {SkipTrelloApi}", _testingConfig.Value.SkipTrelloApi);
@@ -895,6 +896,9 @@ public partial class BoardsController : ControllerBase
                 var qmDeveloperStudent = students.FirstOrDefault(s =>
                     s.StudentRoles?.Any(sr => sr.IsActive && (sr.Role?.Type == 1 || sr.Role?.Type == 2)) ?? false);
                 var qmProgrammingLanguage = qmDeveloperStudent?.ProgrammingLanguage?.Name;
+                var langTraceMsg = $"[LANG-TRACE] QuestMode: developerStudent={qmDeveloperStudent?.Id} ProgrammingLanguageId={qmDeveloperStudent?.ProgrammingLanguageId} ProgrammingLanguage.Name='{qmDeveloperStudent?.ProgrammingLanguage?.Name}' → qmProgrammingLanguage='{qmProgrammingLanguage}'";
+                _logger.LogInformation("{Msg}", langTraceMsg);
+                DbgLog(debugLog, langTraceMsg);
                 var qmVisableModuleDesign = !students
                     .SelectMany(s => s.StudentRoles ?? Enumerable.Empty<StudentRole>())
                     .Any(sr => sr.Role?.CustomerEngagement == true);
@@ -1964,32 +1968,41 @@ public partial class BoardsController : ControllerBase
             string? environmentId = null;
             string? programmingLanguage = null;
             
-            // Find the Backend/Fullstack developer and their programming language
-            var developerStudent = students.FirstOrDefault(s => 
-                s.StudentRoles?.Any(sr => sr.IsActive && (sr.Role?.Type == 1 || sr.Role?.Type == 2)) ?? false);
+            // Find the Backend/Fullstack developer who has a language set — require ProgrammingLanguage != null
+            // so FE-focused type-2 students (who don't set a language) are skipped.
+            // Prefer type 1 (pure Backend) over type 2 (Fullstack).
+            var developerStudent =
+                students.FirstOrDefault(s => s.ProgrammingLanguage != null &&
+                    (s.StudentRoles?.Any(sr => sr.IsActive && sr.Role?.Type == 1) ?? false))
+                ?? students.FirstOrDefault(s => s.ProgrammingLanguage != null &&
+                    (s.StudentRoles?.Any(sr => sr.IsActive && sr.Role?.Type == 2) ?? false));
             
             if (developerStudent != null)
             {
-                _logger.LogInformation("Found developer student: StudentId={StudentId}, ProgrammingLanguageId={ProgrammingLanguageId}, HasProgrammingLanguage={HasProgrammingLanguage}", 
-                    developerStudent.Id, 
-                    developerStudent.ProgrammingLanguageId, 
+                _logger.LogInformation("Found developer student: StudentId={StudentId}, ProgrammingLanguageId={ProgrammingLanguageId}, HasProgrammingLanguage={HasProgrammingLanguage}",
+                    developerStudent.Id,
+                    developerStudent.ProgrammingLanguageId,
                     developerStudent.ProgrammingLanguage != null);
-                
+                DbgLog(debugLog, $"[LANG-TRACE] developer student found: StudentId={developerStudent.Id} ProgrammingLanguageId={developerStudent.ProgrammingLanguageId} HasProgrammingLanguage={developerStudent.ProgrammingLanguage != null}");
+
                 if (developerStudent.ProgrammingLanguage != null)
                 {
                     programmingLanguage = developerStudent.ProgrammingLanguage.Name;
-                    _logger.LogInformation("✅ Using programming language '{Language}' from student {StudentId}", 
+                    _logger.LogInformation("✅ Using programming language '{Language}' from student {StudentId}",
                         programmingLanguage, developerStudent.Id);
+                    DbgLog(debugLog, $"[LANG-TRACE] resolved programmingLanguage='{programmingLanguage}' from student {developerStudent.Id}");
                 }
                 else
                 {
-                    _logger.LogWarning("⚠️ Developer student {StudentId} found but ProgrammingLanguage is null (ProgrammingLanguageId={ProgrammingLanguageId}). Backend code generation will be skipped.", 
+                    _logger.LogWarning("⚠️ Developer student {StudentId} found but ProgrammingLanguage is null (ProgrammingLanguageId={ProgrammingLanguageId}). Backend code generation will be skipped.",
                         developerStudent.Id, developerStudent.ProgrammingLanguageId);
+                    DbgLog(debugLog, $"[LANG-TRACE] ProgrammingLanguage is null for studentId={developerStudent.Id} ProgrammingLanguageId={developerStudent.ProgrammingLanguageId} → will default to c#");
                 }
             }
             else
             {
                 _logger.LogWarning("⚠️ No Backend/Fullstack developer found. Checking students: {StudentCount} students", students.Count);
+                DbgLog(debugLog, $"[LANG-TRACE] no Backend/Fullstack developer found (role type 1 or 2) among {students.Count} students → will default to c#");
                 foreach (var student in students)
                 {
                     var roles = student.StudentRoles?
@@ -1997,6 +2010,7 @@ public partial class BoardsController : ControllerBase
                         .Select(sr => $"{sr.Role?.Name} (Type={sr.Role?.Type})")
                         .ToList() ?? new List<string>();
                     _logger.LogInformation("  Student {StudentId}: Roles=[{Roles}]", student.Id, string.Join(", ", roles));
+                    DbgLog(debugLog, $"[LANG-TRACE]   student {student.Id}: roles=[{string.Join(", ", roles)}]");
                 }
             }
             
@@ -2059,7 +2073,9 @@ public partial class BoardsController : ControllerBase
                         {
                             var verifyDoc = System.Text.Json.JsonDocument.Parse(await verifyResponse.Content.ReadAsStringAsync());
                             if (verifyDoc.RootElement.TryGetProperty("data", out var verifyDataObj) &&
+                                verifyDataObj.ValueKind == System.Text.Json.JsonValueKind.Object &&
                                 verifyDataObj.TryGetProperty("project", out var verifyProjectObj) &&
+                                verifyProjectObj.ValueKind == System.Text.Json.JsonValueKind.Object &&
                                 verifyProjectObj.TryGetProperty("id", out var verifyIdProp))
                             {
                                 var verifiedProjectId = verifyIdProp.GetString();
@@ -2143,9 +2159,11 @@ public partial class BoardsController : ControllerBase
                                 var serviceJsonDoc = System.Text.Json.JsonDocument.Parse(serviceResponseContent);
                                 var serviceRoot = serviceJsonDoc.RootElement;
 
-                                if (serviceRoot.TryGetProperty("data", out var serviceDataObj))
+                                if (serviceRoot.TryGetProperty("data", out var serviceDataObj) &&
+                                    serviceDataObj.ValueKind == System.Text.Json.JsonValueKind.Object)
                                 {
-                                    if (serviceDataObj.TryGetProperty("serviceCreate", out var serviceObj))
+                                    if (serviceDataObj.TryGetProperty("serviceCreate", out var serviceObj) &&
+                                        serviceObj.ValueKind == System.Text.Json.JsonValueKind.Object)
                                     {
                                         if (serviceObj.TryGetProperty("id", out var serviceIdProp))
                                         {
@@ -2242,8 +2260,11 @@ public partial class BoardsController : ControllerBase
                                     {
                                         var queryDoc = System.Text.Json.JsonDocument.Parse(queryResponseContent);
                                         if (queryDoc.RootElement.TryGetProperty("data", out var queryDataObj) &&
+                                            queryDataObj.ValueKind == System.Text.Json.JsonValueKind.Object &&
                                             queryDataObj.TryGetProperty("project", out var projectObj) &&
+                                            projectObj.ValueKind == System.Text.Json.JsonValueKind.Object &&
                                             projectObj.TryGetProperty("environments", out var environmentsProp) &&
+                                            environmentsProp.ValueKind == System.Text.Json.JsonValueKind.Object &&
                                             environmentsProp.TryGetProperty("edges", out var edgesProp))
                                         {
                                             var edges = edgesProp.EnumerateArray().ToList();
@@ -2338,7 +2359,10 @@ public partial class BoardsController : ControllerBase
                                                 var googleEnvContent = new StringContent(googleEnvBody, System.Text.Encoding.UTF8, "application/json");
                                                 var googleEnvResponse = await httpClient.PostAsync(railwayApiUrl, googleEnvContent);
                                                 if (googleEnvResponse.IsSuccessStatusCode)
+                                                {
                                                     _logger.LogInformation("✅ [RAILWAY] Successfully set GOOGLE_API_KEY environment variable on Railway service {ServiceId}", railwayServiceId);
+                                                    googleApiKeySet = true;
+                                                }
                                                 else
                                                     _logger.LogWarning("⚠️ [RAILWAY] Failed to set GOOGLE_API_KEY: {StatusCode}", googleEnvResponse.StatusCode);
                                             }
@@ -2768,9 +2792,12 @@ public partial class BoardsController : ControllerBase
                             }
                             
                             // Create backend-only commit (files at root, no workflows)
+                            var strAppersApiUrlForWorkflow = _configuration["ApiBaseUrl"] ?? "";
+                            DbgLog(debugLog, $"[LANG-TRACE] CreateBackendOnlyCommitAsync: programmingLanguage='{programmingLanguage ?? "(null)"}' → effective='{programmingLanguage ?? "c#"}' strAppersApiUrl='{(string.IsNullOrEmpty(strAppersApiUrlForWorkflow) ? "(EMPTY - test-results webhook will be skipped)" : strAppersApiUrlForWorkflow)}'");
                             var backendCommitSuccess = await _gitHubService.CreateBackendOnlyCommitAsync(
-                                backendOwner, backendRepoNameFromUrl, project.Title, githubToken, 
-                                programmingLanguage ?? "c#", dbConnectionString, webApiUrl, swaggerUrl);
+                                backendOwner, backendRepoNameFromUrl, project.Title, githubToken,
+                                programmingLanguage ?? "c#", dbConnectionString, webApiUrl, swaggerUrl,
+                                trelloBoardId ?? "", strAppersApiUrlForWorkflow);
                             
                             if (backendCommitSuccess)
                             {
@@ -2882,6 +2909,22 @@ public partial class BoardsController : ControllerBase
                                                                 var frontendUpdated = await _gitHubService.UpdateFrontendReadmeWithWebApiUrlsAsync(frontendOwner, frontendRepoNameFromUrl, project.Title, webApiUrl, githubToken);
                                                                 if (frontendUpdated)
                                                                     _logger.LogInformation("✅ [FRONTEND] README updated with Backend API URL");
+
+                                                                // Patch both config.js locations after README calls (which act as a timing buffer
+                                                                // for GitHub to index the initial commit before we try to read/update those files).
+                                                                // Non-Vite boards: config.js at root. Vite boards: public/config.js (copied to dist/ at build time).
+                                                                try
+                                                                {
+                                                                    var mentorApiBase = _configuration["ApiBaseUrl"];
+                                                                    var configJsContent = _gitHubService.GenerateConfigJs(webApiUrl, mentorApiBase);
+                                                                    var rootUpdated = await _gitHubService.UpdateFileAsync(frontendOwner, frontendRepoNameFromUrl, "config.js", configJsContent, "chore: set API_URL in config.js after Railway domain assigned", githubToken);
+                                                                    var publicUpdated = await _gitHubService.UpdateFileAsync(frontendOwner, frontendRepoNameFromUrl, "public/config.js", configJsContent, "chore: set API_URL in public/config.js after Railway domain assigned", githubToken);
+                                                                    _logger.LogInformation("✅ [FRONTEND] config.js updated: root={Root} public={Public} API_URL={WebApiUrl}", rootUpdated, publicUpdated, webApiUrl);
+                                                                }
+                                                                catch (Exception cfgEx)
+                                                                {
+                                                                    _logger.LogWarning(cfgEx, "⚠️ [FRONTEND] Failed to update config.js with API URL (non-blocking)");
+                                                                }
                                                             }
                                                         }
                                                         catch (Exception feEx)
@@ -2912,23 +2955,8 @@ public partial class BoardsController : ControllerBase
                                                     _logger.LogWarning(updateEx, "⚠️ [PROJECTBOARD] Failed to update WebApiUrl, will be set when board is created");
                                                 }
                                                 
-                                                // Update config.js in frontend repo with the service URL
-                                                if (!string.IsNullOrEmpty(frontendRepositoryUrl))
-                                                {
-                                                    _ = Task.Run(async () =>
-                                                    {
-                                                        try
-                                                        {
-                                                            await UpdateConfigJsWithServiceUrl(
-                                                                frontendRepositoryUrl, domainUrl, githubToken);
-                                                            _logger.LogInformation("✅ [FRONTEND] Updated config.js with service URL");
-                                                        }
-                                                        catch (Exception ex)
-                                                        {
-                                                            _logger.LogWarning(ex, "⚠️ [FRONTEND] Failed to update config.js with service URL");
-                                                        }
-                                                    });
-                                                }
+                                                // config.js is now updated inside Task.Run above (after README calls provide
+                                                // the timing buffer needed for GitHub to index the initial commit).
                                             }
                                             else
                                             {
@@ -3405,6 +3433,31 @@ public partial class BoardsController : ControllerBase
             {
                 _logger.LogWarning("⚠️ [RAILWAY] Railway service {ServiceId} was created but DATABASE_URL is not available. " +
                     "Connection string validation may have failed or is still in progress. Railway will deploy without database connection.", railwayServiceId);
+            }
+
+            // Late fallback: set GOOGLE_API_KEY if it was not set in the early block
+            // (happens when Neon DB was still provisioning at the time DATABASE_URL was first attempted,
+            // causing both DATABASE_URL and GOOGLE_API_KEY to be skipped; DATABASE_URL is retried above
+            // but GOOGLE_API_KEY has no other retry path).
+            // This block is guarded by googleApiKeySet so it NEVER runs for boards that already have the key.
+            if (!googleApiKeySet && !string.IsNullOrEmpty(railwayServiceId) && !string.IsNullOrEmpty(projectId))
+            {
+                try
+                {
+                    var googleApiKey = _configuration["GoogleApis:StudentBackendApiKey"]
+                        ?? Environment.GetEnvironmentVariable("GOOGLE_API_KEY");
+                    if (!string.IsNullOrWhiteSpace(googleApiKey))
+                    {
+                        _logger.LogInformation("🔄 [RAILWAY] Late fallback: setting GOOGLE_API_KEY on service {ServiceId} (was not set in early block)", railwayServiceId);
+                        await UpdateRailwayGoogleApiKey(railwayServiceId, googleApiKey, projectId, railwayApiToken, railwayApiUrl);
+                    }
+                    else
+                        _logger.LogWarning("⚠️ [RAILWAY] Late fallback: GOOGLE_API_KEY still not set — GoogleApis:StudentBackendApiKey not configured on this service.");
+                }
+                catch (Exception gEx)
+                {
+                    _logger.LogWarning(gEx, "⚠️ [RAILWAY] Late fallback: failed to set GOOGLE_API_KEY (non-blocking)");
+                }
             }
 
             _logger.LogInformation("Successfully created board {BoardId} for project {ProjectId}", trelloBoardId, request.ProjectId);
@@ -7302,6 +7355,64 @@ INSERT INTO ""TestProjects"" (""Name"") VALUES
         }
     }
 
+    private async Task UpdateRailwayGoogleApiKey(string serviceId, string apiKey, string projectId, string apiToken, string apiUrl)
+    {
+        try
+        {
+            using var httpClient = _httpClientFactory.CreateClient();
+            httpClient.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", apiToken);
+            httpClient.DefaultRequestHeaders.Accept.Add(new System.Net.Http.Headers.MediaTypeWithQualityHeaderValue("application/json"));
+            httpClient.DefaultRequestHeaders.Add("User-Agent", "StrAppersBackend/1.0");
+
+            // Fetch environment ID (same approach as UpdateRailwayDatabaseUrl)
+            string? environmentId = null;
+            var getProjectQuery = new
+            {
+                query = @"query GetProject($projectId: String!) { project(id: $projectId) { environments { edges { node { id } } } } }",
+                variables = new { projectId = projectId }
+            };
+            var queryContent = new StringContent(System.Text.Json.JsonSerializer.Serialize(getProjectQuery), System.Text.Encoding.UTF8, "application/json");
+            var queryResponse = await httpClient.PostAsync(apiUrl, queryContent);
+            if (queryResponse.IsSuccessStatusCode)
+            {
+                var queryDoc = System.Text.Json.JsonDocument.Parse(await queryResponse.Content.ReadAsStringAsync());
+                if (queryDoc.RootElement.TryGetProperty("data", out var dataObj) &&
+                    dataObj.TryGetProperty("project", out var projectObj) &&
+                    projectObj.TryGetProperty("environments", out var envsProp) &&
+                    envsProp.TryGetProperty("edges", out var edgesProp))
+                {
+                    var edges = edgesProp.EnumerateArray().ToList();
+                    if (edges.Count > 0 && edges[0].TryGetProperty("node", out var nodeProp) &&
+                        nodeProp.TryGetProperty("id", out var envIdProp))
+                        environmentId = envIdProp.GetString();
+                }
+            }
+
+            if (string.IsNullOrEmpty(environmentId))
+            {
+                _logger.LogWarning("⚠️ [RAILWAY] UpdateRailwayGoogleApiKey: environment ID not found for project {ProjectId}", projectId);
+                return;
+            }
+
+            var setEnvMutation = new
+            {
+                query = @"mutation SetVariable($projectId: String!, $environmentId: String!, $serviceId: String!, $name: String!, $value: String!) { variableUpsert(input: { projectId: $projectId environmentId: $environmentId serviceId: $serviceId name: $name value: $value }) }",
+                variables = new { projectId = projectId, environmentId = environmentId, serviceId = serviceId, name = "GOOGLE_API_KEY", value = apiKey }
+            };
+            var envContent = new StringContent(System.Text.Json.JsonSerializer.Serialize(setEnvMutation), System.Text.Encoding.UTF8, "application/json");
+            var envResponse = await httpClient.PostAsync(apiUrl, envContent);
+            if (envResponse.IsSuccessStatusCode)
+                _logger.LogInformation("✅ [RAILWAY] Late fallback: GOOGLE_API_KEY set on service {ServiceId}", serviceId);
+            else
+                _logger.LogWarning("⚠️ [RAILWAY] Late fallback: failed to set GOOGLE_API_KEY: {StatusCode}", envResponse.StatusCode);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "❌ [RAILWAY] Error setting GOOGLE_API_KEY on Railway service {ServiceId}", serviceId);
+            throw;
+        }
+    }
+
     private async Task VerifyRailwayEnvironmentVariable(HttpClient httpClient, string railwayApiUrl, string serviceId, string apiToken)
     {
         try
@@ -8376,8 +8487,19 @@ INSERT INTO ""TestProjects"" (""Name"") VALUES
             var mentorApiBaseUrl = _configuration["ApiBaseUrl"];
             var newConfigJs = _gitHubService.GenerateConfigJs(serviceUrl, mentorApiBaseUrl);
             
-            // Rich frontend (Vite) has config at public/config.js; vanilla frontend has config.js at root. Try both.
-            var success = await _gitHubService.UpdateFileAsync(
+            // Update BOTH paths: non-Vite boards use config.js at root; Vite boards use public/config.js
+            // (Vite copies public/ to dist/ at build time; static HTML serves root directly via Pages)
+            // UpdateFileAsync creates the file if missing, so trying public/ first then root would create
+            // public/config.js in non-Vite repos and never reach the root — always update both.
+            var rootSuccess = await _gitHubService.UpdateFileAsync(
+                repoOwner,
+                repoName,
+                "config.js",
+                newConfigJs,
+                "Update config.js with Railway service URL after deployment",
+                githubAccessToken
+            );
+            var publicSuccess = await _gitHubService.UpdateFileAsync(
                 repoOwner,
                 repoName,
                 "public/config.js",
@@ -8385,24 +8507,13 @@ INSERT INTO ""TestProjects"" (""Name"") VALUES
                 "Update config.js with Railway service URL after deployment",
                 githubAccessToken
             );
-            if (!success)
+            if (rootSuccess || publicSuccess)
             {
-                success = await _gitHubService.UpdateFileAsync(
-                    repoOwner,
-                    repoName,
-                    "config.js",
-                    newConfigJs,
-                    "Update config.js with Railway service URL after deployment",
-                    githubAccessToken
-                );
-            }
-            if (success)
-            {
-                _logger.LogInformation("[FRONTEND] Updated config.js with service URL");
+                _logger.LogInformation("[FRONTEND] Updated config.js with service URL (root={Root}, public={Public})", rootSuccess, publicSuccess);
             }
             else
             {
-                _logger.LogWarning("[FRONTEND] Could not update config.js (tried public/config.js and config.js)");
+                _logger.LogWarning("[FRONTEND] Could not update config.js (tried config.js and public/config.js)");
             }
         }
         catch (Exception ex)
@@ -8549,6 +8660,7 @@ INSERT INTO ""TestProjects"" (""Name"") VALUES
         Student student, string boardId, Project project, string? programmingLanguage)
     {
         var suffix = $"{boardId}s{student.Id}";
+        _logger.LogInformation("[LANG-TRACE] ProvisionQuestStudentInfraAsync: studentId={StudentId} programmingLanguage='{Language}' (raw, before any normalization)", student.Id, programmingLanguage);
         var neonApiKey = _configuration["Neon:ApiKey"];
         var neonBaseUrl = _configuration["Neon:BaseUrl"];
         var neonDefaultOwnerName = _configuration["Neon:DefaultOwnerName"] ?? "neondb_owner";
@@ -8820,7 +8932,7 @@ INSERT INTO ""TestProjects"" (""Name"") VALUES
                             await _gitHubService.CreateWebhookAsync(beOwner, beRepo, webhookUrl, webhookSecret, githubToken);
                         await _gitHubService.CreateBranchProtectionAsync(beOwner, beRepo, "main", githubToken);
                         await _gitHubService.CreateRepositoryRulesetAsync(beOwner, beRepo, "Backend", githubToken);
-                        await _gitHubService.CreateBackendOnlyCommitAsync(beOwner, beRepo, project.Title, githubToken, programmingLanguage ?? "c#", questDbConnectionString, null, null);
+                        await _gitHubService.CreateBackendOnlyCommitAsync(beOwner, beRepo, project.Title, githubToken, programmingLanguage ?? "c#", questDbConnectionString, null, null, boardId, _configuration["ApiBaseUrl"] ?? "");
 
                         if (!string.IsNullOrEmpty(questRailwayServiceId) && !string.IsNullOrEmpty(railwayApiToken) && !string.IsNullOrEmpty(railwayApiUrl))
                         {

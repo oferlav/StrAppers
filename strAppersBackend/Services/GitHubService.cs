@@ -38,7 +38,7 @@ public interface IGitHubService
     Task<bool> CreateFrontendOnlyCommitAsync(string owner, string repositoryName, string projectTitle, string accessToken, string? webApiUrl = null, string? organizationLogoUrl = null);
     /// <summary>Creates initial commit with hardcoded rich frontend (React + Vite). Use when GitHub:UseHardcodedFrontendTemplate is true.</summary>
     Task<bool> CreateRichFrontendOnlyCommitAsync(string owner, string repositoryName, string projectTitle, string accessToken, string? webApiUrl = null, string? organizationLogoUrl = null);
-    Task<bool> CreateBackendOnlyCommitAsync(string owner, string repositoryName, string projectTitle, string accessToken, string programmingLanguage, string? databaseConnectionString = null, string? webApiUrl = null, string? swaggerUrl = null);
+    Task<bool> CreateBackendOnlyCommitAsync(string owner, string repositoryName, string projectTitle, string accessToken, string programmingLanguage, string? databaseConnectionString = null, string? webApiUrl = null, string? swaggerUrl = null, string boardId = "", string strAppersApiUrl = "");
     Task<bool> CreateInitialReadmeAsync(string owner, string repositoryName, string projectTitle, string accessToken, bool isFrontend = false, string? webApiUrl = null, string? databaseConnectionString = null, string? swaggerUrl = null);
     /// <summary>Updates backend README.md with full Web API and Swagger URLs (e.g. after Railway domain is created).</summary>
     Task<bool> UpdateBackendReadmeWithWebApiUrlsAsync(string owner, string repositoryName, string projectTitle, string? databaseConnectionString, string? webApiUrl, string? swaggerUrl, string accessToken);
@@ -1312,7 +1312,7 @@ public class GitHubService : IGitHubService
     /// <summary>
     /// Creates initial commit with backend files only (at root level, no workflows)
     /// </summary>
-    public async Task<bool> CreateBackendOnlyCommitAsync(string owner, string repositoryName, string projectTitle, string accessToken, string programmingLanguage, string? databaseConnectionString = null, string? webApiUrl = null, string? swaggerUrl = null)
+    public async Task<bool> CreateBackendOnlyCommitAsync(string owner, string repositoryName, string projectTitle, string accessToken, string programmingLanguage, string? databaseConnectionString = null, string? webApiUrl = null, string? swaggerUrl = null, string boardId = "", string strAppersApiUrl = "")
     {
         try
         {
@@ -1362,7 +1362,7 @@ public class GitHubService : IGitHubService
             }
 
             // Create GitHub Actions workflow for deploying backend to Railway (root-level files)
-            var backendWorkflow = GenerateRailwayDeploymentWorkflowAtRoot(programmingLanguage);
+            var backendWorkflow = GenerateRailwayDeploymentWorkflowAtRoot(programmingLanguage, boardId, strAppersApiUrl);
             var backendWorkflowSha = await CreateBlobAsync(owner, repositoryName, backendWorkflow, accessToken);
             if (!string.IsNullOrEmpty(backendWorkflowSha))
             {
@@ -4603,6 +4603,9 @@ INSERT INTO ""TestProjects"" (""Name"") VALUES
     {
         var files = new Dictionary<string, string>();
 
+        _logger.LogInformation("[LANG-TRACE] GenerateBackendFiles: received programmingLanguage='{Language}' lowered='{Lowered}'",
+            programmingLanguage, programmingLanguage?.ToLowerInvariant());
+
         switch (programmingLanguage?.ToLowerInvariant())
         {
             case "c#":
@@ -5678,19 +5681,65 @@ catch (Exception startupEx)
     <PackageReference Include=""Npgsql"" Version=""8.0.0"" />
     <PackageReference Include=""Swashbuckle.AspNetCore"" Version=""6.5.0"" />
   </ItemGroup>
+  <ItemGroup>
+    <Compile Remove=""Tests/**"" />
+  </ItemGroup>
 </Project>
 ";
 
-        // Note: Railway configuration files are generated separately based on programming language in GenerateRailwayConfigFiles
-        // Structure:
-        // - nixpacks.toml at REPO ROOT (Railway expects this at root, build commands use 'cd backend &&' to access backend files)
+        // Starter test helper — pure function, no DB, safe to run in CI
+        files["backend/Helpers/Calculator.cs"] = @"namespace Backend.Helpers;
 
-        // Note: We don't create a backend-specific README.md here to avoid conflict with root README.md
-        // The root README.md contains project overview, backend-specific docs can be added later
+public static class Calculator
+{
+    public static int Add(int a, int b) => a + b;
+}
+";
+
+        // xUnit test project (separate from Backend.csproj — Backend.csproj excludes Tests/ via <Compile Remove>)
+        files["backend/Tests/Tests.csproj"] = @"<Project Sdk=""Microsoft.NET.Sdk"">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include=""Microsoft.NET.Test.Sdk"" Version=""17.8.0"" />
+    <PackageReference Include=""xunit"" Version=""2.6.2"" />
+    <PackageReference Include=""xunit.runner.visualstudio"" Version=""2.5.4"">
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+      <PrivateAssets>all</PrivateAssets>
+    </PackageReference>
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include=""../Backend.csproj"" />
+  </ItemGroup>
+</Project>
+";
+
+        files["backend/Tests/CalculatorTests.cs"] = @"using Backend.Helpers;
+
+namespace Tests;
+
+public class CalculatorTests
+{
+    [Fact]
+    public void Add_ReturnsSumOfTwoNumbers()
+    {
+        Assert.Equal(5, Calculator.Add(2, 3));
+    }
+
+    [Fact]
+    public void Add_WithNegativeNumbers_ReturnsCorrectSum()
+    {
+        Assert.Equal(-1, Calculator.Add(2, -3));
+    }
+}
+";
 
         return files;
     }
-    
+
     /// <summary>
     /// Generates Railway configuration files (nixpacks.toml) based on programming language
     /// </summary>
@@ -5708,9 +5757,6 @@ catch (Exception startupEx)
                 files["nixpacks.toml"] = @"# Nixpacks configuration for Railway - .NET/C# Backend
 # Backend files are in backend/ folder, so we cd into it for all commands
 
-[phases.setup]
-nixPkgs = { dotnet = ""8.0"" }
-
 [phases.install]
 cmds = [
   ""cd backend && dotnet restore Backend.csproj""
@@ -5725,16 +5771,12 @@ cmds = [
 cmd = ""dotnet /app/publish/Backend.dll""
 ";
                 break;
-                
+
             case "python":
                 // Python/FastAPI backend - backend files are in backend/ folder
                 // Railway expects nixpacks.toml at REPO ROOT
                 files["nixpacks.toml"] = @"# Nixpacks configuration for Railway - Python/FastAPI Backend
 # Railway will build from repo root, then cd into backend/ directory
-# Note: No detectors specified - we provide explicit phases
-
-[phases.setup]
-nixPkgs = { python = ""3.12"" }
 
 [phases.install]
 cmds = [
@@ -5751,7 +5793,7 @@ cmds = [
 cmd = ""cd backend && python check_syntax.py && uvicorn main:app --host 0.0.0.0 --port $PORT""
 ";
                 break;
-                
+
             case "nodejs":
             case "node.js":
             case "node":
@@ -5759,10 +5801,6 @@ cmd = ""cd backend && python check_syntax.py && uvicorn main:app --host 0.0.0.0 
                 // Railway expects nixpacks.toml at REPO ROOT
                 files["nixpacks.toml"] = @"# Nixpacks configuration for Railway - Node.js/Express Backend
 # Railway will build from repo root, then cd into backend/ directory
-# Note: No detectors specified - we provide explicit phases
-
-[phases.setup]
-nixPkgs = { node = ""18"" }
 
 [phases.install]
 cmds = [
@@ -5779,16 +5817,12 @@ cmds = [
 cmd = ""cd backend && node app.js""
 ";
                 break;
-                
+
             case "java":
                 // Java/Spring Boot backend - backend files are in backend/ folder
                 // Railway expects nixpacks.toml at REPO ROOT
                 files["nixpacks.toml"] = @"# Nixpacks configuration for Railway - Java/Spring Boot Backend
 # Railway will build from repo root, then cd into backend/ directory
-# Note: No detectors specified - we provide explicit phases
-
-[phases.setup]
-nixPkgs = { jdk = ""17"" }
 
 [phases.install]
 cmds = [
@@ -5804,14 +5838,11 @@ cmds = [
 cmd = ""cd backend && java -jar target/*.jar""
 ";
                 break;
-                
+
             case "php":
                 // PHP backend - backend files are in backend/ folder
                 files["nixpacks.toml"] = @"# Nixpacks configuration for Railway - PHP Backend
 # Backend files are in backend/ folder
-
-[phases.setup]
-nixPkgs = { php = ""8.2"" }
 
 [phases.install]
 cmds = [
@@ -5829,14 +5860,11 @@ cmds = [
 cmd = ""cd backend && php -d display_errors=1 -S 0.0.0.0:$PORT index.php""
 ";
                 break;
-                
+
             case "ruby":
                 // Ruby/Sinatra backend - backend files are in backend/ folder
                 files["nixpacks.toml"] = @"# Nixpacks configuration for Railway - Ruby/Sinatra Backend
 # Backend files are in backend/ folder
-
-[phases.setup]
-nixPkgs = { ruby = ""3.3"" }
 
 [phases.install]
 cmds = [
@@ -5852,20 +5880,15 @@ cmds = [
 cmd = ""cd backend && ruby app.rb""
 ";
                 break;
-                
+
             case "go":
             case "golang":
                 // Go backend - backend files are in backend/ folder
-                // Building to root level for Railway compatibility (Railway expects binaries at root)
-                // Disable auto-detection by providing explicit phases and providers
                 files["nixpacks.toml"] = @"# Nixpacks configuration for Railway - Go Backend
 # Backend files are in backend/ folder
 
 [variables]
 GO_VERSION = ""1.21""
-
-[phases.setup]
-nixPkgs = { go = ""1.21"" }
 
 [phases.install]
 cmds = [
@@ -5881,16 +5904,11 @@ cmds = [
 cmd = ""./backend""
 ";
                 break;
-                
+
             default:
                 // Default to .NET if language not recognized - backend files are in backend/ folder
-                // Railway expects nixpacks.toml at REPO ROOT
                 files["nixpacks.toml"] = @"# Nixpacks configuration for Railway - Default (.NET)
 # Railway will build from repo root, then cd into backend/ directory
-# Note: No detectors specified - we provide explicit phases
-
-[phases.setup]
-nixPkgs = { csharp = ""8.0"" }
 
 [phases.install]
 cmds = [
@@ -5907,7 +5925,7 @@ cmd = ""dotnet /app/publish/Backend.dll""
 ";
                 break;
         }
-        
+
         return files;
     }
 
@@ -5954,9 +5972,6 @@ cmd = ""dotnet /app/publish/Backend.dll""
                 files["nixpacks.toml"] = @"# Nixpacks configuration for Railway - .NET/C# Backend
 # Backend files are at root level
 
-[phases.setup]
-nixPkgs = { dotnet = ""8.0"" }
-
 [phases.install]
 cmds = [
   ""dotnet restore Backend.csproj""
@@ -5971,14 +5986,11 @@ cmds = [
 cmd = ""dotnet /app/publish/Backend.dll""
 ";
                 break;
-                
+
             case "python":
                 // Python/FastAPI backend - files are at root
                 files["nixpacks.toml"] = @"# Nixpacks configuration for Railway - Python/FastAPI Backend
 # Backend files are at root level
-
-[phases.setup]
-nixPkgs = { python = ""3.12"" }
 
 [phases.install]
 cmds = [
@@ -5995,16 +6007,13 @@ cmds = [
 cmd = ""python check_syntax.py && python -m uvicorn main:app --host 0.0.0.0 --port $PORT --lifespan on""
 ";
                 break;
-                
+
             case "nodejs":
             case "node.js":
             case "node":
                 // Node.js/Express backend - files are at root
                 files["nixpacks.toml"] = @"# Nixpacks configuration for Railway - Node.js/Express Backend
 # Backend files are at root level
-
-[phases.setup]
-nixPkgs = { node = ""18"" }
 
 [phases.install]
 cmds = [
@@ -6021,14 +6030,11 @@ cmds = [
 cmd = ""node app.js""
 ";
                 break;
-                
+
             case "java":
                 // Java/Spring Boot backend - files are at root
                 files["nixpacks.toml"] = @"# Nixpacks configuration for Railway - Java/Spring Boot Backend
 # Backend files are at root level
-
-[phases.setup]
-nixPkgs = { jdk = ""17"" }
 
 [phases.install]
 cmds = [
@@ -6044,14 +6050,11 @@ cmds = [
 cmd = ""java -jar target/*.jar""
 ";
                 break;
-                
+
             case "php":
                 // PHP backend - files are at root
                 files["nixpacks.toml"] = @"# Nixpacks configuration for Railway - PHP Backend
 # Backend files are at root level
-
-[phases.setup]
-nixPkgs = { php = ""8.2"" }
 
 [phases.install]
 cmds = [
@@ -6068,14 +6071,11 @@ cmds = [
 cmd = ""php -d display_errors=1 -S 0.0.0.0:$PORT index.php""
 ";
                 break;
-                
+
             case "ruby":
                 // Ruby/Sinatra backend - files are at root
                 files["nixpacks.toml"] = @"# Nixpacks configuration for Railway - Ruby/Sinatra Backend
 # Backend files are at root level
-
-[phases.setup]
-nixPkgs = { ruby = ""3.3"" }
 
 [phases.install]
 cmds = [
@@ -6092,20 +6092,15 @@ cmds = [
 cmd = ""ruby app.rb""
 ";
                 break;
-                
+
             case "go":
             case "golang":
                 // Go backend - files are at root
-                // Using relative paths for Railway compatibility
-                // Disable auto-detection by providing explicit phases
                 files["nixpacks.toml"] = @"# Nixpacks configuration for Railway - Go Backend
 # Backend files are at root level
 
 [variables]
 GO_VERSION = ""1.21""
-
-[phases.setup]
-nixPkgs = { go = ""1.21"" }
 
 [phases.install]
 cmds = [
@@ -6127,9 +6122,6 @@ cmd = ""./backend""
                 files["nixpacks.toml"] = @"# Nixpacks configuration for Railway - Default (.NET)
 # Backend files are at root level
 
-[phases.setup]
-nixPkgs = { dotnet = ""8.0"" }
-
 [phases.install]
 cmds = [
   ""dotnet restore Backend.csproj""
@@ -6145,7 +6137,12 @@ cmd = ""dotnet /app/publish/Backend.dll""
 ";
                 break;
         }
-        
+
+        // C# test/helper files live in GenerateCSharpBackend() with "backend/" prefix.
+        // GenerateBackendFilesAtRoot() strips that prefix so they land at root.
+        // Do NOT add them here — duplicate paths would put backend/Tests/CalculatorTests.cs
+        // back into the repo, bypassing the <Compile Remove="Tests/**"> in root Backend.csproj.
+
         return files;
     }
 
@@ -6923,6 +6920,20 @@ if __name__ == '__main__':
 
         // Note: README.md is created at root level, not here to avoid conflicts
 
+        files["backend/tests/__init__.py"] = "";
+
+        files["backend/tests/test_calculator.py"] = @"def add(a, b):
+    return a + b
+
+
+def test_add_returns_sum():
+    assert add(2, 3) == 5
+
+
+def test_add_with_negative_numbers():
+    assert add(2, -3) == -1
+";
+
         return files;
     }
 
@@ -7602,7 +7613,8 @@ app.listen(PORT, '0.0.0.0', (err) => {
   ""main"": ""app.js"",
   ""scripts"": {
     ""start"": ""node app.js"",
-    ""dev"": ""nodemon app.js""
+    ""dev"": ""nodemon app.js"",
+    ""test"": ""jest""
   },
   ""dependencies"": {
     ""express"": ""^4.18.2"",
@@ -7613,9 +7625,23 @@ app.listen(PORT, '0.0.0.0', (err) => {
     ""winston"": ""^3.11.0""
   },
   ""devDependencies"": {
-    ""nodemon"": ""^3.0.2""
+    ""nodemon"": ""^3.0.2"",
+    ""jest"": ""^29.7.0""
   }
 }
+";
+
+        files["backend/tests/calculator.test.js"] = @"function add(a, b) {
+  return a + b;
+}
+
+test('add returns sum of two numbers', () => {
+  expect(add(2, 3)).toBe(5);
+});
+
+test('add with negative numbers returns correct sum', () => {
+  expect(add(2, -3)).toBe(-1);
+});
 ";
 
         // Note: README.md is created at root level, not here to avoid conflicts
@@ -7670,6 +7696,11 @@ app.listen(PORT, '0.0.0.0', (err) => {
             <groupId>org.springdoc</groupId>
             <artifactId>springdoc-openapi-starter-webmvc-ui</artifactId>
             <version>2.3.0</version>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
         </dependency>
     </dependencies>
 
@@ -8339,6 +8370,21 @@ app.listen(PORT, '0.0.0.0', (err) => {
 "springdoc.swagger-ui.path=/swagger\n";
 
         // Note: README.md is created at root level, not here to avoid conflicts
+
+        files["backend/src/test/java/com/backend/CalculatorTest.java"] = "package com.backend;\n\n" +
+"import org.junit.jupiter.api.Test;\n" +
+"import static org.junit.jupiter.api.Assertions.*;\n\n" +
+"class CalculatorTest {\n\n" +
+"    int add(int a, int b) { return a + b; }\n\n" +
+"    @Test\n" +
+"    void add_returnsSumOfTwoNumbers() {\n" +
+"        assertEquals(5, add(2, 3));\n" +
+"    }\n\n" +
+"    @Test\n" +
+"    void add_withNegativeNumbers_returnsCorrectSum() {\n" +
+"        assertEquals(-1, add(2, -3));\n" +
+"    }\n" +
+"}\n";
 
         return files;
     }
@@ -9100,6 +9146,9 @@ try {
         ""ext-pdo"": ""*"",
         ""ext-pdo_pgsql"": ""*""
     },
+    ""require-dev"": {
+        ""phpunit/phpunit"": ""^10.0""
+    },
     ""autoload"": {
         ""psr-4"": {
             ""App\\"": """"
@@ -9133,6 +9182,42 @@ require __DIR__ . '/vendor/autoload.php';
 require __DIR__ . '/index.php';
 
 echo ""BUILD OK\n"";
+";
+
+        files["backend/phpunit.xml"] = @"<?xml version=""1.0"" encoding=""UTF-8""?>
+<phpunit xmlns:xsi=""http://www.w3.org/2001/XMLSchema-instance""
+         xsi:noNamespaceSchemaLocation=""https://schema.phpunit.de/10.0/phpunit.xsd""
+         bootstrap=""vendor/autoload.php""
+         colors=""true"">
+    <testsuites>
+        <testsuite name=""Backend Test Suite"">
+            <directory>tests</directory>
+        </testsuite>
+    </testsuites>
+</phpunit>
+";
+
+        files["backend/tests/CalculatorTest.php"] = @"<?php
+
+use PHPUnit\Framework\TestCase;
+
+class CalculatorTest extends TestCase
+{
+    private function add(int $a, int $b): int
+    {
+        return $a + $b;
+    }
+
+    public function testAddReturnsSumOfTwoNumbers(): void
+    {
+        $this->assertEquals(5, $this->add(2, 3));
+    }
+
+    public function testAddWithNegativeNumbersReturnsCorrectSum(): void
+    {
+        $this->assertEquals(-1, $this->add(2, -3));
+    }
+}
 ";
 
         return files;
@@ -9947,6 +10032,7 @@ gem 'sinatra', '~> 3.0'
 gem 'pg', '>= 1.5'
 gem 'json'
 gem 'puma', '~> 6.0'
+gem 'rspec', '~> 3.0'
 ";
 
         // Procfile - Railway uses this if present
@@ -9970,6 +10056,7 @@ DEPENDENCIES
   json
   pg (>= 1.5)
   puma (~> 6.0)
+  rspec (~> 3.0)
   sinatra (~> 3.0)
 
 BUNDLED WITH
@@ -10002,6 +10089,21 @@ rescue Exception => e
   STDERR.puts ""BUILD FAILED: #{e.class} - #{e.message}""
   STDERR.puts e.backtrace.join(""\n"")
   exit(1)
+end
+";
+
+        files["backend/spec/calculator_spec.rb"] = @"def add(a, b)
+  a + b
+end
+
+RSpec.describe 'Calculator' do
+  it 'returns the sum of two numbers' do
+    expect(add(2, 3)).to eq(5)
+  end
+
+  it 'returns the correct sum with negative numbers' do
+    expect(add(2, -3)).to eq(-1)
+  end
 end
 ";
 
@@ -11153,6 +11255,27 @@ require (
 github.com/lib/pq v1.10.9/go.mod h1:AlVN5x4E4T544tWzH6hKfbfQvm3HdbOxrmggDNAPY9o=
 ";
 
+        files["backend/calculator_test.go"] = @"package main
+
+import ""testing""
+
+func add(a, b int) int {
+    return a + b
+}
+
+func TestAdd_ReturnsSumOfTwoNumbers(t *testing.T) {
+    if got := add(2, 3); got != 5 {
+        t.Errorf(""add(2, 3) = %d; want 5"", got)
+    }
+}
+
+func TestAdd_WithNegativeNumbers_ReturnsCorrectSum(t *testing.T) {
+    if got := add(2, -3); got != -1 {
+        t.Errorf(""add(2, -3) = %d; want -1"", got)
+    }
+}
+";
+
         return files;
     }
 
@@ -11179,7 +11302,7 @@ permissions:
 
 concurrency:
   group: ""pages""
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   deploy:
@@ -11360,7 +11483,7 @@ permissions:
 
 concurrency:
   group: ""pages""
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   deploy:
@@ -11443,17 +11566,17 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
       
-      - name: Setup Railway CLI
-        uses: bervProject/setup-railway@v2.0.0
-        with:
-          railway_token: ${{{{ secrets.RAILWAY_TOKEN }}}}
-      
+      - name: Install Railway CLI
+        run: npm install -g @railway/cli
+
 {buildCommands}
-      
+
       - name: Deploy to Railway
+        continue-on-error: true
         working-directory: ./backend
         env:
           RAILWAY_SERVICE_ID: ${{{{ secrets.RAILWAY_SERVICE_ID }}}}
+          RAILWAY_TOKEN: ${{{{ secrets.RAILWAY_TOKEN }}}}
         run: |
           railway up --service $RAILWAY_SERVICE_ID --detach
 ";
@@ -11462,7 +11585,10 @@ jobs:
     /// <summary>
     /// Generates GitHub Actions workflow for deploying backend to Railway (files at root level)
     /// </summary>
-    private string GenerateRailwayDeploymentWorkflowAtRoot(string programmingLanguage)
+    private string GenerateRailwayDeploymentWorkflowAtRoot(
+        string programmingLanguage,
+        string boardId = "",
+        string strAppersApiUrl = "")
     {
         // Build commands vary by programming language (files are at root, no backend/ directory)
         var buildCommands = programmingLanguage?.ToLowerInvariant() switch
@@ -11486,12 +11612,42 @@ jobs:
           dotnet publish Backend.csproj -c Release -o ./out"
         };
 
+        _logger.LogInformation("[LANG-TRACE] GenerateRailwayDeploymentWorkflowAtRoot: programmingLanguage='{Language}' lowered='{Lowered}'",
+            programmingLanguage, programmingLanguage?.ToLowerInvariant());
+
+        var testRunCommand = programmingLanguage?.ToLowerInvariant() switch
+        {
+            "c#" or "csharp"                 => "dotnet test Tests/Tests.csproj -v minimal",
+            "python"                          => "pip install pytest -q && pytest tests/ -q --tb=short",
+            "nodejs" or "node.js" or "node"  => "npm test -- --passWithNoTests",
+            "java"                            => "mvn test -q",
+            "php"                             => "composer install -q && ./vendor/bin/phpunit tests/",
+            "ruby"                            => "bundle exec rspec spec/ --format progress",
+            "go"                              => "go test ./...",
+            _                                 => "echo 'no test runner configured'"
+        };
+
+        var reportStep = !string.IsNullOrEmpty(boardId) ? $@"
+      - name: Report CI Results
+        if: always()
+        env:
+          BOARD_ID: ""{boardId}""
+          API_URL: ""{strAppersApiUrl}""
+          GITHUB_BRANCH: ${{{{ github.ref_name }}}}
+          TEST_OUTCOME: ${{{{ steps.run_tests.outcome }}}}
+          DEPLOY_OUTCOME: ${{{{ steps.deploy_railway.outcome }}}}
+        run: |
+          python3 -c ""import json,os,urllib.request as r; test_out=os.environ.get('TEST_OUTCOME','?'); deploy_out=os.environ.get('DEPLOY_OUTCOME','?'); status='PASS' if test_out=='success' else 'FAIL'; test_log=open('/tmp/test_out.txt').read()[:1000] if os.path.exists('/tmp/test_out.txt') else ''; deploy_log=open('/tmp/deploy_out.txt').read()[:800] if os.path.exists('/tmp/deploy_out.txt') else ''; diag='[CI] tests='+test_out+' deploy='+deploy_out; final_output=(diag+chr(10)+test_log+chr(10)+deploy_log).strip(); body=json.dumps({{'boardId':os.environ['BOARD_ID'],'devRole':'Backend','status':status,'output':final_output,'branch':os.environ.get('GITHUB_BRANCH','')}}).encode(); req=r.Request(os.environ['API_URL']+'/api/Mentor/test-results',data=body,headers={{'Content-Type':'application/json'}}); r.urlopen(req,timeout=10)"" || true" : "";
+
         return $@"name: Deploy Backend to Railway
 
 on:
   push:
     branches:
       - main
+      - '[0-9]+-B'
+      - '[0-9]+-B-*'
+      - 'Bugs-B'
   workflow_dispatch:
 
 permissions:
@@ -11503,20 +11659,29 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-      
-      - name: Setup Railway CLI
-        uses: bervProject/setup-railway@v2.0.0
-        with:
-          railway_token: ${{{{ secrets.RAILWAY_TOKEN }}}}
-      
+
+      - name: Install Railway CLI
+        run: npm install -g @railway/cli
+
 {buildCommands}
-      
+
+      - name: Run Tests
+        id: run_tests
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          {testRunCommand} 2>&1 | tee /tmp/test_out.txt
+
       - name: Deploy to Railway
+        id: deploy_railway
+        if: github.ref == 'refs/heads/main'
+        continue-on-error: true
         env:
           RAILWAY_SERVICE_ID: ${{{{ secrets.RAILWAY_SERVICE_ID }}}}
+          RAILWAY_TOKEN: ${{{{ secrets.RAILWAY_TOKEN }}}}
         run: |
-          railway up --service $RAILWAY_SERVICE_ID --detach
-";
+          railway up --service $RAILWAY_SERVICE_ID --detach 2>&1 | tee /tmp/deploy_out.txt
+{reportStep}";
     }
 
     public string GenerateConfigJs(string? webApiUrl, string? mentorApiBaseUrl = null)
