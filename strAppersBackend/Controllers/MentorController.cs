@@ -3422,11 +3422,20 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                     .FirstOrDefaultAsync(s => s.BoardId == request.BoardId);
                 if (student != null && sprintNumber.HasValue)
                 {
+                    // Determine if this is the first test run for this branch (provisioned/initial run)
+                    var isFirstRun = !await _context.BoardStates
+                        .AnyAsync(bs => bs.BoardId == request.BoardId && bs.Source == "TestRunner" && bs.GithubBranch == branch);
+
                     var icon = status == "PASS" ? "✅" : status == "FAIL" ? "❌" : "⚠️";
                     var label = status == "PASS" ? "passed" : status == "FAIL" ? "FAILED" : "ran with no tests found";
                     var msgText = $"{icon} **Automated tests {label}** on branch `{branch}`";
                     if (status == "FAIL")
-                        msgText += "\n\nCheck GitHub Actions for error details.";
+                    {
+                        if (isFirstRun)
+                            msgText += "\n\nThis is completely expected! 🎓 Your CI/CD pipeline is set up and running. The tests fail on the starter code — that's by design.\n\nWrite your solution on this branch and push your changes. The tests will run automatically and you'll see the results here.";
+                        else
+                            msgText += "\n\nCheck GitHub Actions for details, fix the failing tests, and push again.";
+                    }
                     var aiModelTag = status == "PASS" ? "test:passed" : status == "FAIL" ? "test:failed" : "test:info";
                     _context.MentorChatHistory.Add(new MentorChatHistory
                     {
