@@ -3437,7 +3437,7 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                     if (previousStatus == null)
                     {
                         // First run: always show a positive "CI ready" message regardless of outcome
-                        msgText = $"✅ **Your CI/CD pipeline is live!** on branch `{branch}`\n\nPush your code here and the tests will run automatically. You'll see the results in this chat.";
+                        msgText = $"✅ **Your CI/CD pipeline is live!** on branch \"{branch}\" — Push your code here and the tests will run automatically. You'll see the results in this chat.";
                         aiModelTag = "test:passed";
                     }
                     else
@@ -3445,9 +3445,9 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                         // Status changed — notify the student
                         var icon = status == "PASS" ? "✅" : status == "FAIL" ? "❌" : "⚠️";
                         var label = status == "PASS" ? "passed" : status == "FAIL" ? "FAILED" : "ran with no tests found";
-                        msgText = $"{icon} **Automated tests {label}** on branch `{branch}`";
+                        msgText = $"{icon} **Automated tests {label}** on branch \"{branch}\"";
                         if (status == "FAIL")
-                            msgText += "\n\nCheck GitHub Actions for details, fix the failing tests, and push again.";
+                            msgText += " — Check GitHub Actions for details, fix the failing tests, and push again.";
                         aiModelTag = status == "PASS" ? "test:passed" : status == "FAIL" ? "test:failed" : "test:info";
                     }
                     _context.MentorChatHistory.Add(new MentorChatHistory
