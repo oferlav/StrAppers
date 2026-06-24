@@ -3416,6 +3416,35 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                 log.AppendLine($"  → OK: BoardStates upsert complete");
                 if (!string.IsNullOrEmpty(output))
                     log.AppendLine($"  Output preview: {output[..Math.Min(500, output.Length)]}");
+
+                // Inject a system chat bubble into the student's mentor chat history
+                var student = await _context.Students.AsNoTracking()
+                    .FirstOrDefaultAsync(s => s.BoardId == request.BoardId);
+                if (student != null && sprintNumber.HasValue)
+                {
+                    var icon = status == "PASS" ? "✅" : status == "FAIL" ? "❌" : "⚠️";
+                    var label = status == "PASS" ? "passed" : status == "FAIL" ? "FAILED" : "ran with no tests found";
+                    var msgText = $"{icon} **Automated tests {label}** on branch `{branch}`";
+                    if (status == "FAIL")
+                        msgText += "\n\nCheck GitHub Actions for error details.";
+                    var aiModelTag = status == "PASS" ? "test:passed" : status == "FAIL" ? "test:failed" : "test:info";
+                    _context.MentorChatHistory.Add(new MentorChatHistory
+                    {
+                        StudentId = student.Id,
+                        SprintId = sprintNumber.Value,
+                        Role = "system",
+                        Message = msgText,
+                        AIModelName = aiModelTag,
+                        CreatedAt = now
+                    });
+                    await _context.SaveChangesAsync();
+                    log.AppendLine($"  → Chat bubble injected: StudentId={student.Id} SprintId={sprintNumber} Tag={aiModelTag}");
+                }
+                else
+                {
+                    log.AppendLine($"  → Chat bubble SKIPPED: student={(student == null ? "not found" : "found")} sprintNumber={sprintNumber?.ToString() ?? "null"}");
+                }
+
                 _logger.LogInformation("[TestResults] Recorded {Status} for BoardId {BoardId}", status, request.BoardId);
                 _ = SendTestResultEmailAsync(log.ToString(), status);
                 return Ok(new { Success = true, Status = status });
@@ -13365,7 +13394,7 @@ APPROVAL: no    (request changes before merge)";
                 {
                     StudentId = request.StudentId,
                     SprintId = request.SprintId,
-                    Role = "assistant", // System messages are stored as assistant role
+                    Role = "system",
                     Message = request.Message.Trim(),
                     CreatedAt = DateTime.UtcNow
                 };
