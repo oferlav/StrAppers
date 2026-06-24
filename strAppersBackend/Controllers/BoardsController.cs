@@ -2073,6 +2073,7 @@ public partial class BoardsController : ControllerBase
                             var verifyDoc = System.Text.Json.JsonDocument.Parse(await verifyResponse.Content.ReadAsStringAsync());
                             if (verifyDoc.RootElement.TryGetProperty("data", out var verifyDataObj) &&
                                 verifyDataObj.TryGetProperty("project", out var verifyProjectObj) &&
+                                verifyProjectObj.ValueKind == System.Text.Json.JsonValueKind.Object &&
                                 verifyProjectObj.TryGetProperty("id", out var verifyIdProp))
                             {
                                 var verifiedProjectId = verifyIdProp.GetString();
