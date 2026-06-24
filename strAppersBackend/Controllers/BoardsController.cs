@@ -8415,8 +8415,19 @@ INSERT INTO ""TestProjects"" (""Name"") VALUES
             var mentorApiBaseUrl = _configuration["ApiBaseUrl"];
             var newConfigJs = _gitHubService.GenerateConfigJs(serviceUrl, mentorApiBaseUrl);
             
-            // Rich frontend (Vite) has config at public/config.js; vanilla frontend has config.js at root. Try both.
-            var success = await _gitHubService.UpdateFileAsync(
+            // Update BOTH paths: non-Vite boards use config.js at root; Vite boards use public/config.js
+            // (Vite copies public/ to dist/ at build time; static HTML serves root directly via Pages)
+            // UpdateFileAsync creates the file if missing, so trying public/ first then root would create
+            // public/config.js in non-Vite repos and never reach the root — always update both.
+            var rootSuccess = await _gitHubService.UpdateFileAsync(
+                repoOwner,
+                repoName,
+                "config.js",
+                newConfigJs,
+                "Update config.js with Railway service URL after deployment",
+                githubAccessToken
+            );
+            var publicSuccess = await _gitHubService.UpdateFileAsync(
                 repoOwner,
                 repoName,
                 "public/config.js",
@@ -8424,24 +8435,13 @@ INSERT INTO ""TestProjects"" (""Name"") VALUES
                 "Update config.js with Railway service URL after deployment",
                 githubAccessToken
             );
-            if (!success)
+            if (rootSuccess || publicSuccess)
             {
-                success = await _gitHubService.UpdateFileAsync(
-                    repoOwner,
-                    repoName,
-                    "config.js",
-                    newConfigJs,
-                    "Update config.js with Railway service URL after deployment",
-                    githubAccessToken
-                );
-            }
-            if (success)
-            {
-                _logger.LogInformation("[FRONTEND] Updated config.js with service URL");
+                _logger.LogInformation("[FRONTEND] Updated config.js with service URL (root={Root}, public={Public})", rootSuccess, publicSuccess);
             }
             else
             {
-                _logger.LogWarning("[FRONTEND] Could not update config.js (tried public/config.js and config.js)");
+                _logger.LogWarning("[FRONTEND] Could not update config.js (tried config.js and public/config.js)");
             }
         }
         catch (Exception ex)
