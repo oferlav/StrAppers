@@ -4043,6 +4043,98 @@ Items: {input}";
             });
         }
     }
+
+    [HttpGet("railway/test")]
+    public async Task<ActionResult<object>> TestRailwayConnection()
+    {
+        var token = _configuration["Railway:ApiToken"];
+        var apiUrl = _configuration["Railway:ApiUrl"];
+        var projectId = _configuration["Railway:SharedProjectId"];
+
+        var configStatus = new
+        {
+            HasToken = !string.IsNullOrWhiteSpace(token) && token != "your-railway-api-token-here",
+            TokenPrefix = string.IsNullOrWhiteSpace(token) ? "(empty)" : token[..Math.Min(8, token.Length)] + "...",
+            HasApiUrl = !string.IsNullOrWhiteSpace(apiUrl),
+            ApiUrl = apiUrl ?? "(not set)",
+            HasProjectId = !string.IsNullOrWhiteSpace(projectId),
+            ProjectId = projectId ?? "(not set)"
+        };
+
+        if (!configStatus.HasToken || !configStatus.HasApiUrl || !configStatus.HasProjectId)
+            return Ok(new { Config = configStatus, Steps = Array.Empty<object>() });
+
+        using var httpClient = _httpClientFactory.CreateClient();
+        httpClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        httpClient.DefaultRequestHeaders.Accept.Add(new System.Net.Http.Headers.MediaTypeWithQualityHeaderValue("application/json"));
+
+        var steps = new List<object>();
+
+        // Step 1: Verify project
+        var verifyQuery = new
+        {
+            query = @"query GetProject($projectId: String!) { project(id: $projectId) { id name } }",
+            variables = new { projectId }
+        };
+        var verifyBody = new StringContent(JsonSerializer.Serialize(verifyQuery), System.Text.Encoding.UTF8, "application/json");
+        var verifyResp = await httpClient.PostAsync(apiUrl, verifyBody);
+        var verifyRaw = await verifyResp.Content.ReadAsStringAsync();
+        string verifyDiag;
+        try
+        {
+            var doc = JsonDocument.Parse(verifyRaw);
+            var root = doc.RootElement;
+            if (root.TryGetProperty("data", out var dataEl) && dataEl.ValueKind == JsonValueKind.Object
+                && dataEl.TryGetProperty("project", out var projEl) && projEl.ValueKind == JsonValueKind.Object
+                && projEl.TryGetProperty("id", out var idEl))
+                verifyDiag = $"OK — project found, id={idEl.GetString()}";
+            else if (root.TryGetProperty("data", out var dataEl2) && dataEl2.ValueKind == JsonValueKind.Null)
+                verifyDiag = "FAIL — data is null (token cannot access this project)";
+            else if (root.TryGetProperty("errors", out var errEl))
+                verifyDiag = $"FAIL — GraphQL errors: {errEl.GetRawText()[..Math.Min(300, errEl.GetRawText().Length)]}";
+            else
+                verifyDiag = $"UNKNOWN — raw: {verifyRaw[..Math.Min(300, verifyRaw.Length)]}";
+        }
+        catch (Exception ex) { verifyDiag = $"PARSE ERROR: {ex.Message}"; }
+        steps.Add(new { Step = "VerifyProject", HttpStatus = (int)verifyResp.StatusCode, Diagnosis = verifyDiag, RawResponse = verifyRaw.Length > 500 ? verifyRaw[..500] : verifyRaw });
+
+        // Step 2: List project services (read-only, safe)
+        var listQuery = new
+        {
+            query = @"query GetProject($projectId: String!) { project(id: $projectId) { id name services { edges { node { id name } } } environments { edges { node { id name } } } } }",
+            variables = new { projectId }
+        };
+        var listBody = new StringContent(JsonSerializer.Serialize(listQuery), System.Text.Encoding.UTF8, "application/json");
+        var listResp = await httpClient.PostAsync(apiUrl, listBody);
+        var listRaw = await listResp.Content.ReadAsStringAsync();
+        string listDiag;
+        try
+        {
+            var doc = JsonDocument.Parse(listRaw);
+            var root = doc.RootElement;
+            if (root.TryGetProperty("data", out var dataEl) && dataEl.ValueKind == JsonValueKind.Object
+                && dataEl.TryGetProperty("project", out var projEl) && projEl.ValueKind == JsonValueKind.Object)
+            {
+                var svcCount = 0;
+                var envCount = 0;
+                if (projEl.TryGetProperty("services", out var svcEl) && svcEl.ValueKind == JsonValueKind.Object
+                    && svcEl.TryGetProperty("edges", out var svcEdges))
+                    svcCount = svcEdges.GetArrayLength();
+                if (projEl.TryGetProperty("environments", out var envEl) && envEl.ValueKind == JsonValueKind.Object
+                    && envEl.TryGetProperty("edges", out var envEdges))
+                    envCount = envEdges.GetArrayLength();
+                listDiag = $"OK — {svcCount} service(s), {envCount} environment(s)";
+            }
+            else if (root.TryGetProperty("data", out var dataEl2) && dataEl2.ValueKind == JsonValueKind.Null)
+                listDiag = "FAIL — data is null (token lacks access to this project)";
+            else
+                listDiag = $"UNKNOWN — raw: {listRaw[..Math.Min(300, listRaw.Length)]}";
+        }
+        catch (Exception ex) { listDiag = $"PARSE ERROR: {ex.Message}"; }
+        steps.Add(new { Step = "ListProjectDetails", HttpStatus = (int)listResp.StatusCode, Diagnosis = listDiag, RawResponse = listRaw.Length > 800 ? listRaw[..800] : listRaw });
+
+        return Ok(new { Config = configStatus, Steps = steps });
+    }
 }
 
 public class SetPasswordForAllRequest
