@@ -3387,13 +3387,24 @@ Your intelligence is strictly tethered to the Current Project Context and the us
 
                 log.AppendLine($"  BoardExists=true Status(resolved)={status} DevRole(resolved)={devRole} Branch={branch} SprintNumber={sprintNumber?.ToString() ?? "null"}");
 
+                // DEBUG: dump every TestRunner row for this board before querying
+                var allTestRunnerRows = await _context.BoardStates.AsNoTracking()
+                    .Where(bs => bs.BoardId == request.BoardId && bs.Source == "TestRunner")
+                    .Select(bs => new { bs.Id, bs.GithubBranch, bs.LastTestStatus, bs.UpdatedAt })
+                    .ToListAsync();
+                if (allTestRunnerRows.Count == 0)
+                    log.AppendLine("  [DBG] No TestRunner rows found for this board");
+                else
+                    foreach (var r in allTestRunnerRows)
+                        log.AppendLine($"  [DBG] Row Id={r.Id} GithubBranch={r.GithubBranch ?? "(null)"} LastTestStatus={r.LastTestStatus ?? "(null)"} UpdatedAt={r.UpdatedAt:yyyy-MM-dd HH:mm:ss}Z");
+
                 // Capture previous status BEFORE the upsert so we can detect a change
                 var previousRecord = await _context.BoardStates.AsNoTracking()
                     .FirstOrDefaultAsync(bs => bs.BoardId == request.BoardId
                         && bs.Source == "TestRunner"
                         && bs.GithubBranch == branch);
                 var previousStatus = previousRecord?.LastTestStatus;
-                log.AppendLine($"  PreviousStatus={previousStatus ?? "(none — first run)"}");
+                log.AppendLine($"  PreviousStatus={previousStatus ?? "(none — first run)"} (queried GithubBranch=={branch ?? "(null)"}, matched Id={previousRecord?.Id.ToString() ?? "none"})");
 
                 FormattableString sql = $@"
                     INSERT INTO ""BoardStates"" (
