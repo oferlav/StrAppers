@@ -1094,14 +1094,17 @@ public class ApplicationDbContext : DbContext
             entity.Property(e => e.Id).ValueGeneratedOnAdd();
             entity.Property(e => e.Name).HasMaxLength(100).IsRequired();
             entity.Property(e => e.Endpoint).HasMaxLength(100);
-            entity.HasData(
-                new Metric { Id = 1, Name = "Adherence", Endpoint = null },
-                new Metric { Id = 2, Name = "GapAnalysis", Endpoint = null },
-                new Metric { Id = 3, Name = "Improvement", Endpoint = null },
-                new Metric { Id = 4, Name = "Communication", Endpoint = null },
-                new Metric { Id = 5, Name = "Attendance", Endpoint = null },
-                new Metric { Id = 6, Name = "Strengths&weaknesses", Endpoint = null },
-                new Metric { Id = 7, Name = "CustomerEngagement", Endpoint = null });
+            entity.Property(e => e.Description).HasColumnType("text");
+            entity.Property(e => e.Category).HasMaxLength(50);
+            entity.Property(e => e.Required).HasDefaultValue(false);
+            entity.Property(e => e.Influence).HasDefaultValue(3);
+            entity.Property(e => e.Skill).HasColumnType("text");
+            entity.Property(e => e.AIExpertise).HasMaxLength(500);
+            entity.HasOne(e => e.Institute)
+                .WithMany()
+                .HasForeignKey(e => e.InstituteId)
+                .OnDelete(DeleteBehavior.NoAction);
+            entity.HasIndex(e => e.InstituteId);
         });
 
         modelBuilder.Entity<CacheMetrics>(entity =>

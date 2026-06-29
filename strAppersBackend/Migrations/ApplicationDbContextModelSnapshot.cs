@@ -1773,55 +1773,45 @@ namespace strAppersBackend.Migrations
 
                     NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
 
+                    b.Property<string>("AIExpertise")
+                        .HasMaxLength(500)
+                        .HasColumnType("character varying(500)");
+
+                    b.Property<string>("Category")
+                        .HasMaxLength(50)
+                        .HasColumnType("character varying(50)");
+
+                    b.Property<string>("Description")
+                        .HasColumnType("text");
+
                     b.Property<string>("Endpoint")
                         .HasMaxLength(100)
                         .HasColumnType("character varying(100)");
+
+                    b.Property<int>("Influence")
+                        .HasDefaultValue(3)
+                        .HasColumnType("integer");
+
+                    b.Property<int?>("InstituteId")
+                        .HasColumnType("integer");
 
                     b.Property<string>("Name")
                         .IsRequired()
                         .HasMaxLength(100)
                         .HasColumnType("character varying(100)");
 
+                    b.Property<bool>("Required")
+                        .HasDefaultValue(false)
+                        .HasColumnType("boolean");
+
+                    b.Property<string>("Skill")
+                        .HasColumnType("text");
+
                     b.HasKey("Id");
 
-                    b.ToTable("Metrics", (string)null);
+                    b.HasIndex("InstituteId");
 
-                    b.HasData(
-                        new
-                        {
-                            Id = 1,
-                            Name = "Adherence"
-                        },
-                        new
-                        {
-                            Id = 2,
-                            Name = "GapAnalysis"
-                        },
-                        new
-                        {
-                            Id = 3,
-                            Name = "Improvement"
-                        },
-                        new
-                        {
-                            Id = 4,
-                            Name = "Communication"
-                        },
-                        new
-                        {
-                            Id = 5,
-                            Name = "Attendance"
-                        },
-                        new
-                        {
-                            Id = 6,
-                            Name = "Strengths&weaknesses"
-                        },
-                        new
-                        {
-                            Id = 7,
-                            Name = "CustomerEngagement"
-                        });
+                    b.ToTable("Metrics", (string)null);
                 });
 
             modelBuilder.Entity("strAppersBackend.Models.ModuleType", b =>
@@ -4113,6 +4103,15 @@ namespace strAppersBackend.Migrations
                         .IsRequired();
 
                     b.Navigation("Project");
+                });
+
+            modelBuilder.Entity("strAppersBackend.Models.Metric", b =>
+                {
+                    b.HasOne("strAppersBackend.Models.Institute", "Institute")
+                        .WithMany()
+                        .HasForeignKey("InstituteId");
+
+                    b.Navigation("Institute");
                 });
 
             modelBuilder.Entity("strAppersBackend.Models.Employer", b =>
