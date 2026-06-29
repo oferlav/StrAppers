@@ -305,7 +305,7 @@ public partial class MetricsController
             return BadRequest(new { success = false, message = "Student is not assigned to this board." });
 
         var metrics = await _context.Metrics.AsNoTracking()
-            .Where(m => m.Endpoint != null && m.Endpoint != "")
+            .Where(m => m.Required && m.Endpoint != null && m.Endpoint != "")
             .ToListAsync(cancellationToken);
 
         var errors = new List<string>();
