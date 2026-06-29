@@ -1,3 +1,4 @@
+using strAppersBackend.Controllers;
 using strAppersBackend.Models;
 
 namespace strAppersBackend.Tests;
@@ -234,5 +235,163 @@ public class MetricsAssessmentEngineTests
             }
         }
         return sb.ToString().Trim();
+    }
+}
+
+/// <summary>
+/// Tests for MetricsController.FilterChatBlobByWindow — the shared chat-blob line parser
+/// used by the GroupChat and PrivateChat sensors.
+/// </summary>
+public class FilterChatBlobByWindowTests
+{
+    // Sprint 3: 2026-06-01 00:00:00 UTC → 2026-06-07 23:59:59 UTC
+    private static readonly DateTime WindowStart = new(2026, 6, 1, 0, 0, 0, DateTimeKind.Utc);
+    private static readonly DateTime WindowEnd   = new(2026, 6, 7, 23, 59, 59, DateTimeKind.Utc);
+
+    [Fact]
+    public void Returns_EmptyList_ForNullBlob()
+    {
+        var result = MetricsController.FilterChatBlobByWindow(null, WindowStart, WindowEnd);
+        Assert.Empty(result);
+    }
+
+    [Fact]
+    public void Returns_EmptyList_ForEmptyBlob()
+    {
+        var result = MetricsController.FilterChatBlobByWindow("", WindowStart, WindowEnd);
+        Assert.Empty(result);
+    }
+
+    [Fact]
+    public void Returns_EmptyList_ForWhitespaceOnlyBlob()
+    {
+        var result = MetricsController.FilterChatBlobByWindow("   \n  \n", WindowStart, WindowEnd);
+        Assert.Empty(result);
+    }
+
+    [Fact]
+    public void Includes_LineExactlyAtWindowStart()
+    {
+        var blob = "[2026-06-01 00:00:00] alice@example.com: Hello\n";
+        var result = MetricsController.FilterChatBlobByWindow(blob, WindowStart, WindowEnd);
+        Assert.Single(result);
+        Assert.Contains("Hello", result[0]);
+    }
+
+    [Fact]
+    public void Includes_LineExactlyAtWindowEnd()
+    {
+        var blob = "[2026-06-07 23:59:59] bob@example.com: Last message\n";
+        var result = MetricsController.FilterChatBlobByWindow(blob, WindowStart, WindowEnd);
+        Assert.Single(result);
+        Assert.Contains("Last message", result[0]);
+    }
+
+    [Fact]
+    public void Includes_LineInsideWindow()
+    {
+        var blob = "[2026-06-04 12:00:00] alice@example.com: Mid-sprint\n";
+        var result = MetricsController.FilterChatBlobByWindow(blob, WindowStart, WindowEnd);
+        Assert.Single(result);
+    }
+
+    [Fact]
+    public void Excludes_LineBeforeWindow()
+    {
+        var blob = "[2026-05-31 23:59:59] alice@example.com: Before sprint\n";
+        var result = MetricsController.FilterChatBlobByWindow(blob, WindowStart, WindowEnd);
+        Assert.Empty(result);
+    }
+
+    [Fact]
+    public void Excludes_LineAfterWindow()
+    {
+        var blob = "[2026-06-08 00:00:00] alice@example.com: After sprint\n";
+        var result = MetricsController.FilterChatBlobByWindow(blob, WindowStart, WindowEnd);
+        Assert.Empty(result);
+    }
+
+    [Fact]
+    public void Returns_OnlyInWindowLines_FromMixedBlob()
+    {
+        var blob =
+            "[2026-05-30 10:00:00] alice@example.com: Before sprint\n" +
+            "[2026-06-02 09:00:00] alice@example.com: Sprint day 2\n" +
+            "[2026-06-05 14:30:00] bob@example.com: Sprint day 5\n" +
+            "[2026-06-09 08:00:00] alice@example.com: After sprint\n";
+
+        var result = MetricsController.FilterChatBlobByWindow(blob, WindowStart, WindowEnd);
+
+        Assert.Equal(2, result.Count);
+        Assert.Contains("Sprint day 2", result[0]);
+        Assert.Contains("Sprint day 5", result[1]);
+    }
+
+    [Fact]
+    public void Skips_LinesWithNoTimestampPrefix()
+    {
+        var blob =
+            "This line has no timestamp\n" +
+            "[2026-06-03 10:00:00] alice@example.com: Has timestamp\n";
+
+        var result = MetricsController.FilterChatBlobByWindow(blob, WindowStart, WindowEnd);
+
+        Assert.Single(result);
+        Assert.Contains("Has timestamp", result[0]);
+    }
+
+    [Fact]
+    public void Skips_LinesWithMalformedTimestamp()
+    {
+        var blob =
+            "[NOT-A-DATE] alice@example.com: Bad line\n" +
+            "[2026-06-03 10:00:00] alice@example.com: Good line\n";
+
+        var result = MetricsController.FilterChatBlobByWindow(blob, WindowStart, WindowEnd);
+
+        Assert.Single(result);
+        Assert.Contains("Good line", result[0]);
+    }
+
+    [Fact]
+    public void Skips_LinesWithWrongTimestampFormat()
+    {
+        var blob =
+            "[06/03/2026 10:00:00] alice@example.com: Wrong format\n" +
+            "[2026-06-03 10:00:00] alice@example.com: Correct format\n";
+
+        var result = MetricsController.FilterChatBlobByWindow(blob, WindowStart, WindowEnd);
+
+        Assert.Single(result);
+        Assert.Contains("Correct format", result[0]);
+    }
+
+    [Fact]
+    public void Preserves_FullLineContent_IncludingTimestamp()
+    {
+        var line = "[2026-06-03 11:22:33] user@test.com: Hello world!";
+        var blob = line + "\n";
+        var result = MetricsController.FilterChatBlobByWindow(blob, WindowStart, WindowEnd);
+        Assert.Single(result);
+        Assert.Equal(line, result[0]);
+    }
+
+    [Fact]
+    public void Handles_BlobWithNoNewlineAtEnd()
+    {
+        var blob = "[2026-06-03 10:00:00] alice@example.com: No trailing newline";
+        var result = MetricsController.FilterChatBlobByWindow(blob, WindowStart, WindowEnd);
+        Assert.Single(result);
+    }
+
+    [Fact]
+    public void Handles_MultipleConsecutiveNewlines()
+    {
+        var blob =
+            "[2026-06-02 10:00:00] alice@example.com: First\n" +
+            "\n\n" +
+            "[2026-06-04 10:00:00] bob@example.com: Second\n";
+        var result = MetricsController.FilterChatBlobByWindow(blob, WindowStart, WindowEnd);
+        Assert.Equal(2, result.Count);
     }
 }

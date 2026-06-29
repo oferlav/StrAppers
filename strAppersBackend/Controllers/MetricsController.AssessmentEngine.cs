@@ -1,5 +1,6 @@
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using System.Globalization;
 using System.Text;
 using strAppersBackend.Models;
 using strAppersBackend.Utilities;
@@ -193,6 +194,19 @@ public partial class MetricsController
             sb.AppendLine("_(none for this sprint)_");
         sb.AppendLine();
 
+        AppendChatBlobSection(sb, "### Group chat (squad)",
+            haveWindow ? FilterChatBlobByWindow(board.GroupChat, windowStart, windowEnd) : null,
+            haveWindow);
+
+        if (!string.IsNullOrWhiteSpace(student.Email) && haveWindow)
+            await AppendAssessmentPrivateChatAsync(sb, boardId, student.Email, windowStart, windowEnd, ct);
+        else
+        {
+            sb.AppendLine("### Private chats (1-on-1)");
+            sb.AppendLine("_(none for this sprint)_");
+            sb.AppendLine();
+        }
+
         return sb.Length == 0 ? "(No context blocks available for this sprint.)" : sb.ToString();
     }
 
@@ -369,5 +383,83 @@ public partial class MetricsController
             }
         }
         return sb.ToString().Trim();
+    }
+
+    // Parses a chat blob (line-per-message, "[yyyy-MM-dd HH:mm:ss] email: text\n" format)
+    // and returns only lines whose timestamp falls within [windowStart, windowEnd] (UTC inclusive).
+    // Lines with no parseable timestamp are skipped. Null blob returns empty list.
+    internal static List<string> FilterChatBlobByWindow(string? blob, DateTime windowStart, DateTime windowEnd)
+    {
+        if (string.IsNullOrEmpty(blob)) return [];
+        var result = new List<string>();
+        foreach (var line in blob.Split('\n'))
+        {
+            var trimmed = line.Trim();
+            if (trimmed.Length == 0) continue;
+            if (trimmed.Length < 21 || trimmed[0] != '[') continue; // no timestamp prefix
+            var closeBracket = trimmed.IndexOf(']', 1);
+            if (closeBracket < 0) continue;
+            var tsStr = trimmed.Substring(1, closeBracket - 1);
+            if (!DateTime.TryParseExact(tsStr, "yyyy-MM-dd HH:mm:ss",
+                    CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out var ts))
+                continue;
+            var tsUtc = ts.ToUniversalTime();
+            if (tsUtc >= windowStart && tsUtc <= windowEnd)
+                result.Add(trimmed);
+        }
+        return result;
+    }
+
+    private static void AppendChatBlobSection(StringBuilder sb, string header, List<string>? lines, bool haveWindow)
+    {
+        sb.AppendLine(header);
+        if (!haveWindow || lines == null || lines.Count == 0)
+        {
+            sb.AppendLine("_(none for this sprint)_");
+        }
+        else
+        {
+            foreach (var line in lines)
+                sb.AppendLine($"- {line}");
+        }
+        sb.AppendLine();
+    }
+
+    private async Task AppendAssessmentPrivateChatAsync(
+        StringBuilder sb,
+        string boardId,
+        string studentEmail,
+        DateTime windowStart,
+        DateTime windowEnd,
+        CancellationToken ct)
+    {
+        var emailLower = studentEmail.Trim().ToLowerInvariant();
+        var chats = await _context.PrivateChats.AsNoTracking()
+            .Where(c => c.BoardId == boardId
+                && (c.Email1 == emailLower || c.Email2 == emailLower))
+            .ToListAsync(ct);
+
+        sb.AppendLine("### Private chats (1-on-1)");
+        if (chats.Count == 0)
+        {
+            sb.AppendLine("_(none for this sprint)_");
+            sb.AppendLine();
+            return;
+        }
+
+        var anyLines = false;
+        foreach (var chat in chats)
+        {
+            var lines = FilterChatBlobByWindow(chat.ChatHistory, windowStart, windowEnd);
+            if (lines.Count == 0) continue;
+            anyLines = true;
+            var peer = string.Equals(chat.Email1, emailLower, StringComparison.Ordinal) ? chat.Email2 : chat.Email1;
+            sb.AppendLine($"#### With {peer}");
+            foreach (var line in lines)
+                sb.AppendLine($"- {line}");
+        }
+        if (!anyLines)
+            sb.AppendLine("_(none for this sprint)_");
+        sb.AppendLine();
     }
 }
