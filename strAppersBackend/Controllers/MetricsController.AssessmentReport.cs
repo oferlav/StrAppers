@@ -304,9 +304,17 @@ public partial class MetricsController
         if (!string.Equals(student.BoardId?.Trim(), boardId, StringComparison.OrdinalIgnoreCase))
             return BadRequest(new { success = false, message = "Student is not assigned to this board." });
 
+        if (request.InstituteId <= 0)
+            return BadRequest(new { success = false, message = "InstituteId is required." });
+
         var metrics = await _context.Metrics.AsNoTracking()
-            .Where(m => m.Required && m.Endpoint != null && m.Endpoint != "")
+            .Where(m => m.InstituteId == request.InstituteId
+                     && m.Required
+                     && m.Endpoint != null && m.Endpoint != "")
             .ToListAsync(cancellationToken);
+
+        if (!metrics.Any())
+            return Ok(new { success = false, message = "No active metrics configured for this institute." });
 
         var errors = new List<string>();
         foreach (var metric in metrics)
@@ -348,6 +356,7 @@ public partial class MetricsController
         public string BoardId { get; set; } = "";
         public int StudentId { get; set; }
         public int SprintNumber { get; set; }
+        public int InstituteId { get; set; }
     }
 
     public sealed class SquadNameSearchResponseDto

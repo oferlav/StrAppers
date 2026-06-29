@@ -1,5 +1,6 @@
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using strAppersBackend.Models;
 
 namespace strAppersBackend.Controllers;
 
@@ -36,21 +37,24 @@ public partial class MetricsController
         MetricSensorFlagsDto Sensors);
 
     /// <summary>
-    /// Returns base-institute metrics (InstituteId=1) plus the requesting institute's own metrics.
-    /// instituteId defaults to 1 when omitted (base institute view).
+    /// Returns the institute's own metrics, seeding from the base templates (InstituteId=1)
+    /// on first access if the institute has no metrics yet.
     /// </summary>
     [HttpGet("use/assessment-config")]
     public async Task<ActionResult<IEnumerable<MetricAssessmentConfigDto>>> GetAssessmentMetricConfiguration(
-        [FromQuery] int instituteId = 1)
+        [FromQuery] int instituteId = 1,
+        CancellationToken cancellationToken = default)
     {
         try
         {
+            if (instituteId > 1)
+                await SeedMetricsForInstituteIfEmptyAsync(instituteId, cancellationToken);
+
             var metrics = await _context.Metrics
                 .AsNoTracking()
-                .Where(m => m.InstituteId == 1 || m.InstituteId == instituteId)
-                .OrderBy(m => m.InstituteId)
-                .ThenBy(m => m.Id)
-                .ToListAsync();
+                .Where(m => m.InstituteId == instituteId)
+                .OrderBy(m => m.Id)
+                .ToListAsync(cancellationToken);
 
             var dtos = metrics.Select(m => new MetricAssessmentConfigDto(
                 m.Id,
@@ -63,7 +67,7 @@ public partial class MetricsController
                 m.Influence,
                 m.Skill,
                 m.AIExpertise,
-                m.InstituteId == 1,
+                false,
                 "db",
                 new MetricSensorFlagsDto(
                     m.UseCustomerChat, m.UseMentorChat, m.UseCodebaseQuality,
@@ -77,6 +81,66 @@ public partial class MetricsController
         {
             _logger.LogError(ex, "Error building assessment metric configuration list for institute {InstituteId}", instituteId);
             return StatusCode(500, "An error occurred while loading metric configuration.");
+        }
+    }
+
+    /// <summary>
+    /// Seeds the institute's own metric rows by copying from the base templates (InstituteId=1).
+    /// Uses a Serializable transaction so concurrent first-accesses don't produce duplicates.
+    /// Swallows serialization conflicts — they mean another request already seeded successfully.
+    /// </summary>
+    private async Task SeedMetricsForInstituteIfEmptyAsync(int instituteId, CancellationToken ct)
+    {
+        await using var tx = await _context.Database.BeginTransactionAsync(
+            System.Data.IsolationLevel.Serializable, ct);
+        try
+        {
+            var hasOwn = await _context.Metrics
+                .AnyAsync(m => m.InstituteId == instituteId, ct);
+
+            if (!hasOwn)
+            {
+                var templates = await _context.Metrics
+                    .AsNoTracking()
+                    .Where(m => m.InstituteId == 1)
+                    .ToListAsync(ct);
+
+                var copies = templates.Select(t => new Metric
+                {
+                    InstituteId          = instituteId,
+                    Name                 = t.Name,
+                    Endpoint             = t.Endpoint,
+                    Description          = t.Description,
+                    Category             = t.Category,
+                    Required             = t.Required,
+                    Influence            = t.Influence,
+                    Skill                = t.Skill,
+                    AIExpertise          = t.AIExpertise,
+                    UseCustomerChat      = t.UseCustomerChat,
+                    UseMentorChat        = t.UseMentorChat,
+                    UseCodebaseQuality   = t.UseCodebaseQuality,
+                    UseResources         = t.UseResources,
+                    UseStakeholders      = t.UseStakeholders,
+                    UseProjectModule     = t.UseProjectModule,
+                    UseMeetingTranscripts = t.UseMeetingTranscripts,
+                    UseGroupChat         = t.UseGroupChat,
+                    UsePrivateChat       = t.UsePrivateChat,
+                    UseTrelloTasks       = t.UseTrelloTasks,
+                    UseTrelloUserStory   = t.UseTrelloUserStory,
+                    UseFigmaDesign       = t.UseFigmaDesign,
+                }).ToList();
+
+                _context.Metrics.AddRange(copies);
+                await _context.SaveChangesAsync(ct);
+            }
+
+            await tx.CommitAsync(ct);
+        }
+        catch (Exception ex)
+        {
+            await tx.RollbackAsync(ct);
+            // Serialization conflict = concurrent request already seeded. Log and continue.
+            _logger.LogWarning(ex, "Metric seed transaction rolled back for institute {InstituteId} — likely a concurrent seed (safe to ignore).", instituteId);
         }
     }
 
