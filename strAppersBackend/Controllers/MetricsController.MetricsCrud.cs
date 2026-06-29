@@ -13,7 +13,8 @@ public partial class MetricsController
         bool Required,
         int Influence,
         string? Skill,
-        string? AIExpertise);
+        string? AIExpertise,
+        MetricSensorFlagsDto? Sensors = null);
 
     public record CreateMetricRequest(
         string Name,
@@ -23,7 +24,8 @@ public partial class MetricsController
         int Influence,
         string? Skill,
         string? AIExpertise,
-        string? Endpoint);
+        string? Endpoint,
+        MetricSensorFlagsDto? Sensors = null);
 
     public record SkillDefinitionAssistRequest(
         string MetricName,
@@ -55,6 +57,22 @@ public partial class MetricsController
         metric.Skill       = request.Skill;
         metric.AIExpertise = request.AIExpertise;
 
+        if (request.Sensors is { } s)
+        {
+            metric.UseCustomerChat     = s.CustomerChat;
+            metric.UseMentorChat       = s.MentorChat;
+            metric.UseCodebaseQuality  = s.CodebaseQuality;
+            metric.UseResources        = s.Resources;
+            metric.UseStakeholders     = s.Stakeholders;
+            metric.UseProjectModule    = s.ProjectModule;
+            metric.UseMeetingTranscripts = s.MeetingTranscripts;
+            metric.UseGroupChat        = s.GroupChat;
+            metric.UsePrivateChat      = s.PrivateChat;
+            metric.UseTrelloTasks      = s.TrelloTasks;
+            metric.UseTrelloUserStory  = s.TrelloUserStory;
+            metric.UseFigmaDesign      = s.FigmaDesign;
+        }
+
         await _context.SaveChangesAsync();
         return NoContent();
     }
@@ -82,6 +100,21 @@ public partial class MetricsController
             AIExpertise = request.AIExpertise,
             Endpoint    = request.Endpoint,
         };
+        if (request.Sensors is { } cs)
+        {
+            metric.UseCustomerChat     = cs.CustomerChat;
+            metric.UseMentorChat       = cs.MentorChat;
+            metric.UseCodebaseQuality  = cs.CodebaseQuality;
+            metric.UseResources        = cs.Resources;
+            metric.UseStakeholders     = cs.Stakeholders;
+            metric.UseProjectModule    = cs.ProjectModule;
+            metric.UseMeetingTranscripts = cs.MeetingTranscripts;
+            metric.UseGroupChat        = cs.GroupChat;
+            metric.UsePrivateChat      = cs.PrivateChat;
+            metric.UseTrelloTasks      = cs.TrelloTasks;
+            metric.UseTrelloUserStory  = cs.TrelloUserStory;
+            metric.UseFigmaDesign      = cs.FigmaDesign;
+        }
 
         _context.Metrics.Add(metric);
         await _context.SaveChangesAsync();
@@ -98,7 +131,12 @@ public partial class MetricsController
             metric.Skill,
             metric.AIExpertise,
             false,
-            "db");
+            "db",
+            new MetricSensorFlagsDto(
+                metric.UseCustomerChat, metric.UseMentorChat, metric.UseCodebaseQuality,
+                metric.UseResources, metric.UseStakeholders, metric.UseProjectModule,
+                metric.UseMeetingTranscripts, metric.UseGroupChat, metric.UsePrivateChat,
+                metric.UseTrelloTasks, metric.UseTrelloUserStory, metric.UseFigmaDesign));
 
         return CreatedAtAction(nameof(GetAssessmentMetricConfiguration), new { instituteId }, dto);
     }

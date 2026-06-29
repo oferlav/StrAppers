@@ -64,7 +64,7 @@ public partial class MetricsController
                 board.SprintPlan, board.StartDate, request.SprintNumber, out windowStart, out windowEnd);
 
         var contextMd = await BuildAssessmentContextAsync(
-            boardId, board, student, request.SprintNumber,
+            metric, boardId, board, student, request.SprintNumber,
             request.TrelloRoleLabel, haveWindow, windowStart, windowEnd,
             cancellationToken);
 
@@ -168,6 +168,7 @@ public partial class MetricsController
     }
 
     private async Task<string> BuildAssessmentContextAsync(
+        Metric metric,
         string boardId,
         ProjectBoard board,
         Student student,
@@ -179,33 +180,57 @@ public partial class MetricsController
         CancellationToken ct)
     {
         var sb = new StringBuilder();
+        var email = student.Email;
+        var hasEmail = !string.IsNullOrWhiteSpace(email);
 
-        await AppendAssessmentCustomerChatAsync(sb, student.Id, sprintNumber, ct);
-        await AppendAssessmentMentorChatAsync(sb, student.Id, sprintNumber, ct);
-        await AppendAssessmentBoardStateAsync(sb, boardId, sprintNumber, ct);
-        await AppendAssessmentResourcesAsync(sb, boardId, student.Id, sprintNumber, ct);
-        await AppendAssessmentStakeholdersAsync(sb, boardId, ct);
-        await AppendAssessmentProjectModuleAsync(sb, boardId, board, sprintNumber, trelloRoleLabel, ct);
+        if (metric.UseCustomerChat)
+            await AppendAssessmentCustomerChatAsync(sb, student.Id, sprintNumber, ct);
+        if (metric.UseMentorChat)
+            await AppendAssessmentMentorChatAsync(sb, student.Id, sprintNumber, ct);
+        if (metric.UseCodebaseQuality)
+            await AppendAssessmentBoardStateAsync(sb, boardId, sprintNumber, ct);
+        if (metric.UseResources)
+            await AppendAssessmentResourcesAsync(sb, boardId, student.Id, sprintNumber, ct);
+        if (metric.UseStakeholders)
+            await AppendAssessmentStakeholdersAsync(sb, boardId, ct);
+        if (metric.UseProjectModule)
+            await AppendAssessmentProjectModuleAsync(sb, boardId, board, sprintNumber, trelloRoleLabel, ct);
 
-        sb.AppendLine("### Meeting transcripts");
-        if (!string.IsNullOrWhiteSpace(student.Email) && haveWindow)
-            await AppendAssessmentMeetingTranscriptsAsync(sb, boardId, student.Email, windowStart, windowEnd, ct);
-        else
-            sb.AppendLine("_(none for this sprint)_");
-        sb.AppendLine();
-
-        AppendChatBlobSection(sb, "### Group chat (squad)",
-            haveWindow ? FilterChatBlobByWindow(board.GroupChat, windowStart, windowEnd) : null,
-            haveWindow);
-
-        if (!string.IsNullOrWhiteSpace(student.Email) && haveWindow)
-            await AppendAssessmentPrivateChatAsync(sb, boardId, student.Email, windowStart, windowEnd, ct);
-        else
+        if (metric.UseMeetingTranscripts)
         {
-            sb.AppendLine("### Private chats (1-on-1)");
-            sb.AppendLine("_(none for this sprint)_");
+            sb.AppendLine("### Meeting transcripts");
+            if (hasEmail && haveWindow)
+                await AppendAssessmentMeetingTranscriptsAsync(sb, boardId, email!, windowStart, windowEnd, ct);
+            else
+                sb.AppendLine("_(none for this sprint)_");
             sb.AppendLine();
         }
+
+        if (metric.UseGroupChat)
+            AppendChatBlobSection(sb, "### Group chat (squad)",
+                haveWindow ? FilterChatBlobByWindow(board.GroupChat, windowStart, windowEnd) : null,
+                haveWindow);
+
+        if (metric.UsePrivateChat)
+        {
+            if (hasEmail && haveWindow)
+                await AppendAssessmentPrivateChatAsync(sb, boardId, email!, windowStart, windowEnd, ct);
+            else
+            {
+                sb.AppendLine("### Private chats (1-on-1)");
+                sb.AppendLine("_(none for this sprint)_");
+                sb.AppendLine();
+            }
+        }
+
+        if (metric.UseTrelloTasks && hasEmail)
+            await AppendAssessmentTrelloTasksAsync(sb, boardId, email!, ct);
+
+        if (metric.UseTrelloUserStory)
+            await AppendAssessmentTrelloUserStoryAsync(sb, boardId, board.UserStoryBoardId, ct);
+
+        if (metric.UseFigmaDesign && haveWindow)
+            await AppendAssessmentFigmaDesignAsync(sb, boardId, windowStart, windowEnd, ct);
 
         return sb.Length == 0 ? "(No context blocks available for this sprint.)" : sb.ToString();
     }
@@ -251,7 +276,7 @@ public partial class MetricsController
             .OrderByDescending(s => s.UpdatedAt)
             .ToListAsync(ct);
 
-        sb.AppendLine("### Board state (GitHub / CI)");
+        sb.AppendLine("### Codebase Quality (GitHub / CI)");
         if (states.Count == 0) { sb.AppendLine("_(none for this sprint)_"); sb.AppendLine(); return; }
         foreach (var s in states)
         {
@@ -383,6 +408,178 @@ public partial class MetricsController
             }
         }
         return sb.ToString().Trim();
+    }
+
+    private async Task AppendAssessmentTrelloTasksAsync(
+        StringBuilder sb, string boardId, string studentEmail, CancellationToken ct)
+    {
+        sb.AppendLine("### Trello tasks (assigned to student)");
+        try
+        {
+            var cards = await _trelloService.GetMemberBoardCardsAsync(boardId, studentEmail);
+            if (cards.Count == 0) { sb.AppendLine("_(none)_"); sb.AppendLine(); return; }
+            foreach (var card in cards)
+            {
+                sb.AppendLine($"#### {card.CardName}");
+                if (!string.IsNullOrWhiteSpace(card.Description))
+                    sb.AppendLine(Truncate(card.Description.Trim(), 1000));
+                if (!string.IsNullOrWhiteSpace(card.ChecklistsText))
+                    sb.AppendLine(card.ChecklistsText);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "TrelloTasks sensor failed for board {BoardId}", boardId);
+            sb.AppendLine("_(sensor error — Trello unavailable)_");
+        }
+        sb.AppendLine();
+    }
+
+    private async Task AppendAssessmentTrelloUserStoryAsync(
+        StringBuilder sb, string boardId, string? userStoryBoardId, CancellationToken ct)
+    {
+        sb.AppendLine("### Trello user stories");
+        var targetBoard = userStoryBoardId ?? boardId;
+        try
+        {
+            var result = await _trelloService.GetUserStoriesListAsync(targetBoard);
+            if (result == null) { sb.AppendLine("_(none)_"); sb.AppendLine(); return; }
+
+            var t = result.GetType();
+            var success = t.GetProperty("Success")?.GetValue(result) is bool b && b;
+            if (!success) { sb.AppendLine("_(none)_"); sb.AppendLine(); return; }
+
+            var cards = t.GetProperty("Cards")?.GetValue(result) as System.Collections.IEnumerable;
+            if (cards == null) { sb.AppendLine("_(none)_"); sb.AppendLine(); return; }
+
+            var count = 0;
+            foreach (var card in cards)
+            {
+                var ct2 = card.GetType();
+                var name = ct2.GetProperty("Name")?.GetValue(card) as string ?? "";
+                var desc = ct2.GetProperty("Description")?.GetValue(card) as string ?? "";
+                if (string.IsNullOrWhiteSpace(name)) continue;
+                sb.AppendLine($"- **{name}**");
+                if (!string.IsNullOrWhiteSpace(desc))
+                    sb.AppendLine($"  {Truncate(desc.Trim(), 500)}");
+                count++;
+            }
+            if (count == 0) sb.AppendLine("_(none)_");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "TrelloUserStory sensor failed for board {BoardId}", targetBoard);
+            sb.AppendLine("_(sensor error — Trello unavailable)_");
+        }
+        sb.AppendLine();
+    }
+
+    private async Task AppendAssessmentFigmaDesignAsync(
+        StringBuilder sb, string boardId, DateTime windowStart, DateTime windowEnd, CancellationToken ct)
+    {
+        sb.AppendLine("### Figma design (version history)");
+        try
+        {
+            var figmaRow = await _context.Figma.AsNoTracking()
+                .FirstOrDefaultAsync(f => f.BoardId == boardId, ct);
+            if (figmaRow == null || string.IsNullOrEmpty(figmaRow.FigmaFileKey))
+            {
+                sb.AppendLine("_(no Figma integration configured for this board)_");
+                sb.AppendLine();
+                return;
+            }
+
+            // Refresh token if expired.
+            var token = figmaRow.FigmaAccessToken;
+            if (string.IsNullOrEmpty(token))
+            {
+                sb.AppendLine("_(Figma OAuth token missing — reconnect Figma for this board)_");
+                sb.AppendLine();
+                return;
+            }
+
+            if (figmaRow.FigmaTokenExpiry.HasValue && figmaRow.FigmaTokenExpiry.Value <= DateTime.UtcNow)
+            {
+                token = await TryRefreshFigmaTokenAsync(figmaRow, ct);
+                if (string.IsNullOrEmpty(token))
+                {
+                    sb.AppendLine("_(Figma token expired and could not be refreshed)_");
+                    sb.AppendLine();
+                    return;
+                }
+            }
+
+            using var http = _httpClientFactory.CreateClient();
+            http.DefaultRequestHeaders.Authorization =
+                new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", token);
+            var versionsUrl = $"https://api.figma.com/v1/files/{figmaRow.FigmaFileKey}/versions";
+            var res = await http.GetAsync(versionsUrl, ct);
+            if (!res.IsSuccessStatusCode)
+            {
+                sb.AppendLine($"_(Figma versions API returned {(int)res.StatusCode})_");
+                sb.AppendLine();
+                return;
+            }
+
+            using var doc = System.Text.Json.JsonDocument.Parse(await res.Content.ReadAsStringAsync(ct));
+            if (!doc.RootElement.TryGetProperty("versions", out var versions))
+            {
+                sb.AppendLine("_(no versions returned)_");
+                sb.AppendLine();
+                return;
+            }
+
+            var count = 0;
+            foreach (var v in versions.EnumerateArray())
+            {
+                var createdAtStr = v.TryGetProperty("created_at", out var ca) ? ca.GetString() : null;
+                if (createdAtStr == null || !DateTime.TryParse(createdAtStr,
+                        System.Globalization.CultureInfo.InvariantCulture,
+                        System.Globalization.DateTimeStyles.AssumeUniversal, out var ts))
+                    continue;
+                var tsUtc = ts.ToUniversalTime();
+                if (tsUtc < windowStart || tsUtc > windowEnd) continue;
+
+                var label = v.TryGetProperty("label", out var lp) ? lp.GetString() : null;
+                var descr = v.TryGetProperty("description", out var dp) ? dp.GetString() : null;
+                var user  = v.TryGetProperty("user", out var up)
+                    ? (up.TryGetProperty("handle", out var hp) ? hp.GetString() : null) : null;
+                sb.Append($"- [{tsUtc:yyyy-MM-dd HH:mm}]");
+                if (!string.IsNullOrWhiteSpace(user))   sb.Append($" by {user}");
+                if (!string.IsNullOrWhiteSpace(label))  sb.Append($" — {label}");
+                if (!string.IsNullOrWhiteSpace(descr))  sb.Append($": {Truncate(descr.Trim(), 200)}");
+                sb.AppendLine();
+                count++;
+            }
+            if (count == 0) sb.AppendLine("_(no Figma versions in this sprint window)_");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "FigmaDesign sensor failed for board {BoardId}", boardId);
+            sb.AppendLine("_(sensor error — Figma unavailable)_");
+        }
+        sb.AppendLine();
+    }
+
+    private async Task<string?> TryRefreshFigmaTokenAsync(Models.Figma figmaRow, CancellationToken ct)
+    {
+        if (string.IsNullOrEmpty(figmaRow.FigmaRefreshToken)) return null;
+        try
+        {
+            using var http = _httpClientFactory.CreateClient();
+            var form = new FormUrlEncodedContent(
+            [
+                new KeyValuePair<string, string>("client_id",     _configuration["Figma:ClientId"] ?? ""),
+                new KeyValuePair<string, string>("client_secret", _configuration["Figma:ClientSecret"] ?? ""),
+                new KeyValuePair<string, string>("refresh_token", figmaRow.FigmaRefreshToken),
+                new KeyValuePair<string, string>("grant_type",    "refresh_token"),
+            ]);
+            var res = await http.PostAsync("https://api.figma.com/v1/oauth/token", form, ct);
+            if (!res.IsSuccessStatusCode) return null;
+            using var doc = System.Text.Json.JsonDocument.Parse(await res.Content.ReadAsStringAsync(ct));
+            return doc.RootElement.TryGetProperty("access_token", out var ap) ? ap.GetString() : null;
+        }
+        catch { return null; }
     }
 
     // Parses a chat blob (line-per-message, "[yyyy-MM-dd HH:mm:ss] email: text\n" format)

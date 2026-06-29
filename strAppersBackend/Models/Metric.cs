@@ -34,4 +34,18 @@ public class Metric
 
     public int? InstituteId { get; set; }
     public Institute? Institute { get; set; }
+
+    // Per-sensor toggles — all default true so existing metrics keep all sources enabled.
+    public bool UseCustomerChat { get; set; } = true;
+    public bool UseMentorChat { get; set; } = true;
+    public bool UseCodebaseQuality { get; set; } = true;
+    public bool UseResources { get; set; } = true;
+    public bool UseStakeholders { get; set; } = true;
+    public bool UseProjectModule { get; set; } = true;
+    public bool UseMeetingTranscripts { get; set; } = true;
+    public bool UseGroupChat { get; set; } = true;
+    public bool UsePrivateChat { get; set; } = true;
+    public bool UseTrelloTasks { get; set; } = true;
+    public bool UseTrelloUserStory { get; set; } = true;
+    public bool UseFigmaDesign { get; set; } = true;
 }

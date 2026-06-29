@@ -6,6 +6,20 @@ namespace strAppersBackend.Controllers;
 /// <summary>AI assessment metric catalog — backed by the Metrics table, scoped per institute.</summary>
 public partial class MetricsController
 {
+    public record MetricSensorFlagsDto(
+        bool CustomerChat,
+        bool MentorChat,
+        bool CodebaseQuality,
+        bool Resources,
+        bool Stakeholders,
+        bool ProjectModule,
+        bool MeetingTranscripts,
+        bool GroupChat,
+        bool PrivateChat,
+        bool TrelloTasks,
+        bool TrelloUserStory,
+        bool FigmaDesign);
+
     public record MetricAssessmentConfigDto(
         int Id,
         string Key,
@@ -18,7 +32,8 @@ public partial class MetricsController
         string? Skill,
         string? AIExpertise,
         bool IsBaseInstitute,
-        string Source);
+        string Source,
+        MetricSensorFlagsDto Sensors);
 
     /// <summary>
     /// Returns base-institute metrics (InstituteId=1) plus the requesting institute's own metrics.
@@ -49,7 +64,12 @@ public partial class MetricsController
                 m.Skill,
                 m.AIExpertise,
                 m.InstituteId == 1,
-                "db")).ToList();
+                "db",
+                new MetricSensorFlagsDto(
+                    m.UseCustomerChat, m.UseMentorChat, m.UseCodebaseQuality,
+                    m.UseResources, m.UseStakeholders, m.UseProjectModule,
+                    m.UseMeetingTranscripts, m.UseGroupChat, m.UsePrivateChat,
+                    m.UseTrelloTasks, m.UseTrelloUserStory, m.UseFigmaDesign))).ToList();
 
             return Ok(dtos);
         }
