@@ -44,11 +44,8 @@ public partial class MetricsController
         if (metric == null)
             return NotFound(new { message = $"Metric {id} not found." });
 
-        if (metric.InstituteId != instituteId)
+        if (metric.InstituteId != 1 && metric.InstituteId != instituteId)
             return StatusCode(403, new { message = "You can only edit metrics belonging to your institute." });
-
-        if (metric.InstituteId == 1)
-            return StatusCode(403, new { message = "Base-institute metrics are read-only." });
 
         metric.Description = request.Description;
         metric.Category    = request.Category;
@@ -152,10 +149,7 @@ public partial class MetricsController
         if (metric == null)
             return NotFound(new { message = $"Metric {id} not found." });
 
-        if (metric.InstituteId == 1)
-            return StatusCode(403, new { message = "Base-institute metrics cannot be deleted." });
-
-        if (metric.InstituteId != instituteId)
+        if (metric.InstituteId != 1 && metric.InstituteId != instituteId)
             return StatusCode(403, new { message = "You can only delete metrics belonging to your institute." });
 
         _context.Metrics.Remove(metric);
