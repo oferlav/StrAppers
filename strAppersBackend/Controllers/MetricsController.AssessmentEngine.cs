@@ -607,7 +607,7 @@ public partial class MetricsController
         return result;
     }
 
-    private static void AppendChatBlobSection(StringBuilder sb, string header, List<string>? lines, bool haveWindow)
+    internal static void AppendChatBlobSection(StringBuilder sb, string header, List<string>? lines, bool haveWindow)
     {
         sb.AppendLine(header);
         if (!haveWindow || lines == null || lines.Count == 0)

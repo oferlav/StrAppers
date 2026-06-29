@@ -1,3 +1,4 @@
+using System.Text;
 using strAppersBackend.Controllers;
 using strAppersBackend.Models;
 
@@ -235,6 +236,208 @@ public class MetricsAssessmentEngineTests
             }
         }
         return sb.ToString().Trim();
+    }
+}
+
+/// <summary>
+/// Tests for per-metric sensor toggle flags (Metric model defaults, flag toggling,
+/// AppendChatBlobSection output, guard simulation for GroupChat, MetricSensorFlagsDto mapping).
+/// </summary>
+public class MetricSensorFlagTests
+{
+    // ── Metric model defaults ─────────────────────────────────────────────────
+
+    [Fact]
+    public void AllSensorFlags_DefaultToTrue_OnNewMetric()
+    {
+        var metric = new Metric();
+
+        Assert.True(metric.UseCustomerChat);
+        Assert.True(metric.UseMentorChat);
+        Assert.True(metric.UseCodebaseQuality);
+        Assert.True(metric.UseResources);
+        Assert.True(metric.UseStakeholders);
+        Assert.True(metric.UseProjectModule);
+        Assert.True(metric.UseMeetingTranscripts);
+        Assert.True(metric.UseGroupChat);
+        Assert.True(metric.UsePrivateChat);
+        Assert.True(metric.UseTrelloTasks);
+        Assert.True(metric.UseTrelloUserStory);
+        Assert.True(metric.UseFigmaDesign);
+    }
+
+    [Fact]
+    public void DisablingOneFlag_DoesNotAffectOthers()
+    {
+        var metric = new Metric { UseGroupChat = false };
+
+        Assert.False(metric.UseGroupChat);
+        Assert.True(metric.UseCustomerChat);
+        Assert.True(metric.UseMentorChat);
+        Assert.True(metric.UsePrivateChat);
+        Assert.True(metric.UseTrelloTasks);
+        Assert.True(metric.UseFigmaDesign);
+    }
+
+    // ── AppendChatBlobSection ─────────────────────────────────────────────────
+
+    [Fact]
+    public void AppendChatBlobSection_AlwaysEmitsHeader()
+    {
+        var sb = new StringBuilder();
+        MetricsController.AppendChatBlobSection(sb, "### Group chat (squad)", null, haveWindow: false);
+        Assert.Contains("### Group chat (squad)", sb.ToString());
+    }
+
+    [Fact]
+    public void AppendChatBlobSection_EmitsSentinel_WhenLinesNull()
+    {
+        var sb = new StringBuilder();
+        MetricsController.AppendChatBlobSection(sb, "### Group chat (squad)", null, haveWindow: true);
+        Assert.Contains("_(none for this sprint)_", sb.ToString());
+    }
+
+    [Fact]
+    public void AppendChatBlobSection_EmitsSentinel_WhenLinesEmpty()
+    {
+        var sb = new StringBuilder();
+        MetricsController.AppendChatBlobSection(sb, "### Group chat (squad)", [], haveWindow: true);
+        Assert.Contains("_(none for this sprint)_", sb.ToString());
+    }
+
+    [Fact]
+    public void AppendChatBlobSection_EmitsSentinel_WhenNoWindow()
+    {
+        var sb = new StringBuilder();
+        var lines = new List<string> { "[2026-06-03 10:00:00] alice@x.com: Hi" };
+        MetricsController.AppendChatBlobSection(sb, "### Group chat (squad)", lines, haveWindow: false);
+        Assert.Contains("_(none for this sprint)_", sb.ToString());
+    }
+
+    [Fact]
+    public void AppendChatBlobSection_EmitsFormattedLines_WhenHaveWindowAndLines()
+    {
+        var sb = new StringBuilder();
+        var lines = new List<string>
+        {
+            "[2026-06-02 09:00:00] alice@x.com: Sprint standup note",
+            "[2026-06-04 14:00:00] bob@x.com: Pushed the fix",
+        };
+        MetricsController.AppendChatBlobSection(sb, "### Group chat (squad)", lines, haveWindow: true);
+        var output = sb.ToString();
+        Assert.Contains("Sprint standup note", output);
+        Assert.Contains("Pushed the fix", output);
+        Assert.DoesNotContain("_(none for this sprint)_", output);
+    }
+
+    // ── GroupChat sensor guard simulation ─────────────────────────────────────
+
+    private static readonly DateTime W0 = new(2026, 6, 1, 0, 0, 0, DateTimeKind.Utc);
+    private static readonly DateTime W1 = new(2026, 6, 7, 23, 59, 59, DateTimeKind.Utc);
+
+    private static string SimulateGroupChatBlock(Metric metric, string? groupChatBlob, bool haveWindow)
+    {
+        var sb = new StringBuilder();
+        if (metric.UseGroupChat)
+        {
+            var lines = haveWindow ? MetricsController.FilterChatBlobByWindow(groupChatBlob, W0, W1) : null;
+            MetricsController.AppendChatBlobSection(sb, "### Group chat (squad)", lines, haveWindow);
+        }
+        return sb.ToString();
+    }
+
+    [Fact]
+    public void GroupChatGuard_WhenDisabled_ProducesNoOutput()
+    {
+        var metric = new Metric { UseGroupChat = false };
+        var blob = "[2026-06-03 10:00:00] alice@x.com: Hello squad\n";
+
+        var output = SimulateGroupChatBlock(metric, blob, haveWindow: true);
+
+        Assert.Empty(output);
+    }
+
+    [Fact]
+    public void GroupChatGuard_WhenEnabled_ProducesHeader()
+    {
+        var metric = new Metric { UseGroupChat = true };
+
+        var output = SimulateGroupChatBlock(metric, null, haveWindow: true);
+
+        Assert.Contains("### Group chat (squad)", output);
+    }
+
+    [Fact]
+    public void GroupChatGuard_WhenEnabled_WithMatchingBlob_ProducesLines()
+    {
+        var metric = new Metric { UseGroupChat = true };
+        var blob = "[2026-06-03 10:00:00] alice@x.com: All good on my end\n";
+
+        var output = SimulateGroupChatBlock(metric, blob, haveWindow: true);
+
+        Assert.Contains("All good on my end", output);
+        Assert.DoesNotContain("_(none for this sprint)_", output);
+    }
+
+    [Fact]
+    public void GroupChatGuard_WhenEnabled_BlobOutsideWindow_ProducesSentinel()
+    {
+        var metric = new Metric { UseGroupChat = true };
+        var blob = "[2026-05-01 10:00:00] alice@x.com: Old message\n"; // before window
+
+        var output = SimulateGroupChatBlock(metric, blob, haveWindow: true);
+
+        Assert.Contains("_(none for this sprint)_", output);
+        Assert.DoesNotContain("Old message", output);
+    }
+
+    // ── MetricSensorFlagsDto mapping ──────────────────────────────────────────
+
+    [Fact]
+    public void MetricSensorFlagsDto_AllTrue_WhenDefaultMetric()
+    {
+        var metric = new Metric();
+        var dto = new MetricsController.MetricSensorFlagsDto(
+            metric.UseCustomerChat, metric.UseMentorChat, metric.UseCodebaseQuality,
+            metric.UseResources, metric.UseStakeholders, metric.UseProjectModule,
+            metric.UseMeetingTranscripts, metric.UseGroupChat, metric.UsePrivateChat,
+            metric.UseTrelloTasks, metric.UseTrelloUserStory, metric.UseFigmaDesign);
+
+        Assert.True(dto.CustomerChat);
+        Assert.True(dto.MentorChat);
+        Assert.True(dto.CodebaseQuality);
+        Assert.True(dto.Resources);
+        Assert.True(dto.Stakeholders);
+        Assert.True(dto.ProjectModule);
+        Assert.True(dto.MeetingTranscripts);
+        Assert.True(dto.GroupChat);
+        Assert.True(dto.PrivateChat);
+        Assert.True(dto.TrelloTasks);
+        Assert.True(dto.TrelloUserStory);
+        Assert.True(dto.FigmaDesign);
+    }
+
+    [Fact]
+    public void MetricSensorFlagsDto_ReflectsDisabledFlags()
+    {
+        var metric = new Metric
+        {
+            UseGroupChat   = false,
+            UseFigmaDesign = false,
+            UseTrelloTasks = false,
+        };
+        var dto = new MetricsController.MetricSensorFlagsDto(
+            metric.UseCustomerChat, metric.UseMentorChat, metric.UseCodebaseQuality,
+            metric.UseResources, metric.UseStakeholders, metric.UseProjectModule,
+            metric.UseMeetingTranscripts, metric.UseGroupChat, metric.UsePrivateChat,
+            metric.UseTrelloTasks, metric.UseTrelloUserStory, metric.UseFigmaDesign);
+
+        Assert.False(dto.GroupChat);
+        Assert.False(dto.FigmaDesign);
+        Assert.False(dto.TrelloTasks);
+        Assert.True(dto.CustomerChat);
+        Assert.True(dto.MentorChat);
+        Assert.True(dto.PrivateChat);
     }
 }
 
