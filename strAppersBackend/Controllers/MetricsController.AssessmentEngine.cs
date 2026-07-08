@@ -47,9 +47,23 @@ public partial class MetricsController
 
         var student = await _context.Students
             .AsNoTracking()
+            .Include(s => s.StudentRoles)
+            .ThenInclude(sr => sr.Role)
             .FirstOrDefaultAsync(s => s.Id == request.StudentId, cancellationToken);
         if (student == null)
             return NotFound(new { message = $"Student {request.StudentId} not found." });
+
+        // Resolve the Trello role label (same convention as Adherence) when the caller didn't pass one —
+        // the sprint role card is matched by role label, and it carries the sprint's task requests.
+        var trelloRoleLabel = request.TrelloRoleLabel;
+        if (string.IsNullOrWhiteSpace(trelloRoleLabel))
+        {
+            var activeRoleName = student.StudentRoles?.FirstOrDefault(sr => sr.IsActive)?.Role?.Name?.Trim();
+            if (!string.IsNullOrWhiteSpace(activeRoleName))
+                trelloRoleLabel = board.IsSingleRole && student.RoleIndex > 0
+                    ? $"{activeRoleName} {student.RoleIndex}"
+                    : activeRoleName;
+        }
 
         var sprintLengthWeeks = _configuration.GetValue("BusinessLogicConfig:SprintLengthInWeeks", 1);
         var sprintMerge = await _context.ProjectBoardSprintMerges
@@ -63,7 +77,7 @@ public partial class MetricsController
 
         var contextMd = await BuildAssessmentContextAsync(
             metric, boardId, board, student, request.SprintNumber,
-            request.TrelloRoleLabel, haveWindow, windowStart, windowEnd,
+            trelloRoleLabel, haveWindow, windowStart, windowEnd,
             cancellationToken);
 
         // Layer 2 (deterministic categories): the skill definition is the authority. If it defines
@@ -244,8 +258,8 @@ public partial class MetricsController
             }
         }
 
-        if (metric.UseTrelloTasks && hasEmail)
-            await AppendAssessmentTrelloTasksAsync(sb, boardId, email!, ct);
+        if (metric.UseTrelloTasks)
+            await AppendAssessmentTrelloTasksAsync(sb, boardId, email, trelloRoleLabel, sprintNumber, ct);
 
         if (metric.UseTrelloUserStory)
             await AppendAssessmentTrelloUserStoryAsync(sb, boardId, board.UserStoryBoardId, email, haveWindow, windowStart, windowEnd, ct);
@@ -498,9 +512,45 @@ public partial class MetricsController
     }
 
     private async Task AppendAssessmentTrelloTasksAsync(
-        StringBuilder sb, string boardId, string studentEmail, CancellationToken ct)
+        StringBuilder sb, string boardId, string? studentEmail, string? roleLabel, int sprintNumber, CancellationToken ct)
     {
+        // Sprint role card first: it carries the sprint's task requests and is matched by role
+        // label, not member assignment — so it is invisible to the member-cards lookup below.
+        if (!string.IsNullOrWhiteSpace(roleLabel))
+        {
+            sb.AppendLine($"### Sprint {sprintNumber} task card (role: {roleLabel}) — the tasks requested from this student this sprint");
+            try
+            {
+                var labels = await _trelloService.ResolveSprintLabelsAsync(boardId, sprintNumber, roleLabel);
+                var found = false;
+                foreach (var lbl in labels)
+                {
+                    var snap = await _trelloService.GetSprintRoleCardSnapshotAsync(boardId, sprintNumber, lbl);
+                    if (snap == null) continue;
+                    found = true;
+                    sb.AppendLine($"#### {snap.CardName}");
+                    if (!string.IsNullOrWhiteSpace(snap.Description))
+                        sb.AppendLine(Truncate(snap.Description.Trim(), 2000));
+                    if (!string.IsNullOrWhiteSpace(snap.ChecklistsText))
+                        sb.AppendLine(snap.ChecklistsText);
+                }
+                if (!found) sb.AppendLine("_(no sprint task card found for this role)_");
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Sprint role card lookup failed for board {BoardId}, role {Role}", boardId, roleLabel);
+                sb.AppendLine("_(sensor error — Trello unavailable)_");
+            }
+            sb.AppendLine();
+        }
+
         sb.AppendLine("### Trello tasks (assigned to student)");
+        if (string.IsNullOrWhiteSpace(studentEmail))
+        {
+            sb.AppendLine("_(student has no email — cannot look up assigned cards)_");
+            sb.AppendLine();
+            return;
+        }
         try
         {
             var cards = await _trelloService.GetMemberBoardCardsAsync(boardId, studentEmail);

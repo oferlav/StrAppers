@@ -2009,14 +2009,30 @@ namespace strAppersBackend.Services
                 string? memberId = null;
                 var membersUrl = $"https://api.trello.com/1/boards/{targetBoard}/members?fields=id,email&key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
                 var membersRes = await _httpClient.GetAsync(membersUrl);
-                if (!membersRes.IsSuccessStatusCode) return Array.Empty<SprintRoleCardSnapshot>();
+                if (!membersRes.IsSuccessStatusCode)
+                {
+                    _logger.LogWarning("[USER-STORY-SENSOR] Members lookup failed for board {Board}: HTTP {Status}", targetBoard, (int)membersRes.StatusCode);
+                    return Array.Empty<SprintRoleCardSnapshot>();
+                }
                 var membersJson = JsonSerializer.Deserialize<JsonElement[]>(await membersRes.Content.ReadAsStringAsync());
-                var match = (membersJson ?? []).FirstOrDefault(m =>
+                var allMembers = membersJson ?? [];
+                var membersWithEmail = allMembers.Count(m =>
+                    m.TryGetProperty("email", out var e) && !string.IsNullOrEmpty(e.GetString()));
+                var match = allMembers.FirstOrDefault(m =>
                     string.Equals(m.TryGetProperty("email", out var ep) ? ep.GetString() : null,
                         emailLower, StringComparison.OrdinalIgnoreCase));
                 if (match.ValueKind != JsonValueKind.Undefined && match.TryGetProperty("id", out var idProp))
                     memberId = idProp.GetString();
-                if (string.IsNullOrEmpty(memberId)) return Array.Empty<SprintRoleCardSnapshot>();
+                if (string.IsNullOrEmpty(memberId))
+                {
+                    // Trello only exposes member emails to workspace-admin tokens — if WithEmail is 0
+                    // below, that is the cause and attribution can never match by email on this board.
+                    _logger.LogWarning("[USER-STORY-SENSOR] Could not resolve {Email} on board {Board}: {Total} members, {WithEmail} expose an email.",
+                        emailLower, targetBoard, allMembers.Length, membersWithEmail);
+                    return Array.Empty<SprintRoleCardSnapshot>();
+                }
+                _logger.LogInformation("[USER-STORY-SENSOR] Resolved {Email} -> member {MemberId} on board {Board} ({Total} members, {WithEmail} with email).",
+                    emailLower, memberId, targetBoard, allMembers.Length, membersWithEmail);
 
                 // Find the User Stories list ID on the target board.
                 var listsUrl = $"https://api.trello.com/1/boards/{targetBoard}/lists?key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
@@ -2054,6 +2070,8 @@ namespace strAppersBackend.Services
                         mp.EnumerateArray().Any(m => string.Equals(m.GetString(), memberId, StringComparison.Ordinal))).ToList();
                 }
 
+                var beforeWindowCount = storyCards.Count;
+
                 // Sprint-window filter: a story only counts as this sprint's activity when it was
                 // created or last touched within the window.
                 if (windowStart.HasValue && windowEnd.HasValue)
@@ -2070,6 +2088,10 @@ namespace strAppersBackend.Services
                                && last >= windowStart.Value && last <= windowEnd.Value;
                     }).ToList();
                 }
+
+                _logger.LogInformation("[USER-STORY-SENSOR] Board {Board}: {Attributed} stories attributed (memberFilter={MemberFilter}), {InWindow} within sprint window [{Start:u} .. {End:u}].",
+                    targetBoard, beforeWindowCount, anyCardHasMembers, storyCards.Count,
+                    windowStart ?? default, windowEnd ?? default);
 
                 var results = new List<SprintRoleCardSnapshot>();
                 foreach (var c in storyCards)
