@@ -281,7 +281,7 @@ public partial class MetricsController
             await AppendAssessmentTrelloTasksAsync(sb, boardId, email, trelloRoleLabel, sprintNumber, ct);
 
         if (metric.UseTrelloUserStory)
-            await AppendAssessmentTrelloUserStoryAsync(sb, boardId, board.UserStoryBoardId, trelloRoleLabel, haveWindow, windowStart, windowEnd, ct);
+            await AppendAssessmentTrelloUserStoryAsync(sb, boardId, board.UserStoryBoardId, trelloRoleLabel, sprintNumber, haveWindow, windowStart, windowEnd, ct);
 
         if (metric.UseFigmaDesign && haveWindow)
             await AppendAssessmentFigmaDesignAsync(sb, boardId, windowStart, windowEnd, ct);
@@ -592,10 +592,10 @@ public partial class MetricsController
     }
 
     private async Task AppendAssessmentTrelloUserStoryAsync(
-        StringBuilder sb, string boardId, string? userStoryBoardId, string? roleLabel,
+        StringBuilder sb, string boardId, string? userStoryBoardId, string? roleLabel, int sprintNumber,
         bool haveWindow, DateTime windowStart, DateTime windowEnd, CancellationToken ct)
     {
-        sb.AppendLine("### Trello user stories (attributed to this student, active in this sprint window)");
+        sb.AppendLine("### Trello user story (this sprint's deliverable for this student)");
         try
         {
             // Role-based attribution: user stories are the PM's deliverable. Other roles don't
@@ -607,6 +607,36 @@ public partial class MetricsController
                 return;
             }
 
+            // Primary linkage: sprint role card (main board) → ModuleId custom field → story card
+            // with the same ModuleId. The sprint card IS the sprint scoping — no date heuristics.
+            // The story card lives on the dedicated user-story board when one exists, otherwise on
+            // the main board's "User Stories" list (legacy).
+            var storyBoard = string.IsNullOrWhiteSpace(userStoryBoardId) ? boardId : userStoryBoardId;
+            string? moduleIdStr = null;
+            var labels = await _trelloService.ResolveSprintLabelsAsync(boardId, sprintNumber, roleLabel!);
+            foreach (var lbl in labels)
+            {
+                moduleIdStr = await _trelloService.GetModuleIdFromSprintCardAsync(boardId, sprintNumber, lbl);
+                if (!string.IsNullOrWhiteSpace(moduleIdStr)) break;
+            }
+
+            if (!string.IsNullOrWhiteSpace(moduleIdStr))
+            {
+                var usResult = await _trelloService.GetUserStoryCardByModuleIdAsync(storyBoard, moduleIdStr.Trim());
+                var card = GetUserStoryCardFromResult(usResult);
+                var storyText = ConcatenateUserStoryText(card);
+                if (!string.IsNullOrWhiteSpace(storyText))
+                {
+                    sb.AppendLine($"_(linked from the sprint {sprintNumber} role card via ModuleId {moduleIdStr.Trim()})_");
+                    sb.AppendLine(storyText.Trim());
+                    sb.AppendLine();
+                    return;
+                }
+                _logger.LogInformation("[USER-STORY-SENSOR] ModuleId {ModuleId} set on sprint card but no matching story card on board {Board}; falling back to full list.",
+                    moduleIdStr.Trim(), storyBoard);
+            }
+
+            // Fallback (no ModuleId on the sprint card, or no matching card): full list, window-filtered.
             var cards = await _trelloService.GetUserStoryCardsAsync(
                 boardId, userStoryBoardId,
                 haveWindow ? windowStart : null, haveWindow ? windowEnd : null);

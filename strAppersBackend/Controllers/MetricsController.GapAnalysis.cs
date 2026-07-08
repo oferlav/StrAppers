@@ -715,7 +715,9 @@ public partial class MetricsController
                         roleModuleId!.Trim(), pmModuleId!.Trim());
                 }
 
-                var usResult = await _trelloService.GetUserStoryCardByModuleIdAsync(boardId, moduleIdForUserStory);
+                // Story cards live on the dedicated user-story board when one exists (legacy: main board).
+                var usBoard = string.IsNullOrWhiteSpace(board.UserStoryBoardId) ? boardId : board.UserStoryBoardId;
+                var usResult = await _trelloService.GetUserStoryCardByModuleIdAsync(usBoard, moduleIdForUserStory);
                 var card = GetUserStoryCardFromResult(usResult);
                 var storyText = ConcatenateUserStoryText(card);
                 if (CountWords(storyText) > 10)
@@ -830,7 +832,7 @@ public partial class MetricsController
         if (ContainsDesigner(originalRoleName))
             await AppendDesignerSkillArtifactsAsync(sb, boardId, studentId, sprintNumber, cancellationToken);
         else if (ContainsProduct(originalRoleName))
-            await AppendProductManagerSkillArtifactAsync(sb, boardId, board.ProjectId, sprintNumber, cancellationToken);
+            await AppendProductManagerSkillArtifactAsync(sb, boardId, board.UserStoryBoardId, board.ProjectId, sprintNumber, cancellationToken);
         else if (IsMarketingOrBizDev(originalRoleName))
             sb.AppendLine(await BuildStakeholdersArtifactSectionAsync(boardId, sprintNumber, cancellationToken));
         else if (ContainsDeveloper(originalRoleName))
@@ -894,6 +896,7 @@ public partial class MetricsController
     private async Task AppendProductManagerSkillArtifactAsync(
         StringBuilder sb,
         string boardId,
+        string? userStoryBoardId,
         int projectId,
         int sprintNumber,
         CancellationToken cancellationToken)
@@ -913,7 +916,9 @@ public partial class MetricsController
             return;
         }
 
-        var usResult = await _trelloService.GetUserStoryCardByModuleIdAsync(boardId, moduleIdStr.Trim());
+        // Story cards live on the dedicated user-story board when one exists (legacy: main board).
+        var usBoard = string.IsNullOrWhiteSpace(userStoryBoardId) ? boardId : userStoryBoardId;
+        var usResult = await _trelloService.GetUserStoryCardByModuleIdAsync(usBoard, moduleIdStr.Trim());
         var card = GetUserStoryCardFromResult(usResult);
         if (card == null)
         {
