@@ -119,6 +119,8 @@ namespace strAppersBackend.Models
         public string LastName { get; set; } = string.Empty;
         public int RoleId { get; set; }
         public string RoleName { get; set; } = string.Empty;
+        /// <summary>Role's main tool from the Roles config (Role.Skill.Name, e.g. "Trello"). Trello board invitations are only sent to members whose main tool is Trello.</summary>
+        public string? MainTool { get; set; }
     }
 
     public class TrelloSprintPlan

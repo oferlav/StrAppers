@@ -2793,6 +2793,7 @@ Return only the JSON object:";
                 ? (await _context.Students
                     .Include(s => s.StudentRoles)
                     .ThenInclude(sr => sr.Role)
+                    .ThenInclude(r => r.Skill)
                     .Where(s => request.StudentIds.Contains(s.Id))
                     .ToListAsync())
                     .Select(s => new TrelloTeamMember
@@ -2801,7 +2802,8 @@ Return only the JSON object:";
                         FirstName = s.FirstName,
                         LastName = s.LastName,
                         RoleId = s.StudentRoles?.FirstOrDefault()?.RoleId ?? 0,
-                        RoleName = s.StudentRoles?.FirstOrDefault()?.Role?.Name ?? "Team Member"
+                        RoleName = s.StudentRoles?.FirstOrDefault()?.Role?.Name ?? "Team Member",
+                        MainTool = s.StudentRoles?.FirstOrDefault()?.Role?.Skill?.Name
                     }).ToList()
                 : roleGroups.Select(r => new TrelloTeamMember
                 {

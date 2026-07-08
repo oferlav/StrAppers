@@ -419,6 +419,23 @@ namespace strAppersBackend.Services
             (roleName.Contains("Product Manager", StringComparison.OrdinalIgnoreCase) ||
              roleName.Contains("PM", StringComparison.OrdinalIgnoreCase));
 
+        /// <summary>
+        /// Trello invitation emails are only sent to members whose role's main tool is Trello
+        /// (Roles config → Main Tool). Members without Trello as main tool never interact with
+        /// Trello directly, so a collaboration invite would only confuse them.
+        /// </summary>
+        private static List<TrelloTeamMember> OnlyTrelloToolMembers(IEnumerable<TrelloTeamMember> members, ILogger logger)
+        {
+            var all = members.ToList();
+            var trelloOnly = all
+                .Where(m => string.Equals(m.MainTool?.Trim(), "Trello", StringComparison.OrdinalIgnoreCase))
+                .ToList();
+            if (trelloOnly.Count < all.Count)
+                logger.LogInformation("📧 [TRELLO INVITATION] MainTool filter: {Kept}/{Total} members have Trello as main tool; the rest are not invited.",
+                    trelloOnly.Count, all.Count);
+            return trelloOnly;
+        }
+
         private async Task DeleteBoardAsync(string? boardId)
         {
             if (string.IsNullOrEmpty(boardId)) return;
@@ -487,6 +504,7 @@ namespace strAppersBackend.Services
                           (m.RoleName.Contains("Product Manager", StringComparison.OrdinalIgnoreCase) ||
                            m.RoleName.Contains("PM", StringComparison.OrdinalIgnoreCase))).ToList()
                     : teamMembers;
+                membersToInvite = OnlyTrelloToolMembers(membersToInvite, _logger);
 
                 foreach (var member in membersToInvite)
                 {
@@ -650,10 +668,11 @@ namespace strAppersBackend.Services
                                  m.RoleName.Contains("PM", StringComparison.OrdinalIgnoreCase)))
                             .ToList();
                         
-                        _logger.LogInformation("📧 [TRELLO INVITATION] SendInvitationToPMOnly is enabled. Filtered from {TotalCount} to {PMCount} Product Manager(s) only", 
+                        _logger.LogInformation("📧 [TRELLO INVITATION] SendInvitationToPMOnly is enabled. Filtered from {TotalCount} to {PMCount} Product Manager(s) only",
                             request.TeamMembers.Count, membersToInvite.Count);
                     }
-                    
+                    membersToInvite = OnlyTrelloToolMembers(membersToInvite, _logger);
+
                     _logger.LogInformation("Starting member invitation process for {MemberCount} members", membersToInvite.Count);
                     
                     foreach (var member in membersToInvite)
@@ -853,6 +872,7 @@ namespace strAppersBackend.Services
                     {
                         membersToInvite = request.TeamMembers;
                     }
+                    membersToInvite = OnlyTrelloToolMembers(membersToInvite, _logger);
 
                     foreach (var member in membersToInvite)
                     {
@@ -966,6 +986,7 @@ namespace strAppersBackend.Services
                     {
                         membersToInvite = request.TeamMembers;
                     }
+                    membersToInvite = OnlyTrelloToolMembers(membersToInvite, _logger);
 
                     foreach (var member in membersToInvite)
                     {

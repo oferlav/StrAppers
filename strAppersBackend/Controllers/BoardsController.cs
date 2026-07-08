@@ -196,6 +196,7 @@ public partial class BoardsController : ControllerBase
             var students = await _context.Students
                 .Include(s => s.StudentRoles)
                 .ThenInclude(sr => sr.Role)
+                .ThenInclude(r => r.Skill)
                 .Include(s => s.ProgrammingLanguage)
                 .Where(s => request.StudentIds.Contains(s.Id) && s.IsAvailable)
                 .ToListAsync();
@@ -361,7 +362,8 @@ public partial class BoardsController : ControllerBase
                             FirstName = s.FirstName,
                             LastName = s.LastName,
                             RoleId = s.StudentRoles?.FirstOrDefault()?.RoleId ?? 0,
-                            RoleName = s.StudentRoles?.FirstOrDefault()?.Role?.Name ?? "Team Member"
+                            RoleName = s.StudentRoles?.FirstOrDefault()?.Role?.Name ?? "Team Member",
+                            MainTool = s.StudentRoles?.FirstOrDefault()?.Role?.Skill?.Name
                         }).ToList();
                         sprintPlanForStorage = trelloRequest.SprintPlan;
                         // Filter out cards for roles not in the current team (full template may have all roles)
@@ -629,7 +631,8 @@ public partial class BoardsController : ControllerBase
                         FirstName = s.FirstName,
                         LastName = s.LastName,
                         RoleId = s.StudentRoles?.FirstOrDefault()?.RoleId ?? 0,
-                        RoleName = s.StudentRoles?.FirstOrDefault()?.Role?.Name ?? "Team Member"
+                        RoleName = s.StudentRoles?.FirstOrDefault()?.Role?.Name ?? "Team Member",
+                        MainTool = s.StudentRoles?.FirstOrDefault()?.Role?.Skill?.Name
                     }).ToList(),
                     SprintPlan = trelloSprintPlan
                 };
@@ -3548,7 +3551,8 @@ public partial class BoardsController : ControllerBase
                     Email     = s.Email,
                     FirstName = s.FirstName,
                     LastName  = s.LastName,
-                    RoleName  = s.StudentRoles!.FirstOrDefault()!.Role!.Name ?? "Team Member"
+                    RoleName  = s.StudentRoles!.FirstOrDefault()!.Role!.Name ?? "Team Member",
+                    MainTool  = s.StudentRoles!.FirstOrDefault()!.Role!.Skill!.Name
                 })
                 .ToListAsync();
 
