@@ -314,6 +314,19 @@ public partial class MetricsController
         if (!metrics.Any())
             return Ok(new { success = false, message = "No active metrics configured for this institute." });
 
+        if (request.ForceRefresh)
+        {
+            var stale = await _context.CacheMetrics
+                .Where(c => c.BoardId == boardId && c.StudentId == request.StudentId && c.SprintNumber == request.SprintNumber)
+                .ToListAsync(cancellationToken);
+            if (stale.Count > 0)
+            {
+                _context.CacheMetrics.RemoveRange(stale);
+                await _context.SaveChangesAsync(cancellationToken);
+                _logger.LogInformation("[RUN-STUDENT-SPRINT] ForceRefresh: deleted {Count} stale CacheMetrics rows for student {StudentId}, sprint {Sprint}.", stale.Count, request.StudentId, request.SprintNumber);
+            }
+        }
+
         var errors = new List<string>();
         foreach (var metric in metrics)
         {
@@ -362,6 +375,7 @@ public partial class MetricsController
         public int StudentId { get; set; }
         public int SprintNumber { get; set; }
         public int InstituteId { get; set; }
+        public bool ForceRefresh { get; set; }
     }
 
     public sealed class SquadNameSearchResponseDto
