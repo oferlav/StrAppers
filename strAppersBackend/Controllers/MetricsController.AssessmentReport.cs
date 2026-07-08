@@ -335,19 +335,19 @@ public partial class MetricsController
                 switch (ToSlugKey(metric.Name))
                 {
                     case "adherence":
-                        await Adherence(new AdherenceRequest { BoardId = boardId, StudentId = request.StudentId, SprintNumber = request.SprintNumber }, cancellationToken);
+                        await Adherence(new AdherenceRequest { BoardId = boardId, StudentId = request.StudentId, SprintNumber = request.SprintNumber, MetricIdOverride = metric.Id }, cancellationToken);
                         break;
                     case "gapanalysis":
-                        await GapAnalysis(new GapAnalysisRequest { BoardId = boardId, StudentId = request.StudentId, SprintNumber = request.SprintNumber }, cancellationToken);
+                        await GapAnalysis(new GapAnalysisRequest { BoardId = boardId, StudentId = request.StudentId, SprintNumber = request.SprintNumber, MetricIdOverride = metric.Id }, cancellationToken);
                         break;
                     case "attendance":
-                        await Attendance(boardId, request.SprintNumber, request.StudentId, cancellationToken);
+                        await Attendance(boardId, request.SprintNumber, request.StudentId, cancellationToken, metricIdOverride: metric.Id);
                         break;
                     case "customerengagement":
-                        await CustomerEngagement(new CustomerEngagementRequest { BoardId = boardId, StudentId = request.StudentId, SprintNumber = request.SprintNumber }, cancellationToken);
+                        await CustomerEngagement(new CustomerEngagementRequest { BoardId = boardId, StudentId = request.StudentId, SprintNumber = request.SprintNumber, MetricIdOverride = metric.Id }, cancellationToken);
                         break;
                     case "communication":
-                        await MeetingsCommunication(new MeetingsCommunicationRequest { BoardId = boardId, StudentId = request.StudentId, SprintNumber = request.SprintNumber }, cancellationToken);
+                        await MeetingsCommunication(new MeetingsCommunicationRequest { BoardId = boardId, StudentId = request.StudentId, SprintNumber = request.SprintNumber, MetricIdOverride = metric.Id }, cancellationToken);
                         break;
                     default:
                         await RunAssessmentEngine(new AssessmentEngineRequest(

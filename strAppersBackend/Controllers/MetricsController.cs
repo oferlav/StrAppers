@@ -66,6 +66,8 @@ public partial class MetricsController : ControllerBase
         public string BoardId { get; set; } = string.Empty;
         public int StudentId { get; set; }
         public int SprintNumber { get; set; }
+        /// <summary>Institute metric Id to store CacheMetrics under (set by the batch runner). Null = legacy base metric Id.</summary>
+        public int? MetricIdOverride { get; set; }
     }
 
     /// <summary>
@@ -86,6 +88,7 @@ public partial class MetricsController : ControllerBase
             return BadRequest(new { success = false, message = "SprintNumber must be >= 0." });
 
         var boardId = request.BoardId.Trim();
+        var metricId = request.MetricIdOverride ?? AdherenceMetricId;
 
         var student = await _context.Students
             .AsNoTracking()
@@ -137,7 +140,7 @@ public partial class MetricsController : ControllerBase
                 return Ok(new
                 {
                     success = true,
-                    metricId = AdherenceMetricId,
+                    metricId = metricId,
                     reviewContent = "",
                     message = $"No sprint card found in Sprint {request.SprintNumber} for Full Stack role (checked for \"{roleName}\", \"Backend Developer\", and \"Frontend Developer\").",
                     requiredSkillData = false,
@@ -166,7 +169,7 @@ public partial class MetricsController : ControllerBase
                 return Ok(new
                 {
                     success = true,
-                    metricId = AdherenceMetricId,
+                    metricId = metricId,
                     reviewContent = "",
                     message = $"No sprint card found in Sprint {request.SprintNumber} with label matching role \"{roleLabel}\".",
                     requiredSkillData = false,
@@ -292,7 +295,7 @@ public partial class MetricsController : ControllerBase
 
         var graphBase64 = AdherenceChartRenderer.ToBase64Png(AdherenceChartRenderer.RenderPng(criteriaResults));
 
-        await UpsertCacheMetricsAsync(boardId, student.Id, request.SprintNumber, AdherenceMetricId, reviewContent, graphBase64, cancellationToken);
+        await UpsertCacheMetricsAsync(boardId, student.Id, request.SprintNumber, metricId, reviewContent, graphBase64, cancellationToken);
 
         if (fullStackRole)
         {
@@ -302,7 +305,7 @@ public partial class MetricsController : ControllerBase
             return Ok(new
             {
                 success = true,
-                metricId = AdherenceMetricId,
+                metricId = metricId,
                 reviewContent,
                 graphBase64,
                 requiredSkillData = requiredSkill,
@@ -316,7 +319,7 @@ public partial class MetricsController : ControllerBase
         return Ok(new
         {
             success = true,
-            metricId = AdherenceMetricId,
+            metricId = metricId,
             reviewContent,
             graphBase64,
             requiredSkillData = requiredSkill,

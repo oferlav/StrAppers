@@ -19,7 +19,8 @@ public partial class MetricsController
         [FromQuery] string boardId,
         [FromQuery] int sprintNumber,
         [FromQuery] int studentId,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        [FromQuery] int? metricIdOverride = null)
     {
         if (string.IsNullOrWhiteSpace(boardId))
             return BadRequest(new { success = false, message = "BoardId is required." });
@@ -29,6 +30,7 @@ public partial class MetricsController
             return BadRequest(new { success = false, message = "SprintNumber must be >= 0." });
 
         var boardIdTrim = boardId.Trim();
+        var metricId = metricIdOverride ?? AttendanceMetricId;
 
         var student = await _context.Students.AsNoTracking()
             .FirstOrDefaultAsync(s => s.Id == studentId, cancellationToken);
@@ -47,14 +49,14 @@ public partial class MetricsController
         {
             const string summary = "Attendance cannot be evaluated: the student has no email on file (meetings are tracked by email).";
             var graphNoEmail = AttendanceChartRenderer.ToBase64Png(AttendanceChartRenderer.RenderPng(0, 0));
-            await UpsertCacheMetricsAsync(boardIdTrim, studentId, sprintNumber, AttendanceMetricId, summary, graphNoEmail, cancellationToken);
+            await UpsertCacheMetricsAsync(boardIdTrim, studentId, sprintNumber, metricId, summary, graphNoEmail, cancellationToken);
             return Ok(new
             {
                 success = true,
                 boardId = boardIdTrim,
                 sprintNumber,
                 studentId,
-                metricId = AttendanceMetricId,
+                metricId = metricId,
                 scheduleResolved = false,
                 attendedCount = 0,
                 totalScheduled = 0,
@@ -68,14 +70,14 @@ public partial class MetricsController
         {
             const string summary = "Sprint 0 is not used for team meeting attendance metrics.";
             var graphS0 = AttendanceChartRenderer.ToBase64Png(AttendanceChartRenderer.RenderPng(0, 0));
-            await UpsertCacheMetricsAsync(boardIdTrim, studentId, sprintNumber, AttendanceMetricId, summary, graphS0, cancellationToken);
+            await UpsertCacheMetricsAsync(boardIdTrim, studentId, sprintNumber, metricId, summary, graphS0, cancellationToken);
             return Ok(new
             {
                 success = true,
                 boardId = boardIdTrim,
                 sprintNumber,
                 studentId,
-                metricId = AttendanceMetricId,
+                metricId = metricId,
                 scheduleResolved = false,
                 attendedCount = 0,
                 totalScheduled = 0,
@@ -101,14 +103,14 @@ public partial class MetricsController
         {
             const string summary = "Could not resolve this sprint’s date range from the board schedule; attendance vs sprint is unknown.";
             var graphNoWindow = AttendanceChartRenderer.ToBase64Png(AttendanceChartRenderer.RenderPng(0, 0));
-            await UpsertCacheMetricsAsync(boardIdTrim, studentId, sprintNumber, AttendanceMetricId, summary, graphNoWindow, cancellationToken);
+            await UpsertCacheMetricsAsync(boardIdTrim, studentId, sprintNumber, metricId, summary, graphNoWindow, cancellationToken);
             return Ok(new
             {
                 success = true,
                 boardId = boardIdTrim,
                 sprintNumber,
                 studentId,
-                metricId = AttendanceMetricId,
+                metricId = metricId,
                 scheduleResolved = false,
                 attendedCount = 0,
                 totalScheduled = 0,
@@ -137,7 +139,7 @@ public partial class MetricsController
 
         var png = AttendanceChartRenderer.RenderPng(attended, total);
         var graphB64 = AttendanceChartRenderer.ToBase64Png(png);
-        await UpsertCacheMetricsAsync(boardIdTrim, studentId, sprintNumber, AttendanceMetricId, summaryOk, graphB64, cancellationToken);
+        await UpsertCacheMetricsAsync(boardIdTrim, studentId, sprintNumber, metricId, summaryOk, graphB64, cancellationToken);
 
         return Ok(new
         {
@@ -145,7 +147,7 @@ public partial class MetricsController
             boardId = boardIdTrim,
             sprintNumber,
             studentId,
-            metricId = AttendanceMetricId,
+            metricId = metricId,
             scheduleResolved = true,
             windowStartUtc,
             windowEndUtc = windowEndInclusiveUtc,

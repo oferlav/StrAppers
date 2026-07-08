@@ -21,6 +21,8 @@ public partial class MetricsController
         public int SprintNumber { get; set; }
         /// <summary>When true, returns generated prompts only (no LLM, no CacheMetrics write).</summary>
         public bool Test { get; set; }
+        /// <summary>Institute metric Id to store CacheMetrics under (set by the batch runner). Null = legacy base metric Id.</summary>
+        public int? MetricIdOverride { get; set; }
     }
 
     /// <summary>
@@ -43,6 +45,7 @@ public partial class MetricsController
             return BadRequest(new { success = false, message = "SprintNumber must be >= 1 (Sprint 0 has no meetings)." });
 
         var boardId = request.BoardId.Trim();
+        var metricId = request.MetricIdOverride ?? MeetingsCommunicationMetricId;
 
         var student = await _context.Students
             .AsNoTracking()
@@ -63,8 +66,8 @@ public partial class MetricsController
         if (string.IsNullOrEmpty(studentEmail))
         {
             await UpsertCacheMetricsAsync(boardId, request.StudentId, request.SprintNumber,
-                MeetingsCommunicationMetricId, NoMeetingTranscriptReviewMessage, null, cancellationToken);
-            return Ok(new { success = true, metricId = MeetingsCommunicationMetricId, skippedLlm = true, reviewContent = NoMeetingTranscriptReviewMessage });
+                metricId, NoMeetingTranscriptReviewMessage, null, cancellationToken);
+            return Ok(new { success = true, metricId = metricId, skippedLlm = true, reviewContent = NoMeetingTranscriptReviewMessage });
         }
 
         // Resolve sprint window
@@ -82,8 +85,8 @@ public partial class MetricsController
         {
             const string msg = "Could not resolve this sprint's date range; meeting communication review skipped.";
             await UpsertCacheMetricsAsync(boardId, request.StudentId, request.SprintNumber,
-                MeetingsCommunicationMetricId, msg, null, cancellationToken);
-            return Ok(new { success = true, metricId = MeetingsCommunicationMetricId, skippedLlm = true, reviewContent = msg });
+                metricId, msg, null, cancellationToken);
+            return Ok(new { success = true, metricId = metricId, skippedLlm = true, reviewContent = msg });
         }
 
         // Get this student's meetings in the sprint window
@@ -119,8 +122,8 @@ public partial class MetricsController
         if (meetings.Count == 0)
         {
             await UpsertCacheMetricsAsync(boardId, request.StudentId, request.SprintNumber,
-                MeetingsCommunicationMetricId, NoMeetingTranscriptReviewMessage, null, cancellationToken);
-            return Ok(new { success = true, metricId = MeetingsCommunicationMetricId, skippedLlm = true, reviewContent = NoMeetingTranscriptReviewMessage });
+                metricId, NoMeetingTranscriptReviewMessage, null, cancellationToken);
+            return Ok(new { success = true, metricId = metricId, skippedLlm = true, reviewContent = NoMeetingTranscriptReviewMessage });
         }
 
         var latestMeeting = meetings.First();
@@ -180,8 +183,8 @@ public partial class MetricsController
                     _logger.LogWarning("MeetingsCommunication: transcript not available — {Error}", fetchError);
                     var msg = $"Meeting transcript is not yet available for this sprint ({fetchError ?? "no transcripts found"}). Try again after the meeting ends and transcription has processed.";
                     await UpsertCacheMetricsAsync(boardId, request.StudentId, request.SprintNumber,
-                        MeetingsCommunicationMetricId, msg, null, cancellationToken);
-                    return Ok(new { success = true, metricId = MeetingsCommunicationMetricId, skippedLlm = true, reviewContent = msg });
+                        metricId, msg, null, cancellationToken);
+                    return Ok(new { success = true, metricId = metricId, skippedLlm = true, reviewContent = msg });
                 }
             }
             catch (Exception ex)
@@ -189,8 +192,8 @@ public partial class MetricsController
                 _logger.LogWarning(ex, "MeetingsCommunication: Graph API fetch threw for meeting {Id}", latestMeeting.Id);
                 var msg = $"Meeting transcript could not be retrieved for this sprint (Graph API error: {ex.Message}). Try again later.";
                 await UpsertCacheMetricsAsync(boardId, request.StudentId, request.SprintNumber,
-                    MeetingsCommunicationMetricId, msg, null, cancellationToken);
-                return Ok(new { success = true, metricId = MeetingsCommunicationMetricId, skippedLlm = true, reviewContent = msg });
+                    metricId, msg, null, cancellationToken);
+                return Ok(new { success = true, metricId = metricId, skippedLlm = true, reviewContent = msg });
             }
         }
 
@@ -310,11 +313,11 @@ public partial class MetricsController
                 var absentMsg = "The student did not attend the meeting for this sprint, so a meeting communication review was not produced.";
                 if (!request.Test)
                     await UpsertCacheMetricsAsync(boardId, request.StudentId, request.SprintNumber,
-                        MeetingsCommunicationMetricId, absentMsg, null, cancellationToken);
+                        metricId, absentMsg, null, cancellationToken);
                 return Ok(new
                 {
                     success = true,
-                    metricId = MeetingsCommunicationMetricId,
+                    metricId = metricId,
                     skippedLlm = true,
                     reviewContent = absentMsg,
                     studentEmailChecked = studentEmail,
@@ -415,12 +418,12 @@ public partial class MetricsController
 
             var reviewContent = FormatMeetingsCommunicationReviewContent(dto);
             await UpsertCacheMetricsAsync(boardId, request.StudentId, request.SprintNumber,
-                MeetingsCommunicationMetricId, reviewContent, graphB64, cancellationToken);
+                metricId, reviewContent, graphB64, cancellationToken);
 
             return Ok(new
             {
                 success = true,
-                metricId = MeetingsCommunicationMetricId,
+                metricId = metricId,
                 skippedLlm = false,
                 reviewContent,
                 graphBase64 = graphB64,

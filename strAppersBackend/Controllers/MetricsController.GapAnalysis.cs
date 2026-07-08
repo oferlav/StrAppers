@@ -25,6 +25,8 @@ public partial class MetricsController
         /// <summary>When true, returns only the generated system and user prompts (no LLM call, no CacheMetrics update). Omit or false for normal gap analysis.</summary>
         [DefaultValue(false)]
         public bool Test { get; set; } = false;
+        /// <summary>Institute metric Id to store CacheMetrics under (set by the batch runner). Null = legacy base metric Id.</summary>
+        public int? MetricIdOverride { get; set; }
     }
 
     /// <summary>
@@ -46,6 +48,7 @@ public partial class MetricsController
             return BadRequest(new { success = false, message = "SprintNumber must be >= 0." });
 
         var boardId = request.BoardId.Trim();
+        var metricId = request.MetricIdOverride ?? GapAnalysisMetricId;
 
         var student = await _context.Students
             .AsNoTracking()
@@ -273,12 +276,12 @@ public partial class MetricsController
                     }
 
                     var graphSingleFs = GapAnalysisBarChartRenderer.ToBase64Png(GapAnalysisBarChartRenderer.RenderSingleChart(fsTrackResult.ChartRows));
-                    await UpsertCacheMetricsAsync(boardId, student.Id, request.SprintNumber, GapAnalysisMetricId, fsTrackResult.Narrative, graphSingleFs, cancellationToken);
+                    await UpsertCacheMetricsAsync(boardId, student.Id, request.SprintNumber, metricId, fsTrackResult.Narrative, graphSingleFs, cancellationToken);
 
                     return Ok(new
                     {
                         success = true,
-                        metricId = GapAnalysisMetricId,
+                        metricId = metricId,
                         reviewContent = fsTrackResult.Narrative,
                         graphBase64 = graphSingleFs,
                         model = fsTrackResult.RawModel,
@@ -295,8 +298,8 @@ public partial class MetricsController
                     if (!beSingle.ParsedOk)
                         return UnprocessableEntity(new { success = false, message = "Gap analysis did not return valid JSON for the backend track. Nothing was saved to CacheMetrics.", preview = Truncate(beSingle.Narrative, 4000) });
                     var beSingleGraph = GapAnalysisBarChartRenderer.ToBase64Png(GapAnalysisBarChartRenderer.RenderSingleChart(beSingle.ChartRows, "Backend"));
-                    await UpsertCacheMetricsAsync(boardId, student.Id, request.SprintNumber, GapAnalysisMetricId, beSingle.Narrative, beSingleGraph, cancellationToken);
-                    return Ok(new { success = true, metricId = GapAnalysisMetricId, reviewContent = beSingle.Narrative, graphBase64 = beSingleGraph, model = beSingle.RawModel, inputTokens = beSingle.InputTokens, outputTokens = beSingle.OutputTokens });
+                    await UpsertCacheMetricsAsync(boardId, student.Id, request.SprintNumber, metricId, beSingle.Narrative, beSingleGraph, cancellationToken);
+                    return Ok(new { success = true, metricId = metricId, reviewContent = beSingle.Narrative, graphBase64 = beSingleGraph, model = beSingle.RawModel, inputTokens = beSingle.InputTokens, outputTokens = beSingle.OutputTokens });
                 }
 
                 if (!gaCheckBackend && gaCheckFrontend)
@@ -306,8 +309,8 @@ public partial class MetricsController
                     if (!feSingle.ParsedOk)
                         return UnprocessableEntity(new { success = false, message = "Gap analysis did not return valid JSON for the frontend track. Nothing was saved to CacheMetrics.", preview = Truncate(feSingle.Narrative, 4000) });
                     var feSingleGraph = GapAnalysisBarChartRenderer.ToBase64Png(GapAnalysisBarChartRenderer.RenderSingleChart(feSingle.ChartRows, "Frontend"));
-                    await UpsertCacheMetricsAsync(boardId, student.Id, request.SprintNumber, GapAnalysisMetricId, feSingle.Narrative, feSingleGraph, cancellationToken);
-                    return Ok(new { success = true, metricId = GapAnalysisMetricId, reviewContent = feSingle.Narrative, graphBase64 = feSingleGraph, model = feSingle.RawModel, inputTokens = feSingle.InputTokens, outputTokens = feSingle.OutputTokens });
+                    await UpsertCacheMetricsAsync(boardId, student.Id, request.SprintNumber, metricId, feSingle.Narrative, feSingleGraph, cancellationToken);
+                    return Ok(new { success = true, metricId = metricId, reviewContent = feSingle.Narrative, graphBase64 = feSingleGraph, model = feSingle.RawModel, inputTokens = feSingle.InputTokens, outputTokens = feSingle.OutputTokens });
                 }
 
                 // Both tracks — B2C or no/ambiguous CardId (existing behavior)
@@ -327,7 +330,7 @@ public partial class MetricsController
 
                 var beGraphB64 = GapAnalysisBarChartRenderer.ToBase64Png(GapAnalysisBarChartRenderer.RenderSingleChart(be.ChartRows, "Backend"));
                 var beSection = "## Backend (repository)\n\n" + be.Narrative;
-                await UpsertCacheMetricsAsync(boardId, student.Id, request.SprintNumber, GapAnalysisMetricId, beSection, beGraphB64, cancellationToken);
+                await UpsertCacheMetricsAsync(boardId, student.Id, request.SprintNumber, metricId, beSection, beGraphB64, cancellationToken);
 
                 var fe = await RunGapAnalysisForTrackAsync(
                     boardId, board, student.Id, request.SprintNumber, "Frontend Developer", $"{roleDesc} (frontend repository)", roleName, isBackend: false, includeCustomerContext, cancellationToken);
@@ -348,7 +351,7 @@ public partial class MetricsController
                 var feGraphB64 = GapAnalysisBarChartRenderer.ToBase64Png(GapAnalysisBarChartRenderer.RenderSingleChart(fe.ChartRows, "Frontend"));
                 var feSection = "## Frontend (repository)\n\n" + fe.Narrative;
                 await UpsertCacheMetricsAsync(
-                    boardId, student.Id, request.SprintNumber, GapAnalysisMetricId, feSection, null, cancellationToken,
+                    boardId, student.Id, request.SprintNumber, metricId, feSection, null, cancellationToken,
                     graph2Base64: feGraphB64, appendReviewContent: true);
 
                 var combinedNarrative = beSection + "\n\n" + feSection;
@@ -358,7 +361,7 @@ public partial class MetricsController
                 return Ok(new
                 {
                     success = true,
-                    metricId = GapAnalysisMetricId,
+                    metricId = metricId,
                     reviewContent = combinedNarrative,
                     graphBase64 = beGraphB64,
                     graph2Base64 = feGraphB64,
@@ -389,12 +392,12 @@ public partial class MetricsController
 
             // Backend/Frontend headlines on charts are only for full-stack (two repos); single-track roles get no section title.
             var graphSingle = GapAnalysisBarChartRenderer.ToBase64Png(GapAnalysisBarChartRenderer.RenderSingleChart(single.ChartRows));
-            await UpsertCacheMetricsAsync(boardId, student.Id, request.SprintNumber, GapAnalysisMetricId, single.Narrative, graphSingle, cancellationToken);
+            await UpsertCacheMetricsAsync(boardId, student.Id, request.SprintNumber, metricId, single.Narrative, graphSingle, cancellationToken);
 
             return Ok(new
             {
                 success = true,
-                metricId = GapAnalysisMetricId,
+                metricId = metricId,
                 reviewContent = single.Narrative,
                 graphBase64 = graphSingle,
                 model = single.RawModel,

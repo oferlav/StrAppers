@@ -23,6 +23,8 @@ public partial class MetricsController
         public int SprintNumber { get; set; }
         /// <summary>When true, returns generated prompts only (no LLM, no CacheMetrics write).</summary>
         public bool Test { get; set; }
+        /// <summary>Institute metric Id to store CacheMetrics under (set by the batch runner). Null = legacy base metric Id.</summary>
+        public int? MetricIdOverride { get; set; }
     }
 
     /// <summary>
@@ -44,6 +46,7 @@ public partial class MetricsController
             return BadRequest(new { success = false, message = "SprintNumber must be >= 0." });
 
         var boardId = request.BoardId.Trim();
+        var metricId = request.MetricIdOverride ?? CustomerEngagementMetricId;
 
         var student = await _context.Students
             .AsNoTracking()
@@ -69,7 +72,7 @@ public partial class MetricsController
             try { await _smtpEmailService.SendPlainEmailAsync("ofer@skill-in.com", $"[Metrics Debug] CustomerEngagement gate student={request.StudentId}", dbg); } catch { /* ignore */ }
         }
         if (!hasCustomerEngagement && isDeveloper)
-            return Ok(new { success = true, metricId = CustomerEngagementMetricId, skippedLlm = true, reviewContent = (string?)null, message = "Developer role without CustomerEngagement enabled; skipping." });
+            return Ok(new { success = true, metricId = metricId, skippedLlm = true, reviewContent = (string?)null, message = "Developer role without CustomerEngagement enabled; skipping." });
 
         var board = await _context.ProjectBoards.AsNoTracking()
             .FirstOrDefaultAsync(b => b.Id == boardId, cancellationToken);
@@ -94,13 +97,13 @@ public partial class MetricsController
             }
 
             await UpsertCacheMetricsAsync(
-                boardId, request.StudentId, request.SprintNumber, CustomerEngagementMetricId,
+                boardId, request.StudentId, request.SprintNumber, metricId,
                 NoCustomerChatReviewMessage, graphBase64: null, cancellationToken);
 
             return Ok(new
             {
                 success = true,
-                metricId = CustomerEngagementMetricId,
+                metricId = metricId,
                 skippedLlm = true,
                 reviewContent = NoCustomerChatReviewMessage,
                 graphBase64 = (string?)null,
@@ -167,12 +170,12 @@ public partial class MetricsController
 
             var reviewContent = FormatCustomerEngagementReviewContent(dto);
             await UpsertCacheMetricsAsync(
-                boardId, request.StudentId, request.SprintNumber, CustomerEngagementMetricId, reviewContent, graphB64, cancellationToken);
+                boardId, request.StudentId, request.SprintNumber, metricId, reviewContent, graphB64, cancellationToken);
 
             return Ok(new
             {
                 success = true,
-                metricId = CustomerEngagementMetricId,
+                metricId = metricId,
                 skippedLlm = false,
                 reviewContent,
                 graphBase64 = graphB64,
