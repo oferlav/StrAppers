@@ -479,6 +479,7 @@ public class CourseBoardBuilderService : ICourseBoardBuilderService
             ProjectDescription = project.Description,
             ProjectLengthWeeks = config.SprintCount,
             SprintLengthWeeks = 1,
+            SprintLengthDays = config.SprintLengthInDays,
             DueDate = null,
             TeamMembers = new List<TrelloTeamMember>(),
             StudentEmails = new List<string>(),

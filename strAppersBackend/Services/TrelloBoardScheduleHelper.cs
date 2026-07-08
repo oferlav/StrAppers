@@ -125,4 +125,29 @@ public static class TrelloBoardScheduleHelper
         var nextFirstDayLocal = localDate.AddDays(daysToAdd);
         return nextFirstDayLocal.Subtract(localOffset);
     }
+
+    /// <summary>
+    /// Day-based kickoff (courses with SprintLengthDays): always the NEXT local day at 10:00 local,
+    /// never same-day — avoids meeting invites landing minutes before the meeting. Returned as UTC.
+    /// </summary>
+    public static DateTime GetDayBasedKickoffUtc(DateTime utcNow, TimeSpan localOffset)
+    {
+        var localDate = utcNow.Add(localOffset).Date;
+        var kickoffLocal = localDate.AddDays(1).AddHours(10);
+        return kickoffLocal.Subtract(localOffset);
+    }
+
+    /// <summary>
+    /// Sprint N due date for day-based courses: kickoff local date + (N × days − 1), end of day local
+    /// (23:59:59.9999999 — same convention as the weekly helper), returned as UTC. 1-based sprint number.
+    /// </summary>
+    public static DateTime GetSprintDueDateUtcForDays(
+        DateTime kickoffUtc, int sprintNumber1Based, int sprintLengthDays, TimeSpan localOffset)
+    {
+        var days = Math.Max(1, sprintLengthDays);
+        var n = Math.Max(1, sprintNumber1Based);
+        var kickoffLocalDate = kickoffUtc.Add(localOffset).Date;
+        var dueLocal = kickoffLocalDate.AddDays(n * days - 1).AddDays(1).AddTicks(-1);
+        return dueLocal.Subtract(localOffset);
+    }
 }

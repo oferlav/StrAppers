@@ -102,7 +102,9 @@ namespace strAppersBackend.Models
         public List<string> StudentEmails { get; set; } = new List<string>();
         public int ProjectLengthWeeks { get; set; }
         public int SprintLengthWeeks { get; set; }
-        
+        /// <summary>Per-course sprint length in days (course builder). Null = legacy weekly cadence from config.</summary>
+        public int? SprintLengthDays { get; set; }
+
         public DateTime? DueDate { get; set; }
         
         [Required]
