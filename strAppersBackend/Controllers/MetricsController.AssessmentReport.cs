@@ -321,22 +321,29 @@ public partial class MetricsController
         {
             try
             {
-                switch (metric.Id)
+                switch (metric.Endpoint?.Trim().ToLowerInvariant())
                 {
-                    case 1:
+                    case "adherence":
                         await Adherence(new AdherenceRequest { BoardId = boardId, StudentId = request.StudentId, SprintNumber = request.SprintNumber }, cancellationToken);
                         break;
-                    case 2:
+                    case "gapanalysis":
                         await GapAnalysis(new GapAnalysisRequest { BoardId = boardId, StudentId = request.StudentId, SprintNumber = request.SprintNumber }, cancellationToken);
                         break;
-                    case 5:
+                    case "attendance":
                         await Attendance(boardId, request.SprintNumber, request.StudentId, cancellationToken);
                         break;
-                    case 7:
+                    case "customerengagement":
                         await CustomerEngagement(new CustomerEngagementRequest { BoardId = boardId, StudentId = request.StudentId, SprintNumber = request.SprintNumber }, cancellationToken);
                         break;
-                    case 8:
+                    case "meetingscommunication":
                         await MeetingsCommunication(new MeetingsCommunicationRequest { BoardId = boardId, StudentId = request.StudentId, SprintNumber = request.SprintNumber }, cancellationToken);
+                        break;
+                    default:
+                        await RunAssessmentEngine(new AssessmentEngineRequest(
+                            MetricId: metric.Id,
+                            BoardId: boardId,
+                            StudentId: request.StudentId,
+                            SprintNumber: request.SprintNumber), cancellationToken);
                         break;
                 }
                 _logger.LogInformation("[RUN-STUDENT-SPRINT] Metric {MetricId} ({MetricName}) OK for student {StudentId}, sprint {Sprint}.", metric.Id, metric.Name, request.StudentId, request.SprintNumber);
