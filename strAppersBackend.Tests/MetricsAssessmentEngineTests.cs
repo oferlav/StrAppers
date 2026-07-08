@@ -11,36 +11,30 @@ namespace strAppersBackend.Tests;
 /// </summary>
 public class MetricsAssessmentEngineTests
 {
-    // ── Skill guard ───────────────────────────────────────────────────────────
+    // ── Skill fallback (blank skill → generic rubric built from the metric name) ──
 
     [Fact]
-    public void SkillGuard_Blocks_WhenSkillIsNull()
+    public void SkillFallback_UsesMetricName_WhenSkillIsNull()
     {
         var metric = new Metric { Id = 101, Name = "Research Depth", Skill = null };
 
-        bool canRun = !string.IsNullOrWhiteSpace(metric.Skill);
+        var skillRubric = metric.Skill?.Trim() ?? string.Empty;
+        if (string.IsNullOrEmpty(skillRubric))
+            skillRubric = $"Assess the student's overall \"{metric.Name}\" for this sprint based on the available evidence.";
 
-        Assert.False(canRun);
+        Assert.Contains("Research Depth", skillRubric);
     }
 
     [Fact]
-    public void SkillGuard_Blocks_WhenSkillIsWhitespace()
-    {
-        var metric = new Metric { Id = 101, Name = "Research Depth", Skill = "   " };
-
-        bool canRun = !string.IsNullOrWhiteSpace(metric.Skill);
-
-        Assert.False(canRun);
-    }
-
-    [Fact]
-    public void SkillGuard_Allows_WhenSkillIsDefined()
+    public void SkillFallback_KeepsDefinition_WhenSkillIsDefined()
     {
         var metric = new Metric { Id = 101, Name = "Research Depth", Skill = "Score 0–100 on source quality." };
 
-        bool canRun = !string.IsNullOrWhiteSpace(metric.Skill);
+        var skillRubric = metric.Skill?.Trim() ?? string.Empty;
+        if (string.IsNullOrEmpty(skillRubric))
+            skillRubric = $"Assess the student's overall \"{metric.Name}\" for this sprint based on the available evidence.";
 
-        Assert.True(canRun);
+        Assert.Equal("Score 0–100 on source quality.", skillRubric);
     }
 
     // ── AIExpertise prefix in system prompt ───────────────────────────────────
@@ -596,5 +590,109 @@ public class FilterChatBlobByWindowTests
             "[2026-06-04 10:00:00] bob@example.com: Second\n";
         var result = MetricsController.FilterChatBlobByWindow(blob, WindowStart, WindowEnd);
         Assert.Equal(2, result.Count);
+    }
+}
+
+/// <summary>
+/// Tests for the deterministic category pipeline: ParseRubricCategories (extracting "Category:"
+/// lines from the skill definition) and NormalizeAssessmentCategories (forcing the LLM response
+/// to exactly the expected category names).
+/// </summary>
+public class AssessmentCategoryNormalizationTests
+{
+    // ── ParseRubricCategories ─────────────────────────────────────────────────
+
+    [Fact]
+    public void Parse_ReturnsEmpty_ForFreeFormProse()
+    {
+        var result = MetricsController.ParseRubricCategories("Assess the student on general engagement and initiative.");
+        Assert.Empty(result);
+    }
+
+    [Fact]
+    public void Parse_ExtractsNamedCategories_WithEmDashSeparator()
+    {
+        var rubric = "Category: Initiative — visible activity in chats and tasks\nCategory: Communication — clarity of written messages";
+        var result = MetricsController.ParseRubricCategories(rubric);
+        Assert.Equal(new[] { "Initiative", "Communication" }, result);
+    }
+
+    [Fact]
+    public void Parse_ExtractsCategories_FromBulletedLines()
+    {
+        var rubric = "- Category: Teamwork - collaboration quality\n* Category: Delivery: completed tasks vs planned";
+        var result = MetricsController.ParseRubricCategories(rubric);
+        Assert.Equal(new[] { "Teamwork", "Delivery" }, result);
+    }
+
+    [Fact]
+    public void Parse_IsCaseInsensitive_AndDeduplicates()
+    {
+        var rubric = "category: Focus — attention to sprint goals\nCATEGORY: focus — duplicate entry";
+        var result = MetricsController.ParseRubricCategories(rubric);
+        Assert.Single(result);
+        Assert.Equal("Focus", result[0]);
+    }
+
+    // ── NormalizeAssessmentCategories ─────────────────────────────────────────
+
+    private static GapAnalysisCategoryScore Cat(string name, int score, string rationale = "evidence") =>
+        new() { Name = name, Score = score, Rationale = rationale };
+
+    [Fact]
+    public void Normalize_KeepsMatchedCategory_UnderCanonicalName()
+    {
+        var returned = new List<GapAnalysisCategoryScore> { Cat("initiative", 85) };
+        var result = MetricsController.NormalizeAssessmentCategories(returned, new List<string> { "Initiative" });
+        Assert.Single(result);
+        Assert.Equal("Initiative", result[0].Name);
+        Assert.Equal(85, result[0].Score);
+    }
+
+    [Fact]
+    public void Normalize_DropsInventedCategories()
+    {
+        var returned = new List<GapAnalysisCategoryScore> { Cat("Initiative", 70), Cat("Sprint Performance", 30) };
+        var result = MetricsController.NormalizeAssessmentCategories(returned, new List<string> { "Initiative", "Communication" });
+        Assert.Equal(2, result.Count);
+        Assert.DoesNotContain(result, c => c.Name == "Sprint Performance");
+    }
+
+    [Fact]
+    public void Normalize_FillsMissingExpectedCategory_WithZeroAndNote()
+    {
+        var returned = new List<GapAnalysisCategoryScore> { Cat("Initiative", 70) };
+        var result = MetricsController.NormalizeAssessmentCategories(returned, new List<string> { "Initiative", "Communication" });
+        var missing = result.Single(c => c.Name == "Communication");
+        Assert.Equal(0, missing.Score);
+        Assert.Contains("no score returned", missing.Rationale);
+    }
+
+    [Fact]
+    public void Normalize_AdoptsRenamedCategory_WhenSingleExpected()
+    {
+        var returned = new List<GapAnalysisCategoryScore> { Cat("Sprint Performance", 60, "did some work") };
+        var result = MetricsController.NormalizeAssessmentCategories(returned, new List<string> { "Strengths&weaknesses" });
+        Assert.Single(result);
+        Assert.Equal("Strengths&weaknesses", result[0].Name);
+        Assert.Equal(60, result[0].Score);
+        Assert.Equal("did some work", result[0].Rationale);
+    }
+
+    [Fact]
+    public void Normalize_ClampsScores_ToValidRange()
+    {
+        var returned = new List<GapAnalysisCategoryScore> { Cat("Initiative", 250) };
+        var result = MetricsController.NormalizeAssessmentCategories(returned, new List<string> { "Initiative" });
+        Assert.Equal(100, result[0].Score);
+    }
+
+    [Fact]
+    public void Normalize_EmptyResponse_FillsAllExpected()
+    {
+        var result = MetricsController.NormalizeAssessmentCategories(
+            new List<GapAnalysisCategoryScore>(), new List<string> { "Initiative", "Communication" });
+        Assert.Equal(2, result.Count);
+        Assert.All(result, c => Assert.Equal(0, c.Score));
     }
 }

@@ -37,8 +37,6 @@ public partial class MetricsController
             .FirstOrDefaultAsync(m => m.Id == request.MetricId, cancellationToken);
         if (metric == null)
             return NotFound(new { message = $"Metric {request.MetricId} not found." });
-        if (string.IsNullOrWhiteSpace(metric.Skill))
-            return UnprocessableEntity(new { message = $"Metric '{metric.Name}' has no Skill definition. Cannot run assessment." });
 
         var boardId = request.BoardId.Trim();
         var board = await _context.ProjectBoards
@@ -68,24 +66,37 @@ public partial class MetricsController
             request.TrelloRoleLabel, haveWindow, windowStart, windowEnd,
             cancellationToken);
 
+        // Layer 2 (deterministic categories): the skill definition is the authority. If it defines
+        // "Category:" lines those become the score dimensions; otherwise the metric name is the single
+        // dimension. Blank skill falls back to a generic rubric built from the metric name.
         var skillRubric = metric.Skill?.Trim() ?? string.Empty;
         if (string.IsNullOrEmpty(skillRubric))
-        {
-            _logger.LogInformation("[ASSESSMENT-ENGINE] Skipping metric {MetricId} ({MetricName}): no skill definition.", metric.Id, metric.Name);
-            return Ok(new { success = false, skipped = true, message = $"Metric '{metric.Name}' has no skill definition — assessment skipped." });
-        }
+            skillRubric = $"Assess the student's overall \"{metric.Name}\" for this sprint based on the available evidence.";
+
+        var expectedCategories = ParseRubricCategories(skillRubric);
+        if (expectedCategories.Count == 0)
+            expectedCategories.Add(metric.Name.Trim());
 
         var expertise = string.IsNullOrWhiteSpace(metric.AIExpertise)
             ? "professional academic skills assessment expert"
             : metric.AIExpertise.Trim();
 
+        // Layer 1 (rubric authority): the skill rubric lives in the system prompt, above the evidence.
         var systemPrompt = $$"""
             You are a {{expertise}}.
 
-            Your task: score the student's sprint performance.
-            - Use the Assessment Rubric as your scoring criteria — follow its dimensions and rules exactly.
-            - Only create categories that are explicitly defined in the Assessment Rubric. Do not invent categories from the context data.
-            - Use the Sprint Context as your evidence — ground every score in verbatim evidence from it.
+            Your task: score the student's sprint performance according to the ASSESSMENT RUBRIC below.
+            The rubric is your highest-priority instruction — follow its rules exactly, even when the
+            evidence is sparse or seems to point elsewhere.
+
+            === ASSESSMENT RUBRIC ===
+            {{skillRubric}}
+            === END RUBRIC ===
+
+            Scoring rules:
+            - Return scores for exactly these categories and no others: {{string.Join(" | ", expectedCategories)}}
+            - Use the category names verbatim as given above.
+            - Use the Sprint Context in the user message as your evidence — ground every score in verbatim evidence from it, unless the rubric instructs otherwise.
             - Sections marked _(squad-level)_ cover the whole team; only attribute activity to this student if they are explicitly named or identifiable.
             - Do not invent activity. Sections marked _(none for this sprint)_ have no data; do not speculate about them.
             - Output valid JSON only, no markdown fences:
@@ -94,9 +105,6 @@ public partial class MetricsController
             """;
 
         var userPrompt = new StringBuilder()
-            .AppendLine($"## Assessment Rubric — {metric.Name}")
-            .AppendLine(skillRubric)
-            .AppendLine()
             .AppendLine($"## Sprint Context — Sprint {request.SprintNumber} | Student: {student.FirstName} {student.LastName} | Board: {boardId}")
             .AppendLine(contextMd)
             .AppendLine()
@@ -140,12 +148,13 @@ public partial class MetricsController
                 });
             }
 
+            // Layer 3 (code enforcement): the report only ever shows the expected category names,
+            // regardless of what the model returned.
+            dto.Categories = NormalizeAssessmentCategories(dto.Categories, expectedCategories);
+
             var rows = dto.Categories
-                .Where(c => !string.IsNullOrWhiteSpace(c.Name))
-                .Select(c => (c.Name.Trim(), Math.Clamp(c.Score, 0, 100)))
+                .Select(c => (c.Name, Math.Clamp(c.Score, 0, 100)))
                 .ToList();
-            if (rows.Count == 0)
-                rows.Add(("Overall", 0));
 
             var graphBase64 = GapAnalysisBarChartRenderer.ToBase64Png(
                 GapAnalysisBarChartRenderer.RenderSingleChart(rows, metric.Name));
@@ -404,6 +413,61 @@ public partial class MetricsController
                 sb.AppendLine(Truncate(m.TranscriptVtt.Trim(), 6000));
             }
         }
+    }
+
+    /// <summary>
+    /// Extracts named score dimensions from a skill rubric. A dimension is a line starting with
+    /// "Category:" (optionally bulleted), e.g. "Category: Initiative — visible activity in chats and tasks".
+    /// The name is the text before the first separator (—, –, -, or :). Returns an empty list for free-form prose.
+    /// </summary>
+    internal static List<string> ParseRubricCategories(string skillRubric)
+    {
+        var names = new List<string>();
+        foreach (var rawLine in skillRubric.Split('\n'))
+        {
+            var line = rawLine.Trim().TrimStart('-', '*', '•').TrimStart();
+            if (!line.StartsWith("Category:", StringComparison.OrdinalIgnoreCase))
+                continue;
+            var rest = line["Category:".Length..].Trim();
+            var sepIdx = rest.IndexOfAny(new[] { '—', '–' });
+            var dashIdx = rest.IndexOf(" - ", StringComparison.Ordinal);
+            var colonIdx = rest.IndexOf(':');
+            var cut = new[] { sepIdx, dashIdx, colonIdx }.Where(i => i >= 0).DefaultIfEmpty(-1).Min();
+            var name = (cut >= 0 ? rest[..cut] : rest).Trim();
+            if (name.Length > 0 && !names.Any(n => string.Equals(n, name, StringComparison.OrdinalIgnoreCase)))
+                names.Add(name);
+        }
+        return names;
+    }
+
+    /// <summary>
+    /// Forces the LLM's category list to exactly match the expected names (order preserved):
+    /// matched categories keep their score/rationale under the canonical name, invented ones are
+    /// dropped, and missing ones are filled with a no-score note. When a single category is expected
+    /// and the model renamed it, the first returned category is adopted under the expected name.
+    /// </summary>
+    internal static List<GapAnalysisCategoryScore> NormalizeAssessmentCategories(
+        List<GapAnalysisCategoryScore> returned, List<string> expected)
+    {
+        var usable = returned.Where(c => !string.IsNullOrWhiteSpace(c.Name)).ToList();
+        var result = new List<GapAnalysisCategoryScore>();
+        foreach (var name in expected)
+        {
+            var match = usable.FirstOrDefault(c =>
+                string.Equals(c.Name.Trim(), name, StringComparison.OrdinalIgnoreCase));
+            if (match == null && expected.Count == 1)
+                match = usable.FirstOrDefault();
+
+            result.Add(new GapAnalysisCategoryScore
+            {
+                Name = name,
+                Score = match != null ? Math.Clamp(match.Score, 0, 100) : 0,
+                Rationale = match?.Rationale is { Length: > 0 } r
+                    ? r
+                    : "(no score returned for this category)",
+            });
+        }
+        return result;
     }
 
     private static string FormatAssessmentReviewContent(string metricName, GapAnalysisLlmResult dto)
