@@ -22,6 +22,8 @@ namespace strAppersBackend.Services
         Task<string?> GetSprintCardBranchContextAsync(string boardId, int sprintNumber, string roleName);
         /// <summary>All open cards on the board assigned to the member with the given email, with card name, description, and checklist text.</summary>
         Task<IReadOnlyList<SprintRoleCardSnapshot>> GetMemberBoardCardsAsync(string boardId, string memberEmail);
+        /// <summary>User Story cards assigned to the member with the given email. Resolves email→memberId on the target board (falling back to the main board). Returns empty if the member is not found or has no assigned user stories.</summary>
+        Task<IReadOnlyList<SprintRoleCardSnapshot>> GetUserStoryCardsForMemberAsync(string boardId, string? userStoryBoardId, string memberEmail);
         /// <summary>Sprint role card: title, description, and flattened checklists for gap-analysis context.</summary>
         Task<SprintRoleCardSnapshot?> GetSprintRoleCardSnapshotAsync(string boardId, int sprintNumber, string roleName);
         /// <summary>
@@ -1940,6 +1942,101 @@ namespace strAppersBackend.Services
             catch (Exception ex)
             {
                 _logger.LogWarning(ex, "GetMemberBoardCardsAsync failed for board {BoardId} email {Email}", boardId, memberEmail);
+                return Array.Empty<SprintRoleCardSnapshot>();
+            }
+        }
+
+        /// <inheritdoc />
+        public async Task<IReadOnlyList<SprintRoleCardSnapshot>> GetUserStoryCardsForMemberAsync(
+            string boardId, string? userStoryBoardId, string memberEmail)
+        {
+            if (string.IsNullOrWhiteSpace(boardId) || string.IsNullOrWhiteSpace(memberEmail))
+                return Array.Empty<SprintRoleCardSnapshot>();
+            try
+            {
+                var targetBoard = userStoryBoardId ?? boardId;
+                var emailLower = memberEmail.Trim().ToLowerInvariant();
+
+                // Resolve email → Trello memberId. Try the user-story board first, then the main board.
+                string? memberId = null;
+                foreach (var bid in new[] { targetBoard, boardId }.Distinct())
+                {
+                    var membersUrl = $"https://api.trello.com/1/boards/{bid}/members?fields=id,email&key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
+                    var membersRes = await _httpClient.GetAsync(membersUrl);
+                    if (!membersRes.IsSuccessStatusCode) continue;
+                    var membersJson = JsonSerializer.Deserialize<JsonElement[]>(await membersRes.Content.ReadAsStringAsync());
+                    var match = (membersJson ?? []).FirstOrDefault(m =>
+                        string.Equals(m.TryGetProperty("email", out var ep) ? ep.GetString() : null,
+                            emailLower, StringComparison.OrdinalIgnoreCase));
+                    if (match.ValueKind != JsonValueKind.Undefined && match.TryGetProperty("id", out var idProp))
+                        memberId = idProp.GetString();
+                    if (!string.IsNullOrEmpty(memberId)) break;
+                }
+                if (string.IsNullOrEmpty(memberId)) return Array.Empty<SprintRoleCardSnapshot>();
+
+                // Find the User Stories list ID on the target board.
+                var listsUrl = $"https://api.trello.com/1/boards/{targetBoard}/lists?key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
+                var listsRes = await _httpClient.GetAsync(listsUrl);
+                if (!listsRes.IsSuccessStatusCode) return Array.Empty<SprintRoleCardSnapshot>();
+                var listsData = JsonSerializer.Deserialize<JsonElement[]>(await listsRes.Content.ReadAsStringAsync());
+                var userStoryList = (listsData ?? []).FirstOrDefault(l =>
+                    string.Equals(l.TryGetProperty("name", out var n) ? n.GetString() : "",
+                        "User Stories", StringComparison.OrdinalIgnoreCase));
+                if (userStoryList.ValueKind == JsonValueKind.Undefined) return Array.Empty<SprintRoleCardSnapshot>();
+                if (!userStoryList.TryGetProperty("id", out var lidProp)) return Array.Empty<SprintRoleCardSnapshot>();
+                var listId = lidProp.GetString() ?? "";
+                if (string.IsNullOrEmpty(listId)) return Array.Empty<SprintRoleCardSnapshot>();
+
+                // Fetch open cards with checklists; idMembers is included in the default field set.
+                var cardsUrl = $"https://api.trello.com/1/boards/{targetBoard}/cards?filter=open&checklists=all&fields=name,desc,idMembers,idList&key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
+                var cardsRes = await _httpClient.GetAsync(cardsUrl);
+                if (!cardsRes.IsSuccessStatusCode) return Array.Empty<SprintRoleCardSnapshot>();
+                var cardsData = JsonSerializer.Deserialize<JsonElement[]>(await cardsRes.Content.ReadAsStringAsync());
+
+                var results = new List<SprintRoleCardSnapshot>();
+                foreach (var c in cardsData ?? [])
+                {
+                    // Only cards in the User Stories list.
+                    var cardList = c.TryGetProperty("idList", out var cl) ? cl.GetString() : "";
+                    if (!string.Equals(cardList, listId, StringComparison.OrdinalIgnoreCase)) continue;
+
+                    // Only cards assigned to this member.
+                    if (!c.TryGetProperty("idMembers", out var mProp) || mProp.ValueKind != JsonValueKind.Array) continue;
+                    if (!mProp.EnumerateArray().Any(m => string.Equals(m.GetString(), memberId, StringComparison.Ordinal))) continue;
+
+                    var name = c.TryGetProperty("name", out var np) ? np.GetString() ?? "" : "";
+                    var desc = c.TryGetProperty("desc", out var dp) ? dp.GetString() ?? "" : "";
+
+                    var sb = new StringBuilder();
+                    if (c.TryGetProperty("checklists", out var clsProp) && clsProp.ValueKind == JsonValueKind.Array)
+                    {
+                        foreach (var cl2 in clsProp.EnumerateArray())
+                        {
+                            var clName = cl2.TryGetProperty("name", out var cn) ? cn.GetString() ?? "Checklist" : "Checklist";
+                            sb.Append("### ").AppendLine(clName);
+                            if (!cl2.TryGetProperty("checkItems", out var items) || items.ValueKind != JsonValueKind.Array) continue;
+                            foreach (var item in items.EnumerateArray())
+                            {
+                                var state = item.TryGetProperty("state", out var st) ? st.GetString() ?? "" : "";
+                                var itemName = item.TryGetProperty("name", out var nm) ? nm.GetString() ?? "" : "";
+                                sb.Append("- [").Append(state).Append("] ").AppendLine(itemName);
+                            }
+                            sb.AppendLine();
+                        }
+                    }
+                    results.Add(new SprintRoleCardSnapshot
+                    {
+                        TrelloCardId = c.TryGetProperty("id", out var ip) ? ip.GetString() ?? "" : "",
+                        CardName = name,
+                        Description = desc,
+                        ChecklistsText = sb.ToString().Trim(),
+                    });
+                }
+                return results;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "GetUserStoryCardsForMemberAsync failed for board {BoardId} email {Email}", boardId, memberEmail);
                 return Array.Empty<SprintRoleCardSnapshot>();
             }
         }

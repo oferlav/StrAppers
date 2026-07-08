@@ -236,7 +236,7 @@ public partial class MetricsController
             await AppendAssessmentTrelloTasksAsync(sb, boardId, email!, ct);
 
         if (metric.UseTrelloUserStory)
-            await AppendAssessmentTrelloUserStoryAsync(sb, boardId, board.UserStoryBoardId, ct);
+            await AppendAssessmentTrelloUserStoryAsync(sb, boardId, board.UserStoryBoardId, email, ct);
 
         if (metric.UseFigmaDesign && haveWindow)
             await AppendAssessmentFigmaDesignAsync(sb, boardId, windowStart, windowEnd, ct);
@@ -456,39 +456,33 @@ public partial class MetricsController
     }
 
     private async Task AppendAssessmentTrelloUserStoryAsync(
-        StringBuilder sb, string boardId, string? userStoryBoardId, CancellationToken ct)
+        StringBuilder sb, string boardId, string? userStoryBoardId, string? studentEmail, CancellationToken ct)
     {
-        sb.AppendLine("### Trello user stories _(squad-level — all team members)_");
-        var targetBoard = userStoryBoardId ?? boardId;
+        sb.AppendLine("### Trello user stories (assigned to this student)");
         try
         {
-            var result = await _trelloService.GetUserStoriesListAsync(targetBoard);
-            if (result == null) { sb.AppendLine("_(none)_"); sb.AppendLine(); return; }
+            if (string.IsNullOrWhiteSpace(studentEmail))
+            {
+                sb.AppendLine("_(student has no email — cannot filter user stories by member)_");
+                sb.AppendLine();
+                return;
+            }
 
-            var t = result.GetType();
-            var success = t.GetProperty("Success")?.GetValue(result) is bool b && b;
-            if (!success) { sb.AppendLine("_(none)_"); sb.AppendLine(); return; }
+            var cards = await _trelloService.GetUserStoryCardsForMemberAsync(boardId, userStoryBoardId, studentEmail);
+            if (cards.Count == 0) { sb.AppendLine("_(none assigned to this student)_"); sb.AppendLine(); return; }
 
-            var cards = t.GetProperty("Cards")?.GetValue(result) as System.Collections.IEnumerable;
-            if (cards == null) { sb.AppendLine("_(none)_"); sb.AppendLine(); return; }
-
-            var count = 0;
             foreach (var card in cards)
             {
-                var ct2 = card.GetType();
-                var name = ct2.GetProperty("Name")?.GetValue(card) as string ?? "";
-                var desc = ct2.GetProperty("Description")?.GetValue(card) as string ?? "";
-                if (string.IsNullOrWhiteSpace(name)) continue;
-                sb.AppendLine($"- **{name}**");
-                if (!string.IsNullOrWhiteSpace(desc))
-                    sb.AppendLine($"  {Truncate(desc.Trim(), 500)}");
-                count++;
+                sb.AppendLine($"#### {card.CardName}");
+                if (!string.IsNullOrWhiteSpace(card.Description))
+                    sb.AppendLine(Truncate(card.Description.Trim(), 500));
+                if (!string.IsNullOrWhiteSpace(card.ChecklistsText))
+                    sb.AppendLine(card.ChecklistsText);
             }
-            if (count == 0) sb.AppendLine("_(none)_");
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "TrelloUserStory sensor failed for board {BoardId}", targetBoard);
+            _logger.LogWarning(ex, "TrelloUserStory sensor failed for board {BoardId}", boardId);
             sb.AppendLine("_(sensor error — Trello unavailable)_");
         }
         sb.AppendLine();
