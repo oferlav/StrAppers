@@ -138,7 +138,14 @@ public partial class MetricsController
         return CreatedAtAction(nameof(GetAssessmentMetricConfiguration), new { instituteId }, dto);
     }
 
-    /// <summary>Delete an institute-owned metric. Returns 403 for base-institute (Id=1) rows.</summary>
+    /// <summary>
+    /// Core metrics backed by hardcoded BE logic (batch runner routes them by name slug).
+    /// They cannot be deleted; their names must stay intact or the routing breaks.
+    /// </summary>
+    internal static readonly HashSet<string> CoreMetricSlugs = new(StringComparer.Ordinal)
+        { "adherence", "gapanalysis", "attendance", "customerengagement", "communication" };
+
+    /// <summary>Delete an institute-owned metric. Returns 403 for base-institute (Id=1) rows and core metrics.</summary>
     [HttpDelete("{id:int}")]
     public async Task<IActionResult> DeleteMetric(int id, [FromQuery] int instituteId)
     {
@@ -151,6 +158,9 @@ public partial class MetricsController
 
         if (metric.InstituteId != 1 && metric.InstituteId != instituteId)
             return StatusCode(403, new { message = "You can only delete metrics belonging to your institute." });
+
+        if (CoreMetricSlugs.Contains(ToSlugKey(metric.Name)))
+            return StatusCode(403, new { message = $"'{metric.Name}' is a core metric and cannot be deleted. Disable it instead (Active toggle)." });
 
         _context.Metrics.Remove(metric);
         await _context.SaveChangesAsync();

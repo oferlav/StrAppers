@@ -144,7 +144,7 @@ public partial class MetricsController
         }
     }
 
-    private static string ToSlugKey(string name)
+    internal static string ToSlugKey(string name)
     {
         var s = name.Trim().ToLowerInvariant().Replace("&", "and").Replace(' ', '_');
         return System.Text.RegularExpressions.Regex.Replace(s, "[^a-z0-9_]", "");

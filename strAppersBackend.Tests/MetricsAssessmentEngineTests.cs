@@ -696,3 +696,38 @@ public class AssessmentCategoryNormalizationTests
         Assert.All(result, c => Assert.Equal(0, c.Score));
     }
 }
+
+/// <summary>
+/// Core metrics (hardcoded BE logic, routed by name slug) must be protected from deletion,
+/// and their display names must map onto the protected slug set.
+/// </summary>
+public class CoreMetricGuardTests
+{
+    [Theory]
+    [InlineData("Adherence")]
+    [InlineData("GapAnalysis")]
+    [InlineData("Attendance")]
+    [InlineData("CustomerEngagement")]
+    [InlineData("Communication")]
+    public void CoreMetricNames_MapToProtectedSlugs(string metricName)
+    {
+        var slug = MetricsController.ToSlugKey(metricName);
+        Assert.Contains(slug, MetricsController.CoreMetricSlugs);
+    }
+
+    [Theory]
+    [InlineData("Strengths&weaknesses")]
+    [InlineData("Squad collaboration index")]
+    [InlineData("Custom Institute Metric")]
+    public void NonCoreMetricNames_AreNotProtected(string metricName)
+    {
+        var slug = MetricsController.ToSlugKey(metricName);
+        Assert.DoesNotContain(slug, MetricsController.CoreMetricSlugs);
+    }
+
+    [Fact]
+    public void CoreSlugSet_HasExactlyFiveEntries()
+    {
+        Assert.Equal(5, MetricsController.CoreMetricSlugs.Count);
+    }
+}
