@@ -262,7 +262,7 @@ public partial class MetricsController
             await AppendAssessmentTrelloTasksAsync(sb, boardId, email, trelloRoleLabel, sprintNumber, ct);
 
         if (metric.UseTrelloUserStory)
-            await AppendAssessmentTrelloUserStoryAsync(sb, boardId, board.UserStoryBoardId, email, haveWindow, windowStart, windowEnd, ct);
+            await AppendAssessmentTrelloUserStoryAsync(sb, boardId, board.UserStoryBoardId, trelloRoleLabel, haveWindow, windowStart, windowEnd, ct);
 
         if (metric.UseFigmaDesign && haveWindow)
             await AppendAssessmentFigmaDesignAsync(sb, boardId, windowStart, windowEnd, ct);
@@ -573,21 +573,23 @@ public partial class MetricsController
     }
 
     private async Task AppendAssessmentTrelloUserStoryAsync(
-        StringBuilder sb, string boardId, string? userStoryBoardId, string? studentEmail,
+        StringBuilder sb, string boardId, string? userStoryBoardId, string? roleLabel,
         bool haveWindow, DateTime windowStart, DateTime windowEnd, CancellationToken ct)
     {
         sb.AppendLine("### Trello user stories (attributed to this student, active in this sprint window)");
         try
         {
-            if (string.IsNullOrWhiteSpace(studentEmail))
+            // Role-based attribution: user stories are the PM's deliverable. Other roles don't
+            // write them, so their assessments should not see them as personal activity.
+            if (!Services.TrelloService.IsPMRole(roleLabel))
             {
-                sb.AppendLine("_(student has no email — cannot filter user stories by member)_");
+                sb.AppendLine("_(user stories are the Product Manager's deliverable — not this student's role)_");
                 sb.AppendLine();
                 return;
             }
 
-            var cards = await _trelloService.GetUserStoryCardsForMemberAsync(
-                boardId, userStoryBoardId, studentEmail,
+            var cards = await _trelloService.GetUserStoryCardsAsync(
+                boardId, userStoryBoardId,
                 haveWindow ? windowStart : null, haveWindow ? windowEnd : null);
             if (cards.Count == 0) { sb.AppendLine("_(none for this sprint)_"); sb.AppendLine(); return; }
 

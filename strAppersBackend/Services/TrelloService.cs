@@ -23,14 +23,13 @@ namespace strAppersBackend.Services
         /// <summary>All open cards on the board assigned to the member with the given email, with card name, description, and checklist text.</summary>
         Task<IReadOnlyList<SprintRoleCardSnapshot>> GetMemberBoardCardsAsync(string boardId, string memberEmail);
         /// <summary>
-        /// User Story cards attributed to the member with the given email. Membership of the user-story board is
-        /// the attribution signal (only story writers are invited there): if no card carries idMembers assignments,
-        /// a board member gets ALL the stories; when cards do carry assignments, only the member's own cards are
-        /// returned. Non-members always get an empty list. When a sprint window is given, only cards created or
-        /// last active within it count (creation time is decoded from the Trello card id).
+        /// User Story cards from the user-story board (or the main board's "User Stories" list on legacy
+        /// boards). Attribution to a student is role-based and decided by the caller — this only collects.
+        /// When a sprint window is given, only cards created or last active within it count (creation time
+        /// is decoded from the Trello card id).
         /// </summary>
-        Task<IReadOnlyList<SprintRoleCardSnapshot>> GetUserStoryCardsForMemberAsync(
-            string boardId, string? userStoryBoardId, string memberEmail,
+        Task<IReadOnlyList<SprintRoleCardSnapshot>> GetUserStoryCardsAsync(
+            string boardId, string? userStoryBoardId,
             DateTime? windowStart = null, DateTime? windowEnd = null);
         /// <summary>Sprint role card: title, description, and flattened checklists for gap-analysis context.</summary>
         Task<SprintRoleCardSnapshot?> GetSprintRoleCardSnapshotAsync(string boardId, int sprintNumber, string roleName);
@@ -417,7 +416,7 @@ namespace strAppersBackend.Services
             return apiErrorResponse;
         }
 
-        private static bool IsPMRole(string? roleName) =>
+        internal static bool IsPMRole(string? roleName) =>
             !string.IsNullOrWhiteSpace(roleName) &&
             (roleName.Contains("Product Manager", StringComparison.OrdinalIgnoreCase) ||
              roleName.Contains("PM", StringComparison.OrdinalIgnoreCase));
@@ -1992,47 +1991,15 @@ namespace strAppersBackend.Services
         }
 
         /// <inheritdoc />
-        public async Task<IReadOnlyList<SprintRoleCardSnapshot>> GetUserStoryCardsForMemberAsync(
-            string boardId, string? userStoryBoardId, string memberEmail,
+        public async Task<IReadOnlyList<SprintRoleCardSnapshot>> GetUserStoryCardsAsync(
+            string boardId, string? userStoryBoardId,
             DateTime? windowStart = null, DateTime? windowEnd = null)
         {
-            if (string.IsNullOrWhiteSpace(boardId) || string.IsNullOrWhiteSpace(memberEmail))
+            if (string.IsNullOrWhiteSpace(boardId))
                 return Array.Empty<SprintRoleCardSnapshot>();
             try
             {
                 var targetBoard = string.IsNullOrWhiteSpace(userStoryBoardId) ? boardId : userStoryBoardId;
-                var emailLower = memberEmail.Trim().ToLowerInvariant();
-
-                // Resolve email → Trello memberId on the target board ONLY. Board membership is the
-                // attribution signal: only story writers receive the collaboration invite to this board,
-                // so a student who is not a member here did not write user stories.
-                string? memberId = null;
-                var membersUrl = $"https://api.trello.com/1/boards/{targetBoard}/members?fields=id,email&key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
-                var membersRes = await _httpClient.GetAsync(membersUrl);
-                if (!membersRes.IsSuccessStatusCode)
-                {
-                    _logger.LogWarning("[USER-STORY-SENSOR] Members lookup failed for board {Board}: HTTP {Status}", targetBoard, (int)membersRes.StatusCode);
-                    return Array.Empty<SprintRoleCardSnapshot>();
-                }
-                var membersJson = JsonSerializer.Deserialize<JsonElement[]>(await membersRes.Content.ReadAsStringAsync());
-                var allMembers = membersJson ?? [];
-                var membersWithEmail = allMembers.Count(m =>
-                    m.TryGetProperty("email", out var e) && !string.IsNullOrEmpty(e.GetString()));
-                var match = allMembers.FirstOrDefault(m =>
-                    string.Equals(m.TryGetProperty("email", out var ep) ? ep.GetString() : null,
-                        emailLower, StringComparison.OrdinalIgnoreCase));
-                if (match.ValueKind != JsonValueKind.Undefined && match.TryGetProperty("id", out var idProp))
-                    memberId = idProp.GetString();
-                if (string.IsNullOrEmpty(memberId))
-                {
-                    // Trello only exposes member emails to workspace-admin tokens — if WithEmail is 0
-                    // below, that is the cause and attribution can never match by email on this board.
-                    _logger.LogWarning("[USER-STORY-SENSOR] Could not resolve {Email} on board {Board}: {Total} members, {WithEmail} expose an email.",
-                        emailLower, targetBoard, allMembers.Length, membersWithEmail);
-                    return Array.Empty<SprintRoleCardSnapshot>();
-                }
-                _logger.LogInformation("[USER-STORY-SENSOR] Resolved {Email} -> member {MemberId} on board {Board} ({Total} members, {WithEmail} with email).",
-                    emailLower, memberId, targetBoard, allMembers.Length, membersWithEmail);
 
                 // Find the User Stories list ID on the target board.
                 var listsUrl = $"https://api.trello.com/1/boards/{targetBoard}/lists?key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
@@ -2047,8 +2014,7 @@ namespace strAppersBackend.Services
                 var listId = lidProp.GetString() ?? "";
                 if (string.IsNullOrEmpty(listId)) return Array.Empty<SprintRoleCardSnapshot>();
 
-                // Fetch open cards with checklists; idMembers is included in the default field set.
-                var cardsUrl = $"https://api.trello.com/1/boards/{targetBoard}/cards?filter=open&checklists=all&fields=name,desc,idMembers,idList,dateLastActivity&key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
+                var cardsUrl = $"https://api.trello.com/1/boards/{targetBoard}/cards?filter=open&checklists=all&fields=name,desc,idList,dateLastActivity&key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
                 var cardsRes = await _httpClient.GetAsync(cardsUrl);
                 if (!cardsRes.IsSuccessStatusCode) return Array.Empty<SprintRoleCardSnapshot>();
                 var cardsData = JsonSerializer.Deserialize<JsonElement[]>(await cardsRes.Content.ReadAsStringAsync());
@@ -2057,18 +2023,6 @@ namespace strAppersBackend.Services
                 var storyCards = (cardsData ?? []).Where(c =>
                     string.Equals(c.TryGetProperty("idList", out var cl) ? cl.GetString() : "",
                         listId, StringComparison.OrdinalIgnoreCase)).ToList();
-
-                // Hybrid attribution: when cards carry explicit member assignments, filter to this
-                // member's cards; when none do (the common case — writers just author cards without
-                // assigning themselves), board membership attributes all stories to this member.
-                var anyCardHasMembers = storyCards.Any(c =>
-                    c.TryGetProperty("idMembers", out var mp) && mp.ValueKind == JsonValueKind.Array && mp.GetArrayLength() > 0);
-                if (anyCardHasMembers)
-                {
-                    storyCards = storyCards.Where(c =>
-                        c.TryGetProperty("idMembers", out var mp) && mp.ValueKind == JsonValueKind.Array &&
-                        mp.EnumerateArray().Any(m => string.Equals(m.GetString(), memberId, StringComparison.Ordinal))).ToList();
-                }
 
                 var beforeWindowCount = storyCards.Count;
 
@@ -2089,9 +2043,8 @@ namespace strAppersBackend.Services
                     }).ToList();
                 }
 
-                _logger.LogInformation("[USER-STORY-SENSOR] Board {Board}: {Attributed} stories attributed (memberFilter={MemberFilter}), {InWindow} within sprint window [{Start:u} .. {End:u}].",
-                    targetBoard, beforeWindowCount, anyCardHasMembers, storyCards.Count,
-                    windowStart ?? default, windowEnd ?? default);
+                _logger.LogInformation("[USER-STORY-SENSOR] Board {Board}: {Total} stories on the list, {InWindow} within sprint window [{Start:u} .. {End:u}].",
+                    targetBoard, beforeWindowCount, storyCards.Count, windowStart ?? default, windowEnd ?? default);
 
                 var results = new List<SprintRoleCardSnapshot>();
                 foreach (var c in storyCards)
@@ -2128,7 +2081,7 @@ namespace strAppersBackend.Services
             }
             catch (Exception ex)
             {
-                _logger.LogWarning(ex, "GetUserStoryCardsForMemberAsync failed for board {BoardId} email {Email}", boardId, memberEmail);
+                _logger.LogWarning(ex, "GetUserStoryCardsAsync failed for board {BoardId}", boardId);
                 return Array.Empty<SprintRoleCardSnapshot>();
             }
         }
