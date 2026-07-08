@@ -525,7 +525,7 @@ public partial class MetricsController
     private async Task AppendAssessmentTrelloUserStoryAsync(
         StringBuilder sb, string boardId, string? userStoryBoardId, string? studentEmail, CancellationToken ct)
     {
-        sb.AppendLine("### Trello user stories (attributed to this student)");
+        sb.AppendLine("### Trello user stories (attributed to this student) _(persistent artifact — authored early in the project; do NOT treat as this sprint's activity)_");
         try
         {
             if (string.IsNullOrWhiteSpace(studentEmail))

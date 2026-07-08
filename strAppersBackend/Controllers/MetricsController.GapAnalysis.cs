@@ -720,7 +720,7 @@ public partial class MetricsController
                 var storyText = ConcatenateUserStoryText(card);
                 if (CountWords(storyText) > 10)
                 {
-                    sb.AppendLine("### PM user story (requirements reference — compare your work to this)");
+                    sb.AppendLine("### PM user story (requirements reference — compare your work to this) _(persistent artifact authored earlier in the project; NOT this student's sprint activity)_");
                     sb.AppendLine(storyText.Trim());
                     sb.AppendLine();
                 }
@@ -898,7 +898,7 @@ public partial class MetricsController
         int sprintNumber,
         CancellationToken cancellationToken)
     {
-        sb.AppendLine("### Skill — Product Manager user story (primary PM deliverable)");
+        sb.AppendLine("### Skill — Product Manager user story (primary PM deliverable) _(pre-existing artifact — assess its quality and coverage, but do NOT describe its creation as this sprint's activity)_");
         string? moduleIdStr = null;
         foreach (var lbl in GapAnalysisPmSprintCardLabels)
         {
