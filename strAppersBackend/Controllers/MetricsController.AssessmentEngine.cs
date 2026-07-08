@@ -140,6 +140,25 @@ public partial class MetricsController
             });
         }
 
+        // Debug:AiContext=true → email the exact prompts (same pipeline as the legacy metrics).
+        if (DebugAiContext)
+        {
+            try
+            {
+                var dbg = $"=== Assessment Engine Debug ===\n" +
+                          $"Metric:    {metric.Id} ({metric.Name})\n" +
+                          $"Student:   {request.StudentId} ({student.FirstName} {student.LastName})\n" +
+                          $"Board:     {boardId} | Sprint: {request.SprintNumber} | RoleLabel: {trelloRoleLabel ?? "(none)"}\n" +
+                          $"Window:    {(haveWindow ? $"{windowStart:u} .. {windowEnd:u}" : "(not resolved)")}\n\n" +
+                          $"--- SYSTEM PROMPT ---\n{systemPrompt}\n\n--- USER PROMPT ---\n{userPrompt}";
+                await _smtpEmailService.SendPlainEmailAsync(
+                    "ofer@skill-in.com",
+                    $"[AssessmentEngine Debug] {metric.Name} | Student {request.StudentId} | Sprint {request.SprintNumber}",
+                    dbg);
+            }
+            catch { /* never interrupt the AI flow */ }
+        }
+
         try
         {
             var modelName = _configuration["OpenAI:CheapModel"] ?? "gpt-4o-mini";
@@ -591,6 +610,16 @@ public partial class MetricsController
             var cards = await _trelloService.GetUserStoryCardsAsync(
                 boardId, userStoryBoardId,
                 haveWindow ? windowStart : null, haveWindow ? windowEnd : null);
+
+            // dateLastActivity only reflects the LAST touch, so on retroactive assessments a story
+            // worked on this sprint but touched later falls outside the window. Fall back to the
+            // unfiltered list, honestly labeled, rather than reporting no story exists at all.
+            if (cards.Count == 0 && haveWindow)
+            {
+                cards = await _trelloService.GetUserStoryCardsAsync(boardId, userStoryBoardId);
+                if (cards.Count > 0)
+                    sb.AppendLine("_(no story activity detected inside this sprint window — the stories below are shown as persistent artifacts; assess their quality but do NOT credit their creation to this sprint)_");
+            }
             if (cards.Count == 0) { sb.AppendLine("_(none for this sprint)_"); sb.AppendLine(); return; }
 
             foreach (var card in cards)
