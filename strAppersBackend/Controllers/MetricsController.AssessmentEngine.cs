@@ -86,7 +86,7 @@ public partial class MetricsController
 
         var userPrompt = new StringBuilder()
             .AppendLine($"## Assessment Rubric — {metric.Name}")
-            .AppendLine(metric.Skill.Trim())
+            .AppendLine(metric.Skill?.Trim() ?? string.Empty)
             .AppendLine()
             .AppendLine($"## Sprint Context — Sprint {request.SprintNumber} | Student: {student.FirstName} {student.LastName} | Board: {boardId}")
             .AppendLine(contextMd)
