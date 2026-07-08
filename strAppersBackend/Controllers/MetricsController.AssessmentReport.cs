@@ -308,9 +308,7 @@ public partial class MetricsController
             return BadRequest(new { success = false, message = "InstituteId is required." });
 
         var metrics = await _context.Metrics.AsNoTracking()
-            .Where(m => m.InstituteId == request.InstituteId
-                     && m.Required
-                     && m.Endpoint != null && m.Endpoint != "")
+            .Where(m => m.InstituteId == request.InstituteId && m.Required)
             .ToListAsync(cancellationToken);
 
         if (!metrics.Any())
