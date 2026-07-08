@@ -96,6 +96,9 @@ public partial class MetricsController
             Scoring rules:
             - Return scores for exactly these categories and no others: {{string.Join(" | ", expectedCategories)}}
             - Use the category names verbatim as given above.
+            - Scores are integers on a 0–100 scale. Calibrate to these bands: 0–19 = no meaningful evidence,
+              20–39 = minimal, 40–59 = partial, 60–79 = good, 80–100 = excellent. Use the full range —
+              a weak-but-present performance is ~20–40, not a single-digit score.
             - Use the Sprint Context in the user message as your evidence — ground every score in verbatim evidence from it, unless the rubric instructs otherwise.
             - Sections marked _(squad-level)_ cover the whole team; only attribute activity to this student if they are explicitly named or identifiable.
             - Do not invent activity. Sections marked _(none for this sprint)_ have no data; do not speculate about them.
