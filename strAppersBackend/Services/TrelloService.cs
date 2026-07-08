@@ -26,9 +26,12 @@ namespace strAppersBackend.Services
         /// User Story cards attributed to the member with the given email. Membership of the user-story board is
         /// the attribution signal (only story writers are invited there): if no card carries idMembers assignments,
         /// a board member gets ALL the stories; when cards do carry assignments, only the member's own cards are
-        /// returned. Non-members always get an empty list.
+        /// returned. Non-members always get an empty list. When a sprint window is given, only cards created or
+        /// last active within it count (creation time is decoded from the Trello card id).
         /// </summary>
-        Task<IReadOnlyList<SprintRoleCardSnapshot>> GetUserStoryCardsForMemberAsync(string boardId, string? userStoryBoardId, string memberEmail);
+        Task<IReadOnlyList<SprintRoleCardSnapshot>> GetUserStoryCardsForMemberAsync(
+            string boardId, string? userStoryBoardId, string memberEmail,
+            DateTime? windowStart = null, DateTime? windowEnd = null);
         /// <summary>Sprint role card: title, description, and flattened checklists for gap-analysis context.</summary>
         Task<SprintRoleCardSnapshot?> GetSprintRoleCardSnapshotAsync(string boardId, int sprintNumber, string roleName);
         /// <summary>
@@ -418,6 +421,22 @@ namespace strAppersBackend.Services
             !string.IsNullOrWhiteSpace(roleName) &&
             (roleName.Contains("Product Manager", StringComparison.OrdinalIgnoreCase) ||
              roleName.Contains("PM", StringComparison.OrdinalIgnoreCase));
+
+        /// <summary>
+        /// Trello card ids are Mongo ObjectIds: the first 8 hex chars encode the creation time
+        /// as unix seconds. Returns false for null/short/non-hex ids.
+        /// </summary>
+        internal static bool TryGetCardCreationUtc(string? cardId, out DateTime createdUtc)
+        {
+            createdUtc = default;
+            if (string.IsNullOrEmpty(cardId) || cardId.Length < 8)
+                return false;
+            if (!uint.TryParse(cardId[..8], System.Globalization.NumberStyles.HexNumber,
+                    System.Globalization.CultureInfo.InvariantCulture, out var seconds))
+                return false;
+            createdUtc = DateTimeOffset.FromUnixTimeSeconds(seconds).UtcDateTime;
+            return true;
+        }
 
         /// <summary>
         /// Trello invitation emails are only sent to members whose role's main tool is Trello
@@ -1974,7 +1993,8 @@ namespace strAppersBackend.Services
 
         /// <inheritdoc />
         public async Task<IReadOnlyList<SprintRoleCardSnapshot>> GetUserStoryCardsForMemberAsync(
-            string boardId, string? userStoryBoardId, string memberEmail)
+            string boardId, string? userStoryBoardId, string memberEmail,
+            DateTime? windowStart = null, DateTime? windowEnd = null)
         {
             if (string.IsNullOrWhiteSpace(boardId) || string.IsNullOrWhiteSpace(memberEmail))
                 return Array.Empty<SprintRoleCardSnapshot>();
@@ -2012,7 +2032,7 @@ namespace strAppersBackend.Services
                 if (string.IsNullOrEmpty(listId)) return Array.Empty<SprintRoleCardSnapshot>();
 
                 // Fetch open cards with checklists; idMembers is included in the default field set.
-                var cardsUrl = $"https://api.trello.com/1/boards/{targetBoard}/cards?filter=open&checklists=all&fields=name,desc,idMembers,idList&key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
+                var cardsUrl = $"https://api.trello.com/1/boards/{targetBoard}/cards?filter=open&checklists=all&fields=name,desc,idMembers,idList,dateLastActivity&key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
                 var cardsRes = await _httpClient.GetAsync(cardsUrl);
                 if (!cardsRes.IsSuccessStatusCode) return Array.Empty<SprintRoleCardSnapshot>();
                 var cardsData = JsonSerializer.Deserialize<JsonElement[]>(await cardsRes.Content.ReadAsStringAsync());
@@ -2032,6 +2052,23 @@ namespace strAppersBackend.Services
                     storyCards = storyCards.Where(c =>
                         c.TryGetProperty("idMembers", out var mp) && mp.ValueKind == JsonValueKind.Array &&
                         mp.EnumerateArray().Any(m => string.Equals(m.GetString(), memberId, StringComparison.Ordinal))).ToList();
+                }
+
+                // Sprint-window filter: a story only counts as this sprint's activity when it was
+                // created or last touched within the window.
+                if (windowStart.HasValue && windowEnd.HasValue)
+                {
+                    storyCards = storyCards.Where(c =>
+                    {
+                        var id = c.TryGetProperty("id", out var ip) ? ip.GetString() : null;
+                        if (TryGetCardCreationUtc(id, out var created) &&
+                            created >= windowStart.Value && created <= windowEnd.Value)
+                            return true;
+                        var lastStr = c.TryGetProperty("dateLastActivity", out var la) ? la.GetString() : null;
+                        return DateTime.TryParse(lastStr, System.Globalization.CultureInfo.InvariantCulture,
+                                   System.Globalization.DateTimeStyles.AdjustToUniversal, out var last)
+                               && last >= windowStart.Value && last <= windowEnd.Value;
+                    }).ToList();
                 }
 
                 var results = new List<SprintRoleCardSnapshot>();

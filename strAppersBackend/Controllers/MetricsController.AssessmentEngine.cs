@@ -248,7 +248,7 @@ public partial class MetricsController
             await AppendAssessmentTrelloTasksAsync(sb, boardId, email!, ct);
 
         if (metric.UseTrelloUserStory)
-            await AppendAssessmentTrelloUserStoryAsync(sb, boardId, board.UserStoryBoardId, email, ct);
+            await AppendAssessmentTrelloUserStoryAsync(sb, boardId, board.UserStoryBoardId, email, haveWindow, windowStart, windowEnd, ct);
 
         if (metric.UseFigmaDesign && haveWindow)
             await AppendAssessmentFigmaDesignAsync(sb, boardId, windowStart, windowEnd, ct);
@@ -523,9 +523,10 @@ public partial class MetricsController
     }
 
     private async Task AppendAssessmentTrelloUserStoryAsync(
-        StringBuilder sb, string boardId, string? userStoryBoardId, string? studentEmail, CancellationToken ct)
+        StringBuilder sb, string boardId, string? userStoryBoardId, string? studentEmail,
+        bool haveWindow, DateTime windowStart, DateTime windowEnd, CancellationToken ct)
     {
-        sb.AppendLine("### Trello user stories (attributed to this student) _(persistent artifact — authored early in the project; do NOT treat as this sprint's activity)_");
+        sb.AppendLine("### Trello user stories (attributed to this student, active in this sprint window)");
         try
         {
             if (string.IsNullOrWhiteSpace(studentEmail))
@@ -535,8 +536,10 @@ public partial class MetricsController
                 return;
             }
 
-            var cards = await _trelloService.GetUserStoryCardsForMemberAsync(boardId, userStoryBoardId, studentEmail);
-            if (cards.Count == 0) { sb.AppendLine("_(none attributed to this student — not a user-story writer)_"); sb.AppendLine(); return; }
+            var cards = await _trelloService.GetUserStoryCardsForMemberAsync(
+                boardId, userStoryBoardId, studentEmail,
+                haveWindow ? windowStart : null, haveWindow ? windowEnd : null);
+            if (cards.Count == 0) { sb.AppendLine("_(none for this sprint)_"); sb.AppendLine(); return; }
 
             foreach (var card in cards)
             {

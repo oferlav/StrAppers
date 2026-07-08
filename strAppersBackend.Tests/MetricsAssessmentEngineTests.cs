@@ -731,3 +731,30 @@ public class CoreMetricGuardTests
         Assert.Equal(5, MetricsController.CoreMetricSlugs.Count);
     }
 }
+
+/// <summary>
+/// Trello card creation time is decoded from the card id (Mongo ObjectId: first 8 hex chars
+/// are unix seconds). Used by the sprint-window filter on the user-story sensor.
+/// </summary>
+public class TrelloCardCreationTimeTests
+{
+    [Fact]
+    public void Decodes_KnownTimestamp_FromCardIdPrefix()
+    {
+        // 0x67748580 = 1735689600 = 2025-01-01T00:00:00Z
+        var ok = strAppersBackend.Services.TrelloService.TryGetCardCreationUtc("67748580abcdef0123456789", out var created);
+        Assert.True(ok);
+        Assert.Equal(new DateTime(2025, 1, 1, 0, 0, 0, DateTimeKind.Utc), created);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("1234567")]
+    [InlineData("zzzzzzzz0123456789abcdef")]
+    public void ReturnsFalse_ForInvalidIds(string? cardId)
+    {
+        var ok = strAppersBackend.Services.TrelloService.TryGetCardCreationUtc(cardId, out _);
+        Assert.False(ok);
+    }
+}
