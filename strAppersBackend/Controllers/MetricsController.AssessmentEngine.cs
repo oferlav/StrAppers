@@ -68,17 +68,24 @@ public partial class MetricsController
             request.TrelloRoleLabel, haveWindow, windowStart, windowEnd,
             cancellationToken);
 
+        var skillRubric = metric.Skill?.Trim() ?? string.Empty;
+        if (string.IsNullOrEmpty(skillRubric))
+        {
+            _logger.LogInformation("[ASSESSMENT-ENGINE] Skipping metric {MetricId} ({MetricName}): no skill definition.", metric.Id, metric.Name);
+            return Ok(new { success = false, skipped = true, message = $"Metric '{metric.Name}' has no skill definition — assessment skipped." });
+        }
+
         var expertise = string.IsNullOrWhiteSpace(metric.AIExpertise)
             ? "professional academic skills assessment expert"
             : metric.AIExpertise.Trim();
 
         var systemPrompt = $$"""
-            You are a {{expertise}}. Assess the student's sprint work using ONLY the CONTEXT provided below.
+            You are a {{expertise}}.
 
-            Rules:
-            - Score 0–100 for each dimension defined in the rubric.
-            - Ground every score in verbatim evidence from the CONTEXT. Do not invent activity.
-            - Sections marked _(none for this sprint)_ have no data — do not speculate about them.
+            Your task: score the student's sprint performance.
+            - Use the Assessment Rubric as your scoring criteria — follow its dimensions and rules exactly.
+            - Use the Sprint Context as your evidence — ground every score in verbatim evidence from it.
+            - Do not invent activity. Sections marked _(none for this sprint)_ have no data; do not speculate about them.
             - Output valid JSON only, no markdown fences:
               {"categories":[{"name":"string","score":0,"rationale":"string"}],"narrative":"markdown"}
             - narrative: brief markdown summary of strengths, gaps, and 1–3 concrete follow-up suggestions.
@@ -86,7 +93,7 @@ public partial class MetricsController
 
         var userPrompt = new StringBuilder()
             .AppendLine($"## Assessment Rubric — {metric.Name}")
-            .AppendLine(metric.Skill?.Trim() ?? string.Empty)
+            .AppendLine(skillRubric)
             .AppendLine()
             .AppendLine($"## Sprint Context — Sprint {request.SprintNumber} | Student: {student.FirstName} {student.LastName} | Board: {boardId}")
             .AppendLine(contextMd)
