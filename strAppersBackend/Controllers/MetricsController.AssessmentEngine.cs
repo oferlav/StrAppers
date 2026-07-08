@@ -84,7 +84,9 @@ public partial class MetricsController
 
             Your task: score the student's sprint performance.
             - Use the Assessment Rubric as your scoring criteria — follow its dimensions and rules exactly.
+            - Only create categories that are explicitly defined in the Assessment Rubric. Do not invent categories from the context data.
             - Use the Sprint Context as your evidence — ground every score in verbatim evidence from it.
+            - Sections marked _(squad-level)_ cover the whole team; only attribute activity to this student if they are explicitly named or identifiable.
             - Do not invent activity. Sections marked _(none for this sprint)_ have no data; do not speculate about them.
             - Output valid JSON only, no markdown fences:
               {"categories":[{"name":"string","score":0,"rationale":"string"}],"narrative":"markdown"}
@@ -195,7 +197,7 @@ public partial class MetricsController
         if (metric.UseMentorChat)
             await AppendAssessmentMentorChatAsync(sb, student.Id, sprintNumber, ct);
         if (metric.UseCodebaseQuality)
-            await AppendAssessmentBoardStateAsync(sb, boardId, sprintNumber, ct);
+            await AppendAssessmentBoardStateAsync(sb, boardId, sprintNumber, trelloRoleLabel, ct);
         if (metric.UseResources)
             await AppendAssessmentResourcesAsync(sb, boardId, student.Id, sprintNumber, ct);
         if (metric.UseStakeholders)
@@ -214,7 +216,7 @@ public partial class MetricsController
         }
 
         if (metric.UseGroupChat)
-            AppendChatBlobSection(sb, "### Group chat (squad)",
+            AppendChatBlobSection(sb, "### Group chat (squad) _(squad-level — all team members)_",
                 haveWindow ? FilterChatBlobByWindow(board.GroupChat, windowStart, windowEnd) : null,
                 haveWindow);
 
@@ -276,12 +278,23 @@ public partial class MetricsController
         sb.AppendLine();
     }
 
-    private async Task AppendAssessmentBoardStateAsync(StringBuilder sb, string boardId, int sprintNumber, CancellationToken ct)
+    private async Task AppendAssessmentBoardStateAsync(StringBuilder sb, string boardId, int sprintNumber, string? trelloRoleLabel, CancellationToken ct)
     {
-        var states = await _context.BoardStates.AsNoTracking()
+        var all = await _context.BoardStates.AsNoTracking()
             .Where(s => s.BoardId == boardId && s.SprintNumber == sprintNumber)
             .OrderByDescending(s => s.UpdatedAt)
             .ToListAsync(ct);
+
+        // Filter to this student's dev role when possible; fall back to all if no match.
+        var states = all;
+        if (!string.IsNullOrWhiteSpace(trelloRoleLabel))
+        {
+            var filtered = all.Where(s =>
+                !string.IsNullOrWhiteSpace(s.DevRole) &&
+                (s.DevRole.Contains(trelloRoleLabel, StringComparison.OrdinalIgnoreCase) ||
+                 trelloRoleLabel.Contains(s.DevRole, StringComparison.OrdinalIgnoreCase))).ToList();
+            if (filtered.Count > 0) states = filtered;
+        }
 
         sb.AppendLine("### Codebase Quality (GitHub / CI)");
         if (states.Count == 0) { sb.AppendLine("_(none for this sprint)_"); sb.AppendLine(); return; }
@@ -321,7 +334,7 @@ public partial class MetricsController
             .Where(s => s.BoardId == boardId)
             .ToListAsync(ct);
 
-        sb.AppendLine("### CRM / Stakeholders");
+        sb.AppendLine("### CRM / Stakeholders _(squad-level — all team members)_");
         if (stakeholders.Count == 0) { sb.AppendLine("_(none for this sprint)_"); sb.AppendLine(); return; }
         foreach (var s in stakeholders)
         {
@@ -445,7 +458,7 @@ public partial class MetricsController
     private async Task AppendAssessmentTrelloUserStoryAsync(
         StringBuilder sb, string boardId, string? userStoryBoardId, CancellationToken ct)
     {
-        sb.AppendLine("### Trello user stories");
+        sb.AppendLine("### Trello user stories _(squad-level — all team members)_");
         var targetBoard = userStoryBoardId ?? boardId;
         try
         {
@@ -484,7 +497,7 @@ public partial class MetricsController
     private async Task AppendAssessmentFigmaDesignAsync(
         StringBuilder sb, string boardId, DateTime windowStart, DateTime windowEnd, CancellationToken ct)
     {
-        sb.AppendLine("### Figma design (version history)");
+        sb.AppendLine("### Figma design (version history) _(squad-level — versions attributed by user handle)_");
         try
         {
             var figmaRow = await _context.Figma.AsNoTracking()
