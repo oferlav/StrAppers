@@ -319,7 +319,7 @@ public partial class MetricsController
         {
             try
             {
-                switch (metric.Endpoint?.Trim().ToLowerInvariant())
+                switch (ToSlugKey(metric.Name))
                 {
                     case "adherence":
                         await Adherence(new AdherenceRequest { BoardId = boardId, StudentId = request.StudentId, SprintNumber = request.SprintNumber }, cancellationToken);
@@ -333,7 +333,7 @@ public partial class MetricsController
                     case "customerengagement":
                         await CustomerEngagement(new CustomerEngagementRequest { BoardId = boardId, StudentId = request.StudentId, SprintNumber = request.SprintNumber }, cancellationToken);
                         break;
-                    case "meetingscommunication":
+                    case "communication":
                         await MeetingsCommunication(new MeetingsCommunicationRequest { BoardId = boardId, StudentId = request.StudentId, SprintNumber = request.SprintNumber }, cancellationToken);
                         break;
                     default:
