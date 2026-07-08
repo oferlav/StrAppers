@@ -522,7 +522,7 @@ public partial class MetricsController
     private async Task AppendAssessmentTrelloUserStoryAsync(
         StringBuilder sb, string boardId, string? userStoryBoardId, string? studentEmail, CancellationToken ct)
     {
-        sb.AppendLine("### Trello user stories (assigned to this student)");
+        sb.AppendLine("### Trello user stories (attributed to this student)");
         try
         {
             if (string.IsNullOrWhiteSpace(studentEmail))
@@ -533,7 +533,7 @@ public partial class MetricsController
             }
 
             var cards = await _trelloService.GetUserStoryCardsForMemberAsync(boardId, userStoryBoardId, studentEmail);
-            if (cards.Count == 0) { sb.AppendLine("_(none assigned to this student)_"); sb.AppendLine(); return; }
+            if (cards.Count == 0) { sb.AppendLine("_(none attributed to this student — not a user-story writer)_"); sb.AppendLine(); return; }
 
             foreach (var card in cards)
             {

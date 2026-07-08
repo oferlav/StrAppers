@@ -22,7 +22,12 @@ namespace strAppersBackend.Services
         Task<string?> GetSprintCardBranchContextAsync(string boardId, int sprintNumber, string roleName);
         /// <summary>All open cards on the board assigned to the member with the given email, with card name, description, and checklist text.</summary>
         Task<IReadOnlyList<SprintRoleCardSnapshot>> GetMemberBoardCardsAsync(string boardId, string memberEmail);
-        /// <summary>User Story cards assigned to the member with the given email. Resolves email→memberId on the target board (falling back to the main board). Returns empty if the member is not found or has no assigned user stories.</summary>
+        /// <summary>
+        /// User Story cards attributed to the member with the given email. Membership of the user-story board is
+        /// the attribution signal (only story writers are invited there): if no card carries idMembers assignments,
+        /// a board member gets ALL the stories; when cards do carry assignments, only the member's own cards are
+        /// returned. Non-members always get an empty list.
+        /// </summary>
         Task<IReadOnlyList<SprintRoleCardSnapshot>> GetUserStoryCardsForMemberAsync(string boardId, string? userStoryBoardId, string memberEmail);
         /// <summary>Sprint role card: title, description, and flattened checklists for gap-analysis context.</summary>
         Task<SprintRoleCardSnapshot?> GetSprintRoleCardSnapshotAsync(string boardId, int sprintNumber, string roleName);
@@ -1954,24 +1959,22 @@ namespace strAppersBackend.Services
                 return Array.Empty<SprintRoleCardSnapshot>();
             try
             {
-                var targetBoard = userStoryBoardId ?? boardId;
+                var targetBoard = string.IsNullOrWhiteSpace(userStoryBoardId) ? boardId : userStoryBoardId;
                 var emailLower = memberEmail.Trim().ToLowerInvariant();
 
-                // Resolve email → Trello memberId. Try the user-story board first, then the main board.
+                // Resolve email → Trello memberId on the target board ONLY. Board membership is the
+                // attribution signal: only story writers receive the collaboration invite to this board,
+                // so a student who is not a member here did not write user stories.
                 string? memberId = null;
-                foreach (var bid in new[] { targetBoard, boardId }.Distinct())
-                {
-                    var membersUrl = $"https://api.trello.com/1/boards/{bid}/members?fields=id,email&key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
-                    var membersRes = await _httpClient.GetAsync(membersUrl);
-                    if (!membersRes.IsSuccessStatusCode) continue;
-                    var membersJson = JsonSerializer.Deserialize<JsonElement[]>(await membersRes.Content.ReadAsStringAsync());
-                    var match = (membersJson ?? []).FirstOrDefault(m =>
-                        string.Equals(m.TryGetProperty("email", out var ep) ? ep.GetString() : null,
-                            emailLower, StringComparison.OrdinalIgnoreCase));
-                    if (match.ValueKind != JsonValueKind.Undefined && match.TryGetProperty("id", out var idProp))
-                        memberId = idProp.GetString();
-                    if (!string.IsNullOrEmpty(memberId)) break;
-                }
+                var membersUrl = $"https://api.trello.com/1/boards/{targetBoard}/members?fields=id,email&key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
+                var membersRes = await _httpClient.GetAsync(membersUrl);
+                if (!membersRes.IsSuccessStatusCode) return Array.Empty<SprintRoleCardSnapshot>();
+                var membersJson = JsonSerializer.Deserialize<JsonElement[]>(await membersRes.Content.ReadAsStringAsync());
+                var match = (membersJson ?? []).FirstOrDefault(m =>
+                    string.Equals(m.TryGetProperty("email", out var ep) ? ep.GetString() : null,
+                        emailLower, StringComparison.OrdinalIgnoreCase));
+                if (match.ValueKind != JsonValueKind.Undefined && match.TryGetProperty("id", out var idProp))
+                    memberId = idProp.GetString();
                 if (string.IsNullOrEmpty(memberId)) return Array.Empty<SprintRoleCardSnapshot>();
 
                 // Find the User Stories list ID on the target board.
@@ -1993,17 +1996,26 @@ namespace strAppersBackend.Services
                 if (!cardsRes.IsSuccessStatusCode) return Array.Empty<SprintRoleCardSnapshot>();
                 var cardsData = JsonSerializer.Deserialize<JsonElement[]>(await cardsRes.Content.ReadAsStringAsync());
 
-                var results = new List<SprintRoleCardSnapshot>();
-                foreach (var c in cardsData ?? [])
+                // Cards in the User Stories list only.
+                var storyCards = (cardsData ?? []).Where(c =>
+                    string.Equals(c.TryGetProperty("idList", out var cl) ? cl.GetString() : "",
+                        listId, StringComparison.OrdinalIgnoreCase)).ToList();
+
+                // Hybrid attribution: when cards carry explicit member assignments, filter to this
+                // member's cards; when none do (the common case — writers just author cards without
+                // assigning themselves), board membership attributes all stories to this member.
+                var anyCardHasMembers = storyCards.Any(c =>
+                    c.TryGetProperty("idMembers", out var mp) && mp.ValueKind == JsonValueKind.Array && mp.GetArrayLength() > 0);
+                if (anyCardHasMembers)
                 {
-                    // Only cards in the User Stories list.
-                    var cardList = c.TryGetProperty("idList", out var cl) ? cl.GetString() : "";
-                    if (!string.Equals(cardList, listId, StringComparison.OrdinalIgnoreCase)) continue;
+                    storyCards = storyCards.Where(c =>
+                        c.TryGetProperty("idMembers", out var mp) && mp.ValueKind == JsonValueKind.Array &&
+                        mp.EnumerateArray().Any(m => string.Equals(m.GetString(), memberId, StringComparison.Ordinal))).ToList();
+                }
 
-                    // Only cards assigned to this member.
-                    if (!c.TryGetProperty("idMembers", out var mProp) || mProp.ValueKind != JsonValueKind.Array) continue;
-                    if (!mProp.EnumerateArray().Any(m => string.Equals(m.GetString(), memberId, StringComparison.Ordinal))) continue;
-
+                var results = new List<SprintRoleCardSnapshot>();
+                foreach (var c in storyCards)
+                {
                     var name = c.TryGetProperty("name", out var np) ? np.GetString() ?? "" : "";
                     var desc = c.TryGetProperty("desc", out var dp) ? dp.GetString() ?? "" : "";
 
