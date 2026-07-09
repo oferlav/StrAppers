@@ -234,11 +234,12 @@ public partial class MetricsController : ControllerBase
         if (!string.IsNullOrEmpty(studentEmail))
         {
             var sprintLengthWeeks = _configuration.GetValue("BusinessLogicConfig:SprintLengthInWeeks", 1);
+            var sprintLengthDays = await SprintLengthResolver.ResolveForBoardAsync(_context, boardId, sprintLengthWeeks, cancellationToken);
             var sprintMerge = await _context.ProjectBoardSprintMerges.AsNoTracking()
                 .FirstOrDefaultAsync(m => m.ProjectBoardId == boardId && m.SprintNumber == request.SprintNumber, cancellationToken);
             var haveWindow =
-                SprintPlanDateResolver.TryGetInclusiveUtcRangeFromSprintMerge(sprintMerge, request.SprintNumber, sprintLengthWeeks, out var meetWindowStart, out var meetWindowEnd)
-                || SprintPlanDateResolver.TryGetSprintInclusiveUtcRange(board.SprintPlan, board.StartDate, request.SprintNumber, out meetWindowStart, out meetWindowEnd);
+                SprintPlanDateResolver.TryGetInclusiveUtcRangeFromSprintMerge(sprintMerge, request.SprintNumber, sprintLengthDays, out var meetWindowStart, out var meetWindowEnd)
+                || SprintPlanDateResolver.TryGetSprintInclusiveUtcRange(board.SprintPlan, board.StartDate, request.SprintNumber, out meetWindowStart, out meetWindowEnd, sprintLengthDays);
 
             if (haveWindow)
             {
@@ -635,6 +636,7 @@ public partial class MetricsController : ControllerBase
             return false;
 
         var sprintLengthWeeks = _configuration.GetValue("BusinessLogicConfig:SprintLengthInWeeks", 1);
+        var sprintLengthDays = await SprintLengthResolver.ResolveForBoardAsync(_context, boardId, sprintLengthWeeks, cancellationToken);
         var sprintMerge = await _context.ProjectBoardSprintMerges.AsNoTracking()
             .FirstOrDefaultAsync(m => m.ProjectBoardId == boardId && m.SprintNumber == sprintNumber, cancellationToken);
 
@@ -642,9 +644,9 @@ public partial class MetricsController : ControllerBase
         DateTime windowEndInclusiveUtc;
         var haveWindow =
             SprintPlanDateResolver.TryGetInclusiveUtcRangeFromSprintMerge(
-                sprintMerge, sprintNumber, sprintLengthWeeks, out windowStartUtc, out windowEndInclusiveUtc)
+                sprintMerge, sprintNumber, sprintLengthDays, out windowStartUtc, out windowEndInclusiveUtc)
             || SprintPlanDateResolver.TryGetSprintInclusiveUtcRange(
-                board.SprintPlan, board.StartDate, sprintNumber, out windowStartUtc, out windowEndInclusiveUtc);
+                board.SprintPlan, board.StartDate, sprintNumber, out windowStartUtc, out windowEndInclusiveUtc, sprintLengthDays);
 
         if (!haveWindow)
             return await _context.Stakeholders.AsNoTracking().AnyAsync(s => s.BoardId == boardId, cancellationToken);

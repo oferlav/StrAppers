@@ -16,13 +16,14 @@ public static class SprintPlanDateResolver
 
     /// <summary>
     /// Inclusive UTC range from <see cref="ProjectBoardSprintMerge"/> — same rules as
-    /// <c>GET /api/Boards/use/sprint-schedule</c> (DueDate, MergedAt for sprint 1, and <paramref name="sprintLengthInWeeks"/>).
+    /// <c>GET /api/Boards/use/sprint-schedule</c> (DueDate, MergedAt for sprint 1, and <paramref name="sprintLengthInDays"/>).
     /// Prefer this over <see cref="TryGetSprintInclusiveUtcRange"/> when merge rows exist so CRM and the board UI agree.
+    /// Callers supply DAYS (resolve per board via <see cref="SprintLengthResolver"/>; legacy = configWeeks × 7).
     /// </summary>
     public static bool TryGetInclusiveUtcRangeFromSprintMerge(
         ProjectBoardSprintMerge? merge,
         int sprintNumber,
-        int sprintLengthInWeeks,
+        int sprintLengthInDays,
         out DateTime startUtc,
         out DateTime endInclusiveUtc)
     {
@@ -31,7 +32,7 @@ public static class SprintPlanDateResolver
         if (merge == null || sprintNumber <= 0 || merge.DueDate == null)
             return false;
 
-        var sprintDays = Math.Max(1, sprintLengthInWeeks * 7);
+        var sprintDays = Math.Max(1, sprintLengthInDays);
         DateTime? startRaw;
         if (sprintNumber == 1)
             startRaw = merge.MergedAt;
@@ -60,7 +61,8 @@ public static class SprintPlanDateResolver
         DateTime? boardStartDateUtc,
         int sprintNumber,
         out DateTime startUtc,
-        out DateTime endInclusiveUtc)
+        out DateTime endInclusiveUtc,
+        int? sprintLengthDaysOverride = null)
     {
         startUtc = default;
         endInclusiveUtc = default;
@@ -71,7 +73,7 @@ public static class SprintPlanDateResolver
         {
             var plan = JsonSerializer.Deserialize<TrelloSprintPlan>(sprintPlanJson, JsonOptions);
             if (plan?.Lists == null || plan.Lists.Count == 0)
-                return TryFallbackFromBoardStart(plan, boardStartDateUtc, sprintNumber, out startUtc, out endInclusiveUtc);
+                return TryFallbackFromBoardStart(plan, boardStartDateUtc, sprintNumber, sprintLengthDaysOverride, out startUtc, out endInclusiveUtc);
 
             TrelloList? match = null;
             foreach (var list in plan.Lists)
@@ -85,7 +87,7 @@ public static class SprintPlanDateResolver
             }
 
             if (match == null || match.StartDate == null || match.EndDate == null)
-                return TryFallbackFromBoardStart(plan, boardStartDateUtc, sprintNumber, out startUtc, out endInclusiveUtc);
+                return TryFallbackFromBoardStart(plan, boardStartDateUtc, sprintNumber, sprintLengthDaysOverride, out startUtc, out endInclusiveUtc);
 
             startUtc = ToUtc(match.StartDate.Value);
             var endRaw = ToUtc(match.EndDate.Value);
@@ -116,6 +118,7 @@ public static class SprintPlanDateResolver
         TrelloSprintPlan? plan,
         DateTime? boardStartDateUtc,
         int sprintNumber,
+        int? sprintLengthDaysOverride,
         out DateTime startUtc,
         out DateTime endInclusiveUtc)
     {
@@ -132,20 +135,30 @@ public static class SprintPlanDateResolver
             _ => DateTime.SpecifyKind(originRaw, DateTimeKind.Utc),
         };
 
-        var totalSprints = plan?.TotalSprints ?? 0;
-        if (totalSprints <= 0 && plan?.Lists != null)
+        double daysPerSprint;
+        if (sprintLengthDaysOverride is int overrideDays)
         {
-            totalSprints = plan.Lists.Count(l => ListNameMatchesAnySprint(l.Name));
+            // Day-based course: the caller resolved the cadence from the template; the
+            // EstimatedWeeks heuristic below assumes weekly sprints and must not be used.
+            daysPerSprint = Math.Max(1, overrideDays);
         }
+        else
+        {
+            var totalSprints = plan?.TotalSprints ?? 0;
+            if (totalSprints <= 0 && plan?.Lists != null)
+            {
+                totalSprints = plan.Lists.Count(l => ListNameMatchesAnySprint(l.Name));
+            }
 
-        if (totalSprints <= 0)
-            totalSprints = 1;
+            if (totalSprints <= 0)
+                totalSprints = 1;
 
-        var estimatedWeeks = plan?.EstimatedWeeks ?? 0;
-        if (estimatedWeeks <= 0)
-            estimatedWeeks = totalSprints;
+            var estimatedWeeks = plan?.EstimatedWeeks ?? 0;
+            if (estimatedWeeks <= 0)
+                estimatedWeeks = totalSprints;
 
-        var daysPerSprint = Math.Max(1.0, 7.0 * estimatedWeeks / totalSprints);
+            daysPerSprint = Math.Max(1.0, 7.0 * estimatedWeeks / totalSprints);
+        }
 
         startUtc = origin.AddDays(daysPerSprint * (sprintNumber - 1));
         var endExclusive = origin.AddDays(daysPerSprint * sprintNumber);

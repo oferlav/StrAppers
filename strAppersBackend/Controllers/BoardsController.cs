@@ -335,6 +335,8 @@ public partial class BoardsController : ControllerBase
             TrelloProjectCreationRequest? trelloRequest = null;
             object? sprintPlanForStorage = null;
             var useSavedTrelloJson = false;
+            // Per-course sprint length in days (course-builder templates). Null = legacy weekly cadence.
+            int? sprintLengthDays = null;
             _logger.LogInformation("[BOARD-CREATE] UseDBProjectBoard={UseDB}, EffectiveTrelloBoardJson present={HasJson}, Length={JsonLen}",
                 useDBProjectBoard,
                 !string.IsNullOrWhiteSpace(effectiveTrelloBoardJson),
@@ -356,6 +358,15 @@ public partial class BoardsController : ControllerBase
                         trelloRequest.StudentEmails = students.Select(s => s.Email).ToList();
                         trelloRequest.ProjectLengthWeeks = projectLengthWeeks;
                         trelloRequest.SprintLengthWeeks = sprintLengthWeeks;
+                        // SprintLengthDays is deliberately NOT overwritten from config — it is the course's own cadence.
+                        sprintLengthDays = trelloRequest.SprintLengthDays;
+                        if (sprintLengthDays is int kickoffDays)
+                        {
+                            // Day-based course: kickoff is the next local day at 10:00 (no calendar-week wait).
+                            kickoffUtc = strAppersBackend.Services.TrelloBoardScheduleHelper.GetDayBasedKickoffUtc(DateTime.UtcNow, localOffset);
+                            kickoffDateTimeIso = kickoffUtc.ToString("yyyy-MM-ddTHH:mm:ssZ");
+                            _logger.LogInformation("[BOARD-CREATE] Day-based course ({Days} days/sprint): kickoff overridden to next-day 10:00 local, UTC={KickoffUtc}", kickoffDays, kickoffUtc);
+                        }
                         trelloRequest.TeamMembers = students.Select(s => new TrelloTeamMember
                         {
                             Email = s.Email,
@@ -400,7 +411,8 @@ public partial class BoardsController : ControllerBase
                             if (removed > 0)
                                 _logger.LogInformation("Filtered {Removed} cards for roles not in team (template had all roles). User Stories list cards are always kept. Sending {Count} cards to Trello.", removed, trelloRequest.SprintPlan.Cards.Count);
                         }
-                        // UseDBProjectBoard: override saved sprint due dates (first day of week = sprint start, last day of weekend = due)
+                        // UseDBProjectBoard: override saved sprint due dates. Day-based courses chain from the
+                        // kickoff date (N × days − 1); weekly courses keep first-day-of-week / last-day-of-weekend.
                         if (useDBProjectBoard && trelloRequest.SprintPlan?.Cards != null)
                         {
                             var sprintWeeks = _configuration.GetValue<int>("BusinessLogicConfig:SprintLengthInWeeks", 1);
@@ -411,10 +423,13 @@ public partial class BoardsController : ControllerBase
                                 var sprintMatch = Regex.Match(listName, @"Sprint\s*(\d+)", RegexOptions.IgnoreCase);
                                 if (sprintMatch.Success && int.TryParse(sprintMatch.Groups[1].Value, out var sprintNum) && sprintNum >= 1)
                                 {
-                                    card.DueDate = GetSprintDueDateUtc(kickoffUtc, sprintNum, firstDayOfWeek, offsetMin, sprintWeeks);
+                                    card.DueDate = sprintLengthDays is int cardDays
+                                        ? strAppersBackend.Services.TrelloBoardScheduleHelper.GetSprintDueDateUtcForDays(kickoffUtc, sprintNum, cardDays, localOffset)
+                                        : GetSprintDueDateUtc(kickoffUtc, sprintNum, firstDayOfWeek, offsetMin, sprintWeeks);
                                 }
                             }
-                            _logger.LogInformation("[BOARD-CREATE] Overrode sprint due dates from Trello:FirstDayOfWeek={FirstDay}, LocalTime={LocalTime}", firstDayOfWeekStr, localTimeStr);
+                            _logger.LogInformation("[BOARD-CREATE] Overrode sprint due dates ({Cadence}) from Trello:FirstDayOfWeek={FirstDay}, LocalTime={LocalTime}",
+                                sprintLengthDays != null ? $"{sprintLengthDays}-day" : "weekly", firstDayOfWeekStr, localTimeStr);
                         }
 
                         _logger.LogInformation("Using saved TrelloBoardJson for project {ProjectId} instead of AI", request.ProjectId);
@@ -914,7 +929,7 @@ public partial class BoardsController : ControllerBase
                         Id = trelloResponse.SystemBoardId,
                         ProjectId = request.ProjectId,
                         StartDate = DateTime.UtcNow,
-                        DueDate = DateTime.UtcNow.AddDays(projectLengthWeeks * 7),
+                        DueDate = ComputeBoardDueDateUtc(sprintLengthDays, kickoffUtc, trelloRequest, projectLengthWeeks),
                         StatusId = 1,
                         AdminId = qmAdminStudent?.Id,
                         SprintPlan = sprintPlanForStorage != null ? System.Text.Json.JsonSerializer.Serialize(sprintPlanForStorage) : null,
@@ -936,7 +951,7 @@ public partial class BoardsController : ControllerBase
                     ProjectId = request.ProjectId,
                     IsSystemBoard = false,
                     StartDate = DateTime.UtcNow,
-                    DueDate = DateTime.UtcNow.AddDays(projectLengthWeeks * 7),
+                    DueDate = ComputeBoardDueDateUtc(sprintLengthDays, kickoffUtc, trelloRequest, projectLengthWeeks),
                     StatusId = 1,
                     AdminId = qmAdminStudent?.Id,
                     SprintPlan = sprintPlanForStorage != null ? System.Text.Json.JsonSerializer.Serialize(sprintPlanForStorage) : null,
@@ -3124,7 +3139,7 @@ public partial class BoardsController : ControllerBase
                     Id = trelloResponse.SystemBoardId,
                     ProjectId = request.ProjectId,
                     StartDate = DateTime.UtcNow,
-                    DueDate = DateTime.UtcNow.AddDays(projectLengthWeeks * 7),
+                    DueDate = ComputeBoardDueDateUtc(sprintLengthDays, kickoffUtc, trelloRequest, projectLengthWeeks),
                     StatusId = 1, // New status
                     AdminId = adminStudent?.Id,
                     SprintPlan = sprintPlanForStorage != null ? System.Text.Json.JsonSerializer.Serialize(sprintPlanForStorage) : null,
@@ -3158,7 +3173,7 @@ public partial class BoardsController : ControllerBase
                 ProjectId = request.ProjectId,
                 IsSystemBoard = false, // EmptyBoard or single board
                 StartDate = DateTime.UtcNow,
-                DueDate = DateTime.UtcNow.AddDays(projectLengthWeeks * 7),
+                DueDate = ComputeBoardDueDateUtc(sprintLengthDays, kickoffUtc, trelloRequest, projectLengthWeeks),
                 StatusId = 1, // New status
                 AdminId = adminStudent?.Id,
                 SprintPlan = sprintPlanForStorage != null ? System.Text.Json.JsonSerializer.Serialize(sprintPlanForStorage) : null,
@@ -3233,7 +3248,9 @@ public partial class BoardsController : ControllerBase
                         if (isMergeTypeAdd && sprintNum == visibleSprints + 1)
                         {
                             // Next sprint: no list on board yet; DueDate = last day of that sprint
-                            dueDateUtc = GetSprintDueDateUtc(kickoffUtc, sprintNum, firstDayOfWeek, offsetMin, sprintLengthWeeks);
+                            dueDateUtc = sprintLengthDays is int nextDays
+                                ? strAppersBackend.Services.TrelloBoardScheduleHelper.GetSprintDueDateUtcForDays(kickoffUtc, sprintNum, nextDays, localOffset)
+                                : GetSprintDueDateUtc(kickoffUtc, sprintNum, firstDayOfWeek, offsetMin, sprintLengthWeeks);
                             mergedAt = null;
                         }
                         else if (overriddenSprints.TryGetValue(sprintNum, out var overridden))
@@ -3251,7 +3268,9 @@ public partial class BoardsController : ControllerBase
                             listId = snapshot.ListId;
                             dueDateUtc = snapshot.Cards?.Count > 0 && snapshot.Cards[0].DueDate.HasValue
                                 ? ToUtcForDb(snapshot.Cards[0].DueDate.Value)
-                                : GetSprintDueDateUtc(kickoffUtc, sprintNum, firstDayOfWeek, offsetMin, sprintLengthWeeks);
+                                : sprintLengthDays is int rowDays
+                                    ? strAppersBackend.Services.TrelloBoardScheduleHelper.GetSprintDueDateUtcForDays(kickoffUtc, sprintNum, rowDays, localOffset)
+                                    : GetSprintDueDateUtc(kickoffUtc, sprintNum, firstDayOfWeek, offsetMin, sprintLengthWeeks);
                             if (isMergeTypeAdd && sprintNum <= visibleSprints)
                                 mergedAt = DateTime.UtcNow;
                         }
@@ -4101,6 +4120,26 @@ public partial class BoardsController : ControllerBase
         return dueLocal.AddMinutes(-localOffsetMinutes);
     }
 
+    /// <summary>
+    /// ProjectBoard.DueDate at creation. Day-based courses: kickoff + (sprint count × days), where the
+    /// sprint count comes from the template's Sprint lists (ProjectLengthWeeks is a misnomer there — the
+    /// course builder stores sprint COUNT in it, and it is overwritten with global config at load anyway).
+    /// Weekly (legacy): now + projectLengthWeeks × 7, unchanged.
+    /// </summary>
+    internal static DateTime ComputeBoardDueDateUtc(
+        int? sprintLengthDays, DateTime kickoffUtc, TrelloProjectCreationRequest? trelloRequest, int projectLengthWeeks)
+    {
+        if (sprintLengthDays is int days)
+        {
+            var sprintListCount = trelloRequest?.SprintPlan?.Lists?
+                .Count(l => ParseSprintNumberFromListName(l.Name) != null) ?? 0;
+            if (sprintListCount <= 0)
+                sprintListCount = Math.Max(1, trelloRequest?.SprintPlan?.TotalSprints ?? 1);
+            return kickoffUtc.AddDays(sprintListCount * Math.Max(1, days));
+        }
+        return DateTime.UtcNow.AddDays(projectLengthWeeks * 7);
+    }
+
     /// <summary>Parse sprint number from list name (e.g. "Sprint1", "Sprint 2"). Returns null if not a sprint list.</summary>
     private static int? ParseSprintNumberFromListName(string? listName)
     {
@@ -4154,8 +4193,10 @@ public partial class BoardsController : ControllerBase
             else
             {
                 var sprintLengthInWeeks = _configuration.GetValue<int>("BusinessLogicConfig:SprintLengthInWeeks", 1);
-                // Sprint window is inclusive (start and due both count): 1 week = 7 days = due - 6 days for start
-                var sprintDays = Math.Max(1, sprintLengthInWeeks * 7);
+                // Sprint window is inclusive (start and due both count): start = due - (days - 1).
+                // Days resolved per board (course templates carry SprintLengthDays; legacy = weeks × 7).
+                var sprintDays = await strAppersBackend.Utilities.SprintLengthResolver.ResolveForBoardAsync(
+                    _context, boardId, sprintLengthInWeeks);
                 startDate = dueDate.HasValue ? dueDate.Value.AddDays(-(sprintDays - 1)) : (DateTime?)null;
             }
 

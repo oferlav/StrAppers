@@ -65,6 +65,7 @@ public partial class MentorController
             var effectiveBoardId = board.UserStoryBoardId ?? boardId;
 
             var sprintLengthWeeks = _configuration.GetValue<int>("BusinessLogicConfig:SprintLengthInWeeks", 1);
+            var sprintLengthDays = await SprintLengthResolver.ResolveForBoardAsync(_context, boardId, sprintLengthWeeks, cancellationToken);
             var sprintMerge = await _context.ProjectBoardSprintMerges.AsNoTracking()
                 .FirstOrDefaultAsync(m => m.ProjectBoardId == boardId && m.SprintNumber == request.SprintNumber, cancellationToken);
 
@@ -72,13 +73,14 @@ public partial class MentorController
             DateTime windowEndInclusiveUtc;
             var haveSprintWindow =
                 SprintPlanDateResolver.TryGetInclusiveUtcRangeFromSprintMerge(
-                    sprintMerge, request.SprintNumber, sprintLengthWeeks, out windowStartUtc, out windowEndInclusiveUtc)
+                    sprintMerge, request.SprintNumber, sprintLengthDays, out windowStartUtc, out windowEndInclusiveUtc)
                 || SprintPlanDateResolver.TryGetSprintInclusiveUtcRange(
                     board.SprintPlan,
                     board.StartDate,
                     request.SprintNumber,
                     out windowStartUtc,
-                    out windowEndInclusiveUtc);
+                    out windowEndInclusiveUtc,
+                    sprintLengthDays);
 
             if (!haveSprintWindow)
             {

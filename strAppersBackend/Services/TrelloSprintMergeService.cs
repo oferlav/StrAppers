@@ -101,6 +101,8 @@ namespace strAppersBackend.Services
                 var listsWithPos = await _trelloService.GetBoardListsWithPositionsAsync(boardId);
                 var existingList = listsWithPos.FirstOrDefault(l => string.Equals(l.Name, listName, StringComparison.OrdinalIgnoreCase));
                 var sprintLengthWeeks = _configuration.GetValue<int>("BusinessLogicConfig:SprintLengthInWeeks", 1);
+                // Per-course day cadence from the template; legacy templates fall back to weekly config.
+                var sprintDays = trelloRequest?.SprintLengthDays is int d ? Math.Max(1, d) : sprintLengthWeeks * 7;
                 DateTime? addModeDueDateUtc = null;
                 if (sprintNumber > 1)
                 {
@@ -108,10 +110,10 @@ namespace strAppersBackend.Services
                         .AsNoTracking()
                         .FirstOrDefaultAsync(m => m.ProjectBoardId == boardId && m.SprintNumber == sprintNumber - 1);
                     if (prevRow?.DueDate != null)
-                        addModeDueDateUtc = prevRow.DueDate.Value.AddDays(sprintLengthWeeks * 7);
+                        addModeDueDateUtc = prevRow.DueDate.Value.AddDays(sprintDays);
                 }
                 if (!addModeDueDateUtc.HasValue)
-                    addModeDueDateUtc = DateTime.UtcNow.Date.AddDays((sprintNumber * sprintLengthWeeks * 7) - 1);
+                    addModeDueDateUtc = DateTime.UtcNow.Date.AddDays((sprintNumber * sprintDays) - 1);
 
                 var listCreated = string.IsNullOrEmpty(existingList.Id);
                 string? newListId;
@@ -182,7 +184,7 @@ namespace strAppersBackend.Services
 
                     var nextSprintNum = sprintNumber + 1;
                     var nextListName = $"Sprint {nextSprintNum}";
-                    var nextDueDateUtc = addModeDueDateUtc?.AddDays(sprintLengthWeeks * 7);
+                    var nextDueDateUtc = addModeDueDateUtc?.AddDays(sprintDays);
                     // Only add a row for the next sprint if the template has that sprint — otherwise we stop (no more "due" merges).
                     var addNextRow = trelloRequest != null && TemplateHasSprint(trelloRequest, nextListName);
                     if (addNextRow)
@@ -340,10 +342,13 @@ namespace strAppersBackend.Services
                         if (trelloRequest != null)
                         {
                             // Compute next sprint DueDate = this sprint's due + one sprint length (do not use template dates from DB).
+                            // Day cadence resolved per board (InstituteProject JSON preferred) so course boards chain correctly.
                             var sprintLengthWeeks = _configuration.GetValue<int>("BusinessLogicConfig:SprintLengthInWeeks", 1);
+                            var sprintDays = await strAppersBackend.Utilities.SprintLengthResolver.ResolveForBoardAsync(
+                                _context, boardId, sprintLengthWeeks);
                             DateTime? nextDueDateUtc = null;
                             if (dueDateUtc.HasValue)
-                                nextDueDateUtc = dueDateUtc.Value.AddDays(7 * sprintLengthWeeks);
+                                nextDueDateUtc = dueDateUtc.Value.AddDays(sprintDays);
 
                             var nextListId = await _trelloService.EnsureNextEmptySprintOnBoardAsync(boardId, trelloRequest, sprintNumber + 1, nextDueDateUtc);
                             if (!string.IsNullOrEmpty(nextListId))
