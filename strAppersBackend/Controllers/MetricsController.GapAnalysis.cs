@@ -32,7 +32,7 @@ public partial class MetricsController
     /// <summary>
     /// Sprint gap analysis (MetricId 2): compares sprint requirements to delivered artifacts; stores <see cref="CacheMetrics.ReviewContent"/> and base64 PNG bar chart(s) in <see cref="CacheMetrics.Graph"/> and optional <see cref="CacheMetrics.Graph2"/>.
     /// Full Stack runs two separate analyses (backend repo vs frontend repo); the model is not told "full stack"—only "backend" or "frontend" expert. Backend result is saved first; frontend narrative and chart are appended (<see cref="CacheMetrics.Graph2"/>).
-    /// Trello cards are matched by the green label: <see cref="Role.Description"/> if set, otherwise <see cref="Role.Name"/> (same board convention as "Role Description" labels).
+    /// Trello cards are matched by the label <see cref="Role.Name"/> (see <see cref="ResolveTrelloSprintCardLabel"/>).
     /// Set <see cref="GapAnalysisRequest.Test"/> to true to return only generated system and user prompts (no LLM, no DB write).
     /// </summary>
     [HttpPost("use/GapAnalysis")]
@@ -415,15 +415,22 @@ public partial class MetricsController
     /// <param name="ParsedOk">False when the model output was not valid JSON — caller must not persist.</param>
     private sealed record GapTrackResult(string Narrative, List<(string Label, int Score)> ChartRows, object? RawModel, bool ParsedOk, int InputTokens = 0, int OutputTokens = 0);
 
-    /// <summary>Board sprint cards use a label that matches the role: prefer database <see cref="Role.Description"/>, then <see cref="Role.Name"/>. Full-stack tracks use fixed developer labels.</summary>
-    private static string ResolveTrelloSprintCardLabel(Role? role, string? fullStackTrackLabel)
+    /// <summary>
+    /// Board sprint cards use a label that matches <see cref="Role.Name"/> (e.g. "Backend Developer") —
+    /// confirmed against live Trello card labels. Full-stack tracks use fixed developer labels.
+    /// Do NOT prefer <see cref="Role.Description"/> here: every seeded role has a non-empty Description
+    /// (e.g. "Develops server-side logic and database integration" for Backend Developer), so doing so
+    /// made every Trello sprint-card lookup for this label miss on every board — the CONTEXT block of
+    /// every Gap Analysis run was silently empty ("No context blocks could be assembled"), because the
+    /// search term never matched a real Trello label. Role.Description is the right string for the LLM's
+    /// persona (see <c>roleDesc</c> in <see cref="GapAnalysis"/>), not for the Trello lookup key.
+    /// </summary>
+    internal static string ResolveTrelloSprintCardLabel(Role? role, string? fullStackTrackLabel)
     {
         if (!string.IsNullOrWhiteSpace(fullStackTrackLabel))
             return fullStackTrackLabel.Trim();
-        if (role == null)
+        if (role == null || string.IsNullOrWhiteSpace(role.Name))
             return "Team Member";
-        if (!string.IsNullOrWhiteSpace(role.Description))
-            return role.Description.Trim();
         return role.Name.Trim();
     }
 
