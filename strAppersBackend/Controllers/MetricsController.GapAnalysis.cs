@@ -903,10 +903,25 @@ public partial class MetricsController
             sb.AppendLine("Presence of an entry here confirms the student stored the artifact in the Squad Room Resources panel.");
             foreach (var r in resources)
             {
-                var hint = LooksLikeImageUrl(r.Url)
-                    ? " (image — content sent to model as inline vision input)"
-                    : " (non-image — URL confirms storage in Resources panel)";
-                sb.AppendLine($"- {r.Name}: {r.Url}{hint}");
+                if (LooksLikeImageUrl(r.Url))
+                {
+                    sb.AppendLine($"- {r.Name}: {r.Url} (image — content sent to model as inline vision input)");
+                    continue;
+                }
+
+                var extracted = await TryExtractResourceDocumentTextAsync(r.Url, r.Name, cancellationToken);
+                if (extracted != null)
+                {
+                    sb.AppendLine($"- {r.Name}: {r.Url} (document content extracted on server — see below; score its actual content, not just its presence)");
+                    sb.AppendLine($"  Extracted content of \"{r.Name}\":");
+                    sb.AppendLine("  ```");
+                    sb.AppendLine(extracted);
+                    sb.AppendLine("  ```");
+                }
+                else
+                {
+                    sb.AppendLine($"- {r.Name}: {r.Url} (non-image — URL confirms storage in Resources panel; content could not be extracted for review, e.g. unsupported file type or empty/scanned document — do not penalise the student for a server-side extraction limitation)");
+                }
             }
         }
         else
@@ -1091,6 +1106,63 @@ public partial class MetricsController
         var u = url.Trim().ToLowerInvariant();
         return u.Contains(".png", StringComparison.Ordinal) || u.Contains(".jpg", StringComparison.Ordinal) ||
                u.Contains(".jpeg", StringComparison.Ordinal) || u.Contains(".webp", StringComparison.Ordinal) || u.Contains(".gif", StringComparison.Ordinal);
+    }
+
+    private const int GapAnalysisResourceDocMaxChars = 6000;
+
+    /// <summary>
+    /// Downloads a non-image resource from Azure Blob and extracts its text — the same
+    /// <see cref="ResourceDocumentContentExtractor"/> the mentor-review feature uses (.docx/.xlsx/.pptx/
+    /// text) plus <see cref="PdfTextExtractor"/> for PDF — so Gap Analysis can score actual document
+    /// content instead of only confirming a URL was stored. Previously the model was only shown the URL
+    /// (e.g. an uploaded ERD .docx), so it could never verify the deliverable's quality even when the
+    /// student's mentor review could. Returns null on any failure (unsupported type, blob not found,
+    /// empty/scanned content) — callers fall back to the URL-only line.
+    /// </summary>
+    internal async Task<string?> TryExtractResourceDocumentTextAsync(string url, string resourceName, CancellationToken cancellationToken)
+    {
+        if (!_blobStorageService.IsConfigured || string.IsNullOrWhiteSpace(url))
+            return null;
+        if (!Uri.TryCreate(url.Trim(), UriKind.Absolute, out var blobUri))
+            return null;
+
+        try
+        {
+            var blobOpen = await _blobStorageService.OpenBlobReadAsync(blobUri, cancellationToken);
+            if (blobOpen == null)
+                return null;
+
+            var (stream, contentType, fileName) = blobOpen.Value;
+            var safeName = string.IsNullOrWhiteSpace(resourceName) ? fileName : resourceName;
+            var mime = ResourceDocumentContentExtractor.NormalizeMimeForDisplay(contentType, safeName);
+
+            string? text;
+            await using (stream)
+            {
+                if (string.Equals(mime, "application/pdf", StringComparison.OrdinalIgnoreCase))
+                {
+                    using var ms = new MemoryStream();
+                    await stream.CopyToAsync(ms, cancellationToken);
+                    text = PdfTextExtractor.TryExtractText(ms.ToArray(), GapAnalysisResourceDocMaxChars);
+                }
+                else
+                {
+                    var payload = await ResourceDocumentContentExtractor.BuildAsync(stream, contentType, safeName, cancellationToken);
+                    text = payload.Mode == "text" ? payload.TextBody : null;
+                }
+            }
+
+            if (string.IsNullOrWhiteSpace(text))
+                return null;
+            return text.Length > GapAnalysisResourceDocMaxChars
+                ? text[..GapAnalysisResourceDocMaxChars] + "\n… [truncated]"
+                : text;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "GapAnalysis: failed to extract document text for resource {Name} ({Url})", resourceName, url);
+            return null;
+        }
     }
 
     private static string GapAnalysisImageMimeType(string url)
