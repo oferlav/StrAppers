@@ -77,6 +77,9 @@ public partial class BoardsController : ControllerBase
     private static void DbgLog(System.Text.StringBuilder? sb, string msg)
         => sb?.AppendLine($"[{DateTime.UtcNow:yyyy-MM-dd HH:mm:ss.fff}Z] {msg}");
 
+    private static string Truncate(string? s, int max)
+        => string.IsNullOrEmpty(s) ? "" : s.Length <= max ? s : s[..max] + "…";
+
     private async Task FlushDebugLog(System.Text.StringBuilder? debugLog, string boardId)
     {
         if (debugLog == null) return;
@@ -2078,9 +2081,11 @@ public partial class BoardsController : ControllerBase
                     // Use shared Railway project instead of creating a new one
                     projectId = _configuration["Railway:SharedProjectId"];
 
+                    DbgLog(debugLog, $"[RAILWAY] START: ApiUrl={railwayApiUrl} TokenSet={!string.IsNullOrWhiteSpace(railwayApiToken)} SharedProjectId={(string.IsNullOrWhiteSpace(projectId) ? "(MISSING)" : projectId)} ServiceName={sanitizedName}");
                     if (string.IsNullOrWhiteSpace(projectId))
                     {
                         _logger.LogError("❌ [RAILWAY] Shared project ID not configured. Cannot create Railway service.");
+                        DbgLog(debugLog, "[RAILWAY] ABORTED: Railway:SharedProjectId not configured — no service created.");
                         // Continue without Railway service - board creation can still proceed
                     }
                     else
@@ -2201,9 +2206,10 @@ public partial class BoardsController : ControllerBase
                                         if (serviceObj.TryGetProperty("id", out var serviceIdProp))
                                         {
                                             railwayServiceId = serviceIdProp.GetString();
-                                            _logger.LogInformation("✅ [RAILWAY] Service created: ID={ServiceId}, Name={ServiceName}", 
+                                            _logger.LogInformation("✅ [RAILWAY] Service created: ID={ServiceId}, Name={ServiceName}",
                                                 railwayServiceId, sanitizedName);
                                             _logger.LogInformation("🔍 [RAILWAY] DIAGNOSTIC: Service {ServiceId} will be configured with backend build settings", railwayServiceId);
+                                            DbgLog(debugLog, $"[RAILWAY] Service created OK: ServiceId={railwayServiceId} Name={sanitizedName}");
                                         }
                                     }
                                 }
@@ -2240,6 +2246,7 @@ public partial class BoardsController : ControllerBase
                                     _logger.LogWarning(parseEx, "⚠️ [RAILWAY] Could not parse error response");
                                 }
                                 
+                                DbgLog(debugLog, $"[RAILWAY] Service creation FAILED after {serviceRetryCount + 1} attempts: HTTP {serviceResponse?.StatusCode}, Error: {Truncate(errorMessages ?? serviceResponseContent, 800)}");
                                 throw new InvalidOperationException(
                                     $"Failed to create Railway service after {serviceRetryCount + 1} attempts. " +
                                     $"Status: {serviceResponse?.StatusCode}, Error: {errorMessages ?? serviceResponseContent ?? "Unknown error"}. " +
@@ -2472,6 +2479,7 @@ public partial class BoardsController : ControllerBase
                 // CRITICAL: Railway deployment failures MUST fail the entire board creation
                 // Railway is a critical component - board cannot function without backend deployment
                 _logger.LogError(ex, "❌ [RAILWAY] CRITICAL: Railway deployment failed. Board creation cannot proceed. Error: {Error}", ex.Message);
+                DbgLog(debugLog, $"[RAILWAY] CRITICAL FAILURE — board creation aborted: {ex.Message}");
                 throw; // Re-throw to fail the entire board creation
             }
             
@@ -2881,13 +2889,13 @@ public partial class BoardsController : ControllerBase
                                     if (!string.IsNullOrEmpty(railwayApiUrl))
                                     {
                                         using var railwayHttpClient = _httpClientFactory.CreateClient();
-                                        railwayHttpClient.DefaultRequestHeaders.Authorization = 
+                                        railwayHttpClient.DefaultRequestHeaders.Authorization =
                                             new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", railwayApiToken);
                                         railwayHttpClient.DefaultRequestHeaders.Accept.Add(
                                             new System.Net.Http.Headers.MediaTypeWithQualityHeaderValue("application/json"));
                                         railwayHttpClient.DefaultRequestHeaders.Add("User-Agent", "StrAppersBackend/1.0");
-                                        
-                                        await ConnectGitHubRepositoryToRailway(railwayHttpClient, railwayApiUrl, railwayApiToken, railwayServiceId, backendRepositoryUrl);
+
+                                        await ConnectGitHubRepositoryToRailway(railwayHttpClient, railwayApiUrl, railwayApiToken, railwayServiceId, backendRepositoryUrl, debugLog);
                                         
                                         // Set Railway build environment variables (for root-level files, no "cd backend &&" needed)
                                         if (!string.IsNullOrEmpty(environmentId) && !string.IsNullOrEmpty(projectId) && !string.IsNullOrEmpty(programmingLanguage))
@@ -7542,21 +7550,23 @@ INSERT INTO ""TestProjects"" (""Name"") VALUES
     /// <summary>
     /// Connects a GitHub repository to a Railway service
     /// </summary>
-    private async Task ConnectGitHubRepositoryToRailway(HttpClient httpClient, string railwayApiUrl, string railwayApiToken, string serviceId, string repositoryUrl)
+    private async Task ConnectGitHubRepositoryToRailway(HttpClient httpClient, string railwayApiUrl, string railwayApiToken, string serviceId, string repositoryUrl, System.Text.StringBuilder? debugLog = null)
     {
         try
         {
             _logger.LogInformation("🔗 [RAILWAY] Connecting GitHub repository to Railway service {ServiceId}", serviceId);
             _logger.LogDebug("🔗 [RAILWAY] Repository URL: {RepositoryUrl}", repositoryUrl);
-            
+            DbgLog(debugLog, $"[RAILWAY] serviceConnect START: ServiceId={serviceId} Repo={repositoryUrl} (this step triggers the first deployment — if it fails, the service stays 'offline' with no deployment history)");
+
             // Parse GitHub repository URL to extract owner and repo name
             // Format: https://github.com/owner/repo-name
             var uri = new Uri(repositoryUrl);
             var pathParts = uri.AbsolutePath.TrimStart('/').Split('/');
-            
+
             if (pathParts.Length < 2)
             {
                 _logger.LogWarning("⚠️ [RAILWAY] Invalid GitHub repository URL format: {RepositoryUrl}", repositoryUrl);
+                DbgLog(debugLog, $"[RAILWAY] serviceConnect ABORTED: invalid GitHub repo URL format '{repositoryUrl}'");
                 return;
             }
             
@@ -7601,12 +7611,23 @@ INSERT INTO ""TestProjects"" (""Name"") VALUES
             
             if (response.IsSuccessStatusCode)
             {
-                _logger.LogInformation("[RAILWAY] Repository connected successfully");
+                // GraphQL can return 200 with an errors array — success here means HTTP-level only.
+                if (responseContent.Contains("\"errors\"", StringComparison.OrdinalIgnoreCase))
+                {
+                    _logger.LogError("[RAILWAY] serviceConnect returned HTTP 200 with GraphQL errors: {Response}", responseContent);
+                    DbgLog(debugLog, $"[RAILWAY] serviceConnect FAILED (GraphQL errors in HTTP 200): {Truncate(responseContent, 800)}");
+                }
+                else
+                {
+                    _logger.LogInformation("[RAILWAY] Repository connected successfully");
+                    DbgLog(debugLog, $"[RAILWAY] serviceConnect OK: ServiceId={serviceId} — first deployment should be triggered");
+                }
             }
             else
             {
                 _logger.LogError("[RAILWAY] Failed to connect repository: {StatusCode}", response.StatusCode);
-                
+                DbgLog(debugLog, $"[RAILWAY] serviceConnect FAILED: HTTP {(int)response.StatusCode} {response.StatusCode}. Response: {Truncate(responseContent, 800)}");
+
                 // Log GraphQL errors for debugging
                 try
                 {
@@ -7629,6 +7650,7 @@ INSERT INTO ""TestProjects"" (""Name"") VALUES
         catch (Exception ex)
         {
             _logger.LogError(ex, "[RAILWAY] Error connecting repository: {Message}", ex.Message);
+            DbgLog(debugLog, $"[RAILWAY] serviceConnect EXCEPTION: {ex.Message}");
         }
     }
     
