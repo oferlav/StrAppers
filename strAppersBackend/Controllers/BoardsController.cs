@@ -774,7 +774,9 @@ public partial class BoardsController : ControllerBase
                     ordered[i].Position = i + 1;
             }
 
-            // Override sprint due dates: sprint starts first day of week, due = last day of weekend (and when UseDBProjectBoard, override saved JSON dates)
+            // Override sprint due dates (this is the FINAL stamping before the Trello call — it overwrites
+            // any earlier card dates). Day-based courses chain from the kickoff date; weekly courses snap
+            // to first day of week / last day of weekend.
             if (trelloRequest.SprintPlan?.Lists != null && trelloRequest.SprintPlan.Cards != null)
             {
                 foreach (var list in trelloRequest.SprintPlan.Lists)
@@ -782,13 +784,26 @@ public partial class BoardsController : ControllerBase
                     var sprintNum = ParseSprintNumberFromListName(list.Name);
                     if (sprintNum.HasValue && sprintNum.Value >= 1)
                     {
-                        var (startUtc, dueUtc) = strAppersBackend.Services.TrelloBoardScheduleHelper.GetSprintStartAndDueUtc(sprintNum.Value, kickoffUtc, firstDayOfWeek, localOffset);
+                        DateTime dueUtc;
+                        if (sprintLengthDays is int finalStampDays)
+                        {
+                            dueUtc = strAppersBackend.Services.TrelloBoardScheduleHelper.GetSprintDueDateUtcForDays(kickoffUtc, sprintNum.Value, finalStampDays, localOffset);
+                            // Stamp StartDate too so the stored SprintPlan is self-describing for window resolution.
+                            list.StartDate = strAppersBackend.Services.TrelloBoardScheduleHelper.GetSprintDueDateUtcForDays(kickoffUtc, sprintNum.Value - 1, finalStampDays, localOffset).AddTicks(1);
+                            if (sprintNum.Value == 1)
+                                list.StartDate = kickoffUtc.Add(localOffset).Date.Subtract(localOffset);
+                        }
+                        else
+                        {
+                            (_, dueUtc) = strAppersBackend.Services.TrelloBoardScheduleHelper.GetSprintStartAndDueUtc(sprintNum.Value, kickoffUtc, firstDayOfWeek, localOffset);
+                        }
                         list.EndDate = dueUtc;
                         foreach (var card in trelloRequest.SprintPlan.Cards.Where(c => string.Equals(c.ListName, list.Name, StringComparison.OrdinalIgnoreCase)))
                         {
                             card.DueDate = dueUtc;
                         }
-                        _logger.LogDebug("Sprint {SprintNum} list '{ListName}': DueDate set to {DueUtc}", sprintNum.Value, list.Name, dueUtc);
+                        _logger.LogInformation("[BOARD-CREATE] Sprint {SprintNum} list '{ListName}': DueDate set to {DueUtc} ({Cadence})",
+                            sprintNum.Value, list.Name, dueUtc, sprintLengthDays != null ? $"{sprintLengthDays}-day" : "weekly");
                     }
                 }
             }
