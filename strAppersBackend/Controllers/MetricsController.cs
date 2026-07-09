@@ -18,8 +18,21 @@ public partial class MetricsController : ControllerBase
 {
     private const int AdherenceMetricId = 1;
 
-    private static readonly string[] ResourceTaskKeywords =
-        { "resource", "upload", "share", "link", "artifact", "submit", "attach" };
+    /// <summary>
+    /// Words that identify a checklist item as requesting a stored/shared deliverable (as opposed to
+    /// a code/process step). Used by Adherence to cross-check the "Required Resource Data" checkbox
+    /// against real checklist text, and by Gap Analysis to flag a requested-but-missing deliverable
+    /// (e.g. "Save your schema diagram in the Meeting Room") as an explicit artifact channel.
+    /// Keep inclusive: a false positive just means an already-checked "Required Resource Data" box
+    /// gets confirmed; a false negative silently skips a real requirement (the original bug — see
+    /// "High-Level Schema Diagram" / "Blueprint Centralization" checklist items, which contained none
+    /// of the original keywords).
+    /// </summary>
+    internal static readonly string[] ResourceTaskKeywords =
+        {
+            "resource", "upload", "share", "link", "artifact", "submit", "attach",
+            "schema", "save", "meeting room", "erd", "blueprint", "centraliz", "deliverable"
+        };
 
     private readonly ApplicationDbContext _context;
     private readonly ITrelloService _trelloService;

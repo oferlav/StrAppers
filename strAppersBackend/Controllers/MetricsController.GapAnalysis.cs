@@ -466,7 +466,8 @@ public partial class MetricsController
             .AppendLine(
                 "**Category rule:** Score using evidence from **STUDENT ARTIFACTS** above (code/repo, design assets, CRM rows, PM story text, resources). " +
                 "When **CONTEXT** includes **Customer background** and/or **Customer chat history** with substantive content, include a **separate** scored category for **customer alignment** (broad name—distinct from PM user story **Requirements coverage**), per your system instructions. " +
-                "Do not add scored categories for checklist-only items with no matching artifact block (e.g. meetings you cannot verify from this data). Mention those in `narrative` if needed.")
+                "Do not add scored categories for checklist-only items with no matching artifact block (e.g. meetings you cannot verify from this data). Mention those in `narrative` if needed. " +
+                "The **⚠ REQUIRED DELIVERABLE NOT FOUND** marker under **### Resource links** (when present) IS a matching artifact block for a required checklist deliverable — per your system instructions, score it as its own category, do not treat it as a checklist-only item to omit.")
             .AppendLine()
             .AppendLine("Respond with JSON only as specified in your instructions.")
             .ToString();
@@ -901,8 +902,53 @@ public partial class MetricsController
                 sb.AppendLine($"- {r.Name}: {r.Url}{hint}");
             }
         }
+        else
+        {
+            // No resources shared this sprint. Before staying silent (the default — an empty
+            // section with nothing to say caused the model to invent gaps for sprints with no
+            // resource task at all), check whether the sprint checklist actually requested one
+            // (e.g. "Save your schema diagram in the Meeting Room"). If so, give the model an
+            // explicit artifact channel to score against instead of silently dropping it — this
+            // was the root cause of Gap Analysis never flagging a missing ERD/diagram deliverable.
+            var snap = await _trelloService.GetSprintRoleCardSnapshotAsync(boardId, sprintNumber, trelloRoleLabel);
+            var missingLines = ExtractMatchingChecklistLines(snap?.ChecklistsText, ResourceTaskKeywords);
+            if (missingLines.Count > 0)
+            {
+                sb.AppendLine("### Resource links (non-Figma; sprint-scoped when sprint number >= 1)");
+                sb.AppendLine(
+                    "**⚠ REQUIRED DELIVERABLE NOT FOUND:** No resource was found in the Squad Room Resources panel for this sprint, " +
+                    "but the sprint checklist explicitly requests saving/sharing an artifact. Matching checklist item(s):");
+                foreach (var line in missingLines)
+                    sb.AppendLine($"- {line}");
+                sb.AppendLine("Treat this as a required deliverable that was **not delivered**.");
+                _logger.LogInformation(
+                    "GapAnalysis: flagged {Count} required-but-missing resource checklist item(s) for board {BoardId} sprint {Sprint} role {Role}",
+                    missingLines.Count, boardId, sprintNumber, trelloRoleLabel);
+            }
+        }
 
         return sb.ToString();
+    }
+
+    /// <summary>
+    /// Checklist lines (format <c>- [state] text</c>, from <see cref="SprintRoleCardSnapshot.ChecklistsText"/>)
+    /// that mention a stored/shared deliverable per <see cref="ResourceTaskKeywords"/>. Internal + static so it
+    /// is directly unit-testable against real Trello checklist text without mocking the service layer.
+    /// </summary>
+    internal static List<string> ExtractMatchingChecklistLines(string? checklistsText, IReadOnlyList<string> keywords)
+    {
+        var result = new List<string>();
+        if (string.IsNullOrWhiteSpace(checklistsText))
+            return result;
+        foreach (var rawLine in checklistsText.Split('\n'))
+        {
+            var line = rawLine.TrimEnd('\r').Trim();
+            if (!line.StartsWith("- [", StringComparison.Ordinal))
+                continue;
+            if (keywords.Any(kw => line.Contains(kw, StringComparison.OrdinalIgnoreCase)))
+                result.Add(line);
+        }
+        return result;
     }
 
     private async Task AppendProductManagerSkillArtifactAsync(
