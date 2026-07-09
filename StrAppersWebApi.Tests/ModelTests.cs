@@ -78,10 +78,10 @@ public class ModelTests
         // Act
         var request = new UpdateStudentRequest();
 
-        // Assert
-        Assert.Equal(string.Empty, request.FirstName);
-        Assert.Equal(string.Empty, request.LastName);
-        Assert.Equal(string.Empty, request.Email);
+        // Assert — nullable by design: partial updates only touch supplied fields.
+        Assert.Null(request.FirstName);
+        Assert.Null(request.LastName);
+        Assert.Null(request.Email);
     }
 
     [Theory]

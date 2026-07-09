@@ -58,12 +58,13 @@ public class CouponRegistrationTests
         InstituteCoupon = coupon
     };
 
-    // ── No coupon → InstituteId=1, Coupon=null ────────────────────────────
+    // ── No coupon → InstituteId=1, Coupon="1" (default institute coupon) ──
 
     [Fact]
-    public async Task NoCoupon_SetsInstituteId1_AndNullCoupon()
+    public async Task NoCoupon_SetsInstituteId1_AndDefaultCoupon1()
     {
-        using var ctx = CreateContext(nameof(NoCoupon_SetsInstituteId1_AndNullCoupon));
+        // Registration without a coupon defaults Coupon to "1" (the default institute's coupon).
+        using var ctx = CreateContext(nameof(NoCoupon_SetsInstituteId1_AndDefaultCoupon1));
         await SeedMinimumEntities(ctx);
         var ctrl = CreateStudentsController(ctx);
 
@@ -72,7 +73,7 @@ public class CouponRegistrationTests
         var student = await ctx.Students.FirstOrDefaultAsync();
         Assert.NotNull(student);
         Assert.Equal(1, student!.InstituteId);
-        Assert.Null(student.Coupon);
+        Assert.Equal("1", student.Coupon);
     }
 
     // ── Invalid coupon (not in InstituteProjects) → 400 ──────────────────

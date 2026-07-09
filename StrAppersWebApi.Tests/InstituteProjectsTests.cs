@@ -162,9 +162,10 @@ public class InstituteProjectsTests
     }
 
     [Fact]
-    public async Task AllocateInstituteProject_SetsStatusToPending()
+    public async Task AllocateInstituteProject_KeepsStatusZero_UntilCheckout()
     {
-        using var ctx = CreateContext(nameof(AllocateInstituteProject_SetsStatusToPending));
+        // Allocation only sets priorities; Status stays 0 until ConfirmInstituteCheckout sets 1.
+        using var ctx = CreateContext(nameof(AllocateInstituteProject_KeepsStatusZero_UntilCheckout));
         ctx.Students.Add(MakeStudent(1));
         ctx.InstituteProjects.Add(MakeInstituteProject(5));
         await ctx.SaveChangesAsync();
@@ -172,7 +173,8 @@ public class InstituteProjectsTests
         await CreateStudentsController(ctx).AllocateStudentToInstituteProject(5, 1, new AllocateStudentRequest());
 
         var student = await ctx.Students.FindAsync(1);
-        Assert.Equal(1, student!.Status);
+        Assert.Equal(0, student!.Status);
+        Assert.Equal(5, student.InstitutePriority1);
     }
 
     // ── POST /api/Students/use/institute/deallocate/{projectId}/{studentId} ─
