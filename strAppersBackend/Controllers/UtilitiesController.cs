@@ -2337,6 +2337,7 @@ jobs:
             StudentEmails = new List<string>(),
             ProjectLengthWeeks = sourceRequest.ProjectLengthWeeks,
             SprintLengthWeeks = sourceRequest.SprintLengthWeeks,
+            SprintLengthDays = sourceRequest.SprintLengthDays,
             DueDate = sourceRequest.DueDate,
             TeamMembers = new List<TrelloTeamMember>(),
             SprintPlan = new TrelloSprintPlan
