@@ -45,7 +45,9 @@ public class TryBuildSquadTeamTests
             new Mock<ISprintAssessmentService>().Object,
             new Mock<IHttpClientFactory>().Object,
             config,
-            NullLogger<StudentTeamBuilderService>.Instance);
+            NullLogger<StudentTeamBuilderService>.Instance,
+            Microsoft.Extensions.Options.Options.Create(new KickoffConfig()),
+            new Mock<ISmtpEmailService>().Object);
     }
 
     /// <summary>Seed one Role + one Student with that Role, return the student.</summary>
@@ -93,10 +95,10 @@ public class TryBuildSquadTeamTests
         var squad = new InstituteSquad
         {
             Id = 1, InstituteId = 2, Name = "S", RequireDeveloperRule = false,
-            Roles = new List<InstituteSquadRole>
+            Roles = new List<Role>
             {
-                new InstituteSquadRole { Id = 1, Name = "UI/UX Designer", Type = 3, IsActive = true },
-                new InstituteSquadRole { Id = 2, Name = "PM", Type = 4, IsActive = true },
+                new Role { Id = 1, Name = "UI/UX Designer", Type = 3, IsActive = true },
+                new Role { Id = 2, Name = "PM", Type = 4, IsActive = true },
             }
         };
 
@@ -115,10 +117,10 @@ public class TryBuildSquadTeamTests
         var squad = new InstituteSquad
         {
             Id = 1, InstituteId = 2, Name = "S", RequireDeveloperRule = false,
-            Roles = new List<InstituteSquadRole>
+            Roles = new List<Role>
             {
-                new InstituteSquadRole { Id = 1, Name = "UI/UX Designer", Type = 3, IsActive = true },
-                new InstituteSquadRole { Id = 2, Name = "PM", Type = 4, IsActive = true },
+                new Role { Id = 1, Name = "UI/UX Designer", Type = 3, IsActive = true },
+                new Role { Id = 2, Name = "PM", Type = 4, IsActive = true },
             }
         };
 
@@ -138,10 +140,10 @@ public class TryBuildSquadTeamTests
         var squad = new InstituteSquad
         {
             Id = 1, InstituteId = 2, Name = "S", RequireDeveloperRule = false,
-            Roles = new List<InstituteSquadRole>
+            Roles = new List<Role>
             {
-                new InstituteSquadRole { Id = 1, Name = "UI/UX Designer", Type = 3, IsActive = true },
-                new InstituteSquadRole { Id = 2, Name = "PM", Type = 4, IsActive = true },
+                new Role { Id = 1, Name = "UI/UX Designer", Type = 3, IsActive = true },
+                new Role { Id = 2, Name = "PM", Type = 4, IsActive = true },
             }
         };
 
@@ -163,10 +165,10 @@ public class TryBuildSquadTeamTests
         var squad = new InstituteSquad
         {
             Id = 1, InstituteId = 2, Name = "S", RequireDeveloperRule = false,
-            Roles = new List<InstituteSquadRole>
+            Roles = new List<Role>
             {
-                new InstituteSquadRole { Id = 1, Name = "PM", Type = 4, IsActive = true },
-                new InstituteSquadRole { Id = 2, Name = "Analyst", Type = 0, IsActive = true }, // optional, no candidate
+                new Role { Id = 1, Name = "PM", Type = 4, IsActive = true },
+                new Role { Id = 2, Name = "Analyst", Type = 0, IsActive = true }, // optional, no candidate
             }
         };
 
@@ -188,9 +190,9 @@ public class TryBuildSquadTeamTests
         var squad = new InstituteSquad
         {
             Id = 1, InstituteId = 2, Name = "S", RequireDeveloperRule = true,
-            Roles = new List<InstituteSquadRole>
+            Roles = new List<Role>
             {
-                new InstituteSquadRole { Id = 1, Name = "Full Stack", Type = 1, IsActive = true },
+                new Role { Id = 1, Name = "Full Stack", Type = 1, IsActive = true },
             }
         };
 
@@ -211,10 +213,10 @@ public class TryBuildSquadTeamTests
         var squad = new InstituteSquad
         {
             Id = 1, InstituteId = 2, Name = "S", RequireDeveloperRule = true,
-            Roles = new List<InstituteSquadRole>
+            Roles = new List<Role>
             {
-                new InstituteSquadRole { Id = 1, Name = "Frontend Dev", Type = 2, IsActive = true },
-                new InstituteSquadRole { Id = 2, Name = "Backend Dev",  Type = 2, IsActive = true },
+                new Role { Id = 1, Name = "Frontend Dev", Type = 2, IsActive = true },
+                new Role { Id = 2, Name = "Backend Dev",  Type = 2, IsActive = true },
             }
         };
 
@@ -234,10 +236,10 @@ public class TryBuildSquadTeamTests
         var squad = new InstituteSquad
         {
             Id = 1, InstituteId = 2, Name = "S", RequireDeveloperRule = true,
-            Roles = new List<InstituteSquadRole>
+            Roles = new List<Role>
             {
-                new InstituteSquadRole { Id = 1, Name = "Frontend Dev", Type = 2, IsActive = true },
-                new InstituteSquadRole { Id = 2, Name = "Backend Dev",  Type = 2, IsActive = true },
+                new Role { Id = 1, Name = "Frontend Dev", Type = 2, IsActive = true },
+                new Role { Id = 2, Name = "Backend Dev",  Type = 2, IsActive = true },
             }
         };
 
@@ -258,10 +260,10 @@ public class TryBuildSquadTeamTests
         var squad = new InstituteSquad
         {
             Id = 1, InstituteId = 2, Name = "S", RequireDeveloperRule = false,
-            Roles = new List<InstituteSquadRole>
+            Roles = new List<Role>
             {
-                new InstituteSquadRole { Id = 1, Name = "PM", Type = 4, IsActive = true },
-                new InstituteSquadRole { Id = 2, Name = "Full Stack", Type = 1, IsActive = true },
+                new Role { Id = 1, Name = "PM", Type = 4, IsActive = true },
+                new Role { Id = 2, Name = "Full Stack", Type = 1, IsActive = true },
             }
         };
 
@@ -282,7 +284,7 @@ public class TryBuildSquadTeamTests
         var squad = new InstituteSquad
         {
             Id = 1, InstituteId = 2, Name = "S", RequireDeveloperRule = false,
-            Roles = new List<InstituteSquadRole>()
+            Roles = new List<Role>()
         };
 
         var svc = CreateService(ctx);

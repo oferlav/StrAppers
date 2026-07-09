@@ -82,7 +82,8 @@ public class SprintAssessmentTriggerTests
         ITrelloSprintMergeService mergeService,
         ISprintAssessmentService assessmentService) =>
         new(db, mergeService, assessmentService,
-            null!, null!, NullLogger<StudentTeamBuilderService>.Instance);
+            null!, null!, NullLogger<StudentTeamBuilderService>.Instance,
+            Microsoft.Extensions.Options.Options.Create(new KickoffConfig()), null!);
 
     // ════════════════════════════════════════════════════════════════════════
     // Trigger logic

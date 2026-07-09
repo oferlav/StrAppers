@@ -43,7 +43,8 @@ public class InstituteCouponFilterTests
             new Mock<IChatCompletionService>().Object,
             new Mock<IWebHostEnvironment>().Object,
             Options.Create(new ProjectsInstituteMaxLengthFieldsOptions()),
-            new Mock<IAzureBlobStorageService>().Object);
+            new Mock<IAzureBlobStorageService>().Object,
+            new Mock<ISmtpEmailService>().Object);
     }
 
     private static Student MakeInstituteStudent(int id, int instituteId, string? coupon = null) =>
