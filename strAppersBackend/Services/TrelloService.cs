@@ -1791,7 +1791,7 @@ namespace strAppersBackend.Services
             try
             {
                 var listsUrl = $"https://api.trello.com/1/boards/{boardId}/lists?key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
-                var listsRes = await _httpClient.GetAsync(listsUrl);
+                var listsRes = await GetTrelloWithRetryAsync(listsUrl, $"GetSprintCardCustomFieldValue.lists board={boardId}");
                 if (!listsRes.IsSuccessStatusCode) return null;
                 var listsData = JsonSerializer.Deserialize<JsonElement[]>(await listsRes.Content.ReadAsStringAsync());
                 var sprintList = (listsData ?? Array.Empty<JsonElement>()).FirstOrDefault(l =>
@@ -1805,7 +1805,7 @@ namespace strAppersBackend.Services
                 if (string.IsNullOrEmpty(sprintListId)) return null;
 
                 var cfUrl = $"https://api.trello.com/1/boards/{boardId}/customFields?key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
-                var cfRes = await _httpClient.GetAsync(cfUrl);
+                var cfRes = await GetTrelloWithRetryAsync(cfUrl, $"GetSprintCardCustomFieldValue.customFields board={boardId}");
                 string? targetFieldId = null;
                 if (cfRes.IsSuccessStatusCode)
                 {
@@ -1821,7 +1821,7 @@ namespace strAppersBackend.Services
                 }
 
                 var cardsUrl = $"https://api.trello.com/1/boards/{boardId}/cards?customFieldItems=true&key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
-                var cardsRes = await _httpClient.GetAsync(cardsUrl);
+                var cardsRes = await GetTrelloWithRetryAsync(cardsUrl, $"GetSprintCardCustomFieldValue.cards board={boardId}");
                 if (!cardsRes.IsSuccessStatusCode) return null;
                 var cardsData = JsonSerializer.Deserialize<JsonElement[]>(await cardsRes.Content.ReadAsStringAsync());
                 var sprintCard = (cardsData ?? Array.Empty<JsonElement>()).FirstOrDefault(c =>
@@ -1879,7 +1879,7 @@ namespace strAppersBackend.Services
             try
             {
                 var url = $"https://api.trello.com/1/cards/{trelloCardId}?checklists=all&fields=name,desc&key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
-                var res = await _httpClient.GetAsync(url);
+                var res = await GetTrelloWithRetryAsync(url, $"GetSprintRoleCardSnapshot.card board={boardId} card={trelloCardId}");
                 if (!res.IsSuccessStatusCode) return null;
                 var json = JsonSerializer.Deserialize<JsonElement>(await res.Content.ReadAsStringAsync());
                 var name = json.TryGetProperty("name", out var np) ? np.GetString() : "";
@@ -2152,6 +2152,21 @@ namespace strAppersBackend.Services
             }
         }
 
+        /// <summary>
+        /// GET with rate-limit retry for the sprint-card lookup methods. The metrics/gap-analysis
+        /// pipeline fires many full-board reads back-to-back; a 429/503 was previously swallowed
+        /// silently (lookup returned null → "(No context blocks could be assembled...)" with zero
+        /// trace). Delegates to <see cref="SendWithRateLimitRetryAsync"/> and logs the failing
+        /// operation and status — never the URL, which carries the API key/token.
+        /// </summary>
+        private async Task<HttpResponseMessage> GetTrelloWithRetryAsync(string url, string opName)
+        {
+            var res = await SendWithRateLimitRetryAsync(() => _httpClient.GetAsync(url));
+            if (!res.IsSuccessStatusCode)
+                _logger.LogWarning("[TRELLO-RETRY] {Op} failed with HTTP {Status}.", opName, (int)res.StatusCode);
+            return res;
+        }
+
         /// <inheritdoc />
         public async Task<string?> GetSprintRoleCardIdAsync(string boardId, int sprintNumber, string roleName)
         {
@@ -2159,7 +2174,7 @@ namespace strAppersBackend.Services
             try
             {
                 var listsUrl = $"https://api.trello.com/1/boards/{boardId}/lists?key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
-                var listsRes = await _httpClient.GetAsync(listsUrl);
+                var listsRes = await GetTrelloWithRetryAsync(listsUrl, $"GetSprintRoleCardId.lists board={boardId}");
                 if (!listsRes.IsSuccessStatusCode) return null;
                 var listsData = JsonSerializer.Deserialize<JsonElement[]>(await listsRes.Content.ReadAsStringAsync());
                 var sprintList = (listsData ?? Array.Empty<JsonElement>()).FirstOrDefault(l =>
@@ -2173,7 +2188,7 @@ namespace strAppersBackend.Services
                 if (string.IsNullOrEmpty(sprintListId)) return null;
 
                 var cardsUrl = $"https://api.trello.com/1/boards/{boardId}/cards?key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
-                var cardsRes = await _httpClient.GetAsync(cardsUrl);
+                var cardsRes = await GetTrelloWithRetryAsync(cardsUrl, $"GetSprintRoleCardId.cards board={boardId}");
                 if (!cardsRes.IsSuccessStatusCode) return null;
                 var cardsData = JsonSerializer.Deserialize<JsonElement[]>(await cardsRes.Content.ReadAsStringAsync());
                 var sprintCard = (cardsData ?? Array.Empty<JsonElement>()).FirstOrDefault(c =>

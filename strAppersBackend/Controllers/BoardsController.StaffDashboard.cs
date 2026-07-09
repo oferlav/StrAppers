@@ -388,10 +388,16 @@ public partial class BoardsController
     }
 
     /// <summary>
-    /// Sprint numbers from all existing SprintMerge rows, ordered ascending.
+    /// Sprint numbers from SprintMerge rows that represent a sprint that exists on the board.
+    /// MergeType=Add pre-creates a row for the NEXT sprint with MergedAt=null and ListId=null
+    /// (the "run due sprint merges" trigger row); that sprint has no Trello list yet, so it must
+    /// not appear in dropdowns or drive assessment runs. Rows with a ListId (list exists on the
+    /// board) or MergedAt set (sprint was merged) are real. Do NOT filter by position (SkipLast):
+    /// when the last sprint ends with no next row pre-created, that dropped a real sprint.
     /// </summary>
-    private static List<int> GetRealMergedSprintNumbers(ProjectBoard pb) =>
+    internal static List<int> GetRealMergedSprintNumbers(ProjectBoard pb) =>
         pb.SprintMerges
+            .Where(m => m.MergedAt != null || !string.IsNullOrEmpty(m.ListId))
             .Select(m => m.SprintNumber)
             .Distinct()
             .OrderBy(n => n)

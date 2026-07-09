@@ -134,7 +134,12 @@ public partial class MetricsController
             .AsNoTracking()
             .Include(c => c.Metric)
             .Include(c => c.Student)
-            .Where(c => c.BoardId == boardIdTrim);
+            .Where(c => c.BoardId == boardIdTrim)
+            // Hide cached rows for sprints that don't exist on the board (a pre-created next-sprint
+            // merge row has MergedAt=null and ListId=null; assessments cached for it are phantom).
+            .Where(c => c.SprintNumber < 1 || _context.ProjectBoardSprintMerges.Any(m =>
+                m.ProjectBoardId == c.BoardId && m.SprintNumber == c.SprintNumber &&
+                (m.MergedAt != null || m.ListId != null)));
 
         if (roleId.HasValue)
             query = query.Where(c => c.Student!.StudentRoles.Any(sr => sr.RoleId == roleId.Value && sr.IsActive));
@@ -198,7 +203,11 @@ public partial class MetricsController
             .Include(c => c.Metric)
             .Include(c => c.Student)
             .Include(c => c.ProjectBoard)
-            .Where(c => c.Student!.StudentRoles.Any(sr => sr.RoleId == roleId && sr.IsActive));
+            .Where(c => c.Student!.StudentRoles.Any(sr => sr.RoleId == roleId && sr.IsActive))
+            // Same phantom-sprint filter as the board-scoped report (see GetAssessmentReport).
+            .Where(c => c.SprintNumber < 1 || _context.ProjectBoardSprintMerges.Any(m =>
+                m.ProjectBoardId == c.BoardId && m.SprintNumber == c.SprintNumber &&
+                (m.MergedAt != null || m.ListId != null)));
 
         if (studentId.HasValue)
             query = query.Where(c => c.StudentId == studentId.Value);
@@ -306,6 +315,18 @@ public partial class MetricsController
 
         if (request.InstituteId <= 0)
             return BadRequest(new { success = false, message = "InstituteId is required." });
+
+        // A merge row with MergedAt=null and ListId=null is the pre-created "next sprint" trigger row
+        // (MergeType=Add) — that sprint has no Trello list yet, so running metrics for it would cache
+        // phantom assessment rows the report then displays. Sprint 0 (Bugs) has no merge row by design.
+        if (request.SprintNumber >= 1)
+        {
+            var sprintExists = await _context.ProjectBoardSprintMerges.AsNoTracking()
+                .AnyAsync(m => m.ProjectBoardId == boardId && m.SprintNumber == request.SprintNumber &&
+                               (m.MergedAt != null || m.ListId != null), cancellationToken);
+            if (!sprintExists)
+                return BadRequest(new { success = false, message = $"Sprint {request.SprintNumber} does not exist on this board (no merged sprint list). Assessment not run." });
+        }
 
         var metrics = await _context.Metrics.AsNoTracking()
             .Where(m => m.InstituteId == request.InstituteId && m.Required)

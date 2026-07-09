@@ -427,7 +427,7 @@ public partial class MetricsController
         return role.Name.Trim();
     }
 
-    private sealed record GapAnalysisPrompts(string SystemPrompt, string UserPrompt);
+    private sealed record GapAnalysisPrompts(string SystemPrompt, string UserPrompt, string ContextTrace = "");
 
     /// <summary>
     /// Rough token estimate: ~4 characters per token (GPT tokeniser average for English).
@@ -449,7 +449,8 @@ public partial class MetricsController
         CancellationToken cancellationToken,
         bool includeBothRepos = false)
     {
-        var contextMd = await BuildGapAnalysisContextAsync(boardId, board, studentId, sprintNumber, trelloRoleLabel, originalRoleName, includeCustomerContext, cancellationToken);
+        var contextTrace = new List<string>();
+        var contextMd = await BuildGapAnalysisContextAsync(boardId, board, studentId, sprintNumber, trelloRoleLabel, originalRoleName, includeCustomerContext, cancellationToken, contextTrace);
         var artifactsMd = await BuildGapAnalysisArtifactsAsync(boardId, board, studentId, sprintNumber, trelloRoleLabel, originalRoleName, isBackend, cancellationToken, includeBothRepos);
 
         var systemTemplate = LoadGapAnalysisSystemPrompt();
@@ -470,7 +471,7 @@ public partial class MetricsController
             .AppendLine("Respond with JSON only as specified in your instructions.")
             .ToString();
 
-        return new GapAnalysisPrompts(systemPrompt, userPrompt);
+        return new GapAnalysisPrompts(systemPrompt, userPrompt, string.Join("\n", contextTrace));
     }
 
     private async Task<GapTrackResult> RunGapAnalysisForTrackAsync(
@@ -527,6 +528,7 @@ public partial class MetricsController
             var track = isBackend ? "backend" : "frontend";
             var sysLast = systemPrompt.Length > 600 ? "…" + systemPrompt[^600..] : systemPrompt;
             var promptDbg = $"Track={track} StudentId={studentId} Sprint={sprintNumber} UserPromptLength={userPrompt.Length} InlineImages={imageDataUrls.Count}\n\n" +
+                            $"=== CONTEXT ASSEMBLY TRACE ===\n{prompts.ContextTrace}\n\n" +
                             $"=== SYSTEM PROMPT (last 600 chars) ===\n{sysLast}\n\n" +
                             $"=== USER PROMPT ===\n{userPrompt}";
             try { await _smtpEmailService.SendPlainEmailAsync("ofer@skill-in.com", $"[Metrics Debug] GapAnalysis PROMPT track={track} student={studentId} sprint={sprintNumber}", promptDbg); } catch { }
@@ -642,11 +644,17 @@ public partial class MetricsController
         string trelloRoleLabel,
         string originalRoleName,
         bool includeCustomerContext,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        List<string>? trace = null)
     {
         var sb = new StringBuilder();
+        trace ??= new List<string>();
+        trace.Add($"label='{trelloRoleLabel}' sprint={sprintNumber} board={boardId}");
 
         var snap = await _trelloService.GetSprintRoleCardSnapshotAsync(boardId, sprintNumber, trelloRoleLabel);
+        trace.Add(snap == null
+            ? "SprintRoleCardSnapshot=NULL (card not found by label OR Trello API failed — check [TRELLO-RETRY] server log for HTTP status)"
+            : $"SprintRoleCardSnapshot=OK card='{snap.CardName}' descLen={snap.Description?.Length ?? 0} checklistLen={snap.ChecklistsText?.Length ?? 0}");
         if (snap != null)
         {
             sb.AppendLine("### Sprint role card (Trello)");
@@ -670,6 +678,7 @@ public partial class MetricsController
                 if (!string.IsNullOrWhiteSpace(pmModuleId))
                     break;
             }
+            trace.Add($"PmModuleId={(string.IsNullOrWhiteSpace(pmModuleId) ? "(none)" : pmModuleId.Trim())}");
 
             if (!string.IsNullOrWhiteSpace(pmModuleId) && int.TryParse(pmModuleId.Trim(), out var pmModInt))
             {
@@ -688,6 +697,7 @@ public partial class MetricsController
                 if (!string.IsNullOrWhiteSpace(pmModuleId))
                     break;
             }
+            trace.Add($"RoleModuleId={(string.IsNullOrWhiteSpace(roleModuleId) ? "(none)" : roleModuleId.Trim())} PmModuleId={(string.IsNullOrWhiteSpace(pmModuleId) ? "(none)" : pmModuleId.Trim())}");
 
             if (!string.IsNullOrWhiteSpace(roleModuleId) && int.TryParse(roleModuleId.Trim(), out var roleModInt))
             {
@@ -720,6 +730,7 @@ public partial class MetricsController
                 var usResult = await _trelloService.GetUserStoryCardByModuleIdAsync(usBoard, moduleIdForUserStory);
                 var card = GetUserStoryCardFromResult(usResult);
                 var storyText = ConcatenateUserStoryText(card);
+                trace.Add($"UserStory moduleId={moduleIdForUserStory} words={CountWords(storyText)}");
                 if (CountWords(storyText) > 10)
                 {
                     sb.AppendLine("### PM user story (requirements reference — compare your work to this) _(persistent artifact authored earlier in the project; NOT this student's sprint activity)_");
@@ -743,6 +754,7 @@ public partial class MetricsController
             await AppendGapAnalysisCustomerChatHistoryAsync(sb, studentId, sprintNumber, cancellationToken);
         }
 
+        trace.Add($"ContextResult={(sb.Length == 0 ? "EMPTY" : $"{sb.Length} chars")}");
         return sb.Length == 0 ? "(No context blocks could be assembled for this sprint/role.)" : sb.ToString();
     }
 
@@ -1107,6 +1119,7 @@ public partial class MetricsController
         AppendGitHubCompareArtifactLines(sb, diff, usedBase, head, configuredBase, owner, repo, pr?.Merged ?? false);
 
         AppendGitHubPrArtifactLine(sb, pr, owner, repo, head, logIfMissing: true);
+        await AppendMergedPrDiffEvidenceAsync(sb, pr, diff, owner, repo, token);
 
         // Trello BranchContext often says Bugs-F while Git uses sprint-numbered branches (e.g. 8-F). Retry default sprint branch when names differ and primary missed PR or compare.
         if (!string.Equals(head, defaultHead, StringComparison.Ordinal) &&
@@ -1120,6 +1133,7 @@ public partial class MetricsController
                     $"**Sprint default branch `{defaultHead}`:** Trello **BranchContext** targets **`{head}`**, but work is often pushed to the numbered sprint branch **`{defaultHead}`** (e.g. mentor tooling). Additional GitHub evidence for **`{defaultHead}`**:");
                 AppendGitHubCompareArtifactLines(sb, diffAlt, usedAlt, defaultHead, configuredBase, owner, repo, prAlt?.Merged ?? false);
                 AppendGitHubPrArtifactLine(sb, prAlt, owner, repo, defaultHead, logIfMissing: false);
+                await AppendMergedPrDiffEvidenceAsync(sb, prAlt, diffAlt, owner, repo, token);
                 _logger.LogInformation(
                     "GapAnalysis: appended fallback branch evidence {DefaultHead} (primary was {Head}, pr={HasPr}, diff={HasDiff})",
                     defaultHead, head, pr != null, diff != null);
@@ -1127,7 +1141,38 @@ public partial class MetricsController
         }
 
         sb.AppendLine(
-            "**Scoring rule for this track:** Use **0%** implementation completeness only when the GitHub evidence shows **no commits** on the relevant branch relative to the integration branch (nothing landed). If there **are** commits (see compare line) but **no** merged PR yet, **do not** use 0% — reduce the score and explain the missing review/merge. If **two** branch sections appear above, score from the one that shows commits/PR matching the student’s delivery.");
+            "**Scoring rule for this track:** A pull request with **merged=yes** means the student's work **landed** — you MUST NOT use 0% implementation completeness when a merged PR exists; score the delivered content from the **Merged PR diff** section above (an empty branch compare after a squash merge is normal and is NOT evidence of missing work). Use **0%** only when there are **no commits** on the relevant branch **and no merged PR** (nothing landed). If there **are** commits (see compare line) but **no** merged PR yet, **do not** use 0% — reduce the score and explain the missing review/merge. If **two** branch sections appear above, score from the one that shows commits/PR matching the student’s delivery.");
+    }
+
+    /// <summary>
+    /// After a squash merge, compare base...head shows 0 commits/0 files, so the merged PR's own file
+    /// diff is the only evidence of what the student delivered. Appended whenever the PR is merged and
+    /// the compare produced no file-level diff.
+    /// </summary>
+    private async Task AppendMergedPrDiffEvidenceAsync(
+        StringBuilder sb, GitHubPullRequest? pr, GitHubCommitDiff? compareDiff, string owner, string repo, string token)
+    {
+        if (pr == null || !pr.Merged || pr.Number <= 0)
+            return;
+        if (compareDiff != null && compareDiff.TotalFilesChanged > 0)
+            return; // the branch compare already shows the delivered files
+
+        var prDiff = await _githubService.GetPullRequestFilesAsync(owner, repo, pr.Number, token);
+        if (prDiff == null || prDiff.TotalFilesChanged == 0)
+        {
+            sb.AppendLine(
+                $"**Merged PR #{pr.Number} diff:** the PR file list could not be retrieved (API error or empty PR). The PR IS merged, so treat delivered-work evidence as incomplete — do **not** score 0% implementation completeness.");
+            _logger.LogWarning(
+                "GapAnalysis: merged PR #{Num} in {Owner}/{Repo} but PR files unavailable (prDiff={HasDiff})",
+                pr.Number, owner, repo, prDiff != null);
+            return;
+        }
+
+        sb.AppendLine(
+            $"**Merged PR #{pr.Number} diff (the work this student delivered and merged this sprint — score implementation from this):** {prDiff.TotalFilesChanged} file(s) changed, +{prDiff.TotalAdditions}/-{prDiff.TotalDeletions}.");
+        var patch = string.Join("\n", prDiff.FileChanges.Take(25)
+            .Select(f => $"--- {f.FilePath} ({f.Status}, +{f.Additions}/-{f.Deletions})\n{f.Patch ?? "(no patch available)"}"));
+        sb.AppendLine(Truncate(patch, 12000));
     }
 
     private async Task<(GitHubCommitDiff? Diff, string? UsedBase, GitHubPullRequest? Pr)> FetchGitHubGapAnalysisEvidenceAsync(
@@ -1178,7 +1223,8 @@ public partial class MetricsController
                         "The PR for this branch is marked **merged=yes** (see PR line below). " +
                         "This is the EXPECTED, NORMAL result of the platform's squash-merge workflow — it is NOT a gap. " +
                         "You MUST NOT create any category or finding about branch divergence or the branch being behind main. " +
-                        "You MUST NOT recommend that the student keep the sprint branch updated with main.");
+                        "You MUST NOT recommend that the student keep the sprint branch updated with main. " +
+                        "You MUST NOT treat 'commits in range=0' in this compare as missing work — the delivered work is shown in the 'Merged PR diff' section below; score implementation from that.");
                 }
                 else
                 {
