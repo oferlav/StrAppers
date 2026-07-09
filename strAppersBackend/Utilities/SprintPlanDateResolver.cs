@@ -33,20 +33,26 @@ public static class SprintPlanDateResolver
             return false;
 
         var sprintDays = Math.Max(1, sprintLengthInDays);
-        DateTime? startRaw;
-        if (sprintNumber == 1)
-            startRaw = merge.MergedAt;
-        else
-            startRaw = merge.DueDate.Value.AddDays(-(sprintDays - 1));
-
-        if (startRaw == null)
-            return false;
-
-        startUtc = ToUtc(startRaw.Value);
         var endRaw = ToUtc(merge.DueDate.Value);
         endInclusiveUtc = endRaw.TimeOfDay == TimeSpan.Zero
             ? endRaw.Date.AddDays(1).AddTicks(-1)
             : endRaw;
+
+        if (sprintNumber == 1)
+        {
+            if (merge.MergedAt == null)
+                return false;
+            startUtc = ToUtc(merge.MergedAt.Value);
+        }
+        else
+        {
+            // Contiguous windows: start = one tick after the previous sprint's inclusive end
+            // (derived from the NORMALIZED end so end-of-day dues yield start-of-day starts).
+            // The old "due − (days − 1)" preserved the due's time-of-day, leaving the first
+            // day's daytime in no window when dues are 23:59:59-style.
+            startUtc = endInclusiveUtc.AddDays(-sprintDays).AddTicks(1);
+        }
+
         if (endInclusiveUtc < startUtc)
             (startUtc, endInclusiveUtc) = (endInclusiveUtc, startUtc);
         return true;

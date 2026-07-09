@@ -4216,11 +4216,22 @@ public partial class BoardsController : ControllerBase
             else
             {
                 var sprintLengthInWeeks = _configuration.GetValue<int>("BusinessLogicConfig:SprintLengthInWeeks", 1);
-                // Sprint window is inclusive (start and due both count): start = due - (days - 1).
                 // Days resolved per board (course templates carry SprintLengthDays; legacy = weeks × 7).
                 var sprintDays = await strAppersBackend.Utilities.SprintLengthResolver.ResolveForBoardAsync(
                     _context, boardId, sprintLengthInWeeks);
-                startDate = dueDate.HasValue ? dueDate.Value.AddDays(-(sprintDays - 1)) : (DateTime?)null;
+                // Contiguous inclusive windows (same formula as SprintPlanDateResolver): start is one tick
+                // after the previous sprint's normalized end, so end-of-day dues yield start-of-day starts.
+                if (dueDate.HasValue)
+                {
+                    var endInclusive = dueDate.Value.TimeOfDay == TimeSpan.Zero
+                        ? dueDate.Value.Date.AddDays(1).AddTicks(-1)
+                        : dueDate.Value;
+                    startDate = endInclusive.AddDays(-sprintDays).AddTicks(1);
+                }
+                else
+                {
+                    startDate = null;
+                }
             }
 
             return Ok(new

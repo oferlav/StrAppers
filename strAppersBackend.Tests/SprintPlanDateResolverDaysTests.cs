@@ -12,15 +12,17 @@ public class SprintPlanDateResolverDaysTests
     // ── 7a. Merge-row resolver ────────────────────────────────────────────────
 
     [Fact]
-    public void Sprint2_Days3_StartIsDueMinus2Days()
+    public void Sprint2_Days3_WindowIsContiguous_ThreeFullDays()
     {
+        // End-of-day due (23:59:59 local style): start = end − 3 days + 1 tick — i.e. exactly
+        // one tick after the previous sprint's inclusive end. No gap, no overlap.
         var due = new DateTime(2026, 7, 12, 21, 59, 59, DateTimeKind.Utc);
         var merge = new ProjectBoardSprintMerge { SprintNumber = 2, DueDate = due };
 
         var ok = SprintPlanDateResolver.TryGetInclusiveUtcRangeFromSprintMerge(merge, 2, 3, out var start, out var end);
 
         Assert.True(ok);
-        Assert.Equal(due.AddDays(-2), start);
+        Assert.Equal(due.AddDays(-3).AddTicks(1), start);
         Assert.Equal(due, end);
     }
 
@@ -38,16 +40,32 @@ public class SprintPlanDateResolverDaysTests
     }
 
     [Fact]
-    public void Days7_MatchesOldWeeks1Behavior()
+    public void Days7_MidnightDue_MatchesOldWeeks1Behavior()
     {
-        // Regression: passing 7 days must produce the exact output the old weeks=1 produced.
+        // Regression: legacy weekly boards store midnight dues (Trello date-only). The normalized
+        // end is end-of-that-day, and the contiguous start equals the old due − 6 days at midnight.
+        var dueMidnight = new DateTime(2026, 7, 18, 0, 0, 0, DateTimeKind.Utc);
+        var merge = new ProjectBoardSprintMerge { SprintNumber = 2, DueDate = dueMidnight };
+
+        var ok = SprintPlanDateResolver.TryGetInclusiveUtcRangeFromSprintMerge(merge, 2, 7, out var start, out var end);
+
+        Assert.True(ok);
+        Assert.Equal(dueMidnight.AddDays(-6), start); // Jul 12 00:00 — identical to the old weekly window
+        Assert.Equal(dueMidnight.Date.AddDays(1).AddTicks(-1), end);
+    }
+
+    [Fact]
+    public void Days7_EndOfDayDue_WindowIsContiguousSevenDays()
+    {
+        // End-of-day dues previously produced a window starting at 23:59 of the first day
+        // (losing that day's daytime). Now: start = end − 7 days + 1 tick.
         var due = new DateTime(2026, 7, 11, 21, 59, 59, DateTimeKind.Utc);
         var merge = new ProjectBoardSprintMerge { SprintNumber = 2, DueDate = due };
 
         var ok = SprintPlanDateResolver.TryGetInclusiveUtcRangeFromSprintMerge(merge, 2, 7, out var start, out var end);
 
         Assert.True(ok);
-        Assert.Equal(due.AddDays(-6), start); // old: weeks=1 → 7 days → due − 6
+        Assert.Equal(due.AddDays(-7).AddTicks(1), start);
         Assert.Equal(due, end);
     }
 
