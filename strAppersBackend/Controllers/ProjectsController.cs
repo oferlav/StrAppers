@@ -1326,6 +1326,7 @@ public partial class ProjectsController : ControllerBase
                     p.InUse,
                     p.Logo,
                     p.BuiltInCourseName,
+                    p.TrelloBoardJson,
                     p.CreatedAt,
                     p.UpdatedAt,
                     ApplicantsCount = _context.Students.Count(s => s.Status.HasValue && s.Status <= 1 && (
@@ -1336,6 +1337,13 @@ public partial class ProjectsController : ControllerBase
                     ))
                 })
                 .ToListAsync();
+
+            // Resolve each project's sprint length in days (day-based template JSON, else global weeks
+            // config × 7) so the frontend can show "X sprints / Y days" from the course's real cadence.
+            var sprintLengthWeeksConfig = _configuration.GetValue("BusinessLogicConfig:SprintLengthInWeeks", 1);
+            var sprintLengthDaysByProject = projects.ToDictionary(
+                p => p.Id,
+                p => SprintLengthResolver.ResolveFromJson(p.TrelloBoardJson, sprintLengthWeeksConfig));
 
             // Load squad roles + template metadata for all returned projects
             var projectIds = projects.Select(p => p.Id).ToList();
@@ -1401,6 +1409,7 @@ public partial class ProjectsController : ControllerBase
                     RequireDeveloperRule = meta?.RequireDeveloperRule ?? false,
                     CourseType = meta?.CourseType,
                     RoleCount = meta?.RoleCount,
+                    SprintLengthDays = sprintLengthDaysByProject.GetValueOrDefault(p.Id),
                 };
             }));
         }
@@ -1437,6 +1446,7 @@ public partial class ProjectsController : ControllerBase
                     p.InUse,
                     p.Logo,
                     p.BuiltInCourseName,
+                    p.TrelloBoardJson,
                     p.CreatedAt,
                     p.UpdatedAt,
                     ApplicantsCount = _context.Students.Count(s => s.Status.HasValue && s.Status <= 1 && (
@@ -1447,6 +1457,13 @@ public partial class ProjectsController : ControllerBase
                     ))
                 })
                 .ToListAsync();
+
+            // Resolve each project's sprint length in days (day-based template JSON, else global weeks
+            // config × 7) so the frontend can show "X sprints / Y days" from the course's real cadence.
+            var sprintLengthWeeksConfig = _configuration.GetValue("BusinessLogicConfig:SprintLengthInWeeks", 1);
+            var sprintLengthDaysByProject = projects.ToDictionary(
+                p => p.Id,
+                p => SprintLengthResolver.ResolveFromJson(p.TrelloBoardJson, sprintLengthWeeksConfig));
 
             var projectIds = projects.Select(p => p.Id).ToList();
 
@@ -1511,6 +1528,7 @@ public partial class ProjectsController : ControllerBase
                     RequireDeveloperRule = meta?.RequireDeveloperRule ?? false,
                     CourseType = meta?.CourseType,
                     RoleCount = meta?.RoleCount,
+                    SprintLengthDays = sprintLengthDaysByProject.GetValueOrDefault(p.Id),
                 };
             }));
         }
