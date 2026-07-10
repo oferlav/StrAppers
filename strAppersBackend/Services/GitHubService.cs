@@ -4202,7 +4202,7 @@ public class GitHubService : IGitHubService
         }
 
         readme += "## Google APIs (Gemini, Maps, Speech-to-Text)\n\n";
-        readme += "The backend can use a Google API key provided via the **GOOGLE_API_KEY** environment variable (set on Railway). Use it for Gemini LLM, Maps, and Speech-to-Text. Check **GET /api/google/status** and **GET /api/google/health** to verify the key is set and reachable.\n\n";
+        readme += "The backend can use Google API keys provided via environment variables (set on Railway): **GOOGLE_API_KEY** for the Gemini LLM, and **GOOGLE_MAPS_API_KEY** for Geocoding, Maps, Directions, Places, and Speech-to-Text (Google requires Gemini keys to be separate from other APIs). Check **GET /api/google/status** and **GET /api/google/health** to verify the keys are set and reachable.\n\n";
 
         readme += "## Recommended Tools\n\n";
         readme += "**Recommended SQL Editor tool (Free):** [pgAdmin](https://www.pgadmin.org/download/)\n\n";
@@ -4729,16 +4729,23 @@ public class TestProjects
 }
 ";
 
-        // GoogleApiKeyHelper - read GOOGLE_API_KEY from environment (set by Railway)
+        // GoogleApiKeyHelper - read GOOGLE_API_KEY / GOOGLE_MAPS_API_KEY from environment (set by Railway)
         files["backend/Services/GoogleApiKeyHelper.cs"] = @"namespace Backend.Services;
 
 /// <summary>
-/// Helper to read Google API key from environment (GOOGLE_API_KEY).
-/// Used for Gemini, Maps, and Speech-to-Text in student backends.
+/// Helper to read Google API keys from environment.
+/// GOOGLE_API_KEY is for Gemini only; GOOGLE_MAPS_API_KEY is for Geocoding, Maps, Directions, Places, and Speech-to-Text
+/// (Google does not allow those APIs on the same key as Gemini).
 /// </summary>
 public static class GoogleApiKeyHelper
 {
     public static string? GetGoogleApiKey() => Environment.GetEnvironmentVariable(""GOOGLE_API_KEY"");
+
+    public static string? GetMapsApiKey()
+    {
+        var key = Environment.GetEnvironmentVariable(""GOOGLE_MAPS_API_KEY"");
+        return string.IsNullOrWhiteSpace(key) ? GetGoogleApiKey() : key;
+    }
 }
 ";
 
@@ -4760,10 +4767,12 @@ public class GoogleApiController : ControllerBase
     {
         var key = Services.GoogleApiKeyHelper.GetGoogleApiKey();
         var configured = !string.IsNullOrWhiteSpace(key);
+        var mapsConfigured = !string.IsNullOrWhiteSpace(Services.GoogleApiKeyHelper.GetMapsApiKey());
         return Ok(new
         {
             configured,
-            message = configured ? ""Google API key is set. You can use Gemini, Maps, and Speech-to-Text."" : ""Google API key is not set. Add GOOGLE_API_KEY in Railway environment variables.""
+            mapsConfigured,
+            message = configured ? ""Google API key is set. Gemini uses GOOGLE_API_KEY; Maps, Places, Directions, Geocoding, and Speech-to-Text use GOOGLE_MAPS_API_KEY."" : ""Google API key is not set. Add GOOGLE_API_KEY in Railway environment variables.""
         });
     }
 
@@ -4818,9 +4827,9 @@ public class GoogleApiController : ControllerBase
     [HttpGet(""geocoding"")]
     public async Task<IActionResult> Geocoding()
     {
-        var key = Services.GoogleApiKeyHelper.GetGoogleApiKey();
+        var key = Services.GoogleApiKeyHelper.GetMapsApiKey();
         if (string.IsNullOrWhiteSpace(key))
-            return Ok(new { status = ""not_configured"", message = ""GOOGLE_API_KEY is not set."", service = ""Geocoding"" });
+            return Ok(new { status = ""not_configured"", message = ""GOOGLE_MAPS_API_KEY is not set."", service = ""Geocoding"" });
 
         try
         {
@@ -4847,9 +4856,9 @@ public class GoogleApiController : ControllerBase
     [HttpGet(""maps"")]
     public async Task<IActionResult> Maps()
     {
-        var key = Services.GoogleApiKeyHelper.GetGoogleApiKey();
+        var key = Services.GoogleApiKeyHelper.GetMapsApiKey();
         if (string.IsNullOrWhiteSpace(key))
-            return Ok(new { status = ""not_configured"", message = ""GOOGLE_API_KEY is not set."", service = ""Maps"" });
+            return Ok(new { status = ""not_configured"", message = ""GOOGLE_MAPS_API_KEY is not set."", service = ""Maps"" });
 
         try
         {
@@ -4874,9 +4883,9 @@ public class GoogleApiController : ControllerBase
     [HttpGet(""directions"")]
     public async Task<IActionResult> Directions()
     {
-        var key = Services.GoogleApiKeyHelper.GetGoogleApiKey();
+        var key = Services.GoogleApiKeyHelper.GetMapsApiKey();
         if (string.IsNullOrWhiteSpace(key))
-            return Ok(new { status = ""not_configured"", message = ""GOOGLE_API_KEY is not set."", service = ""Directions"" });
+            return Ok(new { status = ""not_configured"", message = ""GOOGLE_MAPS_API_KEY is not set."", service = ""Directions"" });
 
         try
         {
@@ -4905,9 +4914,9 @@ public class GoogleApiController : ControllerBase
     [HttpGet(""places"")]
     public async Task<IActionResult> Places()
     {
-        var key = Services.GoogleApiKeyHelper.GetGoogleApiKey();
+        var key = Services.GoogleApiKeyHelper.GetMapsApiKey();
         if (string.IsNullOrWhiteSpace(key))
-            return Ok(new { status = ""not_configured"", message = ""GOOGLE_API_KEY is not set."", service = ""Places"" });
+            return Ok(new { status = ""not_configured"", message = ""GOOGLE_MAPS_API_KEY is not set."", service = ""Places"" });
 
         try
         {
@@ -4933,9 +4942,9 @@ public class GoogleApiController : ControllerBase
     [HttpGet(""speech-to-text"")]
     public async Task<IActionResult> SpeechToText()
     {
-        var key = Services.GoogleApiKeyHelper.GetGoogleApiKey();
+        var key = Services.GoogleApiKeyHelper.GetMapsApiKey();
         if (string.IsNullOrWhiteSpace(key))
-            return Ok(new { status = ""not_configured"", message = ""GOOGLE_API_KEY is not set."", service = ""SpeechToText"" });
+            return Ok(new { status = ""not_configured"", message = ""GOOGLE_MAPS_API_KEY is not set."", service = ""SpeechToText"" });
 
         try
         {
@@ -6531,13 +6540,19 @@ router = APIRouter(prefix="""", tags=[""google""])
 def get_google_api_key():
     return os.getenv(""GOOGLE_API_KEY"")
 
+def get_maps_api_key():
+    # Geocoding, Maps, Directions, Places, Speech-to-Text (Google does not allow these on the same key as Gemini)
+    return os.getenv(""GOOGLE_MAPS_API_KEY"") or get_google_api_key()
+
 @router.get(""/status"")
 async def status():
     key = get_google_api_key()
     configured = bool(key and key.strip())
+    maps_key = get_maps_api_key()
     return {
         ""configured"": configured,
-        ""message"": ""Google API key is set. You can use Gemini, Maps, and Speech-to-Text."" if configured else 'Google API key is not set. Add GOOGLE_API_KEY in Railway environment variables.'
+        ""mapsConfigured"": bool(maps_key and maps_key.strip()),
+        ""message"": ""Google API key is set. Gemini uses GOOGLE_API_KEY; Maps, Places, Directions, Geocoding, and Speech-to-Text use GOOGLE_MAPS_API_KEY."" if configured else 'Google API key is not set. Add GOOGLE_API_KEY in Railway environment variables.'
     }
 
 @router.get(""/health"")
@@ -6569,9 +6584,9 @@ async def gemini():
 
 @router.get(""/geocoding"")
 async def geocoding():
-    key = get_google_api_key()
+    key = get_maps_api_key()
     if not key or not key.strip():
-        return JSONResponse(content={""status"": ""not_configured"", ""message"": ""GOOGLE_API_KEY is not set."", ""service"": ""Geocoding""})
+        return JSONResponse(content={""status"": ""not_configured"", ""message"": ""GOOGLE_MAPS_API_KEY is not set."", ""service"": ""Geocoding""})
     try:
         url = ""https://maps.googleapis.com/maps/api/geocode/json?address=Times+Square+New+York&key="" + key
         async with httpx.AsyncClient(timeout=10.0) as client:
@@ -6589,9 +6604,9 @@ async def geocoding():
 
 @router.get(""/maps"")
 async def maps():
-    key = get_google_api_key()
+    key = get_maps_api_key()
     if not key or not key.strip():
-        return JSONResponse(content={""status"": ""not_configured"", ""message"": ""GOOGLE_API_KEY is not set."", ""service"": ""Maps""})
+        return JSONResponse(content={""status"": ""not_configured"", ""message"": ""GOOGLE_MAPS_API_KEY is not set."", ""service"": ""Maps""})
     try:
         url = f""https://maps.googleapis.com/maps/api/js?key={key}""
         async with httpx.AsyncClient(timeout=10.0) as client:
@@ -6611,9 +6626,9 @@ async def maps():
 
 @router.get(""/directions"")
 async def directions():
-    key = get_google_api_key()
+    key = get_maps_api_key()
     if not key or not key.strip():
-        return JSONResponse(content={""status"": ""not_configured"", ""message"": ""GOOGLE_API_KEY is not set."", ""service"": ""Directions""})
+        return JSONResponse(content={""status"": ""not_configured"", ""message"": ""GOOGLE_MAPS_API_KEY is not set."", ""service"": ""Directions""})
     try:
         import urllib.parse
         origin = urllib.parse.quote(""Times Square, New York, NY"")
@@ -6634,9 +6649,9 @@ async def directions():
 
 @router.get(""/places"")
 async def places():
-    key = get_google_api_key()
+    key = get_maps_api_key()
     if not key or not key.strip():
-        return JSONResponse(content={""status"": ""not_configured"", ""message"": ""GOOGLE_API_KEY is not set."", ""service"": ""Places""})
+        return JSONResponse(content={""status"": ""not_configured"", ""message"": ""GOOGLE_MAPS_API_KEY is not set."", ""service"": ""Places""})
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
             r = await client.post(
@@ -6653,9 +6668,9 @@ async def places():
 
 @router.get(""/speech-to-text"")
 async def speech_to_text():
-    key = get_google_api_key()
+    key = get_maps_api_key()
     if not key or not key.strip():
-        return JSONResponse(content={""status"": ""not_configured"", ""message"": ""GOOGLE_API_KEY is not set."", ""service"": ""SpeechToText""})
+        return JSONResponse(content={""status"": ""not_configured"", ""message"": ""GOOGLE_MAPS_API_KEY is not set."", ""service"": ""SpeechToText""})
     try:
         silence_bytes = b'\x00' * 3200
         base64_audio = base64.b64encode(silence_bytes).decode(""utf-8"")
@@ -7217,12 +7232,16 @@ const router = express.Router();
 
 function getKey() { return process.env.GOOGLE_API_KEY || ''; }
 
+// Geocoding, Maps, Directions, Places, Speech-to-Text (Google does not allow these on the same key as Gemini)
+function getMapsKey() { return process.env.GOOGLE_MAPS_API_KEY || getKey(); }
+
 router.get('/status', (req, res) => {
     const key = getKey();
     const configured = !!key.trim();
     res.json({
         configured,
-        message: configured ? 'Google API key is set. You can use Gemini, Maps, and Speech-to-Text.' : 'Google API key is not set. Add GOOGLE_API_KEY in Railway environment variables.'
+        mapsConfigured: !!getMapsKey().trim(),
+        message: configured ? 'Google API key is set. Gemini uses GOOGLE_API_KEY; Maps, Places, Directions, Geocoding, and Speech-to-Text use GOOGLE_MAPS_API_KEY.' : 'Google API key is not set. Add GOOGLE_API_KEY in Railway environment variables.'
     });
 });
 
@@ -7259,8 +7278,8 @@ router.get('/gemini', async (req, res) => {
 });
 
 router.get('/geocoding', async (req, res) => {
-    const key = getKey();
-    if (!key.trim()) return res.json({ status: 'not_configured', message: 'GOOGLE_API_KEY is not set.', service: 'Geocoding' });
+    const key = getMapsKey();
+    if (!key.trim()) return res.json({ status: 'not_configured', message: 'GOOGLE_MAPS_API_KEY is not set.', service: 'Geocoding' });
     try {
         const url = 'https://maps.googleapis.com/maps/api/geocode/json?address=Times+Square+New+York&key=' + encodeURIComponent(key);
         const r = await fetch(url);
@@ -7273,8 +7292,8 @@ router.get('/geocoding', async (req, res) => {
 });
 
 router.get('/maps', async (req, res) => {
-    const key = getKey();
-    if (!key.trim()) return res.json({ status: 'not_configured', message: 'GOOGLE_API_KEY is not set.', service: 'Maps' });
+    const key = getMapsKey();
+    if (!key.trim()) return res.json({ status: 'not_configured', message: 'GOOGLE_MAPS_API_KEY is not set.', service: 'Maps' });
     try {
         const url = 'https://maps.googleapis.com/maps/api/js?key=' + encodeURIComponent(key);
         const r = await fetch(url);
@@ -7288,8 +7307,8 @@ router.get('/maps', async (req, res) => {
 });
 
 router.get('/directions', async (req, res) => {
-    const key = getKey();
-    if (!key.trim()) return res.json({ status: 'not_configured', message: 'GOOGLE_API_KEY is not set.', service: 'Directions' });
+    const key = getMapsKey();
+    if (!key.trim()) return res.json({ status: 'not_configured', message: 'GOOGLE_MAPS_API_KEY is not set.', service: 'Directions' });
     try {
         const origin = encodeURIComponent('Times Square, New York, NY');
         const dest = encodeURIComponent('Brooklyn Bridge, New York, NY');
@@ -7304,8 +7323,8 @@ router.get('/directions', async (req, res) => {
 });
 
 router.get('/places', async (req, res) => {
-    const key = getKey();
-    if (!key.trim()) return res.json({ status: 'not_configured', message: 'GOOGLE_API_KEY is not set.', service: 'Places' });
+    const key = getMapsKey();
+    if (!key.trim()) return res.json({ status: 'not_configured', message: 'GOOGLE_MAPS_API_KEY is not set.', service: 'Places' });
     try {
         const r = await fetch('https://places.googleapis.com/v1/places:searchText', {
             method: 'POST',
@@ -7319,8 +7338,8 @@ router.get('/places', async (req, res) => {
 });
 
 router.get('/speech-to-text', async (req, res) => {
-    const key = getKey();
-    if (!key.trim()) return res.json({ status: 'not_configured', message: 'GOOGLE_API_KEY is not set.', service: 'SpeechToText' });
+    const key = getMapsKey();
+    if (!key.trim()) return res.json({ status: 'not_configured', message: 'GOOGLE_MAPS_API_KEY is not set.', service: 'SpeechToText' });
     try {
         const silence = Buffer.alloc(3200, 0);
         const base64Audio = silence.toString('base64');
@@ -7898,6 +7917,11 @@ test('add with negative numbers returns correct sum', () => {
 "        String k = System.getenv(\"GOOGLE_API_KEY\");\n" +
 "        return k != null ? k : \"\";\n" +
 "    }\n\n" +
+"    // Geocoding, Maps, Directions, Places, Speech-to-Text (Google does not allow these on the same key as Gemini)\n" +
+"    private static String getMapsKey() {\n" +
+"        String k = System.getenv(\"GOOGLE_MAPS_API_KEY\");\n" +
+"        return k != null && !k.trim().isEmpty() ? k : getKey();\n" +
+"    }\n\n" +
 "    private static HttpClient httpClient() {\n" +
 "        return HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).build();\n" +
 "    }\n\n" +
@@ -7905,9 +7929,12 @@ test('add with negative numbers returns correct sum', () => {
 "    public ResponseEntity<Map<String, Object>> status() {\n" +
 "        String key = getKey();\n" +
 "        boolean configured = key != null && !key.trim().isEmpty();\n" +
+"        String mapsKey = getMapsKey();\n" +
+"        boolean mapsConfigured = mapsKey != null && !mapsKey.trim().isEmpty();\n" +
 "        return ResponseEntity.ok(Map.of(\n" +
 "            \"configured\", configured,\n" +
-"            \"message\", configured ? \"Google API key is set. You can use Gemini, Maps, and Speech-to-Text.\" : \"Google API key is not set. Add GOOGLE_API_KEY in Railway environment variables.\"\n" +
+"            \"mapsConfigured\", mapsConfigured,\n" +
+"            \"message\", configured ? \"Google API key is set. Gemini uses GOOGLE_API_KEY; Maps, Places, Directions, Geocoding, and Speech-to-Text use GOOGLE_MAPS_API_KEY.\" : \"Google API key is not set. Add GOOGLE_API_KEY in Railway environment variables.\"\n" +
 "        ));\n" +
 "    }\n\n" +
 "    @GetMapping(\"/health\")\n" +
@@ -7936,8 +7963,8 @@ test('add with negative numbers returns correct sum', () => {
 "    }\n\n" +
 "    @GetMapping(\"/geocoding\")\n" +
 "    public ResponseEntity<Map<String, String>> geocoding() {\n" +
-"        String key = getKey();\n" +
-"        if (key == null || key.trim().isEmpty()) return ResponseEntity.ok(Map.of(\"status\", \"not_configured\", \"message\", \"GOOGLE_API_KEY is not set.\", \"service\", \"Geocoding\"));\n" +
+"        String key = getMapsKey();\n" +
+"        if (key == null || key.trim().isEmpty()) return ResponseEntity.ok(Map.of(\"status\", \"not_configured\", \"message\", \"GOOGLE_MAPS_API_KEY is not set.\", \"service\", \"Geocoding\"));\n" +
 "        try {\n" +
 "            String url = \"https://maps.googleapis.com/maps/api/geocode/json?address=Times+Square+New+York&key=\" + URLEncoder.encode(key, StandardCharsets.UTF_8);\n" +
 "            HttpRequest req = HttpRequest.newBuilder().uri(URI.create(url)).timeout(Duration.ofSeconds(10)).GET().build();\n" +
@@ -7952,8 +7979,8 @@ test('add with negative numbers returns correct sum', () => {
 "    }\n\n" +
 "    @GetMapping(\"/maps\")\n" +
 "    public ResponseEntity<Map<String, String>> maps() {\n" +
-"        String key = getKey();\n" +
-"        if (key == null || key.trim().isEmpty()) return ResponseEntity.ok(Map.of(\"status\", \"not_configured\", \"message\", \"GOOGLE_API_KEY is not set.\", \"service\", \"Maps\"));\n" +
+"        String key = getMapsKey();\n" +
+"        if (key == null || key.trim().isEmpty()) return ResponseEntity.ok(Map.of(\"status\", \"not_configured\", \"message\", \"GOOGLE_MAPS_API_KEY is not set.\", \"service\", \"Maps\"));\n" +
 "        try {\n" +
 "            String url = \"https://maps.googleapis.com/maps/api/js?key=\" + URLEncoder.encode(key, StandardCharsets.UTF_8);\n" +
 "            HttpRequest req = HttpRequest.newBuilder().uri(URI.create(url)).timeout(Duration.ofSeconds(10)).GET().build();\n" +
@@ -7968,8 +7995,8 @@ test('add with negative numbers returns correct sum', () => {
 "    }\n\n" +
 "    @GetMapping(\"/directions\")\n" +
 "    public ResponseEntity<Map<String, String>> directions() {\n" +
-"        String key = getKey();\n" +
-"        if (key == null || key.trim().isEmpty()) return ResponseEntity.ok(Map.of(\"status\", \"not_configured\", \"message\", \"GOOGLE_API_KEY is not set.\", \"service\", \"Directions\"));\n" +
+"        String key = getMapsKey();\n" +
+"        if (key == null || key.trim().isEmpty()) return ResponseEntity.ok(Map.of(\"status\", \"not_configured\", \"message\", \"GOOGLE_MAPS_API_KEY is not set.\", \"service\", \"Directions\"));\n" +
 "        try {\n" +
 "            String origin = URLEncoder.encode(\"Times Square, New York, NY\", StandardCharsets.UTF_8);\n" +
 "            String dest = URLEncoder.encode(\"Brooklyn Bridge, New York, NY\", StandardCharsets.UTF_8);\n" +
@@ -7986,8 +8013,8 @@ test('add with negative numbers returns correct sum', () => {
 "    }\n\n" +
 "    @GetMapping(\"/places\")\n" +
 "    public ResponseEntity<Map<String, String>> places() {\n" +
-"        String key = getKey();\n" +
-"        if (key == null || key.trim().isEmpty()) return ResponseEntity.ok(Map.of(\"status\", \"not_configured\", \"message\", \"GOOGLE_API_KEY is not set.\", \"service\", \"Places\"));\n" +
+"        String key = getMapsKey();\n" +
+"        if (key == null || key.trim().isEmpty()) return ResponseEntity.ok(Map.of(\"status\", \"not_configured\", \"message\", \"GOOGLE_MAPS_API_KEY is not set.\", \"service\", \"Places\"));\n" +
 "        try {\n" +
 "            HttpRequest req = HttpRequest.newBuilder().uri(URI.create(\"https://places.googleapis.com/v1/places:searchText\")).timeout(Duration.ofSeconds(10))\n" +
 "                .header(\"Content-Type\", \"application/json\").header(\"X-Goog-Api-Key\", key).header(\"X-Goog-FieldMask\", \"places.id\")\n" +
@@ -8000,8 +8027,8 @@ test('add with negative numbers returns correct sum', () => {
 "    }\n\n" +
 "    @GetMapping(\"/speech-to-text\")\n" +
 "    public ResponseEntity<Map<String, String>> speechToText() {\n" +
-"        String key = getKey();\n" +
-"        if (key == null || key.trim().isEmpty()) return ResponseEntity.ok(Map.of(\"status\", \"not_configured\", \"message\", \"GOOGLE_API_KEY is not set.\", \"service\", \"SpeechToText\"));\n" +
+"        String key = getMapsKey();\n" +
+"        if (key == null || key.trim().isEmpty()) return ResponseEntity.ok(Map.of(\"status\", \"not_configured\", \"message\", \"GOOGLE_MAPS_API_KEY is not set.\", \"service\", \"SpeechToText\"));\n" +
 "        try {\n" +
 "            byte[] silence = new byte[3200];\n" +
 "            String base64Audio = java.util.Base64.getEncoder().encodeToString(silence);\n" +
@@ -8958,6 +8985,9 @@ SWAGGER_HTML;
 } elseif (strpos($path, '/api/google/') === 0) {
     header('Content-Type: application/json');
     $key = trim((string) getenv('GOOGLE_API_KEY'));
+    // Geocoding, Maps, Directions, Places, Speech-to-Text (Google does not allow these on the same key as Gemini)
+    $mapsKey = trim((string) getenv('GOOGLE_MAPS_API_KEY'));
+    if ($mapsKey === '') { $mapsKey = $key; }
     $baseUrl = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent';
     $geocodeUrl = 'https://maps.googleapis.com/maps/api/geocode/json';
     $mapsJsUrl = 'https://maps.googleapis.com/maps/api/js';
@@ -8967,7 +8997,7 @@ SWAGGER_HTML;
     $handler = function ($status, $message, $service) { echo json_encode(compact('status', 'message', 'service')); exit; };
     if ($path === '/api/google/status') {
         $configured = $key !== '';
-        echo json_encode(['configured' => $configured, 'message' => $configured ? 'Google API key is set. You can use Gemini, Maps, and Speech-to-Text.' : 'Google API key is not set. Add GOOGLE_API_KEY in Railway environment variables.']);
+        echo json_encode(['configured' => $configured, 'mapsConfigured' => $mapsKey !== '', 'message' => $configured ? 'Google API key is set. Gemini uses GOOGLE_API_KEY; Maps, Places, Directions, Geocoding, and Speech-to-Text use GOOGLE_MAPS_API_KEY.' : 'Google API key is not set. Add GOOGLE_API_KEY in Railway environment variables.']);
         exit;
     }
     if ($path === '/api/google/health') { $path = '/api/google/gemini'; }
@@ -8985,33 +9015,33 @@ SWAGGER_HTML;
         $handler('ok', $message, 'Gemini');
     }
     if ($path === '/api/google/geocoding') {
-        if ($key === '') { $handler('not_configured', 'GOOGLE_API_KEY is not set.', 'Geocoding'); }
-        $res = @file_get_contents($geocodeUrl . '?address=Times+Square+New+York&key=' . rawurlencode($key));
+        if ($mapsKey === '') { $handler('not_configured', 'GOOGLE_MAPS_API_KEY is not set.', 'Geocoding'); }
+        $res = @file_get_contents($geocodeUrl . '?address=Times+Square+New+York&key=' . rawurlencode($mapsKey));
         $data = json_decode($res, true);
         $statusVal = $data['status'] ?? '';
         if ($statusVal === 'OK') { $handler('ok', 'Geocoding API responded successfully.', 'Geocoding'); }
         $handler('error', $statusVal, 'Geocoding');
     }
     if ($path === '/api/google/maps') {
-        if ($key === '') { $handler('not_configured', 'GOOGLE_API_KEY is not set.', 'Maps'); }
-        $res = @file_get_contents($mapsJsUrl . '?key=' . rawurlencode($key));
+        if ($mapsKey === '') { $handler('not_configured', 'GOOGLE_MAPS_API_KEY is not set.', 'Maps'); }
+        $res = @file_get_contents($mapsJsUrl . '?key=' . rawurlencode($mapsKey));
         if (strpos($res, 'ApiNotActivatedMapError') !== false) { $handler('error', 'Maps JavaScript API is not enabled for this key.', 'Maps'); }
         if (strpos($res, 'RefererNotAllowedMapError') !== false) { $handler('error', 'Referer not allowed for this key.', 'Maps'); }
         if (strpos($res, 'InvalidKeyMapError') !== false) { $handler('error', 'Invalid API key.', 'Maps'); }
         $handler('ok', 'Maps JavaScript API key valid.', 'Maps');
     }
     if ($path === '/api/google/directions') {
-        if ($key === '') { $handler('not_configured', 'GOOGLE_API_KEY is not set.', 'Directions'); }
+        if ($mapsKey === '') { $handler('not_configured', 'GOOGLE_MAPS_API_KEY is not set.', 'Directions'); }
         $origin = rawurlencode('Times Square, New York, NY'); $dest = rawurlencode('Brooklyn Bridge, New York, NY');
-        $res = @file_get_contents($directionsUrl . '?origin=' . $origin . '&destination=' . $dest . '&key=' . rawurlencode($key));
+        $res = @file_get_contents($directionsUrl . '?origin=' . $origin . '&destination=' . $dest . '&key=' . rawurlencode($mapsKey));
         $data = json_decode($res, true);
         $statusVal = $data['status'] ?? '';
         if ($statusVal === 'OK') { $handler('ok', 'Directions API responded successfully. Use it from the backend to return routes to the frontend.', 'Directions'); }
         $handler('error', $statusVal, 'Directions');
     }
     if ($path === '/api/google/places') {
-        if ($key === '') { $handler('not_configured', 'GOOGLE_API_KEY is not set.', 'Places'); }
-        $placesHeader = 'Content-Type: application/json' . chr(13) . chr(10) . 'X-Goog-Api-Key: ' . $key . chr(13) . chr(10) . 'X-Goog-FieldMask: places.id';
+        if ($mapsKey === '') { $handler('not_configured', 'GOOGLE_MAPS_API_KEY is not set.', 'Places'); }
+        $placesHeader = 'Content-Type: application/json' . chr(13) . chr(10) . 'X-Goog-Api-Key: ' . $mapsKey . chr(13) . chr(10) . 'X-Goog-FieldMask: places.id';
         $placesBody = json_encode(['textQuery' => 'coffee']);
         $ctx = stream_context_create(['http' => ['method' => 'POST', 'header' => $placesHeader, 'content' => $placesBody, 'timeout' => 10]]);
         $res = @file_get_contents($placesUrl, false, $ctx);
@@ -9020,11 +9050,11 @@ SWAGGER_HTML;
         $handler('error', strlen($res) > 200 ? substr($res, 0, 200) . '...' : $res, 'Places');
     }
     if ($path === '/api/google/speech-to-text') {
-        if ($key === '') { $handler('not_configured', 'GOOGLE_API_KEY is not set.', 'SpeechToText'); }
+        if ($mapsKey === '') { $handler('not_configured', 'GOOGLE_MAPS_API_KEY is not set.', 'SpeechToText'); }
         $silence = str_repeat(chr(0), 3200); $b64 = base64_encode($silence);
         $body = json_encode(['config' => ['encoding' => 'LINEAR16', 'sampleRateHertz' => 16000, 'languageCode' => 'en-US'], 'audio' => ['content' => $b64]]);
         $ctx = stream_context_create(['http' => ['method' => 'POST', 'header' => 'Content-Type: application/json', 'content' => $body, 'timeout' => 10]]);
-        $res = @file_get_contents($speechUrl . '?key=' . rawurlencode($key), false, $ctx);
+        $res = @file_get_contents($speechUrl . '?key=' . rawurlencode($mapsKey), false, $ctx);
         $code = (int) (isset($http_response_header[0]) ? preg_replace('/.* (\d+) .*/', '$1', $http_response_header[0]) : 0);
         if ($code === 200) { $handler('ok', 'Speech-to-Text API accepted the request.', 'SpeechToText'); }
         if ($code === 400 && strpos($res, 'No speech') !== false) { $handler('ok', 'Speech-to-Text API responded (no speech in test audio).', 'SpeechToText'); }
@@ -9588,11 +9618,17 @@ def google_api_key
   ENV['GOOGLE_API_KEY'].to_s.strip
 end
 
+# Geocoding, Maps, Directions, Places, Speech-to-Text (Google does not allow these on the same key as Gemini)
+def google_maps_api_key
+  key = ENV['GOOGLE_MAPS_API_KEY'].to_s.strip
+  key.empty? ? google_api_key : key
+end
+
 get '/api/google/status' do
   content_type :json
   key = google_api_key
   configured = !key.empty?
-  { configured: configured, message: configured ? 'Google API key is set. You can use Gemini, Maps, and Speech-to-Text.' : 'Google API key is not set. Add GOOGLE_API_KEY in Railway environment variables.' }.to_json
+  { configured: configured, mapsConfigured: !google_maps_api_key.empty?, message: configured ? 'Google API key is set. Gemini uses GOOGLE_API_KEY; Maps, Places, Directions, Geocoding, and Speech-to-Text use GOOGLE_MAPS_API_KEY.' : 'Google API key is not set. Add GOOGLE_API_KEY in Railway environment variables.' }.to_json
 end
 
 get '/api/google/health' do
@@ -9643,8 +9679,8 @@ end
 
 get '/api/google/geocoding' do
   content_type :json
-  key = google_api_key
-  return { status: 'not_configured', message: 'GOOGLE_API_KEY is not set.', service: 'Geocoding' }.to_json if key.empty?
+  key = google_maps_api_key
+  return { status: 'not_configured', message: 'GOOGLE_MAPS_API_KEY is not set.', service: 'Geocoding' }.to_json if key.empty?
   begin
     uri = URI(""https://maps.googleapis.com/maps/api/geocode/json?address=Times+Square+New+York&key=#{ERB::Util.url_encode(key)}"")
     res = Net::HTTP.get_response(uri)
@@ -9661,8 +9697,8 @@ end
 
 get '/api/google/maps' do
   content_type :json
-  key = google_api_key
-  return { status: 'not_configured', message: 'GOOGLE_API_KEY is not set.', service: 'Maps' }.to_json if key.empty?
+  key = google_maps_api_key
+  return { status: 'not_configured', message: 'GOOGLE_MAPS_API_KEY is not set.', service: 'Maps' }.to_json if key.empty?
   begin
     uri = URI(""https://maps.googleapis.com/maps/api/js?key=#{ERB::Util.url_encode(key)}"")
     res = Net::HTTP.get_response(uri)
@@ -9679,8 +9715,8 @@ end
 
 get '/api/google/directions' do
   content_type :json
-  key = google_api_key
-  return { status: 'not_configured', message: 'GOOGLE_API_KEY is not set.', service: 'Directions' }.to_json if key.empty?
+  key = google_maps_api_key
+  return { status: 'not_configured', message: 'GOOGLE_MAPS_API_KEY is not set.', service: 'Directions' }.to_json if key.empty?
   begin
     origin = ERB::Util.url_encode('Times Square, New York, NY')
     dest = ERB::Util.url_encode('Brooklyn Bridge, New York, NY')
@@ -9699,8 +9735,8 @@ end
 
 get '/api/google/places' do
   content_type :json
-  key = google_api_key
-  return { status: 'not_configured', message: 'GOOGLE_API_KEY is not set.', service: 'Places' }.to_json if key.empty?
+  key = google_maps_api_key
+  return { status: 'not_configured', message: 'GOOGLE_MAPS_API_KEY is not set.', service: 'Places' }.to_json if key.empty?
   begin
     uri = URI('https://places.googleapis.com/v1/places:searchText')
     http = Net::HTTP.new(uri.host, uri.port); http.use_ssl = true; http.open_timeout = 10; http.read_timeout = 10
@@ -9716,8 +9752,8 @@ end
 
 get '/api/google/speech-to-text' do
   content_type :json
-  key = google_api_key
-  return { status: 'not_configured', message: 'GOOGLE_API_KEY is not set.', service: 'SpeechToText' }.to_json if key.empty?
+  key = google_maps_api_key
+  return { status: 'not_configured', message: 'GOOGLE_MAPS_API_KEY is not set.', service: 'SpeechToText' }.to_json if key.empty?
   begin
     silence = ""\x00"" * 3200
     base64_audio = Base64.strict_encode64(silence)
@@ -10378,6 +10414,13 @@ import (
 
 func getGoogleApiKey() string { return strings.TrimSpace(os.Getenv(""GOOGLE_API_KEY"")) }
 
+// Geocoding, Maps, Directions, Places, Speech-to-Text (Google does not allow these on the same key as Gemini)
+func getMapsApiKey() string {
+    key := strings.TrimSpace(os.Getenv(""GOOGLE_MAPS_API_KEY""))
+    if key == """" { return getGoogleApiKey() }
+    return key
+}
+
 func googleApiClient() *http.Client { return &http.Client{Timeout: 10 * time.Second} }
 
 func writeGoogleJson(w http.ResponseWriter, v interface{}) {
@@ -10389,8 +10432,8 @@ func GoogleApiStatus(w http.ResponseWriter, r *http.Request) {
     key := getGoogleApiKey()
     configured := key != """"
     msg := ""Google API key is not set. Add GOOGLE_API_KEY in Railway environment variables.""
-    if configured { msg = ""Google API key is set. You can use Gemini, Maps, and Speech-to-Text."" }
-    writeGoogleJson(w, map[string]interface{}{""configured"": configured, ""message"": msg})
+    if configured { msg = ""Google API key is set. Gemini uses GOOGLE_API_KEY; Maps, Places, Directions, Geocoding, and Speech-to-Text use GOOGLE_MAPS_API_KEY."" }
+    writeGoogleJson(w, map[string]interface{}{""configured"": configured, ""mapsConfigured"": getMapsApiKey() != """", ""message"": msg})
 }
 
 func GoogleApiGemini(w http.ResponseWriter, r *http.Request) {
@@ -10412,8 +10455,8 @@ func GoogleApiGemini(w http.ResponseWriter, r *http.Request) {
 }
 
 func GoogleApiGeocoding(w http.ResponseWriter, r *http.Request) {
-    key := getGoogleApiKey()
-    if key == """" { writeGoogleJson(w, map[string]string{""status"": ""not_configured"", ""message"": ""GOOGLE_API_KEY is not set."", ""service"": ""Geocoding""}); return }
+    key := getMapsApiKey()
+    if key == """" { writeGoogleJson(w, map[string]string{""status"": ""not_configured"", ""message"": ""GOOGLE_MAPS_API_KEY is not set."", ""service"": ""Geocoding""}); return }
     apiUrl := ""https://maps.googleapis.com/maps/api/geocode/json?address=Times+Square+New+York&key="" + url.QueryEscape(key)
     resp, err := googleApiClient().Get(apiUrl)
     if err != nil { writeGoogleJson(w, map[string]string{""status"": ""error"", ""message"": err.Error(), ""service"": ""Geocoding""}); return }
@@ -10426,8 +10469,8 @@ func GoogleApiGeocoding(w http.ResponseWriter, r *http.Request) {
 }
 
 func GoogleApiMaps(w http.ResponseWriter, r *http.Request) {
-    key := getGoogleApiKey()
-    if key == """" { writeGoogleJson(w, map[string]string{""status"": ""not_configured"", ""message"": ""GOOGLE_API_KEY is not set."", ""service"": ""Maps""}); return }
+    key := getMapsApiKey()
+    if key == """" { writeGoogleJson(w, map[string]string{""status"": ""not_configured"", ""message"": ""GOOGLE_MAPS_API_KEY is not set."", ""service"": ""Maps""}); return }
     apiUrl := ""https://maps.googleapis.com/maps/api/js?key="" + url.QueryEscape(key)
     resp, err := googleApiClient().Get(apiUrl)
     if err != nil { writeGoogleJson(w, map[string]string{""status"": ""error"", ""message"": err.Error(), ""service"": ""Maps""}); return }
@@ -10441,8 +10484,8 @@ func GoogleApiMaps(w http.ResponseWriter, r *http.Request) {
 }
 
 func GoogleApiDirections(w http.ResponseWriter, r *http.Request) {
-    key := getGoogleApiKey()
-    if key == """" { writeGoogleJson(w, map[string]string{""status"": ""not_configured"", ""message"": ""GOOGLE_API_KEY is not set."", ""service"": ""Directions""}); return }
+    key := getMapsApiKey()
+    if key == """" { writeGoogleJson(w, map[string]string{""status"": ""not_configured"", ""message"": ""GOOGLE_MAPS_API_KEY is not set."", ""service"": ""Directions""}); return }
     origin := url.QueryEscape(""Times Square, New York, NY""); dest := url.QueryEscape(""Brooklyn Bridge, New York, NY"")
     apiUrl := ""https://maps.googleapis.com/maps/api/directions/json?origin="" + origin + ""&destination="" + dest + ""&key="" + url.QueryEscape(key)
     resp, err := googleApiClient().Get(apiUrl)
@@ -10456,8 +10499,8 @@ func GoogleApiDirections(w http.ResponseWriter, r *http.Request) {
 }
 
 func GoogleApiPlaces(w http.ResponseWriter, r *http.Request) {
-    key := getGoogleApiKey()
-    if key == """" { writeGoogleJson(w, map[string]string{""status"": ""not_configured"", ""message"": ""GOOGLE_API_KEY is not set."", ""service"": ""Places""}); return }
+    key := getMapsApiKey()
+    if key == """" { writeGoogleJson(w, map[string]string{""status"": ""not_configured"", ""message"": ""GOOGLE_MAPS_API_KEY is not set."", ""service"": ""Places""}); return }
     body := strings.NewReader(`{""textQuery"":""coffee""}`)
     req, _ := http.NewRequest(""POST"", ""https://places.googleapis.com/v1/places:searchText"", body)
     req.Header.Set(""Content-Type"", ""application/json""); req.Header.Set(""X-Goog-Api-Key"", key); req.Header.Set(""X-Goog-FieldMask"", ""places.id"")
@@ -10469,8 +10512,8 @@ func GoogleApiPlaces(w http.ResponseWriter, r *http.Request) {
 }
 
 func GoogleApiSpeechToText(w http.ResponseWriter, r *http.Request) {
-    key := getGoogleApiKey()
-    if key == """" { writeGoogleJson(w, map[string]string{""status"": ""not_configured"", ""message"": ""GOOGLE_API_KEY is not set."", ""service"": ""SpeechToText""}); return }
+    key := getMapsApiKey()
+    if key == """" { writeGoogleJson(w, map[string]string{""status"": ""not_configured"", ""message"": ""GOOGLE_MAPS_API_KEY is not set."", ""service"": ""SpeechToText""}); return }
     silence := make([]byte, 3200); base64Audio := base64.StdEncoding.EncodeToString(silence)
     payload := `{""config"":{""encoding"":""LINEAR16"",""sampleRateHertz"":16000,""languageCode"":""en-US""},""audio"":{""content"":""` + base64Audio + `""}}`
     apiUrl := ""https://speech.googleapis.com/v1/speech:recognize?key="" + url.QueryEscape(key)

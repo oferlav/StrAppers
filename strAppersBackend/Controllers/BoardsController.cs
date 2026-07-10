@@ -2405,6 +2405,47 @@ public partial class BoardsController : ControllerBase
                                                 }
                                                 else
                                                     _logger.LogWarning("⚠️ [RAILWAY] Failed to set GOOGLE_API_KEY: {StatusCode}", googleEnvResponse.StatusCode);
+
+                                                // Set GOOGLE_MAPS_API_KEY on the same service (Geocoding, Maps JS, Directions, Places, Speech-to-Text
+                                                // — Google no longer allows these on the same key as Gemini)
+                                                var googleMapsApiKey = _configuration["GoogleApis:StudentMapsApiKey"]
+                                                    ?? Environment.GetEnvironmentVariable("GOOGLE_MAPS_API_KEY");
+                                                if (!string.IsNullOrWhiteSpace(googleMapsApiKey))
+                                                {
+                                                    var setMapsEnvMutation = new
+                                                    {
+                                                        query = @"
+                    mutation SetVariable($projectId: String!, $environmentId: String!, $serviceId: String!, $name: String!, $value: String!) {
+                        variableUpsert(input: {
+                            projectId: $projectId
+                            environmentId: $environmentId
+                            serviceId: $serviceId
+                            name: $name
+                            value: $value
+                        })
+                    }",
+                                                        variables = new
+                                                        {
+                                                            projectId = projectId,
+                                                            environmentId = environmentId,
+                                                            serviceId = railwayServiceId,
+                                                            name = "GOOGLE_MAPS_API_KEY",
+                                                            value = googleMapsApiKey
+                                                        }
+                                                    };
+                                                    var mapsEnvBody = System.Text.Json.JsonSerializer.Serialize(setMapsEnvMutation);
+                                                    var mapsEnvContent = new StringContent(mapsEnvBody, System.Text.Encoding.UTF8, "application/json");
+                                                    var mapsEnvResponse = await httpClient.PostAsync(railwayApiUrl, mapsEnvContent);
+                                                    if (mapsEnvResponse.IsSuccessStatusCode)
+                                                        _logger.LogInformation("✅ [RAILWAY] Successfully set GOOGLE_MAPS_API_KEY environment variable on Railway service {ServiceId}", railwayServiceId);
+                                                    else
+                                                    {
+                                                        _logger.LogWarning("⚠️ [RAILWAY] Failed to set GOOGLE_MAPS_API_KEY: {StatusCode}", mapsEnvResponse.StatusCode);
+                                                        googleApiKeySet = false; // let the late fallback retry both keys
+                                                    }
+                                                }
+                                                else
+                                                    _logger.LogWarning("⚠️ [RAILWAY] GOOGLE_MAPS_API_KEY not set on student backend: configure GoogleApis:StudentMapsApiKey or GOOGLE_MAPS_API_KEY on this service.");
                                             }
                                             else
                                                 _logger.LogWarning("⚠️ [RAILWAY] GOOGLE_API_KEY not set on student backend: configure GoogleApis:StudentBackendApiKey or GOOGLE_API_KEY on this service.");
@@ -7484,6 +7525,27 @@ INSERT INTO ""TestProjects"" (""Name"") VALUES
                 _logger.LogInformation("✅ [RAILWAY] Late fallback: GOOGLE_API_KEY set on service {ServiceId}", serviceId);
             else
                 _logger.LogWarning("⚠️ [RAILWAY] Late fallback: failed to set GOOGLE_API_KEY: {StatusCode}", envResponse.StatusCode);
+
+            // Also set GOOGLE_MAPS_API_KEY (Geocoding, Maps JS, Directions, Places, Speech-to-Text
+            // — Google no longer allows these on the same key as Gemini)
+            var mapsApiKey = _configuration["GoogleApis:StudentMapsApiKey"]
+                ?? Environment.GetEnvironmentVariable("GOOGLE_MAPS_API_KEY");
+            if (!string.IsNullOrWhiteSpace(mapsApiKey))
+            {
+                var setMapsEnvMutation = new
+                {
+                    query = @"mutation SetVariable($projectId: String!, $environmentId: String!, $serviceId: String!, $name: String!, $value: String!) { variableUpsert(input: { projectId: $projectId environmentId: $environmentId serviceId: $serviceId name: $name value: $value }) }",
+                    variables = new { projectId = projectId, environmentId = environmentId, serviceId = serviceId, name = "GOOGLE_MAPS_API_KEY", value = mapsApiKey }
+                };
+                var mapsEnvContent = new StringContent(System.Text.Json.JsonSerializer.Serialize(setMapsEnvMutation), System.Text.Encoding.UTF8, "application/json");
+                var mapsEnvResponse = await httpClient.PostAsync(apiUrl, mapsEnvContent);
+                if (mapsEnvResponse.IsSuccessStatusCode)
+                    _logger.LogInformation("✅ [RAILWAY] Late fallback: GOOGLE_MAPS_API_KEY set on service {ServiceId}", serviceId);
+                else
+                    _logger.LogWarning("⚠️ [RAILWAY] Late fallback: failed to set GOOGLE_MAPS_API_KEY: {StatusCode}", mapsEnvResponse.StatusCode);
+            }
+            else
+                _logger.LogWarning("⚠️ [RAILWAY] Late fallback: GOOGLE_MAPS_API_KEY not set — GoogleApis:StudentMapsApiKey not configured on this service.");
         }
         catch (Exception ex)
         {
@@ -8929,6 +8991,15 @@ INSERT INTO ""TestProjects"" (""Name"") VALUES
                     {
                         var setGoogle = new { query = "mutation SetVariable($projectId: String!, $environmentId: String!, $serviceId: String!, $name: String!, $value: String!) { variableUpsert(input: { projectId: $projectId environmentId: $environmentId serviceId: $serviceId name: $name value: $value }) }", variables = new { projectId = railwaySharedProjectId, environmentId = questEnvironmentId, serviceId = questRailwayServiceId, name = "GOOGLE_API_KEY", value = googleKey } };
                         await rHttp.PostAsync(railwayApiUrl, new StringContent(System.Text.Json.JsonSerializer.Serialize(setGoogle), System.Text.Encoding.UTF8, "application/json"));
+                    }
+
+                    // Set GOOGLE_MAPS_API_KEY (Geocoding, Maps JS, Directions, Places, Speech-to-Text
+                    // — Google no longer allows these on the same key as Gemini)
+                    var mapsKey = _configuration["GoogleApis:StudentMapsApiKey"] ?? Environment.GetEnvironmentVariable("GOOGLE_MAPS_API_KEY");
+                    if (!string.IsNullOrEmpty(mapsKey) && !string.IsNullOrEmpty(questEnvironmentId))
+                    {
+                        var setMaps = new { query = "mutation SetVariable($projectId: String!, $environmentId: String!, $serviceId: String!, $name: String!, $value: String!) { variableUpsert(input: { projectId: $projectId environmentId: $environmentId serviceId: $serviceId name: $name value: $value }) }", variables = new { projectId = railwaySharedProjectId, environmentId = questEnvironmentId, serviceId = questRailwayServiceId, name = "GOOGLE_MAPS_API_KEY", value = mapsKey } };
+                        await rHttp.PostAsync(railwayApiUrl, new StringContent(System.Text.Json.JsonSerializer.Serialize(setMaps), System.Text.Encoding.UTF8, "application/json"));
                     }
                 }
                 else
