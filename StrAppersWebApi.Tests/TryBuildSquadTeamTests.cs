@@ -42,7 +42,6 @@ public class TryBuildSquadTeamTests
         return new StudentTeamBuilderService(
             ctx,
             new Mock<ITrelloSprintMergeService>().Object,
-            new Mock<ISprintAssessmentService>().Object,
             new Mock<IHttpClientFactory>().Object,
             config,
             NullLogger<StudentTeamBuilderService>.Instance,
@@ -313,7 +312,6 @@ public class DeveloperExclusivityRuleTests
         return new StudentTeamBuilderService(
             ctx,
             new Mock<ITrelloSprintMergeService>().Object,
-            new Mock<ISprintAssessmentService>().Object,
             new Mock<IHttpClientFactory>().Object,
             config,
             NullLogger<StudentTeamBuilderService>.Instance,
