@@ -4637,19 +4637,14 @@ Staff request:
                         id);
                 }
 
-                var filtered = students
-                    .Where(s => !candidateRoleId.HasValue || s.RoleId != candidateRoleId.Value || (currentStudentId.HasValue && s.Id == currentStudentId.Value))
-                    .Where(s => (currentStudentId.HasValue && s.Id == currentStudentId.Value) || !ShouldExcludePeerByDeveloperRule(candidateRoleName, s.RoleName))
-                    .ToList();
-
-                students = filtered
-                    .GroupBy(s => s.RoleId)
-                    .Select(g => g
-                        .OrderByDescending(s => currentStudentId.HasValue && s.Id == currentStudentId.Value)
-                        .ThenBy(s => s.UpdatedAt ?? DateTime.MaxValue)
-                        .ThenBy(s => s.Id)
-                        .First())
-                    .ToList();
+                // Role identity by NAME, not row id: the catalog holds duplicate rows per conceptual
+                // role (global, institute-1 copy, per-squad copies), so id comparisons over/under-exclude
+                // depending on which duplicate each student happens to hold.
+                var survivorIds = FilterApplicantsForCandidate(
+                    students.Select(s => new ApplicantRoleView(s.Id, s.RoleName, s.UpdatedAt)).ToList(),
+                    candidateRoleName,
+                    currentStudentId);
+                students = students.Where(s => survivorIds.Contains(s.Id)).ToList();
             }
 
             _logger.LogInformation("Found {Count} students for project {ProjectId} with Status < 2", students.Count, id);
@@ -6243,6 +6238,44 @@ Staff request:
     /// When filtering peers for a candidate role: full-stack labels exclude every role whose name contains &quot;Developer&quot;;
     /// any developer-role label excludes full-stack-style labels (Full Stack / Fullstack / FullStack + Developer).
     /// </summary>
+    /// <summary>Minimal applicant view for role-based filtering (testable without the anonymous projection).</summary>
+    internal sealed record ApplicantRoleView(int Id, string? RoleName, DateTime? UpdatedAt);
+
+    /// <summary>Role identity for applicant filtering: trimmed, case-insensitive NAME (never the row id — duplicates exist per institute/squad).</summary>
+    internal static string NormalizeRoleName(string? roleName) => (roleName ?? string.Empty).Trim().ToLowerInvariant();
+
+    /// <summary>
+    /// Applicant post-filter for get-students (MultiRolesPerProject=false):
+    /// 1. Same-role exclusion — applicants holding the CANDIDATE's role (compared by normalized
+    ///    name, so any duplicate row of the same conceptual role matches) are hidden, except self.
+    /// 2. Developer/full-stack pairing exclusion (name-based already), except self.
+    /// 3. Dedupe to one applicant per conceptual role (normalized name): self first, then earliest
+    ///    UpdatedAt, then lowest Id.
+    /// Returns the surviving student ids.
+    /// </summary>
+    internal static HashSet<int> FilterApplicantsForCandidate(
+        List<ApplicantRoleView> students,
+        string? candidateRoleName,
+        int? currentStudentId)
+    {
+        var candidateNorm = NormalizeRoleName(candidateRoleName);
+        bool IsSelf(ApplicantRoleView s) => currentStudentId.HasValue && s.Id == currentStudentId.Value;
+
+        var filtered = students
+            .Where(s => IsSelf(s) || candidateNorm.Length == 0 || NormalizeRoleName(s.RoleName) != candidateNorm)
+            .Where(s => IsSelf(s) || !ShouldExcludePeerByDeveloperRule(candidateRoleName, s.RoleName))
+            .ToList();
+
+        return filtered
+            .GroupBy(s => NormalizeRoleName(s.RoleName))
+            .Select(g => g
+                .OrderByDescending(IsSelf)
+                .ThenBy(s => s.UpdatedAt ?? DateTime.MaxValue)
+                .ThenBy(s => s.Id)
+                .First().Id)
+            .ToHashSet();
+    }
+
     private static bool ShouldExcludePeerByDeveloperRule(string? candidateRoleName, string? peerRoleName)
     {
         if (string.IsNullOrWhiteSpace(candidateRoleName))
