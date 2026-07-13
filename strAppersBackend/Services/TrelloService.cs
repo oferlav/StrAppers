@@ -422,6 +422,13 @@ namespace strAppersBackend.Services
              roleName.Contains("PM", StringComparison.OrdinalIgnoreCase));
 
         /// <summary>
+        /// Full ISO-8601 UTC due for Trello card creation. Date-only (`yyyy-MM-dd`) dues come back
+        /// from Trello as midnight UTC, destroying the end-of-day-local time the schedule computes —
+        /// which desynchronizes the merge runner, sprint windows, and BoardRoom overdue/current-sprint.
+        /// </summary>
+        internal static string FormatTrelloDue(DateTime dueUtc) => $"{dueUtc:yyyy-MM-ddTHH:mm:ssZ}";
+
+        /// <summary>
         /// Trello card ids are Mongo ObjectIds: the first 8 hex chars encode the creation time
         /// as unix seconds. Returns false for null/short/non-hex ids.
         /// </summary>
@@ -1120,7 +1127,7 @@ namespace strAppersBackend.Services
 
                         if (card.DueDate.HasValue)
                         {
-                            createCardUrl += $"&due={card.DueDate.Value:yyyy-MM-dd}";
+                            createCardUrl += $"&due={FormatTrelloDue(card.DueDate.Value)}";
                         }
 
                         // Add role label to card
@@ -1298,7 +1305,7 @@ namespace strAppersBackend.Services
                     var createCardUrl = $"https://api.trello.com/1/cards?name={Uri.EscapeDataString(card.Name)}&desc={Uri.EscapeDataString(finalDescription)}&idList={emptyListId}&key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
                     if (card.DueDate.HasValue)
                     {
-                        createCardUrl += $"&due={card.DueDate.Value:yyyy-MM-dd}";
+                        createCardUrl += $"&due={FormatTrelloDue(card.DueDate.Value)}";
                     }
                     
                     // Add role label to card
@@ -3781,7 +3788,7 @@ namespace strAppersBackend.Services
                 {
                     var createCardUrl = $"https://api.trello.com/1/cards?name={Uri.EscapeDataString(card.Name)}&desc={Uri.EscapeDataString(NormalizeDescriptionNewlinesForTrello(card.Description ?? ""))}&idList={listId}&key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
                     if (card.DueDate.HasValue)
-                        createCardUrl += $"&due={card.DueDate.Value:yyyy-MM-dd}";
+                        createCardUrl += $"&due={FormatTrelloDue(card.DueDate.Value)}";
                     if (!string.IsNullOrEmpty(card.RoleName) && roleLabelIds.TryGetValue(card.RoleName, out var labelId))
                         createCardUrl += $"&idLabels={labelId}";
                     var createResponse = await SendWithRateLimitRetryAsync(() => _httpClient.PostAsync(createCardUrl, null));
@@ -3949,7 +3956,7 @@ namespace strAppersBackend.Services
                     var createCardUrl = $"https://api.trello.com/1/cards?name={Uri.EscapeDataString(card.Name)}&desc={Uri.EscapeDataString(desc)}&idList={newListId}&key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
                     var cardDue = dueDateForNewCards ?? (card.DueDate.HasValue ? (DateTime?)card.DueDate.Value : null);
                     if (cardDue.HasValue)
-                        createCardUrl += $"&due={cardDue.Value:yyyy-MM-dd}";
+                        createCardUrl += $"&due={FormatTrelloDue(cardDue.Value)}";
                     if (!string.IsNullOrEmpty(card.RoleName) && roleLabelIds.TryGetValue(card.RoleName, out var labelId))
                         createCardUrl += $"&idLabels={labelId}";
                     var cardRes = await _httpClient.PostAsync(createCardUrl, null);
@@ -4797,7 +4804,7 @@ namespace strAppersBackend.Services
                     var createCardUrl = $"https://api.trello.com/1/cards?name={Uri.EscapeDataString(card.Name)}&desc={Uri.EscapeDataString(desc)}&idList={listId}&key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
                     var cardDue = dueDateForCards ?? (card.DueDate.HasValue ? (DateTime?)card.DueDate.Value : null);
                     if (cardDue.HasValue)
-                        createCardUrl += $"&due={cardDue.Value:yyyy-MM-dd}";
+                        createCardUrl += $"&due={FormatTrelloDue(cardDue.Value)}";
                     if (!string.IsNullOrEmpty(card.RoleName) && roleLabelIds.TryGetValue(card.RoleName, out var labelId))
                         createCardUrl += $"&idLabels={labelId}";
 

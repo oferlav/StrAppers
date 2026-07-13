@@ -102,7 +102,9 @@ namespace strAppersBackend.Services
                 var existingList = listsWithPos.FirstOrDefault(l => string.Equals(l.Name, listName, StringComparison.OrdinalIgnoreCase));
                 var sprintLengthWeeks = _configuration.GetValue<int>("BusinessLogicConfig:SprintLengthInWeeks", 1);
                 // Per-course day cadence from the template; legacy templates fall back to weekly config.
+                var isDayBased = trelloRequest?.SprintLengthDays != null;
                 var sprintDays = trelloRequest?.SprintLengthDays is int d ? Math.Max(1, d) : sprintLengthWeeks * 7;
+                var localOffset = TrelloBoardScheduleHelper.ParseLocalTimeOffset(_configuration["Trello:LocalTime"]);
                 DateTime? addModeDueDateUtc = null;
                 if (sprintNumber > 1)
                 {
@@ -114,6 +116,10 @@ namespace strAppersBackend.Services
                 }
                 if (!addModeDueDateUtc.HasValue)
                     addModeDueDateUtc = DateTime.UtcNow.Date.AddDays((sprintNumber * sprintDays) - 1);
+                // Day-based: snap to end of local day — a clean chained value is a no-op, a
+                // flattened midnight-UTC value (legacy Trello date-only round trip) heals.
+                if (isDayBased && addModeDueDateUtc.HasValue)
+                    addModeDueDateUtc = TrelloBoardScheduleHelper.NormalizeToEndOfLocalDay(addModeDueDateUtc.Value, localOffset);
 
                 var listCreated = string.IsNullOrEmpty(existingList.Id);
                 string? newListId;
@@ -348,7 +354,14 @@ namespace strAppersBackend.Services
                                 _context, boardId, sprintLengthWeeks);
                             DateTime? nextDueDateUtc = null;
                             if (dueDateUtc.HasValue)
+                            {
                                 nextDueDateUtc = dueDateUtc.Value.AddDays(sprintDays);
+                                // Day-based: heal flattened (midnight-UTC) chain inputs to end of local day.
+                                if (trelloRequest.SprintLengthDays != null)
+                                    nextDueDateUtc = TrelloBoardScheduleHelper.NormalizeToEndOfLocalDay(
+                                        nextDueDateUtc.Value,
+                                        TrelloBoardScheduleHelper.ParseLocalTimeOffset(_configuration["Trello:LocalTime"]));
+                            }
 
                             var nextListId = await _trelloService.EnsureNextEmptySprintOnBoardAsync(boardId, trelloRequest, sprintNumber + 1, nextDueDateUtc);
                             if (!string.IsNullOrEmpty(nextListId))

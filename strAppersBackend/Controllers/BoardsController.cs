@@ -3289,11 +3289,12 @@ public partial class BoardsController : ControllerBase
                             if (snapshot == null)
                                 continue;
                             listId = snapshot.ListId;
-                            dueDateUtc = snapshot.Cards?.Count > 0 && snapshot.Cards[0].DueDate.HasValue
+                            var snapshotDueUtc = snapshot.Cards?.Count > 0 && snapshot.Cards[0].DueDate.HasValue
                                 ? ToUtcForDb(snapshot.Cards[0].DueDate.Value)
-                                : sprintLengthDays is int rowDays
-                                    ? strAppersBackend.Services.TrelloBoardScheduleHelper.GetSprintDueDateUtcForDays(kickoffUtc, sprintNum, rowDays, localOffset)
-                                    : GetSprintDueDateUtc(kickoffUtc, sprintNum, firstDayOfWeek, offsetMin, sprintLengthWeeks);
+                                : (DateTime?)null;
+                            dueDateUtc = ResolveMergeSeedDueUtc(
+                                sprintLengthDays, snapshotDueUtc, kickoffUtc, sprintNum,
+                                firstDayOfWeek, offsetMin, sprintLengthWeeks, localOffset);
                             if (isMergeTypeAdd && sprintNum <= visibleSprints)
                                 mergedAt = DateTime.UtcNow;
                         }
@@ -4161,6 +4162,28 @@ public partial class BoardsController : ControllerBase
             return kickoffUtc.AddDays(sprintListCount * Math.Max(1, days));
         }
         return DateTime.UtcNow.AddDays(projectLengthWeeks * 7);
+    }
+
+    /// <summary>
+    /// Creation-time ProjectBoardSprintMerge.DueDate. Day-based boards ALWAYS use the computed
+    /// end-of-day-local due — the Trello snapshot read-back is untrusted there (date-only round
+    /// trips flatten times to midnight UTC, desynchronizing the merge runner and windows).
+    /// Weekly boards keep the legacy preference: snapshot card due first, weekly helper fallback.
+    /// </summary>
+    internal static DateTime ResolveMergeSeedDueUtc(
+        int? sprintLengthDays,
+        DateTime? snapshotDueUtc,
+        DateTime kickoffUtc,
+        int sprintNumber,
+        DayOfWeek firstDayOfWeek,
+        int localOffsetMinutes,
+        int sprintLengthWeeks,
+        TimeSpan localOffset)
+    {
+        if (sprintLengthDays is int days)
+            return strAppersBackend.Services.TrelloBoardScheduleHelper.GetSprintDueDateUtcForDays(kickoffUtc, sprintNumber, days, localOffset);
+        return snapshotDueUtc
+            ?? GetSprintDueDateUtc(kickoffUtc, sprintNumber, firstDayOfWeek, localOffsetMinutes, sprintLengthWeeks);
     }
 
     /// <summary>Parse sprint number from list name (e.g. "Sprint1", "Sprint 2"). Returns null if not a sprint list.</summary>

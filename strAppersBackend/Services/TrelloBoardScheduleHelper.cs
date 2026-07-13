@@ -138,6 +138,17 @@ public static class TrelloBoardScheduleHelper
     }
 
     /// <summary>
+    /// Snaps a due date to the end (23:59:59.9999999 local) of its LOCAL calendar day, as UTC.
+    /// A clean end-of-day due is a no-op; a flattened midnight-UTC due (Trello date-only round trip)
+    /// heals to the same local day's end. Used when chaining merge-row dues on day-based boards.
+    /// </summary>
+    public static DateTime NormalizeToEndOfLocalDay(DateTime dueUtc, TimeSpan localOffset)
+    {
+        var localDay = dueUtc.Add(localOffset).Date;
+        return localDay.AddDays(1).AddTicks(-1).Subtract(localOffset);
+    }
+
+    /// <summary>
     /// Sprint N due date for day-based courses: kickoff local date + (N × days − 1), end of day local
     /// (23:59:59.9999999 — same convention as the weekly helper), returned as UTC. 1-based sprint number.
     /// </summary>
