@@ -293,3 +293,193 @@ public class TryBuildSquadTeamTests
         Assert.Null(result);
     }
 }
+
+/// <summary>
+/// Developer exclusivity rule (ported from Worker.SelectGroup): a team gets EITHER one full-stack
+/// OR the FE+BE pair — never both. Covers the squad path, the built-in path, and the wait-time
+/// resolution when both sides have candidates.
+/// </summary>
+public class DeveloperExclusivityRuleTests
+{
+    private static ApplicationDbContext CreateContext(string name) =>
+        new ApplicationDbContext(new DbContextOptionsBuilder<ApplicationDbContext>()
+            .UseInMemoryDatabase(name).Options);
+
+    private static StudentTeamBuilderService CreateService(ApplicationDbContext ctx)
+    {
+        var config = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?> { ["ApiBaseUrl"] = "http://localhost:5000" })
+            .Build();
+        return new StudentTeamBuilderService(
+            ctx,
+            new Mock<ITrelloSprintMergeService>().Object,
+            new Mock<ISprintAssessmentService>().Object,
+            new Mock<IHttpClientFactory>().Object,
+            config,
+            NullLogger<StudentTeamBuilderService>.Instance,
+            Microsoft.Extensions.Options.Options.Create(new KickoffConfig { RequireDeveloperRule = true, MinimumStudents = 1 }),
+            new Mock<ISmtpEmailService>().Object);
+    }
+
+    private static Student MakeStudent(int id, string roleName, int roleType, DateTime? startPendingAt = null) => new()
+    {
+        Id = id,
+        Email = $"s{id}@test.com",
+        FirstName = "F",
+        LastName = "L",
+        StudentId = $"s{id}@test.com",
+        LinkedInUrl = "https://linkedin.com/in/x",
+        StartPendingAt = startPendingAt,
+        StudentRoles = new List<StudentRole>
+        {
+            new StudentRole { RoleId = id + 100, IsActive = true,
+                Role = new Role { Id = id + 100, Name = roleName, Type = roleType } }
+        }
+    };
+
+    private static List<Role> DevRoles() => new()
+    {
+        new Role { Id = 1, Name = "Full Stack Developer", Type = 1, IsActive = true },
+        new Role { Id = 2, Name = "Frontend Developer",   Type = 2, IsActive = true },
+        new Role { Id = 3, Name = "Backend Developer",    Type = 2, IsActive = true },
+    };
+
+    private static InstituteTemplate SquadTemplate(bool requireRule) => new()
+    {
+        Id = 1, InstituteId = 2, CourseType = "Squad",
+        Squad = new InstituteSquad { Id = 1, InstituteId = 2, Name = "S", RequireDeveloperRule = requireRule, Roles = DevRoles() }
+    };
+
+    // ── The bug: FS + FE + BE triple must never all be seated ────────────────
+
+    [Fact]
+    public void Squad_Triple_NeverSeatsAllThree()
+    {
+        using var ctx = CreateContext(nameof(Squad_Triple_NeverSeatsAllThree));
+        var fs = MakeStudent(1, "Full Stack Developer", 1);
+        var fe = MakeStudent(2, "Frontend Developer", 2);
+        var be = MakeStudent(3, "Backend Developer", 2);
+
+        var team = CreateService(ctx).TestTryBuildSquadTeam(new List<Student> { fs, fe, be }, SquadTemplate(true), 2, 1);
+
+        Assert.NotNull(team);
+        // Either [fs] alone or [fe, be] — never all three.
+        Assert.True(team!.Count == 1 || team.Count == 2);
+        var hasFs = team.Any(s => s.Id == 1);
+        var hasPair = team.Any(s => s.Id == 2) || team.Any(s => s.Id == 3);
+        Assert.False(hasFs && hasPair, "full-stack and FE/BE must never be seated together");
+    }
+
+    [Fact]
+    public void Squad_Triple_Tie_KeepsFullStack()
+    {
+        using var ctx = CreateContext(nameof(Squad_Triple_Tie_KeepsFullStack));
+        var fs = MakeStudent(1, "Full Stack Developer", 1);
+        var fe = MakeStudent(2, "Frontend Developer", 2);
+        var be = MakeStudent(3, "Backend Developer", 2);
+
+        var team = CreateService(ctx).TestTryBuildSquadTeam(new List<Student> { fs, fe, be }, SquadTemplate(true), 2, 1);
+
+        Assert.NotNull(team);
+        Assert.Single(team!);
+        Assert.Equal(1, team![0].Id); // worker default: ties keep the full-stack
+    }
+
+    [Fact]
+    public void Squad_Triple_PairWaitedLonger_KeepsPair()
+    {
+        using var ctx = CreateContext(nameof(Squad_Triple_PairWaitedLonger_KeepsPair));
+        var now = DateTime.UtcNow;
+        var fs = MakeStudent(1, "Full Stack Developer", 1, startPendingAt: now.AddHours(-1));
+        var fe = MakeStudent(2, "Frontend Developer", 2, startPendingAt: now.AddHours(-48));
+        var be = MakeStudent(3, "Backend Developer", 2, startPendingAt: now.AddHours(-2));
+
+        var team = CreateService(ctx).TestTryBuildSquadTeam(new List<Student> { fs, fe, be }, SquadTemplate(true), 2, 1);
+
+        Assert.NotNull(team);
+        Assert.Equal(2, team!.Count);
+        Assert.DoesNotContain(team, s => s.Id == 1);
+    }
+
+    [Fact]
+    public void Squad_FullStackWithPartialPair_KeepsFullStackOnly()
+    {
+        using var ctx = CreateContext(nameof(Squad_FullStackWithPartialPair_KeepsFullStackOnly));
+        var fs = MakeStudent(1, "Full Stack Developer", 1);
+        var fe = MakeStudent(2, "Frontend Developer", 2); // no backend candidate
+
+        var team = CreateService(ctx).TestTryBuildSquadTeam(new List<Student> { fs, fe }, SquadTemplate(true), 2, 1);
+
+        Assert.NotNull(team);
+        Assert.Single(team!);
+        Assert.Equal(1, team![0].Id);
+    }
+
+    [Fact]
+    public void Squad_OnlyOnePairMember_NoFullStack_Rejected()
+    {
+        using var ctx = CreateContext(nameof(Squad_OnlyOnePairMember_NoFullStack_Rejected));
+        var fe = MakeStudent(2, "Frontend Developer", 2);
+
+        var team = CreateService(ctx).TestTryBuildSquadTeam(new List<Student> { fe }, SquadTemplate(true), 2, 1);
+
+        Assert.Null(team);
+    }
+
+    [Fact]
+    public void Squad_RuleOff_SeatsAllMatched()
+    {
+        using var ctx = CreateContext(nameof(Squad_RuleOff_SeatsAllMatched));
+        var fs = MakeStudent(1, "Full Stack Developer", 1);
+        var fe = MakeStudent(2, "Frontend Developer", 2);
+        var be = MakeStudent(3, "Backend Developer", 2);
+
+        var team = CreateService(ctx).TestTryBuildSquadTeam(new List<Student> { fs, fe, be }, SquadTemplate(false), 2, 1);
+
+        Assert.NotNull(team);
+        Assert.Equal(3, team!.Count); // rule disabled: legacy optional behavior preserved
+    }
+
+    // ── Built-in path (KickoffConfig gate) ────────────────────────────────────
+
+    [Fact]
+    public void BuiltIn_Triple_NeverSeatsAllThree()
+    {
+        using var ctx = CreateContext(nameof(BuiltIn_Triple_NeverSeatsAllThree));
+        var fs = MakeStudent(1, "Full Stack Developer", 1);
+        var fe = MakeStudent(2, "Frontend Developer", 2);
+        var be = MakeStudent(3, "Backend Developer", 2);
+
+        var team = CreateService(ctx).TestTryBuildBuiltInTeam(new List<Student> { fs, fe, be }, DevRoles(), 2, 1);
+
+        Assert.NotNull(team);
+        var hasFs = team!.Any(s => s.Id == 1);
+        var hasPair = team.Any(s => s.Id == 2) || team.Any(s => s.Id == 3);
+        Assert.False(hasFs && hasPair, "full-stack and FE/BE must never be seated together");
+    }
+
+    [Fact]
+    public void BuiltIn_PairOnly_SeatsBoth()
+    {
+        using var ctx = CreateContext(nameof(BuiltIn_PairOnly_SeatsBoth));
+        var fe = MakeStudent(2, "Frontend Developer", 2);
+        var be = MakeStudent(3, "Backend Developer", 2);
+
+        var team = CreateService(ctx).TestTryBuildBuiltInTeam(new List<Student> { fe, be }, DevRoles(), 2, 1);
+
+        Assert.NotNull(team);
+        Assert.Equal(2, team!.Count);
+    }
+
+    [Fact]
+    public void BuiltIn_FullStackOnly_Seated()
+    {
+        using var ctx = CreateContext(nameof(BuiltIn_FullStackOnly_Seated));
+        var fs = MakeStudent(1, "Full Stack Developer", 1);
+
+        var team = CreateService(ctx).TestTryBuildBuiltInTeam(new List<Student> { fs }, DevRoles(), 2, 1);
+
+        Assert.NotNull(team);
+        Assert.Single(team!);
+    }
+}
