@@ -219,9 +219,14 @@ namespace strAppersBackend.Controllers
             try
             {
                 var isDesc = string.Equals(sortDirection, "desc", StringComparison.OrdinalIgnoreCase);
+                // Role-specific prompts apply per role CONCEPT (product decision): a prompt attached
+                // to any duplicate row of the student's role (global / institute / squad copy) counts.
+                var conceptRoleIds = roleId.HasValue
+                    ? await strAppersBackend.Utilities.RoleConceptResolver.ResolveConceptRoleIdsAsync(_context, roleId.Value)
+                    : new List<int>();
                 var baseQuery = _context.MentorPrompts
                     .Include(m => m.Category)
-                    .Where(m => m.IsActive && (m.RoleId == null || m.RoleId == roleId) && m.Category!.Name != "User Message Templates");
+                    .Where(m => m.IsActive && (m.RoleId == null || conceptRoleIds.Contains(m.RoleId.Value)) && m.Category!.Name != "User Message Templates");
 
                 var query = isDesc
                     ? baseQuery.OrderByDescending(m => m.Category!.SortOrder).ThenByDescending(m => m.SortOrder)

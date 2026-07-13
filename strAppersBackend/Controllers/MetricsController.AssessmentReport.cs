@@ -142,7 +142,11 @@ public partial class MetricsController
                 (m.MergedAt != null || m.ListId != null)));
 
         if (roleId.HasValue)
-            query = query.Where(c => c.Student!.StudentRoles.Any(sr => sr.RoleId == roleId.Value && sr.IsActive));
+        {
+            // Per-concept role filter: match any duplicate row of the same role name.
+            var roleConceptIds = await strAppersBackend.Utilities.RoleConceptResolver.ResolveConceptRoleIdsAsync(_context, roleId.Value, cancellationToken);
+            query = WhereStudentHasRoleConcept(query, roleConceptIds);
+        }
         if (studentId.HasValue)
             query = query.Where(c => c.StudentId == studentId.Value);
         if (sprintNumber.HasValue)
@@ -185,8 +189,9 @@ public partial class MetricsController
                 .FirstOrDefaultAsync(s => s.Id == studentId.Value, cancellationToken);
             if (student == null)
                 return NotFound(new { success = false, message = $"Student {studentId.Value} not found." });
+            var conceptIdsForCheck = await strAppersBackend.Utilities.RoleConceptResolver.ResolveConceptRoleIdsAsync(_context, roleId, cancellationToken);
             var hasRole = await _context.StudentRoles.AsNoTracking()
-                .AnyAsync(sr => sr.StudentId == studentId.Value && sr.RoleId == roleId && sr.IsActive, cancellationToken);
+                .AnyAsync(sr => sr.StudentId == studentId.Value && conceptIdsForCheck.Contains(sr.RoleId) && sr.IsActive, cancellationToken);
             if (!hasRole)
                 return BadRequest(new { success = false, message = "Student does not have this active role." });
 
@@ -198,12 +203,14 @@ public partial class MetricsController
             headline = $"Assessment Report — {roleName} (all squads)";
         }
 
-        var query = _context.CacheMetrics
-            .AsNoTracking()
-            .Include(c => c.Metric)
-            .Include(c => c.Student)
-            .Include(c => c.ProjectBoard)
-            .Where(c => c.Student!.StudentRoles.Any(sr => sr.RoleId == roleId && sr.IsActive))
+        var conceptRoleIds = await strAppersBackend.Utilities.RoleConceptResolver.ResolveConceptRoleIdsAsync(_context, roleId, cancellationToken);
+        var query = WhereStudentHasRoleConcept(
+                _context.CacheMetrics
+                    .AsNoTracking()
+                    .Include(c => c.Metric)
+                    .Include(c => c.Student)
+                    .Include(c => c.ProjectBoard),
+                conceptRoleIds)
             // Same phantom-sprint filter as the board-scoped report (see GetAssessmentReport).
             .Where(c => c.SprintNumber < 1 || _context.ProjectBoardSprintMerges.Any(m =>
                 m.ProjectBoardId == c.BoardId && m.SprintNumber == c.SprintNumber &&
@@ -276,6 +283,10 @@ public partial class MetricsController
         var sn = row.ProjectBoard?.SquadName?.Trim();
         return string.IsNullOrEmpty(sn) ? baseName : $"{baseName} ({sn})";
     }
+
+    /// <summary>Role filter for cached assessment rows — per role CONCEPT (all duplicate ids), never a single row id.</summary>
+    internal static IQueryable<CacheMetrics> WhereStudentHasRoleConcept(IQueryable<CacheMetrics> query, List<int> conceptRoleIds)
+        => query.Where(c => c.Student!.StudentRoles.Any(sr => conceptRoleIds.Contains(sr.RoleId) && sr.IsActive));
 
     private static AssessmentReportMetricDto MapMetricDto(CacheMetrics row)
     {

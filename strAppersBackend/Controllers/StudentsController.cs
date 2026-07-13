@@ -377,9 +377,12 @@ public class StudentsController : ControllerBase
                 return NotFound($"Role with ID {roleId} not found");
             }
 
-            // Get students that have an active StudentRole with the specified RoleId and have a boardId
+            // Per-concept role match: students may hold ANY duplicate row of this role (global /
+            // institute / squad copies) — matching a single row id silently misses them.
+            var conceptRoleIds = await strAppersBackend.Utilities.RoleConceptResolver.ResolveConceptRoleIdsAsync(_context, roleId);
+
             var students = await _context.Students
-                .Where(s => s.StudentRoles.Any(sr => sr.RoleId == roleId && sr.IsActive) 
+                .Where(s => s.StudentRoles.Any(sr => conceptRoleIds.Contains(sr.RoleId) && sr.IsActive)
                     && !string.IsNullOrEmpty(s.BoardId))
                 .Select(s => new
                 {
@@ -405,11 +408,11 @@ public class StudentsController : ControllerBase
                     ProjectPriority2 = s.ProjectPriority2,
                     ProjectPriority3 = s.ProjectPriority3,
                     ProjectPriority4 = s.ProjectPriority4,
-                    RoleId = s.StudentRoles.FirstOrDefault(sr => sr.RoleId == roleId && sr.IsActive) != null 
-                        ? s.StudentRoles.FirstOrDefault(sr => sr.RoleId == roleId && sr.IsActive).RoleId 
+                    RoleId = s.StudentRoles.FirstOrDefault(sr => conceptRoleIds.Contains(sr.RoleId) && sr.IsActive) != null
+                        ? s.StudentRoles.FirstOrDefault(sr => conceptRoleIds.Contains(sr.RoleId) && sr.IsActive).RoleId
                         : (int?)null,
-                    RoleName = s.StudentRoles.FirstOrDefault(sr => sr.RoleId == roleId && sr.IsActive) != null 
-                        ? s.StudentRoles.FirstOrDefault(sr => sr.RoleId == roleId && sr.IsActive).Role.Name 
+                    RoleName = s.StudentRoles.FirstOrDefault(sr => conceptRoleIds.Contains(sr.RoleId) && sr.IsActive) != null
+                        ? s.StudentRoles.FirstOrDefault(sr => conceptRoleIds.Contains(sr.RoleId) && sr.IsActive).Role.Name
                         : null,
                     CreatedAt = s.CreatedAt,
                     UpdatedAt = s.UpdatedAt
