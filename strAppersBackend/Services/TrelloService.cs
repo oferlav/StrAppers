@@ -530,6 +530,8 @@ namespace strAppersBackend.Services
                            m.RoleName.Contains("PM", StringComparison.OrdinalIgnoreCase))).ToList()
                     : teamMembers;
                 membersToInvite = OnlyTrelloToolMembers(membersToInvite, _logger);
+                _logger.LogInformation("📧 [EMAIL-DEBUG] User Story board {BoardId} ({BoardName}) — final invite list ({Count}): {Emails}",
+                    boardId, boardName, membersToInvite.Count, string.Join(", ", membersToInvite.Select(m => m.Email)));
 
                 foreach (var member in membersToInvite)
                 {
@@ -545,7 +547,7 @@ namespace strAppersBackend.Services
                         }
                         else
                         {
-                            _logger.LogInformation("✅ [USER-STORY-BOARD] Invited {Email}", member.Email);
+                            _logger.LogInformation("📧 [EMAIL-DEBUG] Invited {Email} to USER STORY board {BoardId} ({BoardName}) — Trello call succeeded (200)", member.Email, boardId, boardName);
                         }
                     }
                     catch (Exception ex)
@@ -699,7 +701,9 @@ namespace strAppersBackend.Services
                     membersToInvite = OnlyTrelloToolMembers(membersToInvite, _logger);
 
                     _logger.LogInformation("Starting member invitation process for {MemberCount} members", membersToInvite.Count);
-                    
+                    _logger.LogInformation("📧 [EMAIL-DEBUG] CreateBoardWithContentAsync Step 2 — board {BoardId} ({BoardName}), sendEmails={SendEmails}, SendInvitationToPMOnly={SendInvitationToPMOnly} (NOT CreateUserStoryBoard-aware) — invite list ({Count}): {Emails}",
+                        trelloBoardId, boardName, sendEmails, _trelloConfig.SendInvitationToPMOnly, membersToInvite.Count, string.Join(", ", membersToInvite.Select(m => m.Email)));
+
                     foreach (var member in membersToInvite)
                     {
                         try
@@ -709,7 +713,7 @@ namespace strAppersBackend.Services
                             var inviteUrl = $"https://api.trello.com/1/boards/{trelloBoardId}/members?email={Uri.EscapeDataString(member.Email)}&type=normal&allowBillableGuest=true&key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
                             var inviteResponse = await _httpClient.PutAsync(inviteUrl, null);
                             var responseContent = await inviteResponse.Content.ReadAsStringAsync();
-                            
+
                             if (!inviteResponse.IsSuccessStatusCode)
                             {
                                 var inviteError = GetInviteErrorMessage(responseContent);
@@ -718,7 +722,7 @@ namespace strAppersBackend.Services
                             }
                             else
                             {
-                                _logger.LogInformation("✅ Successfully invited {Email} to Trello board", member.Email);
+                                _logger.LogInformation("📧 [EMAIL-DEBUG] Invited {Email} to board {BoardId} ({BoardName}) via Step 2 (CreateBoardWithContentAsync) — Trello call succeeded (200)", member.Email, trelloBoardId, boardName);
                             }
                         }
                         catch (Exception ex)
@@ -832,6 +836,11 @@ namespace strAppersBackend.Services
 
                 // When MergeType=Add: create only one board (no SystemBoard). Otherwise when CreatePMEmptyBoard: SystemBoard + EmptyBoard.
                 var mergeType = string.Equals(_trelloConfig.MergeType, "Add", StringComparison.OrdinalIgnoreCase) ? "Add" : "Merge";
+                _logger.LogInformation("📧 [EMAIL-DEBUG] Config: CreateUserStoryBoard={CreateUserStoryBoard}, CreatePMEmptyBoard={CreatePMEmptyBoard}, MergeType(raw)={MergeTypeRaw}, MergeType(resolved)={MergeTypeResolved}, SendInvitationToPMOnly={SendInvitationToPMOnly} → branch={Branch}",
+                    _trelloConfig.CreateUserStoryBoard, _trelloConfig.CreatePMEmptyBoard, _trelloConfig.MergeType, mergeType, _trelloConfig.SendInvitationToPMOnly,
+                    (_trelloConfig.CreatePMEmptyBoard && mergeType != "Add") ? "SystemBoard+EmptyBoard" : "SingleBoard");
+                _logger.LogInformation("📧 [EMAIL-DEBUG] TeamMembers going into this request: {Members}",
+                    string.Join(" | ", request.TeamMembers.Select(m => $"{m.Email} role='{m.RoleName}' isPM={IsPMRole(m.RoleName)} mainTool='{m.MainTool}'")));
                 if (_trelloConfig.CreatePMEmptyBoard && mergeType != "Add")
                 {
                     _logger.LogInformation("📋 [TRELLO] CreatePMEmptyBoard is enabled. Creating SystemBoard first (no emails), then EmptyBoard (with emails)");
@@ -898,6 +907,8 @@ namespace strAppersBackend.Services
                         membersToInvite = request.TeamMembers;
                     }
                     membersToInvite = OnlyTrelloToolMembers(membersToInvite, _logger);
+                    _logger.LogInformation("📧 [EMAIL-DEBUG] EmptyBoard {BoardId} — final invite list ({Count}): {Emails}",
+                        emptyBoardId, membersToInvite.Count, string.Join(", ", membersToInvite.Select(m => m.Email)));
 
                     foreach (var member in membersToInvite)
                     {
@@ -911,6 +922,7 @@ namespace strAppersBackend.Services
 
                             if (inviteResponse.IsSuccessStatusCode)
                             {
+                                _logger.LogInformation("📧 [EMAIL-DEBUG] Invited {Email} to EmptyBoard {BoardId} — Trello call succeeded (200)", member.Email, emptyBoardId);
                                 response.InvitedUsers.Add(new TrelloInvitedUser
                                 {
                                     Email = member.Email,
@@ -1012,6 +1024,8 @@ namespace strAppersBackend.Services
                         membersToInvite = request.TeamMembers;
                     }
                     membersToInvite = OnlyTrelloToolMembers(membersToInvite, _logger);
+                    _logger.LogInformation("📧 [EMAIL-DEBUG] Main board {BoardId} ({BoardName}) — final invite list ({Count}): {Emails}",
+                        trelloBoardId, boardName, membersToInvite.Count, string.Join(", ", membersToInvite.Select(m => m.Email)));
 
                     foreach (var member in membersToInvite)
                     {
@@ -1025,6 +1039,7 @@ namespace strAppersBackend.Services
 
                             if (inviteResponse.IsSuccessStatusCode)
                             {
+                                _logger.LogInformation("📧 [EMAIL-DEBUG] Invited {Email} to MAIN board {BoardId} ({BoardName}) — Trello call succeeded (200)", member.Email, trelloBoardId, boardName);
                                 response.InvitedUsers.Add(new TrelloInvitedUser
                                 {
                                     Email = member.Email,
