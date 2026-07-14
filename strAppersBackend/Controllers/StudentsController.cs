@@ -1479,6 +1479,9 @@ public class StudentsController : ControllerBase
                 SuperUser = student.SuperUser,
                 BoardId = student.BoardId,
                 IsAvailable = student.IsAvailable,
+                // Selection lock (checkout closes selection) reads this on the FE — it was missing
+                // from this DTO, which silently disabled the lock.
+                Status = student.Status,
                 EmployerExposure = student.EmployerExposure,
                 ProgrammingLanguageId = student.ProgrammingLanguageId,
                 ProgrammingLanguageName = student.ProgrammingLanguage?.Name,

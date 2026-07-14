@@ -392,3 +392,54 @@ public class SelectionLockAfterCheckoutTests
         Assert.Contains("\"isAllocatable\":true", json);
     }
 }
+
+/// <summary>
+/// Contract test: the FE selection lock reads studentData.status from GET use/by-email.
+/// The field was missing from that DTO, silently disabling the lock after checkout.
+/// </summary>
+public class StudentByEmailContractTests
+{
+    private static ApplicationDbContext CreateContext(string dbName)
+    {
+        var opts = new DbContextOptionsBuilder<ApplicationDbContext>()
+            .UseInMemoryDatabase(dbName)
+            .Options;
+        return new ApplicationDbContext(opts);
+    }
+
+    private static StudentsController CreateStudentsController(ApplicationDbContext ctx)
+        => new StudentsController(
+            ctx,
+            NullLogger<StudentsController>.Instance,
+            new Mock<IGitHubService>().Object,
+            new Mock<IKickoffService>().Object,
+            new Mock<IPasswordHasherService>().Object);
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    [InlineData(3)]
+    public async Task ByEmail_IncludesStatus(int status)
+    {
+        using var ctx = CreateContext($"{nameof(ByEmail_IncludesStatus)}_{status}");
+        // The endpoint's Include chain has required navigations (Major/Year via non-nullable FKs,
+        // Institute) — seed all principals or the join silently drops the student.
+        ctx.Institutes.Add(new Institute { Id = 1, Name = "Default" });
+        ctx.Majors.Add(new Major { Id = 1, Name = "CS" });
+        ctx.Years.Add(new Year { Id = 1, Name = "1st" });
+        ctx.Students.Add(new Student
+        {
+            Id = 1, Email = "s@t.com", FirstName = "A", LastName = "B",
+            StudentId = "s@t.com", LinkedInUrl = "https://linkedin.com/in/a",
+            GithubUser = "tester", MajorId = 1, YearId = 1, InstituteId = 1,
+            Status = status
+        });
+        await ctx.SaveChangesAsync();
+
+        var result = await CreateStudentsController(ctx).GetStudentByEmail("s@t.com");
+
+        var ok = Assert.IsType<OkObjectResult>(result.Result);
+        var json = System.Text.Json.JsonSerializer.Serialize(ok.Value);
+        Assert.Contains($"\"Status\":{status}", json);
+    }
+}
