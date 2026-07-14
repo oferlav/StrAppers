@@ -48,6 +48,63 @@ public class UtilitiesController : ControllerBase
         _testingConfig = testingConfig;
     }
 
+    public class ClientPerfEntry
+    {
+        public string? Name { get; set; }
+        public double Ms { get; set; }
+        public string? Status { get; set; }
+        public int? Count { get; set; }
+    }
+
+    public class ClientPerfReport
+    {
+        public string? Page { get; set; }
+        public string? UserEmail { get; set; }
+        public double TotalMs { get; set; }
+        public List<ClientPerfEntry>? Entries { get; set; }
+    }
+
+    /// <summary>
+    /// Client-side page-load timing report → debug email (slowest entries first).
+    /// Gated by Debug:ClientPerf (default off); the FE only sends when the page runs with ?debug=1.
+    /// </summary>
+    [HttpPost("use/client-debug-report")]
+    public async Task<IActionResult> PostClientDebugReport([FromBody] ClientPerfReport? report)
+    {
+        if (!_configuration.GetValue<bool>("Debug:ClientPerf", false))
+            return Ok(new { accepted = false, reason = "Debug:ClientPerf disabled" });
+        if (report == null)
+            return BadRequest(new { accepted = false });
+
+        var smtp = HttpContext.RequestServices.GetService<ISmtpEmailService>();
+        if (smtp == null)
+            return Ok(new { accepted = false, reason = "smtp unavailable" });
+
+        var sb = new System.Text.StringBuilder();
+        sb.AppendLine($"=== Client Perf Report: {Truncate(report.Page, 60)} ===");
+        sb.AppendLine($"User: {Truncate(report.UserEmail, 100)} | Total: {report.TotalMs:F0} ms | {DateTime.UtcNow:u}");
+        sb.AppendLine();
+        sb.AppendLine("      ms  entry");
+        foreach (var e in (report.Entries ?? new List<ClientPerfEntry>()).Take(100).OrderByDescending(e => e.Ms))
+            sb.AppendLine($"{e.Ms,8:F0}  {Truncate(e.Name, 120)}  {Truncate(e.Status, 20)}{(e.Count.HasValue ? $" (items={e.Count})" : "")}");
+
+        try
+        {
+            await smtp.SendPlainEmailAsync(
+                "ofer@skill-in.com",
+                $"[ClientPerf] {Truncate(report.Page, 40)} — {report.TotalMs:F0} ms total",
+                sb.ToString());
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[CLIENT-PERF] Failed to send perf report email");
+        }
+        return Ok(new { accepted = true });
+
+        static string Truncate(string? s, int max) =>
+            string.IsNullOrEmpty(s) ? "" : s.Length <= max ? s : s[..max] + "…";
+    }
+
     /// <summary>
     /// Utility endpoint to set the same password hash for ALL Students and Organizations.
     /// This is a one-time utility for testing purposes.
