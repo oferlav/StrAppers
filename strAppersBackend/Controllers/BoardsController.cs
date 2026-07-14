@@ -854,7 +854,7 @@ public partial class BoardsController : ControllerBase
                     .OrderBy(pm => pm.Sequence)
                     .Select(pm => new ProjectModuleInfo { Id = pm.Id, Title = pm.Title })
                     .ToListAsync();
-                trelloResponse = await _trelloService.CreateProjectWithSprintsAsync(trelloRequest, project.Title, projectModules);
+                trelloResponse = await _trelloService.CreateProjectWithSprintsAsync(trelloRequest, project.Title, projectModules, debugLog);
                 
                 if (trelloResponse == null)
                 {
