@@ -42,7 +42,9 @@ public class Organization
     public bool TermsAccepted { get; set; } = false;
     public DateTimeOffset? TermsAcceptedAt { get; set; }
     
-    // Password hash field
+    // Password hash field — never serialized: endpoints returning Organization entities
+    // (e.g. GET use/all) were leaking it to the browser.
+    [System.Text.Json.Serialization.JsonIgnore]
     [MaxLength(256)]
     public string? PasswordHash { get; set; }
     
