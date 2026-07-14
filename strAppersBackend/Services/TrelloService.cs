@@ -698,13 +698,25 @@ namespace strAppersBackend.Services
                     if (_trelloConfig.SendInvitationToPMOnly)
                     {
                         membersToInvite = request.TeamMembers
-                            .Where(m => !string.IsNullOrWhiteSpace(m.RoleName) && 
-                                (m.RoleName.Contains("Product Manager", StringComparison.OrdinalIgnoreCase) || 
+                            .Where(m => !string.IsNullOrWhiteSpace(m.RoleName) &&
+                                (m.RoleName.Contains("Product Manager", StringComparison.OrdinalIgnoreCase) ||
                                  m.RoleName.Contains("PM", StringComparison.OrdinalIgnoreCase)))
                             .ToList();
-                        
+
                         _logger.LogInformation("📧 [TRELLO INVITATION] SendInvitationToPMOnly is enabled. Filtered from {TotalCount} to {PMCount} Product Manager(s) only",
                             request.TeamMembers.Count, membersToInvite.Count);
+                    }
+                    // When CreateUserStoryBoard=true, PM-role members are invited to the dedicated User Story
+                    // board only (by the caller, after this method returns) — exclude them here so they don't
+                    // also get invited (and emailed) for this board. Mirrors the exclusion already applied by
+                    // the caller's own post-creation invite loop for the main/EmptyBoard.
+                    if (_trelloConfig.CreateUserStoryBoard)
+                    {
+                        var beforeCount = membersToInvite.Count;
+                        membersToInvite = membersToInvite.Where(m => !IsPMRole(m.RoleName)).ToList();
+                        if (membersToInvite.Count < beforeCount)
+                            _logger.LogInformation("📧 [TRELLO INVITATION] CreateUserStoryBoard is enabled — excluded {Excluded} PM-role member(s) from this board's Step 2 invite (invited to the User Story board instead)",
+                                beforeCount - membersToInvite.Count);
                     }
                     membersToInvite = OnlyTrelloToolMembers(membersToInvite, _logger);
 
