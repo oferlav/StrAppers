@@ -953,6 +953,11 @@ public class StudentsController : ControllerBase
             if (student == null)
                 return NotFound($"Student with ID {studentId} not found.");
 
+            // Checkout closes selection: Status >= 1 (1 = checked out / pending team, 3 = on a board)
+            // must not add more project priorities. ConfirmInstituteCheckout sets Status=1.
+            if (student.Status >= 1)
+                return BadRequest(new { Success = false, Message = "Selection is closed: the student has already completed checkout." });
+
             var project = await _context.InstituteProjects.FindAsync(instituteProjectId);
             if (project == null)
                 return NotFound($"Institute project with ID {instituteProjectId} not found.");
@@ -1084,6 +1089,10 @@ public class StudentsController : ControllerBase
             var project = await _context.InstituteProjects.FindAsync(instituteProjectId);
             if (project == null)
                 return NotFound($"Institute project with ID {instituteProjectId} not found.");
+
+            // Checkout closes selection (same rule the allocate endpoint enforces).
+            if (student.Status >= 1)
+                return Ok(new { isAllocatable = false, message = "Selection is closed: you have already completed checkout." });
 
             if (!project.IsAvailable)
                 return Ok(new { isAllocatable = false, message = "This institute project is not currently available." });
