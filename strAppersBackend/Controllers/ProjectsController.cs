@@ -4547,7 +4547,8 @@ Staff request:
     public async Task<ActionResult<IEnumerable<object>>> GetStudentsForProject(
         int id,
         [FromQuery(Name = "CandidateRoleId")] int? candidateRoleId = null,
-        [FromQuery(Name = "CurrentStudentId")] int? currentStudentId = null)
+        [FromQuery(Name = "CurrentStudentId")] int? currentStudentId = null,
+        [FromQuery(Name = "IncludePhotos")] bool includePhotos = true)
     {
         try
         {
@@ -4593,12 +4594,20 @@ Staff request:
                     YearName = s.Year != null ? s.Year.Name : null,
                     LinkedInUrl = s.LinkedInUrl,
                     GithubUser = s.GithubUser,
-                    Photo = s.Photo,
+                    // Base64 photos dominate the payload (up to ~2MB each); list/count consumers pass
+                    // IncludePhotos=false and fetch photos only for the selected project.
+                    Photo = includePhotos ? s.Photo : null,
                     ProjectId = s.ProjectId,
                     ProjectPriority1 = s.ProjectPriority1,
                     ProjectPriority2 = s.ProjectPriority2,
                     ProjectPriority3 = s.ProjectPriority3,
                     ProjectPriority4 = s.ProjectPriority4,
+                    // Institute priorities were missing from this DTO, hiding institute-flow matches
+                    // from anyone debugging with the raw response.
+                    InstitutePriority1 = s.InstitutePriority1,
+                    InstitutePriority2 = s.InstitutePriority2,
+                    InstitutePriority3 = s.InstitutePriority3,
+                    InstitutePriority4 = s.InstitutePriority4,
                     IsAdmin = s.IsAdmin,
                     BoardId = s.BoardId,
                     IsAvailable = s.IsAvailable,
