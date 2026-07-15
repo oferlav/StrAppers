@@ -134,10 +134,19 @@ public partial class MetricsController
             .AsNoTracking()
             .Include(c => c.Metric)
             .Include(c => c.Student)
-            .Where(c => c.BoardId == boardIdTrim);
+            .Where(c => c.BoardId == boardIdTrim)
+            // Hide cached rows for sprints that don't exist on the board (a pre-created next-sprint
+            // merge row has MergedAt=null and ListId=null; assessments cached for it are phantom).
+            .Where(c => c.SprintNumber < 1 || _context.ProjectBoardSprintMerges.Any(m =>
+                m.ProjectBoardId == c.BoardId && m.SprintNumber == c.SprintNumber &&
+                (m.MergedAt != null || m.ListId != null)));
 
         if (roleId.HasValue)
-            query = query.Where(c => c.Student!.StudentRoles.Any(sr => sr.RoleId == roleId.Value && sr.IsActive));
+        {
+            // Per-concept role filter: match any duplicate row of the same role name.
+            var roleConceptIds = await strAppersBackend.Utilities.RoleConceptResolver.ResolveConceptRoleIdsAsync(_context, roleId.Value, cancellationToken);
+            query = WhereStudentHasRoleConcept(query, roleConceptIds);
+        }
         if (studentId.HasValue)
             query = query.Where(c => c.StudentId == studentId.Value);
         if (sprintNumber.HasValue)
@@ -180,8 +189,9 @@ public partial class MetricsController
                 .FirstOrDefaultAsync(s => s.Id == studentId.Value, cancellationToken);
             if (student == null)
                 return NotFound(new { success = false, message = $"Student {studentId.Value} not found." });
+            var conceptIdsForCheck = await strAppersBackend.Utilities.RoleConceptResolver.ResolveConceptRoleIdsAsync(_context, roleId, cancellationToken);
             var hasRole = await _context.StudentRoles.AsNoTracking()
-                .AnyAsync(sr => sr.StudentId == studentId.Value && sr.RoleId == roleId && sr.IsActive, cancellationToken);
+                .AnyAsync(sr => sr.StudentId == studentId.Value && conceptIdsForCheck.Contains(sr.RoleId) && sr.IsActive, cancellationToken);
             if (!hasRole)
                 return BadRequest(new { success = false, message = "Student does not have this active role." });
 
@@ -193,12 +203,18 @@ public partial class MetricsController
             headline = $"Assessment Report — {roleName} (all squads)";
         }
 
-        var query = _context.CacheMetrics
-            .AsNoTracking()
-            .Include(c => c.Metric)
-            .Include(c => c.Student)
-            .Include(c => c.ProjectBoard)
-            .Where(c => c.Student!.StudentRoles.Any(sr => sr.RoleId == roleId && sr.IsActive));
+        var conceptRoleIds = await strAppersBackend.Utilities.RoleConceptResolver.ResolveConceptRoleIdsAsync(_context, roleId, cancellationToken);
+        var query = WhereStudentHasRoleConcept(
+                _context.CacheMetrics
+                    .AsNoTracking()
+                    .Include(c => c.Metric)
+                    .Include(c => c.Student)
+                    .Include(c => c.ProjectBoard),
+                conceptRoleIds)
+            // Same phantom-sprint filter as the board-scoped report (see GetAssessmentReport).
+            .Where(c => c.SprintNumber < 1 || _context.ProjectBoardSprintMerges.Any(m =>
+                m.ProjectBoardId == c.BoardId && m.SprintNumber == c.SprintNumber &&
+                (m.MergedAt != null || m.ListId != null)));
 
         if (studentId.HasValue)
             query = query.Where(c => c.StudentId == studentId.Value);
@@ -268,6 +284,10 @@ public partial class MetricsController
         return string.IsNullOrEmpty(sn) ? baseName : $"{baseName} ({sn})";
     }
 
+    /// <summary>Role filter for cached assessment rows — per role CONCEPT (all duplicate ids), never a single row id.</summary>
+    internal static IQueryable<CacheMetrics> WhereStudentHasRoleConcept(IQueryable<CacheMetrics> query, List<int> conceptRoleIds)
+        => query.Where(c => c.Student!.StudentRoles.Any(sr => conceptRoleIds.Contains(sr.RoleId) && sr.IsActive));
+
     private static AssessmentReportMetricDto MapMetricDto(CacheMetrics row)
     {
         var name = row.Metric?.Name?.Trim();
@@ -306,6 +326,18 @@ public partial class MetricsController
 
         if (request.InstituteId <= 0)
             return BadRequest(new { success = false, message = "InstituteId is required." });
+
+        // A merge row with MergedAt=null and ListId=null is the pre-created "next sprint" trigger row
+        // (MergeType=Add) — that sprint has no Trello list yet, so running metrics for it would cache
+        // phantom assessment rows the report then displays. Sprint 0 (Bugs) has no merge row by design.
+        if (request.SprintNumber >= 1)
+        {
+            var sprintExists = await _context.ProjectBoardSprintMerges.AsNoTracking()
+                .AnyAsync(m => m.ProjectBoardId == boardId && m.SprintNumber == request.SprintNumber &&
+                               (m.MergedAt != null || m.ListId != null), cancellationToken);
+            if (!sprintExists)
+                return BadRequest(new { success = false, message = $"Sprint {request.SprintNumber} does not exist on this board (no merged sprint list). Assessment not run." });
+        }
 
         var metrics = await _context.Metrics.AsNoTracking()
             .Where(m => m.InstituteId == request.InstituteId && m.Required)

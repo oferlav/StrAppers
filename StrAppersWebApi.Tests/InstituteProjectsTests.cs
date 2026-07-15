@@ -162,9 +162,10 @@ public class InstituteProjectsTests
     }
 
     [Fact]
-    public async Task AllocateInstituteProject_SetsStatusToPending()
+    public async Task AllocateInstituteProject_KeepsStatusZero_UntilCheckout()
     {
-        using var ctx = CreateContext(nameof(AllocateInstituteProject_SetsStatusToPending));
+        // Allocation only sets priorities; Status stays 0 until ConfirmInstituteCheckout sets 1.
+        using var ctx = CreateContext(nameof(AllocateInstituteProject_KeepsStatusZero_UntilCheckout));
         ctx.Students.Add(MakeStudent(1));
         ctx.InstituteProjects.Add(MakeInstituteProject(5));
         await ctx.SaveChangesAsync();
@@ -172,7 +173,8 @@ public class InstituteProjectsTests
         await CreateStudentsController(ctx).AllocateStudentToInstituteProject(5, 1, new AllocateStudentRequest());
 
         var student = await ctx.Students.FindAsync(1);
-        Assert.Equal(1, student!.Status);
+        Assert.Equal(0, student!.Status);
+        Assert.Equal(5, student.InstitutePriority1);
     }
 
     // ── POST /api/Students/use/institute/deallocate/{projectId}/{studentId} ─
@@ -279,5 +281,165 @@ public class InstituteProjectsTests
         var json = System.Text.Json.JsonSerializer.Serialize(ok.Value);
         // Should only appear once despite being in two priority slots
         Assert.Single(System.Text.Json.JsonDocument.Parse(json).RootElement.EnumerateArray());
+    }
+}
+
+/// <summary>
+/// Checkout closes selection: Status >= 1 must block further project allocation
+/// (the reported go-live bug: a checked-out student could keep applying).
+/// </summary>
+public class SelectionLockAfterCheckoutTests
+{
+    private static ApplicationDbContext CreateContext(string dbName)
+    {
+        var opts = new DbContextOptionsBuilder<ApplicationDbContext>()
+            .UseInMemoryDatabase(dbName)
+            .Options;
+        return new ApplicationDbContext(opts);
+    }
+
+    private static StudentsController CreateStudentsController(ApplicationDbContext ctx)
+        => new StudentsController(
+            ctx,
+            NullLogger<StudentsController>.Instance,
+            new Mock<IGitHubService>().Object,
+            new Mock<IKickoffService>().Object,
+            new Mock<IPasswordHasherService>().Object);
+
+    private static Student MakeStudent(int id, int? status) =>
+        new Student { Id = id, Email = $"s{id}@t.com", FirstName = "A", LastName = "B", StudentId = $"s{id}@t.com", LinkedInUrl = "https://linkedin.com/in/a", Status = status };
+
+    private static InstituteProject MakeProject(int id) =>
+        new InstituteProject { Id = id, InstituteId = 2, Title = $"P{id}", IsAvailable = true };
+
+    // ── Allocate endpoint (authoritative guard) ──────────────────────────────
+
+    [Fact]
+    public async Task Allocate_AfterCheckout_Status1_ReturnsBadRequest_AndWritesNothing()
+    {
+        using var ctx = CreateContext(nameof(Allocate_AfterCheckout_Status1_ReturnsBadRequest_AndWritesNothing));
+        ctx.Students.Add(MakeStudent(1, status: 1));
+        ctx.InstituteProjects.Add(MakeProject(5));
+        await ctx.SaveChangesAsync();
+
+        var result = await CreateStudentsController(ctx).AllocateStudentToInstituteProject(5, 1, new AllocateStudentRequest());
+
+        Assert.IsType<BadRequestObjectResult>(result);
+        var student = await ctx.Students.FindAsync(1);
+        Assert.Null(student!.InstitutePriority1); // no slot was written
+    }
+
+    [Fact]
+    public async Task Allocate_StudentOnBoard_Status3_ReturnsBadRequest()
+    {
+        using var ctx = CreateContext(nameof(Allocate_StudentOnBoard_Status3_ReturnsBadRequest));
+        ctx.Students.Add(MakeStudent(1, status: 3));
+        ctx.InstituteProjects.Add(MakeProject(5));
+        await ctx.SaveChangesAsync();
+
+        var result = await CreateStudentsController(ctx).AllocateStudentToInstituteProject(5, 1, new AllocateStudentRequest());
+
+        Assert.IsType<BadRequestObjectResult>(result);
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(null)]
+    public async Task Allocate_BeforeCheckout_Succeeds(int? status)
+    {
+        using var ctx = CreateContext($"{nameof(Allocate_BeforeCheckout_Succeeds)}_{status?.ToString() ?? "null"}");
+        ctx.Students.Add(MakeStudent(1, status));
+        ctx.InstituteProjects.Add(MakeProject(5));
+        await ctx.SaveChangesAsync();
+
+        var result = await CreateStudentsController(ctx).AllocateStudentToInstituteProject(5, 1, new AllocateStudentRequest());
+
+        Assert.IsType<OkObjectResult>(result);
+        var student = await ctx.Students.FindAsync(1);
+        Assert.Equal(5, student!.InstitutePriority1);
+    }
+
+    // ── Pre-check endpoint (FE-facing message) ───────────────────────────────
+
+    [Fact]
+    public async Task IsAllocatable_AfterCheckout_ReturnsFalse_WithClosedMessage()
+    {
+        using var ctx = CreateContext(nameof(IsAllocatable_AfterCheckout_ReturnsFalse_WithClosedMessage));
+        ctx.Students.Add(MakeStudent(1, status: 1));
+        ctx.InstituteProjects.Add(MakeProject(5));
+        await ctx.SaveChangesAsync();
+
+        var result = await CreateStudentsController(ctx).IsStudentInstituteAllocatable(5, 1);
+
+        var ok = Assert.IsType<OkObjectResult>(result.Result);
+        var json = System.Text.Json.JsonSerializer.Serialize(ok.Value);
+        Assert.Contains("\"isAllocatable\":false", json);
+        Assert.Contains("checkout", json, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task IsAllocatable_BeforeCheckout_ReturnsTrue()
+    {
+        using var ctx = CreateContext(nameof(IsAllocatable_BeforeCheckout_ReturnsTrue));
+        ctx.Students.Add(MakeStudent(1, status: 0));
+        ctx.InstituteProjects.Add(MakeProject(5));
+        await ctx.SaveChangesAsync();
+
+        var result = await CreateStudentsController(ctx).IsStudentInstituteAllocatable(5, 1);
+
+        var ok = Assert.IsType<OkObjectResult>(result.Result);
+        var json = System.Text.Json.JsonSerializer.Serialize(ok.Value);
+        Assert.Contains("\"isAllocatable\":true", json);
+    }
+}
+
+/// <summary>
+/// Contract test: the FE selection lock reads studentData.status from GET use/by-email.
+/// The field was missing from that DTO, silently disabling the lock after checkout.
+/// </summary>
+public class StudentByEmailContractTests
+{
+    private static ApplicationDbContext CreateContext(string dbName)
+    {
+        var opts = new DbContextOptionsBuilder<ApplicationDbContext>()
+            .UseInMemoryDatabase(dbName)
+            .Options;
+        return new ApplicationDbContext(opts);
+    }
+
+    private static StudentsController CreateStudentsController(ApplicationDbContext ctx)
+        => new StudentsController(
+            ctx,
+            NullLogger<StudentsController>.Instance,
+            new Mock<IGitHubService>().Object,
+            new Mock<IKickoffService>().Object,
+            new Mock<IPasswordHasherService>().Object);
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    [InlineData(3)]
+    public async Task ByEmail_IncludesStatus(int status)
+    {
+        using var ctx = CreateContext($"{nameof(ByEmail_IncludesStatus)}_{status}");
+        // The endpoint's Include chain has required navigations (Major/Year via non-nullable FKs,
+        // Institute) — seed all principals or the join silently drops the student.
+        ctx.Institutes.Add(new Institute { Id = 1, Name = "Default" });
+        ctx.Majors.Add(new Major { Id = 1, Name = "CS" });
+        ctx.Years.Add(new Year { Id = 1, Name = "1st" });
+        ctx.Students.Add(new Student
+        {
+            Id = 1, Email = "s@t.com", FirstName = "A", LastName = "B",
+            StudentId = "s@t.com", LinkedInUrl = "https://linkedin.com/in/a",
+            GithubUser = "tester", MajorId = 1, YearId = 1, InstituteId = 1,
+            Status = status
+        });
+        await ctx.SaveChangesAsync();
+
+        var result = await CreateStudentsController(ctx).GetStudentByEmail("s@t.com");
+
+        var ok = Assert.IsType<OkObjectResult>(result.Result);
+        var json = System.Text.Json.JsonSerializer.Serialize(ok.Value);
+        Assert.Contains($"\"Status\":{status}", json);
     }
 }

@@ -77,6 +77,9 @@ public partial class BoardsController : ControllerBase
     private static void DbgLog(System.Text.StringBuilder? sb, string msg)
         => sb?.AppendLine($"[{DateTime.UtcNow:yyyy-MM-dd HH:mm:ss.fff}Z] {msg}");
 
+    private static string Truncate(string? s, int max)
+        => string.IsNullOrEmpty(s) ? "" : s.Length <= max ? s : s[..max] + "…";
+
     private async Task FlushDebugLog(System.Text.StringBuilder? debugLog, string boardId)
     {
         if (debugLog == null) return;
@@ -335,6 +338,8 @@ public partial class BoardsController : ControllerBase
             TrelloProjectCreationRequest? trelloRequest = null;
             object? sprintPlanForStorage = null;
             var useSavedTrelloJson = false;
+            // Per-course sprint length in days (course-builder templates). Null = legacy weekly cadence.
+            int? sprintLengthDays = null;
             _logger.LogInformation("[BOARD-CREATE] UseDBProjectBoard={UseDB}, EffectiveTrelloBoardJson present={HasJson}, Length={JsonLen}",
                 useDBProjectBoard,
                 !string.IsNullOrWhiteSpace(effectiveTrelloBoardJson),
@@ -356,6 +361,15 @@ public partial class BoardsController : ControllerBase
                         trelloRequest.StudentEmails = students.Select(s => s.Email).ToList();
                         trelloRequest.ProjectLengthWeeks = projectLengthWeeks;
                         trelloRequest.SprintLengthWeeks = sprintLengthWeeks;
+                        // SprintLengthDays is deliberately NOT overwritten from config — it is the course's own cadence.
+                        sprintLengthDays = trelloRequest.SprintLengthDays;
+                        if (sprintLengthDays is int kickoffDays)
+                        {
+                            // Day-based course: kickoff is the next local day at 10:00 (no calendar-week wait).
+                            kickoffUtc = strAppersBackend.Services.TrelloBoardScheduleHelper.GetDayBasedKickoffUtc(DateTime.UtcNow, localOffset);
+                            kickoffDateTimeIso = kickoffUtc.ToString("yyyy-MM-ddTHH:mm:ssZ");
+                            _logger.LogInformation("[BOARD-CREATE] Day-based course ({Days} days/sprint): kickoff overridden to next-day 10:00 local, UTC={KickoffUtc}", kickoffDays, kickoffUtc);
+                        }
                         trelloRequest.TeamMembers = students.Select(s => new TrelloTeamMember
                         {
                             Email = s.Email,
@@ -400,7 +414,8 @@ public partial class BoardsController : ControllerBase
                             if (removed > 0)
                                 _logger.LogInformation("Filtered {Removed} cards for roles not in team (template had all roles). User Stories list cards are always kept. Sending {Count} cards to Trello.", removed, trelloRequest.SprintPlan.Cards.Count);
                         }
-                        // UseDBProjectBoard: override saved sprint due dates (first day of week = sprint start, last day of weekend = due)
+                        // UseDBProjectBoard: override saved sprint due dates. Day-based courses chain from the
+                        // kickoff date (N × days − 1); weekly courses keep first-day-of-week / last-day-of-weekend.
                         if (useDBProjectBoard && trelloRequest.SprintPlan?.Cards != null)
                         {
                             var sprintWeeks = _configuration.GetValue<int>("BusinessLogicConfig:SprintLengthInWeeks", 1);
@@ -411,10 +426,13 @@ public partial class BoardsController : ControllerBase
                                 var sprintMatch = Regex.Match(listName, @"Sprint\s*(\d+)", RegexOptions.IgnoreCase);
                                 if (sprintMatch.Success && int.TryParse(sprintMatch.Groups[1].Value, out var sprintNum) && sprintNum >= 1)
                                 {
-                                    card.DueDate = GetSprintDueDateUtc(kickoffUtc, sprintNum, firstDayOfWeek, offsetMin, sprintWeeks);
+                                    card.DueDate = sprintLengthDays is int cardDays
+                                        ? strAppersBackend.Services.TrelloBoardScheduleHelper.GetSprintDueDateUtcForDays(kickoffUtc, sprintNum, cardDays, localOffset)
+                                        : GetSprintDueDateUtc(kickoffUtc, sprintNum, firstDayOfWeek, offsetMin, sprintWeeks);
                                 }
                             }
-                            _logger.LogInformation("[BOARD-CREATE] Overrode sprint due dates from Trello:FirstDayOfWeek={FirstDay}, LocalTime={LocalTime}", firstDayOfWeekStr, localTimeStr);
+                            _logger.LogInformation("[BOARD-CREATE] Overrode sprint due dates ({Cadence}) from Trello:FirstDayOfWeek={FirstDay}, LocalTime={LocalTime}",
+                                sprintLengthDays != null ? $"{sprintLengthDays}-day" : "weekly", firstDayOfWeekStr, localTimeStr);
                         }
 
                         _logger.LogInformation("Using saved TrelloBoardJson for project {ProjectId} instead of AI", request.ProjectId);
@@ -759,7 +777,9 @@ public partial class BoardsController : ControllerBase
                     ordered[i].Position = i + 1;
             }
 
-            // Override sprint due dates: sprint starts first day of week, due = last day of weekend (and when UseDBProjectBoard, override saved JSON dates)
+            // Override sprint due dates (this is the FINAL stamping before the Trello call — it overwrites
+            // any earlier card dates). Day-based courses chain from the kickoff date; weekly courses snap
+            // to first day of week / last day of weekend.
             if (trelloRequest.SprintPlan?.Lists != null && trelloRequest.SprintPlan.Cards != null)
             {
                 foreach (var list in trelloRequest.SprintPlan.Lists)
@@ -767,13 +787,26 @@ public partial class BoardsController : ControllerBase
                     var sprintNum = ParseSprintNumberFromListName(list.Name);
                     if (sprintNum.HasValue && sprintNum.Value >= 1)
                     {
-                        var (startUtc, dueUtc) = strAppersBackend.Services.TrelloBoardScheduleHelper.GetSprintStartAndDueUtc(sprintNum.Value, kickoffUtc, firstDayOfWeek, localOffset);
+                        DateTime dueUtc;
+                        if (sprintLengthDays is int finalStampDays)
+                        {
+                            dueUtc = strAppersBackend.Services.TrelloBoardScheduleHelper.GetSprintDueDateUtcForDays(kickoffUtc, sprintNum.Value, finalStampDays, localOffset);
+                            // Stamp StartDate too so the stored SprintPlan is self-describing for window resolution.
+                            list.StartDate = strAppersBackend.Services.TrelloBoardScheduleHelper.GetSprintDueDateUtcForDays(kickoffUtc, sprintNum.Value - 1, finalStampDays, localOffset).AddTicks(1);
+                            if (sprintNum.Value == 1)
+                                list.StartDate = kickoffUtc.Add(localOffset).Date.Subtract(localOffset);
+                        }
+                        else
+                        {
+                            (_, dueUtc) = strAppersBackend.Services.TrelloBoardScheduleHelper.GetSprintStartAndDueUtc(sprintNum.Value, kickoffUtc, firstDayOfWeek, localOffset);
+                        }
                         list.EndDate = dueUtc;
                         foreach (var card in trelloRequest.SprintPlan.Cards.Where(c => string.Equals(c.ListName, list.Name, StringComparison.OrdinalIgnoreCase)))
                         {
                             card.DueDate = dueUtc;
                         }
-                        _logger.LogDebug("Sprint {SprintNum} list '{ListName}': DueDate set to {DueUtc}", sprintNum.Value, list.Name, dueUtc);
+                        _logger.LogInformation("[BOARD-CREATE] Sprint {SprintNum} list '{ListName}': DueDate set to {DueUtc} ({Cadence})",
+                            sprintNum.Value, list.Name, dueUtc, sprintLengthDays != null ? $"{sprintLengthDays}-day" : "weekly");
                     }
                 }
             }
@@ -821,7 +854,7 @@ public partial class BoardsController : ControllerBase
                     .OrderBy(pm => pm.Sequence)
                     .Select(pm => new ProjectModuleInfo { Id = pm.Id, Title = pm.Title })
                     .ToListAsync();
-                trelloResponse = await _trelloService.CreateProjectWithSprintsAsync(trelloRequest, project.Title, projectModules);
+                trelloResponse = await _trelloService.CreateProjectWithSprintsAsync(trelloRequest, project.Title, projectModules, debugLog);
                 
                 if (trelloResponse == null)
                 {
@@ -914,7 +947,7 @@ public partial class BoardsController : ControllerBase
                         Id = trelloResponse.SystemBoardId,
                         ProjectId = request.ProjectId,
                         StartDate = DateTime.UtcNow,
-                        DueDate = DateTime.UtcNow.AddDays(projectLengthWeeks * 7),
+                        DueDate = ComputeBoardDueDateUtc(sprintLengthDays, kickoffUtc, trelloRequest, projectLengthWeeks),
                         StatusId = 1,
                         AdminId = qmAdminStudent?.Id,
                         SprintPlan = sprintPlanForStorage != null ? System.Text.Json.JsonSerializer.Serialize(sprintPlanForStorage) : null,
@@ -936,7 +969,7 @@ public partial class BoardsController : ControllerBase
                     ProjectId = request.ProjectId,
                     IsSystemBoard = false,
                     StartDate = DateTime.UtcNow,
-                    DueDate = DateTime.UtcNow.AddDays(projectLengthWeeks * 7),
+                    DueDate = ComputeBoardDueDateUtc(sprintLengthDays, kickoffUtc, trelloRequest, projectLengthWeeks),
                     StatusId = 1,
                     AdminId = qmAdminStudent?.Id,
                     SprintPlan = sprintPlanForStorage != null ? System.Text.Json.JsonSerializer.Serialize(sprintPlanForStorage) : null,
@@ -2048,9 +2081,11 @@ public partial class BoardsController : ControllerBase
                     // Use shared Railway project instead of creating a new one
                     projectId = _configuration["Railway:SharedProjectId"];
 
+                    DbgLog(debugLog, $"[RAILWAY] START: ApiUrl={railwayApiUrl} TokenSet={!string.IsNullOrWhiteSpace(railwayApiToken)} SharedProjectId={(string.IsNullOrWhiteSpace(projectId) ? "(MISSING)" : projectId)} ServiceName={sanitizedName}");
                     if (string.IsNullOrWhiteSpace(projectId))
                     {
                         _logger.LogError("❌ [RAILWAY] Shared project ID not configured. Cannot create Railway service.");
+                        DbgLog(debugLog, "[RAILWAY] ABORTED: Railway:SharedProjectId not configured — no service created.");
                         // Continue without Railway service - board creation can still proceed
                     }
                     else
@@ -2171,9 +2206,10 @@ public partial class BoardsController : ControllerBase
                                         if (serviceObj.TryGetProperty("id", out var serviceIdProp))
                                         {
                                             railwayServiceId = serviceIdProp.GetString();
-                                            _logger.LogInformation("✅ [RAILWAY] Service created: ID={ServiceId}, Name={ServiceName}", 
+                                            _logger.LogInformation("✅ [RAILWAY] Service created: ID={ServiceId}, Name={ServiceName}",
                                                 railwayServiceId, sanitizedName);
                                             _logger.LogInformation("🔍 [RAILWAY] DIAGNOSTIC: Service {ServiceId} will be configured with backend build settings", railwayServiceId);
+                                            DbgLog(debugLog, $"[RAILWAY] Service created OK: ServiceId={railwayServiceId} Name={sanitizedName}");
                                         }
                                     }
                                 }
@@ -2210,6 +2246,7 @@ public partial class BoardsController : ControllerBase
                                     _logger.LogWarning(parseEx, "⚠️ [RAILWAY] Could not parse error response");
                                 }
                                 
+                                DbgLog(debugLog, $"[RAILWAY] Service creation FAILED after {serviceRetryCount + 1} attempts: HTTP {serviceResponse?.StatusCode}, Error: {Truncate(errorMessages ?? serviceResponseContent, 800)}");
                                 throw new InvalidOperationException(
                                     $"Failed to create Railway service after {serviceRetryCount + 1} attempts. " +
                                     $"Status: {serviceResponse?.StatusCode}, Error: {errorMessages ?? serviceResponseContent ?? "Unknown error"}. " +
@@ -2442,6 +2479,7 @@ public partial class BoardsController : ControllerBase
                 // CRITICAL: Railway deployment failures MUST fail the entire board creation
                 // Railway is a critical component - board cannot function without backend deployment
                 _logger.LogError(ex, "❌ [RAILWAY] CRITICAL: Railway deployment failed. Board creation cannot proceed. Error: {Error}", ex.Message);
+                DbgLog(debugLog, $"[RAILWAY] CRITICAL FAILURE — board creation aborted: {ex.Message}");
                 throw; // Re-throw to fail the entire board creation
             }
             
@@ -2851,13 +2889,13 @@ public partial class BoardsController : ControllerBase
                                     if (!string.IsNullOrEmpty(railwayApiUrl))
                                     {
                                         using var railwayHttpClient = _httpClientFactory.CreateClient();
-                                        railwayHttpClient.DefaultRequestHeaders.Authorization = 
+                                        railwayHttpClient.DefaultRequestHeaders.Authorization =
                                             new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", railwayApiToken);
                                         railwayHttpClient.DefaultRequestHeaders.Accept.Add(
                                             new System.Net.Http.Headers.MediaTypeWithQualityHeaderValue("application/json"));
                                         railwayHttpClient.DefaultRequestHeaders.Add("User-Agent", "StrAppersBackend/1.0");
-                                        
-                                        await ConnectGitHubRepositoryToRailway(railwayHttpClient, railwayApiUrl, railwayApiToken, railwayServiceId, backendRepositoryUrl);
+
+                                        await ConnectGitHubRepositoryToRailway(railwayHttpClient, railwayApiUrl, railwayApiToken, railwayServiceId, backendRepositoryUrl, debugLog);
                                         
                                         // Set Railway build environment variables (for root-level files, no "cd backend &&" needed)
                                         if (!string.IsNullOrEmpty(environmentId) && !string.IsNullOrEmpty(projectId) && !string.IsNullOrEmpty(programmingLanguage))
@@ -3124,7 +3162,7 @@ public partial class BoardsController : ControllerBase
                     Id = trelloResponse.SystemBoardId,
                     ProjectId = request.ProjectId,
                     StartDate = DateTime.UtcNow,
-                    DueDate = DateTime.UtcNow.AddDays(projectLengthWeeks * 7),
+                    DueDate = ComputeBoardDueDateUtc(sprintLengthDays, kickoffUtc, trelloRequest, projectLengthWeeks),
                     StatusId = 1, // New status
                     AdminId = adminStudent?.Id,
                     SprintPlan = sprintPlanForStorage != null ? System.Text.Json.JsonSerializer.Serialize(sprintPlanForStorage) : null,
@@ -3158,7 +3196,7 @@ public partial class BoardsController : ControllerBase
                 ProjectId = request.ProjectId,
                 IsSystemBoard = false, // EmptyBoard or single board
                 StartDate = DateTime.UtcNow,
-                DueDate = DateTime.UtcNow.AddDays(projectLengthWeeks * 7),
+                DueDate = ComputeBoardDueDateUtc(sprintLengthDays, kickoffUtc, trelloRequest, projectLengthWeeks),
                 StatusId = 1, // New status
                 AdminId = adminStudent?.Id,
                 SprintPlan = sprintPlanForStorage != null ? System.Text.Json.JsonSerializer.Serialize(sprintPlanForStorage) : null,
@@ -3233,7 +3271,9 @@ public partial class BoardsController : ControllerBase
                         if (isMergeTypeAdd && sprintNum == visibleSprints + 1)
                         {
                             // Next sprint: no list on board yet; DueDate = last day of that sprint
-                            dueDateUtc = GetSprintDueDateUtc(kickoffUtc, sprintNum, firstDayOfWeek, offsetMin, sprintLengthWeeks);
+                            dueDateUtc = sprintLengthDays is int nextDays
+                                ? strAppersBackend.Services.TrelloBoardScheduleHelper.GetSprintDueDateUtcForDays(kickoffUtc, sprintNum, nextDays, localOffset)
+                                : GetSprintDueDateUtc(kickoffUtc, sprintNum, firstDayOfWeek, offsetMin, sprintLengthWeeks);
                             mergedAt = null;
                         }
                         else if (overriddenSprints.TryGetValue(sprintNum, out var overridden))
@@ -3249,9 +3289,12 @@ public partial class BoardsController : ControllerBase
                             if (snapshot == null)
                                 continue;
                             listId = snapshot.ListId;
-                            dueDateUtc = snapshot.Cards?.Count > 0 && snapshot.Cards[0].DueDate.HasValue
+                            var snapshotDueUtc = snapshot.Cards?.Count > 0 && snapshot.Cards[0].DueDate.HasValue
                                 ? ToUtcForDb(snapshot.Cards[0].DueDate.Value)
-                                : GetSprintDueDateUtc(kickoffUtc, sprintNum, firstDayOfWeek, offsetMin, sprintLengthWeeks);
+                                : (DateTime?)null;
+                            dueDateUtc = ResolveMergeSeedDueUtc(
+                                sprintLengthDays, snapshotDueUtc, kickoffUtc, sprintNum,
+                                firstDayOfWeek, offsetMin, sprintLengthWeeks, localOffset);
                             if (isMergeTypeAdd && sprintNum <= visibleSprints)
                                 mergedAt = DateTime.UtcNow;
                         }
@@ -4101,6 +4144,48 @@ public partial class BoardsController : ControllerBase
         return dueLocal.AddMinutes(-localOffsetMinutes);
     }
 
+    /// <summary>
+    /// ProjectBoard.DueDate at creation. Day-based courses: kickoff + (sprint count × days), where the
+    /// sprint count comes from the template's Sprint lists (ProjectLengthWeeks is a misnomer there — the
+    /// course builder stores sprint COUNT in it, and it is overwritten with global config at load anyway).
+    /// Weekly (legacy): now + projectLengthWeeks × 7, unchanged.
+    /// </summary>
+    internal static DateTime ComputeBoardDueDateUtc(
+        int? sprintLengthDays, DateTime kickoffUtc, TrelloProjectCreationRequest? trelloRequest, int projectLengthWeeks)
+    {
+        if (sprintLengthDays is int days)
+        {
+            var sprintListCount = trelloRequest?.SprintPlan?.Lists?
+                .Count(l => ParseSprintNumberFromListName(l.Name) != null) ?? 0;
+            if (sprintListCount <= 0)
+                sprintListCount = Math.Max(1, trelloRequest?.SprintPlan?.TotalSprints ?? 1);
+            return kickoffUtc.AddDays(sprintListCount * Math.Max(1, days));
+        }
+        return DateTime.UtcNow.AddDays(projectLengthWeeks * 7);
+    }
+
+    /// <summary>
+    /// Creation-time ProjectBoardSprintMerge.DueDate. Day-based boards ALWAYS use the computed
+    /// end-of-day-local due — the Trello snapshot read-back is untrusted there (date-only round
+    /// trips flatten times to midnight UTC, desynchronizing the merge runner and windows).
+    /// Weekly boards keep the legacy preference: snapshot card due first, weekly helper fallback.
+    /// </summary>
+    internal static DateTime ResolveMergeSeedDueUtc(
+        int? sprintLengthDays,
+        DateTime? snapshotDueUtc,
+        DateTime kickoffUtc,
+        int sprintNumber,
+        DayOfWeek firstDayOfWeek,
+        int localOffsetMinutes,
+        int sprintLengthWeeks,
+        TimeSpan localOffset)
+    {
+        if (sprintLengthDays is int days)
+            return strAppersBackend.Services.TrelloBoardScheduleHelper.GetSprintDueDateUtcForDays(kickoffUtc, sprintNumber, days, localOffset);
+        return snapshotDueUtc
+            ?? GetSprintDueDateUtc(kickoffUtc, sprintNumber, firstDayOfWeek, localOffsetMinutes, sprintLengthWeeks);
+    }
+
     /// <summary>Parse sprint number from list name (e.g. "Sprint1", "Sprint 2"). Returns null if not a sprint list.</summary>
     private static int? ParseSprintNumberFromListName(string? listName)
     {
@@ -4154,9 +4239,22 @@ public partial class BoardsController : ControllerBase
             else
             {
                 var sprintLengthInWeeks = _configuration.GetValue<int>("BusinessLogicConfig:SprintLengthInWeeks", 1);
-                // Sprint window is inclusive (start and due both count): 1 week = 7 days = due - 6 days for start
-                var sprintDays = Math.Max(1, sprintLengthInWeeks * 7);
-                startDate = dueDate.HasValue ? dueDate.Value.AddDays(-(sprintDays - 1)) : (DateTime?)null;
+                // Days resolved per board (course templates carry SprintLengthDays; legacy = weeks × 7).
+                var sprintDays = await strAppersBackend.Utilities.SprintLengthResolver.ResolveForBoardAsync(
+                    _context, boardId, sprintLengthInWeeks);
+                // Contiguous inclusive windows (same formula as SprintPlanDateResolver): start is one tick
+                // after the previous sprint's normalized end, so end-of-day dues yield start-of-day starts.
+                if (dueDate.HasValue)
+                {
+                    var endInclusive = dueDate.Value.TimeOfDay == TimeSpan.Zero
+                        ? dueDate.Value.Date.AddDays(1).AddTicks(-1)
+                        : dueDate.Value;
+                    startDate = endInclusive.AddDays(-sprintDays).AddTicks(1);
+                }
+                else
+                {
+                    startDate = null;
+                }
             }
 
             return Ok(new
@@ -7486,21 +7584,23 @@ INSERT INTO ""TestProjects"" (""Name"") VALUES
     /// <summary>
     /// Connects a GitHub repository to a Railway service
     /// </summary>
-    private async Task ConnectGitHubRepositoryToRailway(HttpClient httpClient, string railwayApiUrl, string railwayApiToken, string serviceId, string repositoryUrl)
+    private async Task ConnectGitHubRepositoryToRailway(HttpClient httpClient, string railwayApiUrl, string railwayApiToken, string serviceId, string repositoryUrl, System.Text.StringBuilder? debugLog = null)
     {
         try
         {
             _logger.LogInformation("🔗 [RAILWAY] Connecting GitHub repository to Railway service {ServiceId}", serviceId);
             _logger.LogDebug("🔗 [RAILWAY] Repository URL: {RepositoryUrl}", repositoryUrl);
-            
+            DbgLog(debugLog, $"[RAILWAY] serviceConnect START: ServiceId={serviceId} Repo={repositoryUrl} (this step triggers the first deployment — if it fails, the service stays 'offline' with no deployment history)");
+
             // Parse GitHub repository URL to extract owner and repo name
             // Format: https://github.com/owner/repo-name
             var uri = new Uri(repositoryUrl);
             var pathParts = uri.AbsolutePath.TrimStart('/').Split('/');
-            
+
             if (pathParts.Length < 2)
             {
                 _logger.LogWarning("⚠️ [RAILWAY] Invalid GitHub repository URL format: {RepositoryUrl}", repositoryUrl);
+                DbgLog(debugLog, $"[RAILWAY] serviceConnect ABORTED: invalid GitHub repo URL format '{repositoryUrl}'");
                 return;
             }
             
@@ -7545,12 +7645,23 @@ INSERT INTO ""TestProjects"" (""Name"") VALUES
             
             if (response.IsSuccessStatusCode)
             {
-                _logger.LogInformation("[RAILWAY] Repository connected successfully");
+                // GraphQL can return 200 with an errors array — success here means HTTP-level only.
+                if (responseContent.Contains("\"errors\"", StringComparison.OrdinalIgnoreCase))
+                {
+                    _logger.LogError("[RAILWAY] serviceConnect returned HTTP 200 with GraphQL errors: {Response}", responseContent);
+                    DbgLog(debugLog, $"[RAILWAY] serviceConnect FAILED (GraphQL errors in HTTP 200): {Truncate(responseContent, 800)}");
+                }
+                else
+                {
+                    _logger.LogInformation("[RAILWAY] Repository connected successfully");
+                    DbgLog(debugLog, $"[RAILWAY] serviceConnect OK: ServiceId={serviceId} — first deployment should be triggered");
+                }
             }
             else
             {
                 _logger.LogError("[RAILWAY] Failed to connect repository: {StatusCode}", response.StatusCode);
-                
+                DbgLog(debugLog, $"[RAILWAY] serviceConnect FAILED: HTTP {(int)response.StatusCode} {response.StatusCode}. Response: {Truncate(responseContent, 800)}");
+
                 // Log GraphQL errors for debugging
                 try
                 {
@@ -7573,6 +7684,7 @@ INSERT INTO ""TestProjects"" (""Name"") VALUES
         catch (Exception ex)
         {
             _logger.LogError(ex, "[RAILWAY] Error connecting repository: {Message}", ex.Message);
+            DbgLog(debugLog, $"[RAILWAY] serviceConnect EXCEPTION: {ex.Message}");
         }
     }
     

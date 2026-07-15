@@ -32,7 +32,7 @@ public partial class MetricsController
     /// <summary>
     /// Sprint gap analysis (MetricId 2): compares sprint requirements to delivered artifacts; stores <see cref="CacheMetrics.ReviewContent"/> and base64 PNG bar chart(s) in <see cref="CacheMetrics.Graph"/> and optional <see cref="CacheMetrics.Graph2"/>.
     /// Full Stack runs two separate analyses (backend repo vs frontend repo); the model is not told "full stack"—only "backend" or "frontend" expert. Backend result is saved first; frontend narrative and chart are appended (<see cref="CacheMetrics.Graph2"/>).
-    /// Trello cards are matched by the green label: <see cref="Role.Description"/> if set, otherwise <see cref="Role.Name"/> (same board convention as "Role Description" labels).
+    /// Trello cards are matched by the label <see cref="Role.Name"/> (see <see cref="ResolveTrelloSprintCardLabel"/>).
     /// Set <see cref="GapAnalysisRequest.Test"/> to true to return only generated system and user prompts (no LLM, no DB write).
     /// </summary>
     [HttpPost("use/GapAnalysis")]
@@ -415,19 +415,26 @@ public partial class MetricsController
     /// <param name="ParsedOk">False when the model output was not valid JSON — caller must not persist.</param>
     private sealed record GapTrackResult(string Narrative, List<(string Label, int Score)> ChartRows, object? RawModel, bool ParsedOk, int InputTokens = 0, int OutputTokens = 0);
 
-    /// <summary>Board sprint cards use a label that matches the role: prefer database <see cref="Role.Description"/>, then <see cref="Role.Name"/>. Full-stack tracks use fixed developer labels.</summary>
-    private static string ResolveTrelloSprintCardLabel(Role? role, string? fullStackTrackLabel)
+    /// <summary>
+    /// Board sprint cards use a label that matches <see cref="Role.Name"/> (e.g. "Backend Developer") —
+    /// confirmed against live Trello card labels. Full-stack tracks use fixed developer labels.
+    /// Do NOT prefer <see cref="Role.Description"/> here: every seeded role has a non-empty Description
+    /// (e.g. "Develops server-side logic and database integration" for Backend Developer), so doing so
+    /// made every Trello sprint-card lookup for this label miss on every board — the CONTEXT block of
+    /// every Gap Analysis run was silently empty ("No context blocks could be assembled"), because the
+    /// search term never matched a real Trello label. Role.Description is the right string for the LLM's
+    /// persona (see <c>roleDesc</c> in <see cref="GapAnalysis"/>), not for the Trello lookup key.
+    /// </summary>
+    internal static string ResolveTrelloSprintCardLabel(Role? role, string? fullStackTrackLabel)
     {
         if (!string.IsNullOrWhiteSpace(fullStackTrackLabel))
             return fullStackTrackLabel.Trim();
-        if (role == null)
+        if (role == null || string.IsNullOrWhiteSpace(role.Name))
             return "Team Member";
-        if (!string.IsNullOrWhiteSpace(role.Description))
-            return role.Description.Trim();
         return role.Name.Trim();
     }
 
-    private sealed record GapAnalysisPrompts(string SystemPrompt, string UserPrompt);
+    private sealed record GapAnalysisPrompts(string SystemPrompt, string UserPrompt, string ContextTrace = "");
 
     /// <summary>
     /// Rough token estimate: ~4 characters per token (GPT tokeniser average for English).
@@ -449,7 +456,8 @@ public partial class MetricsController
         CancellationToken cancellationToken,
         bool includeBothRepos = false)
     {
-        var contextMd = await BuildGapAnalysisContextAsync(boardId, board, studentId, sprintNumber, trelloRoleLabel, originalRoleName, includeCustomerContext, cancellationToken);
+        var contextTrace = new List<string>();
+        var contextMd = await BuildGapAnalysisContextAsync(boardId, board, studentId, sprintNumber, trelloRoleLabel, originalRoleName, includeCustomerContext, cancellationToken, contextTrace);
         var artifactsMd = await BuildGapAnalysisArtifactsAsync(boardId, board, studentId, sprintNumber, trelloRoleLabel, originalRoleName, isBackend, cancellationToken, includeBothRepos);
 
         var systemTemplate = LoadGapAnalysisSystemPrompt();
@@ -465,12 +473,13 @@ public partial class MetricsController
             .AppendLine(
                 "**Category rule:** Score using evidence from **STUDENT ARTIFACTS** above (code/repo, design assets, CRM rows, PM story text, resources). " +
                 "When **CONTEXT** includes **Customer background** and/or **Customer chat history** with substantive content, include a **separate** scored category for **customer alignment** (broad name—distinct from PM user story **Requirements coverage**), per your system instructions. " +
-                "Do not add scored categories for checklist-only items with no matching artifact block (e.g. meetings you cannot verify from this data). Mention those in `narrative` if needed.")
+                "Do not add scored categories for checklist-only items with no matching artifact block (e.g. meetings you cannot verify from this data). Mention those in `narrative` if needed. " +
+                "The **⚠ REQUIRED DELIVERABLE NOT FOUND** marker under **### Resource links** (when present) IS a matching artifact block for a required checklist deliverable — per your system instructions, score it as its own category, do not treat it as a checklist-only item to omit.")
             .AppendLine()
             .AppendLine("Respond with JSON only as specified in your instructions.")
             .ToString();
 
-        return new GapAnalysisPrompts(systemPrompt, userPrompt);
+        return new GapAnalysisPrompts(systemPrompt, userPrompt, string.Join("\n", contextTrace));
     }
 
     private async Task<GapTrackResult> RunGapAnalysisForTrackAsync(
@@ -527,6 +536,7 @@ public partial class MetricsController
             var track = isBackend ? "backend" : "frontend";
             var sysLast = systemPrompt.Length > 600 ? "…" + systemPrompt[^600..] : systemPrompt;
             var promptDbg = $"Track={track} StudentId={studentId} Sprint={sprintNumber} UserPromptLength={userPrompt.Length} InlineImages={imageDataUrls.Count}\n\n" +
+                            $"=== CONTEXT ASSEMBLY TRACE ===\n{prompts.ContextTrace}\n\n" +
                             $"=== SYSTEM PROMPT (last 600 chars) ===\n{sysLast}\n\n" +
                             $"=== USER PROMPT ===\n{userPrompt}";
             try { await _smtpEmailService.SendPlainEmailAsync("ofer@skill-in.com", $"[Metrics Debug] GapAnalysis PROMPT track={track} student={studentId} sprint={sprintNumber}", promptDbg); } catch { }
@@ -642,11 +652,17 @@ public partial class MetricsController
         string trelloRoleLabel,
         string originalRoleName,
         bool includeCustomerContext,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        List<string>? trace = null)
     {
         var sb = new StringBuilder();
+        trace ??= new List<string>();
+        trace.Add($"label='{trelloRoleLabel}' sprint={sprintNumber} board={boardId}");
 
         var snap = await _trelloService.GetSprintRoleCardSnapshotAsync(boardId, sprintNumber, trelloRoleLabel);
+        trace.Add(snap == null
+            ? "SprintRoleCardSnapshot=NULL (card not found by label OR Trello API failed — check [TRELLO-RETRY] server log for HTTP status)"
+            : $"SprintRoleCardSnapshot=OK card='{snap.CardName}' descLen={snap.Description?.Length ?? 0} checklistLen={snap.ChecklistsText?.Length ?? 0}");
         if (snap != null)
         {
             sb.AppendLine("### Sprint role card (Trello)");
@@ -670,6 +686,7 @@ public partial class MetricsController
                 if (!string.IsNullOrWhiteSpace(pmModuleId))
                     break;
             }
+            trace.Add($"PmModuleId={(string.IsNullOrWhiteSpace(pmModuleId) ? "(none)" : pmModuleId.Trim())}");
 
             if (!string.IsNullOrWhiteSpace(pmModuleId) && int.TryParse(pmModuleId.Trim(), out var pmModInt))
             {
@@ -688,6 +705,7 @@ public partial class MetricsController
                 if (!string.IsNullOrWhiteSpace(pmModuleId))
                     break;
             }
+            trace.Add($"RoleModuleId={(string.IsNullOrWhiteSpace(roleModuleId) ? "(none)" : roleModuleId.Trim())} PmModuleId={(string.IsNullOrWhiteSpace(pmModuleId) ? "(none)" : pmModuleId.Trim())}");
 
             if (!string.IsNullOrWhiteSpace(roleModuleId) && int.TryParse(roleModuleId.Trim(), out var roleModInt))
             {
@@ -720,6 +738,7 @@ public partial class MetricsController
                 var usResult = await _trelloService.GetUserStoryCardByModuleIdAsync(usBoard, moduleIdForUserStory);
                 var card = GetUserStoryCardFromResult(usResult);
                 var storyText = ConcatenateUserStoryText(card);
+                trace.Add($"UserStory moduleId={moduleIdForUserStory} words={CountWords(storyText)}");
                 if (CountWords(storyText) > 10)
                 {
                     sb.AppendLine("### PM user story (requirements reference — compare your work to this) _(persistent artifact authored earlier in the project; NOT this student's sprint activity)_");
@@ -743,6 +762,7 @@ public partial class MetricsController
             await AppendGapAnalysisCustomerChatHistoryAsync(sb, studentId, sprintNumber, cancellationToken);
         }
 
+        trace.Add($"ContextResult={(sb.Length == 0 ? "EMPTY" : $"{sb.Length} chars")}");
         return sb.Length == 0 ? "(No context blocks could be assembled for this sprint/role.)" : sb.ToString();
     }
 
@@ -883,14 +903,74 @@ public partial class MetricsController
             sb.AppendLine("Presence of an entry here confirms the student stored the artifact in the Squad Room Resources panel.");
             foreach (var r in resources)
             {
-                var hint = LooksLikeImageUrl(r.Url)
-                    ? " (image — content sent to model as inline vision input)"
-                    : " (non-image — URL confirms storage in Resources panel)";
-                sb.AppendLine($"- {r.Name}: {r.Url}{hint}");
+                if (LooksLikeImageUrl(r.Url))
+                {
+                    sb.AppendLine($"- {r.Name}: {r.Url} (image — content sent to model as inline vision input)");
+                    continue;
+                }
+
+                var extracted = await TryExtractResourceDocumentTextAsync(r.Url, r.Name, cancellationToken);
+                if (extracted != null)
+                {
+                    sb.AppendLine($"- {r.Name}: {r.Url} (document content extracted on server — see below; score its actual content, not just its presence)");
+                    sb.AppendLine($"  Extracted content of \"{r.Name}\":");
+                    sb.AppendLine("  ```");
+                    sb.AppendLine(extracted);
+                    sb.AppendLine("  ```");
+                }
+                else
+                {
+                    sb.AppendLine($"- {r.Name}: {r.Url} (non-image — URL confirms storage in Resources panel; content could not be extracted for review, e.g. unsupported file type or empty/scanned document — do not penalise the student for a server-side extraction limitation)");
+                }
+            }
+        }
+        else
+        {
+            // No resources shared this sprint. Before staying silent (the default — an empty
+            // section with nothing to say caused the model to invent gaps for sprints with no
+            // resource task at all), check whether the sprint checklist actually requested one
+            // (e.g. "Save your schema diagram in the Meeting Room"). If so, give the model an
+            // explicit artifact channel to score against instead of silently dropping it — this
+            // was the root cause of Gap Analysis never flagging a missing ERD/diagram deliverable.
+            var snap = await _trelloService.GetSprintRoleCardSnapshotAsync(boardId, sprintNumber, trelloRoleLabel);
+            var missingLines = ExtractMatchingChecklistLines(snap?.ChecklistsText, ResourceTaskKeywords);
+            if (missingLines.Count > 0)
+            {
+                sb.AppendLine("### Resource links (non-Figma; sprint-scoped when sprint number >= 1)");
+                sb.AppendLine(
+                    "**⚠ REQUIRED DELIVERABLE NOT FOUND:** No resource was found in the Squad Room Resources panel for this sprint, " +
+                    "but the sprint checklist explicitly requests saving/sharing an artifact. Matching checklist item(s):");
+                foreach (var line in missingLines)
+                    sb.AppendLine($"- {line}");
+                sb.AppendLine("Treat this as a required deliverable that was **not delivered**.");
+                _logger.LogInformation(
+                    "GapAnalysis: flagged {Count} required-but-missing resource checklist item(s) for board {BoardId} sprint {Sprint} role {Role}",
+                    missingLines.Count, boardId, sprintNumber, trelloRoleLabel);
             }
         }
 
         return sb.ToString();
+    }
+
+    /// <summary>
+    /// Checklist lines (format <c>- [state] text</c>, from <see cref="SprintRoleCardSnapshot.ChecklistsText"/>)
+    /// that mention a stored/shared deliverable per <see cref="ResourceTaskKeywords"/>. Internal + static so it
+    /// is directly unit-testable against real Trello checklist text without mocking the service layer.
+    /// </summary>
+    internal static List<string> ExtractMatchingChecklistLines(string? checklistsText, IReadOnlyList<string> keywords)
+    {
+        var result = new List<string>();
+        if (string.IsNullOrWhiteSpace(checklistsText))
+            return result;
+        foreach (var rawLine in checklistsText.Split('\n'))
+        {
+            var line = rawLine.TrimEnd('\r').Trim();
+            if (!line.StartsWith("- [", StringComparison.Ordinal))
+                continue;
+            if (keywords.Any(kw => line.Contains(kw, StringComparison.OrdinalIgnoreCase)))
+                result.Add(line);
+        }
+        return result;
     }
 
     private async Task AppendProductManagerSkillArtifactAsync(
@@ -1028,6 +1108,63 @@ public partial class MetricsController
                u.Contains(".jpeg", StringComparison.Ordinal) || u.Contains(".webp", StringComparison.Ordinal) || u.Contains(".gif", StringComparison.Ordinal);
     }
 
+    private const int GapAnalysisResourceDocMaxChars = 6000;
+
+    /// <summary>
+    /// Downloads a non-image resource from Azure Blob and extracts its text — the same
+    /// <see cref="ResourceDocumentContentExtractor"/> the mentor-review feature uses (.docx/.xlsx/.pptx/
+    /// text) plus <see cref="PdfTextExtractor"/> for PDF — so Gap Analysis can score actual document
+    /// content instead of only confirming a URL was stored. Previously the model was only shown the URL
+    /// (e.g. an uploaded ERD .docx), so it could never verify the deliverable's quality even when the
+    /// student's mentor review could. Returns null on any failure (unsupported type, blob not found,
+    /// empty/scanned content) — callers fall back to the URL-only line.
+    /// </summary>
+    internal async Task<string?> TryExtractResourceDocumentTextAsync(string url, string resourceName, CancellationToken cancellationToken)
+    {
+        if (!_blobStorageService.IsConfigured || string.IsNullOrWhiteSpace(url))
+            return null;
+        if (!Uri.TryCreate(url.Trim(), UriKind.Absolute, out var blobUri))
+            return null;
+
+        try
+        {
+            var blobOpen = await _blobStorageService.OpenBlobReadAsync(blobUri, cancellationToken);
+            if (blobOpen == null)
+                return null;
+
+            var (stream, contentType, fileName) = blobOpen.Value;
+            var safeName = string.IsNullOrWhiteSpace(resourceName) ? fileName : resourceName;
+            var mime = ResourceDocumentContentExtractor.NormalizeMimeForDisplay(contentType, safeName);
+
+            string? text;
+            await using (stream)
+            {
+                if (string.Equals(mime, "application/pdf", StringComparison.OrdinalIgnoreCase))
+                {
+                    using var ms = new MemoryStream();
+                    await stream.CopyToAsync(ms, cancellationToken);
+                    text = PdfTextExtractor.TryExtractText(ms.ToArray(), GapAnalysisResourceDocMaxChars);
+                }
+                else
+                {
+                    var payload = await ResourceDocumentContentExtractor.BuildAsync(stream, contentType, safeName, cancellationToken);
+                    text = payload.Mode == "text" ? payload.TextBody : null;
+                }
+            }
+
+            if (string.IsNullOrWhiteSpace(text))
+                return null;
+            return text.Length > GapAnalysisResourceDocMaxChars
+                ? text[..GapAnalysisResourceDocMaxChars] + "\n… [truncated]"
+                : text;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "GapAnalysis: failed to extract document text for resource {Name} ({Url})", resourceName, url);
+            return null;
+        }
+    }
+
     private static string GapAnalysisImageMimeType(string url)
     {
         var l = url.ToLowerInvariant();
@@ -1107,6 +1244,7 @@ public partial class MetricsController
         AppendGitHubCompareArtifactLines(sb, diff, usedBase, head, configuredBase, owner, repo, pr?.Merged ?? false);
 
         AppendGitHubPrArtifactLine(sb, pr, owner, repo, head, logIfMissing: true);
+        await AppendMergedPrDiffEvidenceAsync(sb, pr, diff, owner, repo, token);
 
         // Trello BranchContext often says Bugs-F while Git uses sprint-numbered branches (e.g. 8-F). Retry default sprint branch when names differ and primary missed PR or compare.
         if (!string.Equals(head, defaultHead, StringComparison.Ordinal) &&
@@ -1120,6 +1258,7 @@ public partial class MetricsController
                     $"**Sprint default branch `{defaultHead}`:** Trello **BranchContext** targets **`{head}`**, but work is often pushed to the numbered sprint branch **`{defaultHead}`** (e.g. mentor tooling). Additional GitHub evidence for **`{defaultHead}`**:");
                 AppendGitHubCompareArtifactLines(sb, diffAlt, usedAlt, defaultHead, configuredBase, owner, repo, prAlt?.Merged ?? false);
                 AppendGitHubPrArtifactLine(sb, prAlt, owner, repo, defaultHead, logIfMissing: false);
+                await AppendMergedPrDiffEvidenceAsync(sb, prAlt, diffAlt, owner, repo, token);
                 _logger.LogInformation(
                     "GapAnalysis: appended fallback branch evidence {DefaultHead} (primary was {Head}, pr={HasPr}, diff={HasDiff})",
                     defaultHead, head, pr != null, diff != null);
@@ -1127,7 +1266,38 @@ public partial class MetricsController
         }
 
         sb.AppendLine(
-            "**Scoring rule for this track:** Use **0%** implementation completeness only when the GitHub evidence shows **no commits** on the relevant branch relative to the integration branch (nothing landed). If there **are** commits (see compare line) but **no** merged PR yet, **do not** use 0% — reduce the score and explain the missing review/merge. If **two** branch sections appear above, score from the one that shows commits/PR matching the student’s delivery.");
+            "**Scoring rule for this track:** A pull request with **merged=yes** means the student's work **landed** — you MUST NOT use 0% implementation completeness when a merged PR exists; score the delivered content from the **Merged PR diff** section above (an empty branch compare after a squash merge is normal and is NOT evidence of missing work). Use **0%** only when there are **no commits** on the relevant branch **and no merged PR** (nothing landed). If there **are** commits (see compare line) but **no** merged PR yet, **do not** use 0% — reduce the score and explain the missing review/merge. If **two** branch sections appear above, score from the one that shows commits/PR matching the student’s delivery.");
+    }
+
+    /// <summary>
+    /// After a squash merge, compare base...head shows 0 commits/0 files, so the merged PR's own file
+    /// diff is the only evidence of what the student delivered. Appended whenever the PR is merged and
+    /// the compare produced no file-level diff.
+    /// </summary>
+    private async Task AppendMergedPrDiffEvidenceAsync(
+        StringBuilder sb, GitHubPullRequest? pr, GitHubCommitDiff? compareDiff, string owner, string repo, string token)
+    {
+        if (pr == null || !pr.Merged || pr.Number <= 0)
+            return;
+        if (compareDiff != null && compareDiff.TotalFilesChanged > 0)
+            return; // the branch compare already shows the delivered files
+
+        var prDiff = await _githubService.GetPullRequestFilesAsync(owner, repo, pr.Number, token);
+        if (prDiff == null || prDiff.TotalFilesChanged == 0)
+        {
+            sb.AppendLine(
+                $"**Merged PR #{pr.Number} diff:** the PR file list could not be retrieved (API error or empty PR). The PR IS merged, so treat delivered-work evidence as incomplete — do **not** score 0% implementation completeness.");
+            _logger.LogWarning(
+                "GapAnalysis: merged PR #{Num} in {Owner}/{Repo} but PR files unavailable (prDiff={HasDiff})",
+                pr.Number, owner, repo, prDiff != null);
+            return;
+        }
+
+        sb.AppendLine(
+            $"**Merged PR #{pr.Number} diff (the work this student delivered and merged this sprint — score implementation from this):** {prDiff.TotalFilesChanged} file(s) changed, +{prDiff.TotalAdditions}/-{prDiff.TotalDeletions}.");
+        var patch = string.Join("\n", prDiff.FileChanges.Take(25)
+            .Select(f => $"--- {f.FilePath} ({f.Status}, +{f.Additions}/-{f.Deletions})\n{f.Patch ?? "(no patch available)"}"));
+        sb.AppendLine(Truncate(patch, 12000));
     }
 
     private async Task<(GitHubCommitDiff? Diff, string? UsedBase, GitHubPullRequest? Pr)> FetchGitHubGapAnalysisEvidenceAsync(
@@ -1178,7 +1348,8 @@ public partial class MetricsController
                         "The PR for this branch is marked **merged=yes** (see PR line below). " +
                         "This is the EXPECTED, NORMAL result of the platform's squash-merge workflow — it is NOT a gap. " +
                         "You MUST NOT create any category or finding about branch divergence or the branch being behind main. " +
-                        "You MUST NOT recommend that the student keep the sprint branch updated with main.");
+                        "You MUST NOT recommend that the student keep the sprint branch updated with main. " +
+                        "You MUST NOT treat 'commits in range=0' in this compare as missing work — the delivered work is shown in the 'Merged PR diff' section below; score implementation from that.");
                 }
                 else
                 {
@@ -1244,6 +1415,7 @@ public partial class MetricsController
             return "### Skill — Stakeholders\n(board not found)";
 
         var sprintLengthWeeks = _configuration.GetValue("BusinessLogicConfig:SprintLengthInWeeks", 1);
+        var sprintLengthDays = await SprintLengthResolver.ResolveForBoardAsync(_context, boardId, sprintLengthWeeks, cancellationToken);
         var sprintMerge = await _context.ProjectBoardSprintMerges.AsNoTracking()
             .FirstOrDefaultAsync(m => m.ProjectBoardId == boardId && m.SprintNumber == sprintNumber, cancellationToken);
 
@@ -1251,9 +1423,9 @@ public partial class MetricsController
         DateTime windowEndInclusiveUtc;
         var haveWindow =
             SprintPlanDateResolver.TryGetInclusiveUtcRangeFromSprintMerge(
-                sprintMerge, sprintNumber, sprintLengthWeeks, out windowStartUtc, out windowEndInclusiveUtc)
+                sprintMerge, sprintNumber, sprintLengthDays, out windowStartUtc, out windowEndInclusiveUtc)
             || SprintPlanDateResolver.TryGetSprintInclusiveUtcRange(
-                board.SprintPlan, board.StartDate, sprintNumber, out windowStartUtc, out windowEndInclusiveUtc);
+                board.SprintPlan, board.StartDate, sprintNumber, out windowStartUtc, out windowEndInclusiveUtc, sprintLengthDays);
 
         var q = _context.Stakeholders.AsNoTracking().Where(s => s.BoardId == boardId);
         if (haveWindow)

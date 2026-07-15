@@ -131,6 +131,30 @@ public partial class BoardsController
                 });
             }
 
+            // Per-board sprint length in days (course templates carry SprintLengthDays; legacy = weekly config).
+            // Batched: one query per JSON source for the whole board set.
+            var ipIds = boards.Where(b => b.InstituteProjectId.HasValue).Select(b => b.InstituteProjectId!.Value).Distinct().ToList();
+            var projIds = boards.Select(b => b.ProjectId).Distinct().ToList();
+            var ipJsonById = await _context.InstituteProjects.AsNoTracking()
+                .Where(ip => ipIds.Contains(ip.Id))
+                .Select(ip => new { ip.Id, ip.TrelloBoardJson })
+                .ToDictionaryAsync(x => x.Id, x => x.TrelloBoardJson, cancellationToken);
+            var projJsonById = await _context.Projects.AsNoTracking()
+                .Where(p => projIds.Contains(p.Id))
+                .Select(p => new { p.Id, p.TrelloBoardJson })
+                .ToDictionaryAsync(x => x.Id, x => x.TrelloBoardJson, cancellationToken);
+            var daysByBoard = boards.ToDictionary(
+                b => b.Id,
+                b =>
+                {
+                    string? json = null;
+                    if (b.InstituteProjectId.HasValue && ipJsonById.TryGetValue(b.InstituteProjectId.Value, out var ipJson) && !string.IsNullOrWhiteSpace(ipJson))
+                        json = ipJson;
+                    else if (projJsonById.TryGetValue(b.ProjectId, out var pJson))
+                        json = pJson;
+                    return SprintLengthResolver.ResolveFromJson(json, sprintLengthWeeks);
+                });
+
             var boardIds = boards.Select(b => b.Id).ToList();
             var students = await _context.Students
                 .AsNoTracking()
@@ -170,7 +194,7 @@ public partial class BoardsController
                 byBoard.TryGetValue(pb.Id, out var boardStudents);
                 boardStudents ??= new List<Student>();
 
-                var (currentN, label) = ResolveCurrentSprint(pb, sprintLengthWeeks, nowUtc);
+                var (currentN, label) = ResolveCurrentSprint(pb, daysByBoard[pb.Id], nowUtc);
 
                 var studentDtos = boardStudents
                     .OrderBy(s => s.LastName)
@@ -213,7 +237,7 @@ public partial class BoardsController
                     CurrentSprintNumber = currentN,
                     CurrentSprintLabel = label,
                     MergedSprintNumbers = GetRealMergedSprintNumbers(pb),
-                    LastSprintEndUtc = ComputeLastSprintEndUtc(pb, sprintLengthWeeks),
+                    LastSprintEndUtc = ComputeLastSprintEndUtc(pb, daysByBoard[pb.Id]),
                     Students = studentDtos,
                 });
 
@@ -364,17 +388,23 @@ public partial class BoardsController
     }
 
     /// <summary>
-    /// Sprint numbers from all existing SprintMerge rows, ordered ascending.
+    /// Sprint numbers from SprintMerge rows that represent a sprint that exists on the board.
+    /// MergeType=Add pre-creates a row for the NEXT sprint with MergedAt=null and ListId=null
+    /// (the "run due sprint merges" trigger row); that sprint has no Trello list yet, so it must
+    /// not appear in dropdowns or drive assessment runs. Rows with a ListId (list exists on the
+    /// board) or MergedAt set (sprint was merged) are real. Do NOT filter by position (SkipLast):
+    /// when the last sprint ends with no next row pre-created, that dropped a real sprint.
     /// </summary>
-    private static List<int> GetRealMergedSprintNumbers(ProjectBoard pb) =>
+    internal static List<int> GetRealMergedSprintNumbers(ProjectBoard pb) =>
         pb.SprintMerges
+            .Where(m => m.MergedAt != null || !string.IsNullOrEmpty(m.ListId))
             .Select(m => m.SprintNumber)
             .Distinct()
             .OrderBy(n => n)
             .ToList();
 
-    /// <summary>End of the highest-numbered sprint window (merge row preferred, else plan).</summary>
-    private static DateTime? ComputeLastSprintEndUtc(ProjectBoard pb, int sprintLengthWeeks)
+    /// <summary>End of the highest-numbered sprint window (merge row preferred, else plan). Length in DAYS (per board).</summary>
+    private static DateTime? ComputeLastSprintEndUtc(ProjectBoard pb, int sprintLengthDays)
     {
         var mergesByN = pb.SprintMerges.ToDictionary(m => m.SprintNumber, m => m);
         var realNums = GetRealMergedSprintNumbers(pb);
@@ -385,12 +415,12 @@ public partial class BoardsController
 
         mergesByN.TryGetValue(maxS, out var mergeForLast);
         if (mergeForLast != null &&
-            SprintPlanDateResolver.TryGetInclusiveUtcRangeFromSprintMerge(mergeForLast, maxS, sprintLengthWeeks, out _, out var endM))
+            SprintPlanDateResolver.TryGetInclusiveUtcRangeFromSprintMerge(mergeForLast, maxS, sprintLengthDays, out _, out var endM))
         {
             return endM;
         }
 
-        if (SprintPlanDateResolver.TryGetSprintInclusiveUtcRange(pb.SprintPlan, pb.StartDate, maxS, out _, out var endP))
+        if (SprintPlanDateResolver.TryGetSprintInclusiveUtcRange(pb.SprintPlan, pb.StartDate, maxS, out _, out var endP, sprintLengthDays))
         {
             return endP;
         }
@@ -398,7 +428,7 @@ public partial class BoardsController
         return null;
     }
 
-    private static (int? sprintNumber, string? label) ResolveCurrentSprint(ProjectBoard pb, int sprintLengthWeeks, DateTime nowUtc)
+    private static (int? sprintNumber, string? label) ResolveCurrentSprint(ProjectBoard pb, int sprintLengthDays, DateTime nowUtc)
     {
         var mergesByN = pb.SprintMerges.ToDictionary(m => m.SprintNumber, m => m);
         var realNums = GetRealMergedSprintNumbers(pb);
@@ -411,7 +441,7 @@ public partial class BoardsController
         {
             mergesByN.TryGetValue(n, out var merge);
             if (merge != null &&
-                SprintPlanDateResolver.TryGetInclusiveUtcRangeFromSprintMerge(merge, n, sprintLengthWeeks, out var startM, out var endM))
+                SprintPlanDateResolver.TryGetInclusiveUtcRangeFromSprintMerge(merge, n, sprintLengthDays, out var startM, out var endM))
             {
                 if (nowUtc >= startM && nowUtc <= endM)
                 {
@@ -419,7 +449,7 @@ public partial class BoardsController
                 }
             }
 
-            if (SprintPlanDateResolver.TryGetSprintInclusiveUtcRange(pb.SprintPlan, pb.StartDate, n, out var startP, out var endP))
+            if (SprintPlanDateResolver.TryGetSprintInclusiveUtcRange(pb.SprintPlan, pb.StartDate, n, out var startP, out var endP, sprintLengthDays))
             {
                 if (nowUtc >= startP && nowUtc <= endP)
                 {
@@ -434,11 +464,11 @@ public partial class BoardsController
             mergesByN.TryGetValue(n, out var merge);
             DateTime? startUtc = null;
             if (merge != null &&
-                SprintPlanDateResolver.TryGetInclusiveUtcRangeFromSprintMerge(merge, n, sprintLengthWeeks, out var sm, out _))
+                SprintPlanDateResolver.TryGetInclusiveUtcRangeFromSprintMerge(merge, n, sprintLengthDays, out var sm, out _))
             {
                 startUtc = sm;
             }
-            else if (SprintPlanDateResolver.TryGetSprintInclusiveUtcRange(pb.SprintPlan, pb.StartDate, n, out var sp, out _))
+            else if (SprintPlanDateResolver.TryGetSprintInclusiveUtcRange(pb.SprintPlan, pb.StartDate, n, out var sp, out _, sprintLengthDays))
             {
                 startUtc = sp;
             }

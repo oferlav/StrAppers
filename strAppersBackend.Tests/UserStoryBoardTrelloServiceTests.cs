@@ -250,4 +250,72 @@ public class UserStoryBoardTrelloServiceTests
         var cards = effective.Select(BuildUserStoryCard).ToList();
         Assert.Empty(cards);
     }
+
+    // ── T21-T24: CreateBoardWithContentAsync Step 2 invite list ────────────
+    // Regression coverage for the PM double-invite bug: Step 2 used to invite
+    // PM-role members to the main/EmptyBoard even when CreateUserStoryBoard=true,
+    // duplicating the invite (and email) they'd also get for the dedicated User
+    // Story board. Fix: Step 2 now also excludes PM-role members (via the real
+    // strAppersBackend.Services.TrelloService.IsPMRole helper, InternalsVisibleTo)
+    // whenever CreateUserStoryBoard=true, regardless of SendInvitationToPMOnly.
+
+    private static List<TrelloTeamMember> Step2InviteList(
+        List<TrelloTeamMember> teamMembers, bool sendInvitationToPMOnly, bool createUserStoryBoard)
+    {
+        var membersToInvite = teamMembers;
+        if (sendInvitationToPMOnly)
+        {
+            membersToInvite = teamMembers
+                .Where(m => !string.IsNullOrWhiteSpace(m.RoleName) &&
+                    (m.RoleName.Contains("Product Manager", StringComparison.OrdinalIgnoreCase) ||
+                     m.RoleName.Contains("PM", StringComparison.OrdinalIgnoreCase)))
+                .ToList();
+        }
+        if (createUserStoryBoard)
+        {
+            membersToInvite = membersToInvite
+                .Where(m => !strAppersBackend.Services.TrelloService.IsPMRole(m.RoleName))
+                .ToList();
+        }
+        return membersToInvite;
+    }
+
+    private static List<TrelloTeamMember> MakeSquad() => new()
+    {
+        new() { Email = "pm@x.com",  RoleName = "Product Manager" },
+        new() { Email = "dev@x.com", RoleName = "Backend Developer" },
+    };
+
+    [Fact]
+    public void T21_CreateUserStoryBoardTrue_SendPMOnlyTrue_PMExcludedFromStep2()
+    {
+        // This is the exact config combo from the reported bug (CreateUserStoryBoard=true,
+        // SendInvitationToPMOnly=true): before the fix, PM slipped through Step 2 and got
+        // invited (and emailed) for the main board in addition to the User Story board.
+        var result = Step2InviteList(MakeSquad(), sendInvitationToPMOnly: true, createUserStoryBoard: true);
+        Assert.Empty(result);
+    }
+
+    [Fact]
+    public void T22_CreateUserStoryBoardTrue_SendPMOnlyFalse_PMExcludedNonPMIncluded()
+    {
+        var result = Step2InviteList(MakeSquad(), sendInvitationToPMOnly: false, createUserStoryBoard: true);
+        Assert.Single(result);
+        Assert.Equal("dev@x.com", result[0].Email);
+    }
+
+    [Fact]
+    public void T23_CreateUserStoryBoardFalse_SendPMOnlyTrue_LegacyPMOnlyBehaviorUnchanged()
+    {
+        var result = Step2InviteList(MakeSquad(), sendInvitationToPMOnly: true, createUserStoryBoard: false);
+        Assert.Single(result);
+        Assert.Equal("pm@x.com", result[0].Email);
+    }
+
+    [Fact]
+    public void T24_CreateUserStoryBoardFalse_SendPMOnlyFalse_LegacyEveryoneBehaviorUnchanged()
+    {
+        var result = Step2InviteList(MakeSquad(), sendInvitationToPMOnly: false, createUserStoryBoard: false);
+        Assert.Equal(2, result.Count);
+    }
 }

@@ -18,8 +18,21 @@ public partial class MetricsController : ControllerBase
 {
     private const int AdherenceMetricId = 1;
 
-    private static readonly string[] ResourceTaskKeywords =
-        { "resource", "upload", "share", "link", "artifact", "submit", "attach" };
+    /// <summary>
+    /// Words that identify a checklist item as requesting a stored/shared deliverable (as opposed to
+    /// a code/process step). Used by Adherence to cross-check the "Required Resource Data" checkbox
+    /// against real checklist text, and by Gap Analysis to flag a requested-but-missing deliverable
+    /// (e.g. "Save your schema diagram in the Meeting Room") as an explicit artifact channel.
+    /// Keep inclusive: a false positive just means an already-checked "Required Resource Data" box
+    /// gets confirmed; a false negative silently skips a real requirement (the original bug — see
+    /// "High-Level Schema Diagram" / "Blueprint Centralization" checklist items, which contained none
+    /// of the original keywords).
+    /// </summary>
+    internal static readonly string[] ResourceTaskKeywords =
+        {
+            "resource", "upload", "share", "link", "artifact", "submit", "attach",
+            "schema", "save", "meeting room", "erd", "blueprint", "centraliz", "deliverable"
+        };
 
     private readonly ApplicationDbContext _context;
     private readonly ITrelloService _trelloService;
@@ -234,11 +247,12 @@ public partial class MetricsController : ControllerBase
         if (!string.IsNullOrEmpty(studentEmail))
         {
             var sprintLengthWeeks = _configuration.GetValue("BusinessLogicConfig:SprintLengthInWeeks", 1);
+            var sprintLengthDays = await SprintLengthResolver.ResolveForBoardAsync(_context, boardId, sprintLengthWeeks, cancellationToken);
             var sprintMerge = await _context.ProjectBoardSprintMerges.AsNoTracking()
                 .FirstOrDefaultAsync(m => m.ProjectBoardId == boardId && m.SprintNumber == request.SprintNumber, cancellationToken);
             var haveWindow =
-                SprintPlanDateResolver.TryGetInclusiveUtcRangeFromSprintMerge(sprintMerge, request.SprintNumber, sprintLengthWeeks, out var meetWindowStart, out var meetWindowEnd)
-                || SprintPlanDateResolver.TryGetSprintInclusiveUtcRange(board.SprintPlan, board.StartDate, request.SprintNumber, out meetWindowStart, out meetWindowEnd);
+                SprintPlanDateResolver.TryGetInclusiveUtcRangeFromSprintMerge(sprintMerge, request.SprintNumber, sprintLengthDays, out var meetWindowStart, out var meetWindowEnd)
+                || SprintPlanDateResolver.TryGetSprintInclusiveUtcRange(board.SprintPlan, board.StartDate, request.SprintNumber, out meetWindowStart, out meetWindowEnd, sprintLengthDays);
 
             if (haveWindow)
             {
@@ -635,6 +649,7 @@ public partial class MetricsController : ControllerBase
             return false;
 
         var sprintLengthWeeks = _configuration.GetValue("BusinessLogicConfig:SprintLengthInWeeks", 1);
+        var sprintLengthDays = await SprintLengthResolver.ResolveForBoardAsync(_context, boardId, sprintLengthWeeks, cancellationToken);
         var sprintMerge = await _context.ProjectBoardSprintMerges.AsNoTracking()
             .FirstOrDefaultAsync(m => m.ProjectBoardId == boardId && m.SprintNumber == sprintNumber, cancellationToken);
 
@@ -642,9 +657,9 @@ public partial class MetricsController : ControllerBase
         DateTime windowEndInclusiveUtc;
         var haveWindow =
             SprintPlanDateResolver.TryGetInclusiveUtcRangeFromSprintMerge(
-                sprintMerge, sprintNumber, sprintLengthWeeks, out windowStartUtc, out windowEndInclusiveUtc)
+                sprintMerge, sprintNumber, sprintLengthDays, out windowStartUtc, out windowEndInclusiveUtc)
             || SprintPlanDateResolver.TryGetSprintInclusiveUtcRange(
-                board.SprintPlan, board.StartDate, sprintNumber, out windowStartUtc, out windowEndInclusiveUtc);
+                board.SprintPlan, board.StartDate, sprintNumber, out windowStartUtc, out windowEndInclusiveUtc, sprintLengthDays);
 
         if (!haveWindow)
             return await _context.Stakeholders.AsNoTracking().AnyAsync(s => s.BoardId == boardId, cancellationToken);

@@ -88,6 +88,7 @@ public partial class MetricsController
         }
 
         var sprintLengthWeeks = _configuration.GetValue("BusinessLogicConfig:SprintLengthInWeeks", 1);
+        var sprintLengthDays = await SprintLengthResolver.ResolveForBoardAsync(_context, boardIdTrim, sprintLengthWeeks, cancellationToken);
         var sprintMerge = await _context.ProjectBoardSprintMerges.AsNoTracking()
             .FirstOrDefaultAsync(m => m.ProjectBoardId == boardIdTrim && m.SprintNumber == sprintNumber, cancellationToken);
 
@@ -95,9 +96,9 @@ public partial class MetricsController
         DateTime windowEndInclusiveUtc;
         var haveWindow =
             SprintPlanDateResolver.TryGetInclusiveUtcRangeFromSprintMerge(
-                sprintMerge, sprintNumber, sprintLengthWeeks, out windowStartUtc, out windowEndInclusiveUtc)
+                sprintMerge, sprintNumber, sprintLengthDays, out windowStartUtc, out windowEndInclusiveUtc)
             || SprintPlanDateResolver.TryGetSprintInclusiveUtcRange(
-                board.SprintPlan, board.StartDate, sprintNumber, out windowStartUtc, out windowEndInclusiveUtc);
+                board.SprintPlan, board.StartDate, sprintNumber, out windowStartUtc, out windowEndInclusiveUtc, sprintLengthDays);
 
         if (!haveWindow)
         {

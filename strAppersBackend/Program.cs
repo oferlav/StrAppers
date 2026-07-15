@@ -124,7 +124,6 @@ builder.Services.AddScoped<IChatCompletionService, ChatCompletionService>();
 builder.Services.AddScoped<ITrelloService, TrelloService>();
 builder.Services.AddScoped<ITrelloSprintMergeService, TrelloSprintMergeService>();
 builder.Services.AddScoped<IStudentTeamBuilderService, StudentTeamBuilderService>();
-builder.Services.AddScoped<ISprintAssessmentService, SprintAssessmentService>();
 
 // Add Microsoft Graph services
 builder.Services.AddScoped<IMicrosoftGraphService, MicrosoftGraphService>();

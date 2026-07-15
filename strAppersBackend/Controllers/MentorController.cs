@@ -219,9 +219,14 @@ namespace strAppersBackend.Controllers
             try
             {
                 var isDesc = string.Equals(sortDirection, "desc", StringComparison.OrdinalIgnoreCase);
+                // Role-specific prompts apply per role CONCEPT (product decision): a prompt attached
+                // to any duplicate row of the student's role (global / institute / squad copy) counts.
+                var conceptRoleIds = roleId.HasValue
+                    ? await strAppersBackend.Utilities.RoleConceptResolver.ResolveConceptRoleIdsAsync(_context, roleId.Value)
+                    : new List<int>();
                 var baseQuery = _context.MentorPrompts
                     .Include(m => m.Category)
-                    .Where(m => m.IsActive && (m.RoleId == null || m.RoleId == roleId) && m.Category!.Name != "User Message Templates");
+                    .Where(m => m.IsActive && (m.RoleId == null || conceptRoleIds.Contains(m.RoleId.Value)) && m.Category!.Name != "User Message Templates");
 
                 var query = isDesc
                     ? baseQuery.OrderByDescending(m => m.Category!.SortOrder).ThenByDescending(m => m.SortOrder)
@@ -3436,31 +3441,22 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                 if (!string.IsNullOrEmpty(output))
                     log.AppendLine($"  Output preview: {output[..Math.Min(500, output.Length)]}");
 
-                // Inject a system chat bubble only when the test status changes (or on first run).
+                // Inject a system chat bubble only when the test status changes on a branch that
+                // already has a prior recorded result. The first-ever run on a branch is intentionally
+                // silent in chat (no "pipeline is live" bubble) — BoardStates is still recorded as usual.
                 // Use ProgrammingLanguageId != null to target the backend/fullstack developer,
                 // not a frontend-only student who shares the same board.
                 var student = await _context.Students.AsNoTracking()
                     .FirstOrDefaultAsync(s => s.BoardId == request.BoardId && s.ProgrammingLanguageId != null);
-                if (student != null && sprintNumber.HasValue && ShouldInjectTestResultBubble(previousStatus, status))
+                if (student != null && sprintNumber.HasValue && previousStatus != null && ShouldInjectTestResultBubble(previousStatus, status))
                 {
-                    string msgText;
-                    string aiModelTag;
-                    if (previousStatus == null)
-                    {
-                        // First run: always show a positive "CI ready" message regardless of outcome
-                        msgText = $"✅ **Your CI/CD pipeline is live!** on branch \"{branch}\" — Push your code here and the tests will run automatically. You'll see the results in this chat.";
-                        aiModelTag = "test:passed";
-                    }
-                    else
-                    {
-                        // Status changed — notify the student
-                        var icon = status == "PASS" ? "✅" : status == "FAIL" ? "❌" : "⚠️";
-                        var label = status == "PASS" ? "passed" : status == "FAIL" ? "FAILED" : "ran with no tests found";
-                        msgText = $"{icon} **Automated tests {label}** on branch \"{branch}\"";
-                        if (status == "FAIL")
-                            msgText += " — Check GitHub Actions for details, fix the failing tests, and push again.";
-                        aiModelTag = status == "PASS" ? "test:passed" : status == "FAIL" ? "test:failed" : "test:info";
-                    }
+                    var icon = status == "PASS" ? "✅" : status == "FAIL" ? "❌" : "⚠️";
+                    var label = status == "PASS" ? "passed" : status == "FAIL" ? "FAILED" : "ran with no tests found";
+                    var msgText = $"{icon} **Automated tests {label}** on branch \"{branch}\"";
+                    if (status == "FAIL")
+                        msgText += " — Check GitHub Actions for details, fix the failing tests, and push again.";
+                    var aiModelTag = status == "PASS" ? "test:passed" : status == "FAIL" ? "test:failed" : "test:info";
+
                     _context.MentorChatHistory.Add(new MentorChatHistory
                     {
                         StudentId = student.Id,
@@ -3477,6 +3473,7 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                 {
                     var skipReason = student == null ? "student not found"
                         : !sprintNumber.HasValue ? "no sprint number"
+                        : previousStatus == null ? "first run (silent by design)"
                         : $"status unchanged ({status})";
                     log.AppendLine($"  → Chat bubble SKIPPED: {skipReason}");
                 }

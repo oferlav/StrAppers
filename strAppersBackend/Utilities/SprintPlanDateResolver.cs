@@ -16,13 +16,14 @@ public static class SprintPlanDateResolver
 
     /// <summary>
     /// Inclusive UTC range from <see cref="ProjectBoardSprintMerge"/> — same rules as
-    /// <c>GET /api/Boards/use/sprint-schedule</c> (DueDate, MergedAt for sprint 1, and <paramref name="sprintLengthInWeeks"/>).
+    /// <c>GET /api/Boards/use/sprint-schedule</c> (DueDate, MergedAt for sprint 1, and <paramref name="sprintLengthInDays"/>).
     /// Prefer this over <see cref="TryGetSprintInclusiveUtcRange"/> when merge rows exist so CRM and the board UI agree.
+    /// Callers supply DAYS (resolve per board via <see cref="SprintLengthResolver"/>; legacy = configWeeks × 7).
     /// </summary>
     public static bool TryGetInclusiveUtcRangeFromSprintMerge(
         ProjectBoardSprintMerge? merge,
         int sprintNumber,
-        int sprintLengthInWeeks,
+        int sprintLengthInDays,
         out DateTime startUtc,
         out DateTime endInclusiveUtc)
     {
@@ -31,21 +32,27 @@ public static class SprintPlanDateResolver
         if (merge == null || sprintNumber <= 0 || merge.DueDate == null)
             return false;
 
-        var sprintDays = Math.Max(1, sprintLengthInWeeks * 7);
-        DateTime? startRaw;
-        if (sprintNumber == 1)
-            startRaw = merge.MergedAt;
-        else
-            startRaw = merge.DueDate.Value.AddDays(-(sprintDays - 1));
-
-        if (startRaw == null)
-            return false;
-
-        startUtc = ToUtc(startRaw.Value);
+        var sprintDays = Math.Max(1, sprintLengthInDays);
         var endRaw = ToUtc(merge.DueDate.Value);
         endInclusiveUtc = endRaw.TimeOfDay == TimeSpan.Zero
             ? endRaw.Date.AddDays(1).AddTicks(-1)
             : endRaw;
+
+        if (sprintNumber == 1)
+        {
+            if (merge.MergedAt == null)
+                return false;
+            startUtc = ToUtc(merge.MergedAt.Value);
+        }
+        else
+        {
+            // Contiguous windows: start = one tick after the previous sprint's inclusive end
+            // (derived from the NORMALIZED end so end-of-day dues yield start-of-day starts).
+            // The old "due − (days − 1)" preserved the due's time-of-day, leaving the first
+            // day's daytime in no window when dues are 23:59:59-style.
+            startUtc = endInclusiveUtc.AddDays(-sprintDays).AddTicks(1);
+        }
+
         if (endInclusiveUtc < startUtc)
             (startUtc, endInclusiveUtc) = (endInclusiveUtc, startUtc);
         return true;
@@ -60,7 +67,8 @@ public static class SprintPlanDateResolver
         DateTime? boardStartDateUtc,
         int sprintNumber,
         out DateTime startUtc,
-        out DateTime endInclusiveUtc)
+        out DateTime endInclusiveUtc,
+        int? sprintLengthDaysOverride = null)
     {
         startUtc = default;
         endInclusiveUtc = default;
@@ -71,7 +79,7 @@ public static class SprintPlanDateResolver
         {
             var plan = JsonSerializer.Deserialize<TrelloSprintPlan>(sprintPlanJson, JsonOptions);
             if (plan?.Lists == null || plan.Lists.Count == 0)
-                return TryFallbackFromBoardStart(plan, boardStartDateUtc, sprintNumber, out startUtc, out endInclusiveUtc);
+                return TryFallbackFromBoardStart(plan, boardStartDateUtc, sprintNumber, sprintLengthDaysOverride, out startUtc, out endInclusiveUtc);
 
             TrelloList? match = null;
             foreach (var list in plan.Lists)
@@ -85,7 +93,7 @@ public static class SprintPlanDateResolver
             }
 
             if (match == null || match.StartDate == null || match.EndDate == null)
-                return TryFallbackFromBoardStart(plan, boardStartDateUtc, sprintNumber, out startUtc, out endInclusiveUtc);
+                return TryFallbackFromBoardStart(plan, boardStartDateUtc, sprintNumber, sprintLengthDaysOverride, out startUtc, out endInclusiveUtc);
 
             startUtc = ToUtc(match.StartDate.Value);
             var endRaw = ToUtc(match.EndDate.Value);
@@ -116,6 +124,7 @@ public static class SprintPlanDateResolver
         TrelloSprintPlan? plan,
         DateTime? boardStartDateUtc,
         int sprintNumber,
+        int? sprintLengthDaysOverride,
         out DateTime startUtc,
         out DateTime endInclusiveUtc)
     {
@@ -132,20 +141,30 @@ public static class SprintPlanDateResolver
             _ => DateTime.SpecifyKind(originRaw, DateTimeKind.Utc),
         };
 
-        var totalSprints = plan?.TotalSprints ?? 0;
-        if (totalSprints <= 0 && plan?.Lists != null)
+        double daysPerSprint;
+        if (sprintLengthDaysOverride is int overrideDays)
         {
-            totalSprints = plan.Lists.Count(l => ListNameMatchesAnySprint(l.Name));
+            // Day-based course: the caller resolved the cadence from the template; the
+            // EstimatedWeeks heuristic below assumes weekly sprints and must not be used.
+            daysPerSprint = Math.Max(1, overrideDays);
         }
+        else
+        {
+            var totalSprints = plan?.TotalSprints ?? 0;
+            if (totalSprints <= 0 && plan?.Lists != null)
+            {
+                totalSprints = plan.Lists.Count(l => ListNameMatchesAnySprint(l.Name));
+            }
 
-        if (totalSprints <= 0)
-            totalSprints = 1;
+            if (totalSprints <= 0)
+                totalSprints = 1;
 
-        var estimatedWeeks = plan?.EstimatedWeeks ?? 0;
-        if (estimatedWeeks <= 0)
-            estimatedWeeks = totalSprints;
+            var estimatedWeeks = plan?.EstimatedWeeks ?? 0;
+            if (estimatedWeeks <= 0)
+                estimatedWeeks = totalSprints;
 
-        var daysPerSprint = Math.Max(1.0, 7.0 * estimatedWeeks / totalSprints);
+            daysPerSprint = Math.Max(1.0, 7.0 * estimatedWeeks / totalSprints);
+        }
 
         startUtc = origin.AddDays(daysPerSprint * (sprintNumber - 1));
         var endExclusive = origin.AddDays(daysPerSprint * sprintNumber);

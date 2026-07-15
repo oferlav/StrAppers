@@ -377,9 +377,12 @@ public class StudentsController : ControllerBase
                 return NotFound($"Role with ID {roleId} not found");
             }
 
-            // Get students that have an active StudentRole with the specified RoleId and have a boardId
+            // Per-concept role match: students may hold ANY duplicate row of this role (global /
+            // institute / squad copies) — matching a single row id silently misses them.
+            var conceptRoleIds = await strAppersBackend.Utilities.RoleConceptResolver.ResolveConceptRoleIdsAsync(_context, roleId);
+
             var students = await _context.Students
-                .Where(s => s.StudentRoles.Any(sr => sr.RoleId == roleId && sr.IsActive) 
+                .Where(s => s.StudentRoles.Any(sr => conceptRoleIds.Contains(sr.RoleId) && sr.IsActive)
                     && !string.IsNullOrEmpty(s.BoardId))
                 .Select(s => new
                 {
@@ -405,11 +408,11 @@ public class StudentsController : ControllerBase
                     ProjectPriority2 = s.ProjectPriority2,
                     ProjectPriority3 = s.ProjectPriority3,
                     ProjectPriority4 = s.ProjectPriority4,
-                    RoleId = s.StudentRoles.FirstOrDefault(sr => sr.RoleId == roleId && sr.IsActive) != null 
-                        ? s.StudentRoles.FirstOrDefault(sr => sr.RoleId == roleId && sr.IsActive).RoleId 
+                    RoleId = s.StudentRoles.FirstOrDefault(sr => conceptRoleIds.Contains(sr.RoleId) && sr.IsActive) != null
+                        ? s.StudentRoles.FirstOrDefault(sr => conceptRoleIds.Contains(sr.RoleId) && sr.IsActive).RoleId
                         : (int?)null,
-                    RoleName = s.StudentRoles.FirstOrDefault(sr => sr.RoleId == roleId && sr.IsActive) != null 
-                        ? s.StudentRoles.FirstOrDefault(sr => sr.RoleId == roleId && sr.IsActive).Role.Name 
+                    RoleName = s.StudentRoles.FirstOrDefault(sr => conceptRoleIds.Contains(sr.RoleId) && sr.IsActive) != null
+                        ? s.StudentRoles.FirstOrDefault(sr => conceptRoleIds.Contains(sr.RoleId) && sr.IsActive).Role.Name
                         : null,
                     CreatedAt = s.CreatedAt,
                     UpdatedAt = s.UpdatedAt
@@ -950,6 +953,11 @@ public class StudentsController : ControllerBase
             if (student == null)
                 return NotFound($"Student with ID {studentId} not found.");
 
+            // Checkout closes selection: Status >= 1 (1 = checked out / pending team, 3 = on a board)
+            // must not add more project priorities. ConfirmInstituteCheckout sets Status=1.
+            if (student.Status >= 1)
+                return BadRequest(new { Success = false, Message = "Selection is closed: the student has already completed checkout." });
+
             var project = await _context.InstituteProjects.FindAsync(instituteProjectId);
             if (project == null)
                 return NotFound($"Institute project with ID {instituteProjectId} not found.");
@@ -1081,6 +1089,10 @@ public class StudentsController : ControllerBase
             var project = await _context.InstituteProjects.FindAsync(instituteProjectId);
             if (project == null)
                 return NotFound($"Institute project with ID {instituteProjectId} not found.");
+
+            // Checkout closes selection (same rule the allocate endpoint enforces).
+            if (student.Status >= 1)
+                return Ok(new { isAllocatable = false, message = "Selection is closed: you have already completed checkout." });
 
             if (!project.IsAvailable)
                 return Ok(new { isAllocatable = false, message = "This institute project is not currently available." });
@@ -1467,6 +1479,9 @@ public class StudentsController : ControllerBase
                 SuperUser = student.SuperUser,
                 BoardId = student.BoardId,
                 IsAvailable = student.IsAvailable,
+                // Selection lock (checkout closes selection) reads this on the FE — it was missing
+                // from this DTO, which silently disabled the lock.
+                Status = student.Status,
                 EmployerExposure = student.EmployerExposure,
                 ProgrammingLanguageId = student.ProgrammingLanguageId,
                 ProgrammingLanguageName = student.ProgrammingLanguage?.Name,

@@ -12,7 +12,6 @@ namespace strAppersBackend.Services
     {
         private readonly ApplicationDbContext _context;
         private readonly ITrelloSprintMergeService _sprintMergeService;
-        private readonly ISprintAssessmentService _sprintAssessmentService;
         private readonly IHttpClientFactory _httpClientFactory;
         private readonly IConfiguration _configuration;
         private readonly ILogger<StudentTeamBuilderService> _logger;
@@ -22,7 +21,6 @@ namespace strAppersBackend.Services
         public StudentTeamBuilderService(
             ApplicationDbContext context,
             ITrelloSprintMergeService sprintMergeService,
-            ISprintAssessmentService sprintAssessmentService,
             IHttpClientFactory httpClientFactory,
             IConfiguration configuration,
             ILogger<StudentTeamBuilderService> logger,
@@ -31,7 +29,6 @@ namespace strAppersBackend.Services
         {
             _context = context;
             _sprintMergeService = sprintMergeService;
-            _sprintAssessmentService = sprintAssessmentService;
             _httpClientFactory = httpClientFactory;
             _configuration = configuration;
             _logger = logger;
@@ -96,22 +93,8 @@ namespace strAppersBackend.Services
                     {
                         mergedCount++;
                         _logger.LogInformation("[STUDENT-TEAM-BUILDER] Merged BoardId={BoardId}, SprintNumber={SprintNumber}, ListCreated={ListCreated}.", boardId, mergeRow.SprintNumber, listCreated);
-                        if (listCreated)
-                        {
-                            var completedSprint = mergeRow.SprintNumber - 1;
-                            var capturedBoardId = boardId;
-                            _ = Task.Run(async () =>
-                            {
-                                try
-                                {
-                                    await _sprintAssessmentService.RunForBoardSprintAsync(capturedBoardId, completedSprint);
-                                }
-                                catch (Exception ex)
-                                {
-                                    _logger.LogError(ex, "[STUDENT-TEAM-BUILDER] Background assessment failed for BoardId={BoardId}, Sprint={Sprint}", capturedBoardId, completedSprint);
-                                }
-                            });
-                        }
+                        // Auto-assessment after merge was removed intentionally: assessments run
+                        // on demand only, from the staff dashboard (POST /api/Metrics/use/run-student-sprint).
                     }
                     else
                     {
@@ -461,6 +444,83 @@ namespace strAppersBackend.Services
             int instituteId,
             int ipId) { var s = 0; return TryBuildSquadTeam(candidates, template, instituteId, ipId, ref s); }
 
+        internal List<Student>? TestTryBuildBuiltInTeam(
+            List<Student> candidates,
+            List<Role> baseRoles,
+            int instituteId,
+            int ipId) { var s = 0; return TryBuildBuiltInTeam(candidates, baseRoles, instituteId, ipId, ref s); }
+
+        /// <summary>
+        /// Developer exclusivity rule (ported from the B2C Worker.SelectGroup): a team gets EITHER one
+        /// full-stack (Type=1) OR the FE+BE pair (Type=2 × ≥2) — never both. When both sides have
+        /// candidates, the side that waited longer (StartPendingAt) wins; ties keep the full-stack
+        /// (same default as the worker). The losing side is returned to <paramref name="available"/>.
+        /// Returns the seated developers, or null when the rule cannot be satisfied (skip the team).
+        /// </summary>
+        private List<Student>? ResolveDeveloperBundle(
+            List<Student> available,
+            List<Role> bundleRoles,
+            int instituteId,
+            int ipId)
+        {
+            var fullStack = new List<Student>();
+            var pair = new List<Student>();
+            foreach (var role in bundleRoles)
+            {
+                var matched = available.FirstOrDefault(s =>
+                    s.StudentRoles.Any(sr =>
+                        sr.IsActive &&
+                        sr.Role != null &&
+                        string.Equals(sr.Role.Name, role.Name, StringComparison.OrdinalIgnoreCase)));
+                if (matched == null) continue;
+
+                available.Remove(matched);
+                if (role.Type == 1) fullStack.Add(matched);
+                else pair.Add(matched);
+            }
+
+            // Both sides matched → resolve exclusively, never seat both.
+            if (fullStack.Count > 0 && pair.Count > 0)
+            {
+                var now = DateTime.UtcNow;
+                double Wait(Student s) => s.StartPendingAt.HasValue ? (now - s.StartPendingAt.Value).TotalHours : 0;
+                var pairComplete = pair.Count >= 2;
+                var preferPair = pairComplete && pair.Max(Wait) > fullStack.Max(Wait);
+
+                if (preferPair)
+                {
+                    _logger.LogInformation(
+                        "[INSTITUTE-TEAM-BUILDER] Institute {II}, IpId {IpId}: developer conflict — FE+BE pair waited longer; keeping pair, returning full-stack ({Ids}) to pool.",
+                        instituteId, ipId, string.Join(",", fullStack.Select(s => s.Id)));
+                    available.AddRange(fullStack);
+                    fullStack.Clear();
+                }
+                else
+                {
+                    _logger.LogInformation(
+                        "[INSTITUTE-TEAM-BUILDER] Institute {II}, IpId {IpId}: developer conflict — keeping full-stack, returning FE/BE ({Ids}) to pool.",
+                        instituteId, ipId, string.Join(",", pair.Select(s => s.Id)));
+                    available.AddRange(pair);
+                    pair.Clear();
+                }
+            }
+
+            var ruleMet = (fullStack.Count >= 1 && pair.Count == 0)
+                       || (pair.Count >= 2 && fullStack.Count == 0);
+            if (!ruleMet)
+            {
+                _logger.LogInformation(
+                    "[INSTITUTE-TEAM-BUILDER] Institute {II}, IpId {IpId}: developer rule not met (FullStack={FS}, Pair={P}), skipping.",
+                    instituteId, ipId, fullStack.Count, pair.Count);
+                return null;
+            }
+
+            _logger.LogInformation(
+                "[INSTITUTE-TEAM-BUILDER] Institute {II}, IpId {IpId}: developer rule met (FullStack={FS}, Pair={P}).",
+                instituteId, ipId, fullStack.Count, pair.Count);
+            return fullStack.Concat(pair).ToList();
+        }
+
         private List<Student>? TryBuildSquadTeam(
             List<Student> candidates,
             InstituteTemplate template,
@@ -510,49 +570,19 @@ namespace strAppersBackend.Services
 
             // ── Type=1/2 (Bundle / developer) ─────────────────────────────
             // Only enforced when InstituteSquad.RequireDeveloperRule is true.
-            // Rule: Type=1 (full-stack) >= 1  OR  Type=2 (FE+BE bundle) >= 2
+            // Rule (exclusive): ONE full-stack (Type=1) OR the FE+BE pair (Type=2 × ≥2) — never both.
             var bundleRoles = activeRoles.Where(r => r.Type == 1 || r.Type == 2).ToList();
             if (bundleRoles.Any())
             {
                 if (template.Squad.RequireDeveloperRule)
                 {
-                    var matchedBundle = new List<Student>();
-                    foreach (var squadRole in bundleRoles)
+                    var seated = ResolveDeveloperBundle(available, bundleRoles, instituteId, ipId);
+                    if (seated == null)
                     {
-                        var matched = available.FirstOrDefault(s =>
-                            s.StudentRoles.Any(sr =>
-                                sr.IsActive &&
-                                sr.Role != null &&
-                                string.Equals(sr.Role.Name, squadRole.Name, StringComparison.OrdinalIgnoreCase)));
-
-                        if (matched != null)
-                        {
-                            matchedBundle.Add(matched);
-                            available.Remove(matched);
-                        }
-                    }
-
-                    var fullStackCount = matchedBundle.Count(s =>
-                        s.StudentRoles.Any(sr => sr.IsActive && sr.Role != null &&
-                            activeRoles.Any(r => r.Type == 1 && string.Equals(r.Name, sr.Role.Name, StringComparison.OrdinalIgnoreCase))));
-                    var bundleCount = matchedBundle.Count(s =>
-                        s.StudentRoles.Any(sr => sr.IsActive && sr.Role != null &&
-                            activeRoles.Any(r => r.Type == 2 && string.Equals(r.Name, sr.Role.Name, StringComparison.OrdinalIgnoreCase))));
-
-                    var developerRuleMet = fullStackCount >= 1 || bundleCount >= 2;
-                    if (!developerRuleMet)
-                    {
-                        _logger.LogInformation(
-                            "[INSTITUTE-TEAM-BUILDER] Institute {II}, IpId {IpId}: developer rule not met (FullStack={FS}, Bundle={B}), skipping.",
-                            instituteId, ipId, fullStackCount, bundleCount);
                         skipped++;
                         return null;
                     }
-
-                    team.AddRange(matchedBundle);
-                    _logger.LogInformation(
-                        "[INSTITUTE-TEAM-BUILDER] Institute {II}, IpId {IpId}: developer rule met (FullStack={FS}, Bundle={B}).",
-                        instituteId, ipId, fullStackCount, bundleCount);
+                    team.AddRange(seated);
                 }
                 else
                 {
@@ -638,45 +668,38 @@ namespace strAppersBackend.Services
             }
 
             // Type=1/2 (developer bundle) — uses KickoffConfig.RequireDeveloperRule (no squad flag available)
+            // Rule (exclusive): ONE full-stack (Type=1) OR the FE+BE pair (Type=2 × ≥2) — never both.
             var bundleRoles = baseRoles.Where(r => r.Type == 1 || r.Type == 2).ToList();
             if (bundleRoles.Any())
             {
-                var matchedBundle = new List<Student>();
-                foreach (var role in bundleRoles)
-                {
-                    var matched = available.FirstOrDefault(s =>
-                        s.StudentRoles.Any(sr =>
-                            sr.IsActive &&
-                            sr.Role != null &&
-                            string.Equals(sr.Role.Name, role.Name, StringComparison.OrdinalIgnoreCase)));
-
-                    if (matched != null)
-                    {
-                        matchedBundle.Add(matched);
-                        available.Remove(matched);
-                    }
-                }
-
                 if (_kickoffConfig.RequireDeveloperRule)
                 {
-                    var fullStackCount = matchedBundle.Count(s =>
-                        s.StudentRoles.Any(sr => sr.IsActive && sr.Role != null &&
-                            baseRoles.Any(r => r.Type == 1 && string.Equals(r.Name, sr.Role.Name, StringComparison.OrdinalIgnoreCase))));
-                    var bundleCount = matchedBundle.Count(s =>
-                        s.StudentRoles.Any(sr => sr.IsActive && sr.Role != null &&
-                            baseRoles.Any(r => r.Type == 2 && string.Equals(r.Name, sr.Role.Name, StringComparison.OrdinalIgnoreCase))));
-
-                    if (fullStackCount < 1 && bundleCount < 2)
+                    var seated = ResolveDeveloperBundle(available, bundleRoles, instituteId, ipId);
+                    if (seated == null)
                     {
-                        _logger.LogInformation(
-                            "[INSTITUTE-TEAM-BUILDER] Institute {II}, IpId {IpId} (built-in): developer rule not met (FullStack={FS}, Bundle={B}), skipping.",
-                            instituteId, ipId, fullStackCount, bundleCount);
                         skipped++;
                         return null;
                     }
+                    team.AddRange(seated);
                 }
+                else
+                {
+                    // Rule off: bundle roles behave like optional roles — seat every match.
+                    foreach (var role in bundleRoles)
+                    {
+                        var matched = available.FirstOrDefault(s =>
+                            s.StudentRoles.Any(sr =>
+                                sr.IsActive &&
+                                sr.Role != null &&
+                                string.Equals(sr.Role.Name, role.Name, StringComparison.OrdinalIgnoreCase)));
 
-                team.AddRange(matchedBundle);
+                        if (matched != null)
+                        {
+                            team.Add(matched);
+                            available.Remove(matched);
+                        }
+                    }
+                }
             }
 
             // Type=0 (optional) — add matched, skip unmatched

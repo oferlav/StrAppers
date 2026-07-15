@@ -76,6 +76,8 @@ public interface IGitHubService
     Task<GitHubPullRequest?> GetPullRequestByBranchAsync(string owner, string repo, string branchName, string? accessToken = null);
     /// <summary>Pull requests for this head branch (open or merged), newest first — used for gap analysis.</summary>
     Task<GitHubPullRequest?> GetPullRequestForGapAnalysisAsync(string owner, string repo, string branchName, string? accessToken = null);
+    /// <summary>Files changed by a PR (with patches). After a squash merge the branch compare is empty, so this is the gap-analysis evidence of what a merged PR delivered.</summary>
+    Task<GitHubCommitDiff?> GetPullRequestFilesAsync(string owner, string repo, int pullRequestNumber, string? accessToken = null);
     Task<List<GitHubPullRequest>> GetOpenPullRequestsAsync(string owner, string repo, string? accessToken = null);
     /// <summary>Count commits on a branch (paginated, capped).</summary>
     Task<int> CountCommitsOnBranchPagedAsync(string owner, string repo, string branch, int maxPages = 15, string? accessToken = null);
@@ -2956,6 +2958,68 @@ public class GitHubService : IGitHubService
         catch (Exception ex)
         {
             _logger.LogError(ex, "GetPullRequestForGapAnalysisAsync failed for {Branch} in {Owner}/{Repo}", branchName, owner, repo);
+            return null;
+        }
+    }
+
+    /// <inheritdoc />
+    public async Task<GitHubCommitDiff?> GetPullRequestFilesAsync(string owner, string repo, int pullRequestNumber, string? accessToken = null)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(owner) || string.IsNullOrWhiteSpace(repo) || pullRequestNumber <= 0)
+            {
+                _logger.LogWarning("GetPullRequestFilesAsync: Invalid parameters");
+                return null;
+            }
+
+            var token = accessToken ?? _configuration["GitHub:AccessToken"];
+            var url = $"{GitHubApiBaseUrl}/repos/{owner}/{repo}/pulls/{pullRequestNumber}/files?per_page=100";
+            var request = new HttpRequestMessage(HttpMethod.Get, url);
+            if (!string.IsNullOrEmpty(token))
+                request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", token);
+
+            var response = await _httpClient.SendAsync(request);
+            if (!response.IsSuccessStatusCode)
+            {
+                var errorContent = await response.Content.ReadAsStringAsync();
+                _logger.LogWarning(
+                    "GetPullRequestFilesAsync failed for PR #{Num} in {Owner}/{Repo}: {Status} {Body}",
+                    pullRequestNumber, owner, repo, response.StatusCode, TruncateForLog(errorContent));
+                return null;
+            }
+
+            var content = await response.Content.ReadAsStringAsync();
+            var filesArray = JsonSerializer.Deserialize<JsonElement>(content, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+            if (filesArray.ValueKind != JsonValueKind.Array)
+                return null;
+
+            var diff = new GitHubCommitDiff();
+            foreach (var f in filesArray.EnumerateArray())
+            {
+                var change = new GitHubFileChange
+                {
+                    FilePath = f.TryGetProperty("filename", out var fn) ? fn.GetString() ?? "" : "",
+                    Status = f.TryGetProperty("status", out var st) ? st.GetString() ?? "" : "",
+                    Additions = f.TryGetProperty("additions", out var ad) ? ad.GetInt32() : 0,
+                    Deletions = f.TryGetProperty("deletions", out var de) ? de.GetInt32() : 0,
+                    Patch = f.TryGetProperty("patch", out var pa) && pa.ValueKind == JsonValueKind.String ? pa.GetString() : null
+                };
+                change.Changes = change.Additions + change.Deletions;
+                diff.FileChanges.Add(change);
+                diff.TotalAdditions += change.Additions;
+                diff.TotalDeletions += change.Deletions;
+            }
+            diff.TotalFilesChanged = diff.FileChanges.Count;
+
+            _logger.LogInformation(
+                "✅ [GITHUB PR][GapAnalysis] PR #{Num} files: {Files} changed, +{Add}/-{Del} in {Owner}/{Repo}",
+                pullRequestNumber, diff.TotalFilesChanged, diff.TotalAdditions, diff.TotalDeletions, owner, repo);
+            return diff;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "GetPullRequestFilesAsync failed for PR #{Num} in {Owner}/{Repo}", pullRequestNumber, owner, repo);
             return null;
         }
     }

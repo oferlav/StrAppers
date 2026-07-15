@@ -10,7 +10,7 @@ namespace strAppersBackend.Services
     {
         Task<TrelloUserRegistrationResponse> InviteUserToTrelloAsync(string email, string? fullName = null);
         Task<TrelloUserCheckResponse> CheckUserRegistrationAsync(string email);
-        Task<TrelloProjectCreationResponse> CreateProjectWithSprintsAsync(TrelloProjectCreationRequest request, string projectTitle, List<ProjectModuleInfo>? modules = null);
+        Task<TrelloProjectCreationResponse> CreateProjectWithSprintsAsync(TrelloProjectCreationRequest request, string projectTitle, List<ProjectModuleInfo>? modules = null, StringBuilder? debugLog = null);
         Task<object> GetProjectStatsAsync(string trelloBoardId);
         /// <summary>Gets the "User Stories" list and all its cards (with checklists and custom fields) for a board. Returns null if the list is not found.</summary>
         Task<object?> GetUserStoriesListAsync(string boardId);
@@ -421,6 +421,20 @@ namespace strAppersBackend.Services
             (roleName.Contains("Product Manager", StringComparison.OrdinalIgnoreCase) ||
              roleName.Contains("PM", StringComparison.OrdinalIgnoreCase));
 
+        /// <summary>Writes to both the standard logger and the caller's board-creation debug email (BoardsController's DbgLog/FlushDebugLog), if provided.</summary>
+        private void EmailDbg(StringBuilder? debugLog, string msg)
+        {
+            _logger.LogInformation("📧 [EMAIL-DEBUG] {Msg}", msg);
+            debugLog?.AppendLine($"[{DateTime.UtcNow:yyyy-MM-dd HH:mm:ss.fff}Z] [EMAIL-DEBUG] {msg}");
+        }
+
+        /// <summary>
+        /// Full ISO-8601 UTC due for Trello card creation. Date-only (`yyyy-MM-dd`) dues come back
+        /// from Trello as midnight UTC, destroying the end-of-day-local time the schedule computes —
+        /// which desynchronizes the merge runner, sprint windows, and BoardRoom overdue/current-sprint.
+        /// </summary>
+        internal static string FormatTrelloDue(DateTime dueUtc) => $"{dueUtc:yyyy-MM-ddTHH:mm:ssZ}";
+
         /// <summary>
         /// Trello card ids are Mongo ObjectIds: the first 8 hex chars encode the creation time
         /// as unix seconds. Returns false for null/short/non-hex ids.
@@ -488,7 +502,8 @@ namespace strAppersBackend.Services
             string boardName,
             string? organizationId,
             List<ProjectModuleInfo> modules,
-            List<TrelloTeamMember> teamMembers)
+            List<TrelloTeamMember> teamMembers,
+            StringBuilder? debugLog = null)
         {
             var errors = new List<string>();
             string? boardId = null;
@@ -523,6 +538,7 @@ namespace strAppersBackend.Services
                            m.RoleName.Contains("PM", StringComparison.OrdinalIgnoreCase))).ToList()
                     : teamMembers;
                 membersToInvite = OnlyTrelloToolMembers(membersToInvite, _logger);
+                EmailDbg(debugLog, $"User Story board {boardId} ({boardName}) — final invite list ({membersToInvite.Count}): {string.Join(", ", membersToInvite.Select(m => m.Email))}");
 
                 foreach (var member in membersToInvite)
                 {
@@ -538,7 +554,7 @@ namespace strAppersBackend.Services
                         }
                         else
                         {
-                            _logger.LogInformation("✅ [USER-STORY-BOARD] Invited {Email}", member.Email);
+                            EmailDbg(debugLog, $"Invited {member.Email} to USER STORY board {boardId} ({boardName}) — Trello call succeeded (200)");
                         }
                     }
                     catch (Exception ex)
@@ -625,10 +641,11 @@ namespace strAppersBackend.Services
         }
 
         private async Task<(string? BoardId, string? BoardUrl, string? BoardName, Dictionary<string, string> RoleLabelIds, Dictionary<string, string> ListIds, Dictionary<string, string> CustomFieldIds, List<string> Errors)> CreateBoardWithContentAsync(
-            TrelloProjectCreationRequest request, 
-            string boardName, 
-            string? organizationId, 
-            bool sendEmails)
+            TrelloProjectCreationRequest request,
+            string boardName,
+            string? organizationId,
+            bool sendEmails,
+            StringBuilder? debugLog = null)
         {
             var errors = new List<string>();
             string? trelloBoardId = null;
@@ -681,18 +698,31 @@ namespace strAppersBackend.Services
                     if (_trelloConfig.SendInvitationToPMOnly)
                     {
                         membersToInvite = request.TeamMembers
-                            .Where(m => !string.IsNullOrWhiteSpace(m.RoleName) && 
-                                (m.RoleName.Contains("Product Manager", StringComparison.OrdinalIgnoreCase) || 
+                            .Where(m => !string.IsNullOrWhiteSpace(m.RoleName) &&
+                                (m.RoleName.Contains("Product Manager", StringComparison.OrdinalIgnoreCase) ||
                                  m.RoleName.Contains("PM", StringComparison.OrdinalIgnoreCase)))
                             .ToList();
-                        
+
                         _logger.LogInformation("📧 [TRELLO INVITATION] SendInvitationToPMOnly is enabled. Filtered from {TotalCount} to {PMCount} Product Manager(s) only",
                             request.TeamMembers.Count, membersToInvite.Count);
+                    }
+                    // When CreateUserStoryBoard=true, PM-role members are invited to the dedicated User Story
+                    // board only (by the caller, after this method returns) — exclude them here so they don't
+                    // also get invited (and emailed) for this board. Mirrors the exclusion already applied by
+                    // the caller's own post-creation invite loop for the main/EmptyBoard.
+                    if (_trelloConfig.CreateUserStoryBoard)
+                    {
+                        var beforeCount = membersToInvite.Count;
+                        membersToInvite = membersToInvite.Where(m => !IsPMRole(m.RoleName)).ToList();
+                        if (membersToInvite.Count < beforeCount)
+                            _logger.LogInformation("📧 [TRELLO INVITATION] CreateUserStoryBoard is enabled — excluded {Excluded} PM-role member(s) from this board's Step 2 invite (invited to the User Story board instead)",
+                                beforeCount - membersToInvite.Count);
                     }
                     membersToInvite = OnlyTrelloToolMembers(membersToInvite, _logger);
 
                     _logger.LogInformation("Starting member invitation process for {MemberCount} members", membersToInvite.Count);
-                    
+                    EmailDbg(debugLog, $"CreateBoardWithContentAsync Step 2 — board {trelloBoardId} ({boardName}), sendEmails={sendEmails}, SendInvitationToPMOnly={_trelloConfig.SendInvitationToPMOnly} (NOT CreateUserStoryBoard-aware) — invite list ({membersToInvite.Count}): {string.Join(", ", membersToInvite.Select(m => m.Email))}");
+
                     foreach (var member in membersToInvite)
                     {
                         try
@@ -702,7 +732,7 @@ namespace strAppersBackend.Services
                             var inviteUrl = $"https://api.trello.com/1/boards/{trelloBoardId}/members?email={Uri.EscapeDataString(member.Email)}&type=normal&allowBillableGuest=true&key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
                             var inviteResponse = await _httpClient.PutAsync(inviteUrl, null);
                             var responseContent = await inviteResponse.Content.ReadAsStringAsync();
-                            
+
                             if (!inviteResponse.IsSuccessStatusCode)
                             {
                                 var inviteError = GetInviteErrorMessage(responseContent);
@@ -711,7 +741,7 @@ namespace strAppersBackend.Services
                             }
                             else
                             {
-                                _logger.LogInformation("✅ Successfully invited {Email} to Trello board", member.Email);
+                                EmailDbg(debugLog, $"Invited {member.Email} to board {trelloBoardId} ({boardName}) via Step 2 (CreateBoardWithContentAsync) — Trello call succeeded (200)");
                             }
                         }
                         catch (Exception ex)
@@ -798,7 +828,7 @@ namespace strAppersBackend.Services
             }
         }
 
-        public async Task<TrelloProjectCreationResponse> CreateProjectWithSprintsAsync(TrelloProjectCreationRequest request, string projectTitle, List<ProjectModuleInfo>? modules = null)
+        public async Task<TrelloProjectCreationResponse> CreateProjectWithSprintsAsync(TrelloProjectCreationRequest request, string projectTitle, List<ProjectModuleInfo>? modules = null, StringBuilder? debugLog = null)
         {
             var response = new TrelloProjectCreationResponse();
             var errors = new List<string>();
@@ -825,14 +855,16 @@ namespace strAppersBackend.Services
 
                 // When MergeType=Add: create only one board (no SystemBoard). Otherwise when CreatePMEmptyBoard: SystemBoard + EmptyBoard.
                 var mergeType = string.Equals(_trelloConfig.MergeType, "Add", StringComparison.OrdinalIgnoreCase) ? "Add" : "Merge";
+                EmailDbg(debugLog, $"Config: CreateUserStoryBoard={_trelloConfig.CreateUserStoryBoard}, CreatePMEmptyBoard={_trelloConfig.CreatePMEmptyBoard}, MergeType(raw)={_trelloConfig.MergeType}, MergeType(resolved)={mergeType}, SendInvitationToPMOnly={_trelloConfig.SendInvitationToPMOnly} → branch={((_trelloConfig.CreatePMEmptyBoard && mergeType != "Add") ? "SystemBoard+EmptyBoard" : "SingleBoard")}");
+                EmailDbg(debugLog, $"TeamMembers going into this request: {string.Join(" | ", request.TeamMembers.Select(m => $"{m.Email} role='{m.RoleName}' isPM={IsPMRole(m.RoleName)} mainTool='{m.MainTool}'"))}");
                 if (_trelloConfig.CreatePMEmptyBoard && mergeType != "Add")
                 {
                     _logger.LogInformation("📋 [TRELLO] CreatePMEmptyBoard is enabled. Creating SystemBoard first (no emails), then EmptyBoard (with emails)");
                     
                     // Step 1: Create SystemBoard (full board, NO emails)
                     var systemBoardName = $"{boardName}_System";
-                    var (systemBoardId, systemBoardUrl, systemBoardNameResult, systemRoleLabelIds, systemListIds, systemCustomFieldIds, systemErrors) = 
-                        await CreateBoardWithContentAsync(request, systemBoardName, organizationId, sendEmails: false);
+                    var (systemBoardId, systemBoardUrl, systemBoardNameResult, systemRoleLabelIds, systemListIds, systemCustomFieldIds, systemErrors) =
+                        await CreateBoardWithContentAsync(request, systemBoardName, organizationId, sendEmails: false, debugLog: debugLog);
                     
                     if (string.IsNullOrEmpty(systemBoardId))
                     {
@@ -852,8 +884,8 @@ namespace strAppersBackend.Services
                     _logger.LogInformation("✅ [TRELLO] SystemBoard created successfully: {SystemBoardId}", systemBoardId);
                     
                     // Step 2: Create EmptyBoard (simplified board, WITH emails)
-                    var (emptyBoardId, emptyBoardUrl, emptyBoardName, emptyRoleLabelIds, emptyListIds, emptyCustomFieldIds, emptyErrors) = 
-                        await CreateBoardWithContentAsync(request, boardName, organizationId, sendEmails: true);
+                    var (emptyBoardId, emptyBoardUrl, emptyBoardName, emptyRoleLabelIds, emptyListIds, emptyCustomFieldIds, emptyErrors) =
+                        await CreateBoardWithContentAsync(request, boardName, organizationId, sendEmails: true, debugLog: debugLog);
                     
                     if (string.IsNullOrEmpty(emptyBoardId))
                     {
@@ -891,6 +923,7 @@ namespace strAppersBackend.Services
                         membersToInvite = request.TeamMembers;
                     }
                     membersToInvite = OnlyTrelloToolMembers(membersToInvite, _logger);
+                    EmailDbg(debugLog, $"EmptyBoard {emptyBoardId} — final invite list ({membersToInvite.Count}): {string.Join(", ", membersToInvite.Select(m => m.Email))}");
 
                     foreach (var member in membersToInvite)
                     {
@@ -904,6 +937,7 @@ namespace strAppersBackend.Services
 
                             if (inviteResponse.IsSuccessStatusCode)
                             {
+                                EmailDbg(debugLog, $"Invited {member.Email} to EmptyBoard {emptyBoardId} — Trello call succeeded (200)");
                                 response.InvitedUsers.Add(new TrelloInvitedUser
                                 {
                                     Email = member.Email,
@@ -941,7 +975,7 @@ namespace strAppersBackend.Services
                     if (_trelloConfig.CreateUserStoryBoard)
                     {
                         var (usBoardId, usBoardUrl, usErrors) = await CreateUserStoryBoardAsync(
-                            $"{boardName} — User Stories", organizationId, modules ?? new(), request.TeamMembers);
+                            $"{boardName} — User Stories", organizationId, modules ?? new(), request.TeamMembers, debugLog);
                         if (string.IsNullOrEmpty(usBoardId))
                         {
                             _logger.LogError("User Story board creation failed — rolling back SystemBoard {SysId} and EmptyBoard {EmpId}", systemBoardId, emptyBoardId);
@@ -966,8 +1000,8 @@ namespace strAppersBackend.Services
                 else
                 {
                     // Original behavior: Create single board with emails
-                    var (trelloBoardId, boardUrl, trelloBoardName, roleLabelIds, listIds, customFieldIds, boardErrors) = 
-                        await CreateBoardWithContentAsync(request, boardName, organizationId, sendEmails: true);
+                    var (trelloBoardId, boardUrl, trelloBoardName, roleLabelIds, listIds, customFieldIds, boardErrors) =
+                        await CreateBoardWithContentAsync(request, boardName, organizationId, sendEmails: true, debugLog: debugLog);
                     
                     if (string.IsNullOrEmpty(trelloBoardId))
                     {
@@ -1005,6 +1039,7 @@ namespace strAppersBackend.Services
                         membersToInvite = request.TeamMembers;
                     }
                     membersToInvite = OnlyTrelloToolMembers(membersToInvite, _logger);
+                    EmailDbg(debugLog, $"Main board {trelloBoardId} ({boardName}) — final invite list ({membersToInvite.Count}): {string.Join(", ", membersToInvite.Select(m => m.Email))}");
 
                     foreach (var member in membersToInvite)
                     {
@@ -1018,6 +1053,7 @@ namespace strAppersBackend.Services
 
                             if (inviteResponse.IsSuccessStatusCode)
                             {
+                                EmailDbg(debugLog, $"Invited {member.Email} to MAIN board {trelloBoardId} ({boardName}) — Trello call succeeded (200)");
                                 response.InvitedUsers.Add(new TrelloInvitedUser
                                 {
                                     Email = member.Email,
@@ -1053,7 +1089,7 @@ namespace strAppersBackend.Services
                     if (_trelloConfig.CreateUserStoryBoard)
                     {
                         var (usBoardId, usBoardUrl, usErrors) = await CreateUserStoryBoardAsync(
-                            $"{boardName} — User Stories", organizationId, modules ?? new(), request.TeamMembers);
+                            $"{boardName} — User Stories", organizationId, modules ?? new(), request.TeamMembers, debugLog);
                         if (string.IsNullOrEmpty(usBoardId))
                         {
                             _logger.LogError("User Story board creation failed — rolling back main board {BoardId}", trelloBoardId);
@@ -1120,7 +1156,7 @@ namespace strAppersBackend.Services
 
                         if (card.DueDate.HasValue)
                         {
-                            createCardUrl += $"&due={card.DueDate.Value:yyyy-MM-dd}";
+                            createCardUrl += $"&due={FormatTrelloDue(card.DueDate.Value)}";
                         }
 
                         // Add role label to card
@@ -1298,7 +1334,7 @@ namespace strAppersBackend.Services
                     var createCardUrl = $"https://api.trello.com/1/cards?name={Uri.EscapeDataString(card.Name)}&desc={Uri.EscapeDataString(finalDescription)}&idList={emptyListId}&key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
                     if (card.DueDate.HasValue)
                     {
-                        createCardUrl += $"&due={card.DueDate.Value:yyyy-MM-dd}";
+                        createCardUrl += $"&due={FormatTrelloDue(card.DueDate.Value)}";
                     }
                     
                     // Add role label to card
@@ -1791,7 +1827,7 @@ namespace strAppersBackend.Services
             try
             {
                 var listsUrl = $"https://api.trello.com/1/boards/{boardId}/lists?key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
-                var listsRes = await _httpClient.GetAsync(listsUrl);
+                var listsRes = await GetTrelloWithRetryAsync(listsUrl, $"GetSprintCardCustomFieldValue.lists board={boardId}");
                 if (!listsRes.IsSuccessStatusCode) return null;
                 var listsData = JsonSerializer.Deserialize<JsonElement[]>(await listsRes.Content.ReadAsStringAsync());
                 var sprintList = (listsData ?? Array.Empty<JsonElement>()).FirstOrDefault(l =>
@@ -1805,7 +1841,7 @@ namespace strAppersBackend.Services
                 if (string.IsNullOrEmpty(sprintListId)) return null;
 
                 var cfUrl = $"https://api.trello.com/1/boards/{boardId}/customFields?key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
-                var cfRes = await _httpClient.GetAsync(cfUrl);
+                var cfRes = await GetTrelloWithRetryAsync(cfUrl, $"GetSprintCardCustomFieldValue.customFields board={boardId}");
                 string? targetFieldId = null;
                 if (cfRes.IsSuccessStatusCode)
                 {
@@ -1821,7 +1857,7 @@ namespace strAppersBackend.Services
                 }
 
                 var cardsUrl = $"https://api.trello.com/1/boards/{boardId}/cards?customFieldItems=true&key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
-                var cardsRes = await _httpClient.GetAsync(cardsUrl);
+                var cardsRes = await GetTrelloWithRetryAsync(cardsUrl, $"GetSprintCardCustomFieldValue.cards board={boardId}");
                 if (!cardsRes.IsSuccessStatusCode) return null;
                 var cardsData = JsonSerializer.Deserialize<JsonElement[]>(await cardsRes.Content.ReadAsStringAsync());
                 var sprintCard = (cardsData ?? Array.Empty<JsonElement>()).FirstOrDefault(c =>
@@ -1879,7 +1915,7 @@ namespace strAppersBackend.Services
             try
             {
                 var url = $"https://api.trello.com/1/cards/{trelloCardId}?checklists=all&fields=name,desc&key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
-                var res = await _httpClient.GetAsync(url);
+                var res = await GetTrelloWithRetryAsync(url, $"GetSprintRoleCardSnapshot.card board={boardId} card={trelloCardId}");
                 if (!res.IsSuccessStatusCode) return null;
                 var json = JsonSerializer.Deserialize<JsonElement>(await res.Content.ReadAsStringAsync());
                 var name = json.TryGetProperty("name", out var np) ? np.GetString() : "";
@@ -2152,6 +2188,21 @@ namespace strAppersBackend.Services
             }
         }
 
+        /// <summary>
+        /// GET with rate-limit retry for the sprint-card lookup methods. The metrics/gap-analysis
+        /// pipeline fires many full-board reads back-to-back; a 429/503 was previously swallowed
+        /// silently (lookup returned null → "(No context blocks could be assembled...)" with zero
+        /// trace). Delegates to <see cref="SendWithRateLimitRetryAsync"/> and logs the failing
+        /// operation and status — never the URL, which carries the API key/token.
+        /// </summary>
+        private async Task<HttpResponseMessage> GetTrelloWithRetryAsync(string url, string opName)
+        {
+            var res = await SendWithRateLimitRetryAsync(() => _httpClient.GetAsync(url));
+            if (!res.IsSuccessStatusCode)
+                _logger.LogWarning("[TRELLO-RETRY] {Op} failed with HTTP {Status}.", opName, (int)res.StatusCode);
+            return res;
+        }
+
         /// <inheritdoc />
         public async Task<string?> GetSprintRoleCardIdAsync(string boardId, int sprintNumber, string roleName)
         {
@@ -2159,7 +2210,7 @@ namespace strAppersBackend.Services
             try
             {
                 var listsUrl = $"https://api.trello.com/1/boards/{boardId}/lists?key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
-                var listsRes = await _httpClient.GetAsync(listsUrl);
+                var listsRes = await GetTrelloWithRetryAsync(listsUrl, $"GetSprintRoleCardId.lists board={boardId}");
                 if (!listsRes.IsSuccessStatusCode) return null;
                 var listsData = JsonSerializer.Deserialize<JsonElement[]>(await listsRes.Content.ReadAsStringAsync());
                 var sprintList = (listsData ?? Array.Empty<JsonElement>()).FirstOrDefault(l =>
@@ -2173,7 +2224,7 @@ namespace strAppersBackend.Services
                 if (string.IsNullOrEmpty(sprintListId)) return null;
 
                 var cardsUrl = $"https://api.trello.com/1/boards/{boardId}/cards?key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
-                var cardsRes = await _httpClient.GetAsync(cardsUrl);
+                var cardsRes = await GetTrelloWithRetryAsync(cardsUrl, $"GetSprintRoleCardId.cards board={boardId}");
                 if (!cardsRes.IsSuccessStatusCode) return null;
                 var cardsData = JsonSerializer.Deserialize<JsonElement[]>(await cardsRes.Content.ReadAsStringAsync());
                 var sprintCard = (cardsData ?? Array.Empty<JsonElement>()).FirstOrDefault(c =>
@@ -3766,7 +3817,7 @@ namespace strAppersBackend.Services
                 {
                     var createCardUrl = $"https://api.trello.com/1/cards?name={Uri.EscapeDataString(card.Name)}&desc={Uri.EscapeDataString(NormalizeDescriptionNewlinesForTrello(card.Description ?? ""))}&idList={listId}&key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
                     if (card.DueDate.HasValue)
-                        createCardUrl += $"&due={card.DueDate.Value:yyyy-MM-dd}";
+                        createCardUrl += $"&due={FormatTrelloDue(card.DueDate.Value)}";
                     if (!string.IsNullOrEmpty(card.RoleName) && roleLabelIds.TryGetValue(card.RoleName, out var labelId))
                         createCardUrl += $"&idLabels={labelId}";
                     var createResponse = await SendWithRateLimitRetryAsync(() => _httpClient.PostAsync(createCardUrl, null));
@@ -3934,7 +3985,7 @@ namespace strAppersBackend.Services
                     var createCardUrl = $"https://api.trello.com/1/cards?name={Uri.EscapeDataString(card.Name)}&desc={Uri.EscapeDataString(desc)}&idList={newListId}&key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
                     var cardDue = dueDateForNewCards ?? (card.DueDate.HasValue ? (DateTime?)card.DueDate.Value : null);
                     if (cardDue.HasValue)
-                        createCardUrl += $"&due={cardDue.Value:yyyy-MM-dd}";
+                        createCardUrl += $"&due={FormatTrelloDue(cardDue.Value)}";
                     if (!string.IsNullOrEmpty(card.RoleName) && roleLabelIds.TryGetValue(card.RoleName, out var labelId))
                         createCardUrl += $"&idLabels={labelId}";
                     var cardRes = await _httpClient.PostAsync(createCardUrl, null);
@@ -4782,7 +4833,7 @@ namespace strAppersBackend.Services
                     var createCardUrl = $"https://api.trello.com/1/cards?name={Uri.EscapeDataString(card.Name)}&desc={Uri.EscapeDataString(desc)}&idList={listId}&key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
                     var cardDue = dueDateForCards ?? (card.DueDate.HasValue ? (DateTime?)card.DueDate.Value : null);
                     if (cardDue.HasValue)
-                        createCardUrl += $"&due={cardDue.Value:yyyy-MM-dd}";
+                        createCardUrl += $"&due={FormatTrelloDue(cardDue.Value)}";
                     if (!string.IsNullOrEmpty(card.RoleName) && roleLabelIds.TryGetValue(card.RoleName, out var labelId))
                         createCardUrl += $"&idLabels={labelId}";
 

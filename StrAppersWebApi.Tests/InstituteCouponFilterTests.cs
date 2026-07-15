@@ -43,7 +43,8 @@ public class InstituteCouponFilterTests
             new Mock<IChatCompletionService>().Object,
             new Mock<IWebHostEnvironment>().Object,
             Options.Create(new ProjectsInstituteMaxLengthFieldsOptions()),
-            new Mock<IAzureBlobStorageService>().Object);
+            new Mock<IAzureBlobStorageService>().Object,
+            new Mock<ISmtpEmailService>().Object);
     }
 
     private static Student MakeInstituteStudent(int id, int instituteId, string? coupon = null) =>
@@ -57,15 +58,17 @@ public class InstituteCouponFilterTests
     // ── InstituteId=1 → BadRequest ────────────────────────────────────────
 
     [Fact]
-    public async Task InstituteId1_ReturnsBadRequest()
+    public async Task InstituteId1_ReturnsOk()
     {
-        using var ctx = CreateContext(nameof(InstituteId1_ReturnsBadRequest));
+        // InstituteId=1 (default institute) is now a valid assignment — the endpoint
+        // only rejects null/<= 0. Institute 1 students get their institute's projects.
+        using var ctx = CreateContext(nameof(InstituteId1_ReturnsOk));
         ctx.Students.Add(MakeInstituteStudent(1, instituteId: 1));
         await ctx.SaveChangesAsync();
 
         var result = await CreateProjectsController(ctx).GetAvailableInstituteProjectsForStudent(1);
 
-        Assert.IsType<BadRequestObjectResult>(result);
+        Assert.IsType<OkObjectResult>(result);
     }
 
     // ── Student with no coupon → all available institute projects ─────────

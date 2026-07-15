@@ -98,16 +98,24 @@ namespace strAppersBackend.Controllers
         /// Get all organizations (including inactive)
         /// </summary>
         [HttpGet("use/all")]
-        public async Task<ActionResult<IEnumerable<Organization>>> GetAllOrganizations()
+        public async Task<ActionResult<IEnumerable<object>>> GetAllOrganizations([FromQuery] bool slim = false)
         {
             try
             {
-                _logger.LogInformation("Starting GetAllOrganizations method");
-                
-                // Test basic database connection first
-                var count = await _context.Organizations.CountAsync();
-                _logger.LogInformation("Database connection successful. Found {Count} organizations", count);
-                
+                _logger.LogInformation("Starting GetAllOrganizations method (slim={Slim})", slim);
+
+                // slim=true: id + name only. The full list ships every org's base64 logo and long
+                // texts (multi-MB) — consumers that only need names (e.g. institute choose-squad)
+                // pass slim to keep page load light.
+                if (slim)
+                {
+                    var slimOrgs = await _context.Organizations
+                        .OrderBy(o => o.Name)
+                        .Select(o => new { o.Id, o.Name })
+                        .ToListAsync();
+                    return Ok(slimOrgs);
+                }
+
                 var organizations = await _context.Organizations
                     .OrderBy(o => o.Name)
                     .ToListAsync();

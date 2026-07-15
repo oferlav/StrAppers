@@ -98,9 +98,19 @@ namespace strAppersBackend.Services
                     return (false, $"Sprint {sprintNumber} not in template; no more sprints to add.", 0, false);
                 }
 
+                // The template carries cards for ALL course roles; the board's team may cover fewer.
+                // CreateBoard filters at creation — the merge path must filter too, or later sprints
+                // resurrect cards for roles nobody on the team has (and without a board label).
+                if (trelloRequest != null)
+                    await ApplyTeamRoleCardFilterAsync(boardId, trelloRequest);
+
                 var listsWithPos = await _trelloService.GetBoardListsWithPositionsAsync(boardId);
                 var existingList = listsWithPos.FirstOrDefault(l => string.Equals(l.Name, listName, StringComparison.OrdinalIgnoreCase));
                 var sprintLengthWeeks = _configuration.GetValue<int>("BusinessLogicConfig:SprintLengthInWeeks", 1);
+                // Per-course day cadence from the template; legacy templates fall back to weekly config.
+                var isDayBased = trelloRequest?.SprintLengthDays != null;
+                var sprintDays = trelloRequest?.SprintLengthDays is int d ? Math.Max(1, d) : sprintLengthWeeks * 7;
+                var localOffset = TrelloBoardScheduleHelper.ParseLocalTimeOffset(_configuration["Trello:LocalTime"]);
                 DateTime? addModeDueDateUtc = null;
                 if (sprintNumber > 1)
                 {
@@ -108,10 +118,14 @@ namespace strAppersBackend.Services
                         .AsNoTracking()
                         .FirstOrDefaultAsync(m => m.ProjectBoardId == boardId && m.SprintNumber == sprintNumber - 1);
                     if (prevRow?.DueDate != null)
-                        addModeDueDateUtc = prevRow.DueDate.Value.AddDays(sprintLengthWeeks * 7);
+                        addModeDueDateUtc = prevRow.DueDate.Value.AddDays(sprintDays);
                 }
                 if (!addModeDueDateUtc.HasValue)
-                    addModeDueDateUtc = DateTime.UtcNow.Date.AddDays((sprintNumber * sprintLengthWeeks * 7) - 1);
+                    addModeDueDateUtc = DateTime.UtcNow.Date.AddDays((sprintNumber * sprintDays) - 1);
+                // Day-based: snap to end of local day — a clean chained value is a no-op, a
+                // flattened midnight-UTC value (legacy Trello date-only round trip) heals.
+                if (isDayBased && addModeDueDateUtc.HasValue)
+                    addModeDueDateUtc = TrelloBoardScheduleHelper.NormalizeToEndOfLocalDay(addModeDueDateUtc.Value, localOffset);
 
                 var listCreated = string.IsNullOrEmpty(existingList.Id);
                 string? newListId;
@@ -182,7 +196,7 @@ namespace strAppersBackend.Services
 
                     var nextSprintNum = sprintNumber + 1;
                     var nextListName = $"Sprint {nextSprintNum}";
-                    var nextDueDateUtc = addModeDueDateUtc?.AddDays(sprintLengthWeeks * 7);
+                    var nextDueDateUtc = addModeDueDateUtc?.AddDays(sprintDays);
                     // Only add a row for the next sprint if the template has that sprint — otherwise we stop (no more "due" merges).
                     var addNextRow = trelloRequest != null && TemplateHasSprint(trelloRequest, nextListName);
                     if (addNextRow)
@@ -340,10 +354,23 @@ namespace strAppersBackend.Services
                         if (trelloRequest != null)
                         {
                             // Compute next sprint DueDate = this sprint's due + one sprint length (do not use template dates from DB).
+                            // Day cadence resolved per board (InstituteProject JSON preferred) so course boards chain correctly.
                             var sprintLengthWeeks = _configuration.GetValue<int>("BusinessLogicConfig:SprintLengthInWeeks", 1);
+                            var sprintDays = await strAppersBackend.Utilities.SprintLengthResolver.ResolveForBoardAsync(
+                                _context, boardId, sprintLengthWeeks);
                             DateTime? nextDueDateUtc = null;
                             if (dueDateUtc.HasValue)
-                                nextDueDateUtc = dueDateUtc.Value.AddDays(7 * sprintLengthWeeks);
+                            {
+                                nextDueDateUtc = dueDateUtc.Value.AddDays(sprintDays);
+                                // Day-based: heal flattened (midnight-UTC) chain inputs to end of local day.
+                                if (trelloRequest.SprintLengthDays != null)
+                                    nextDueDateUtc = TrelloBoardScheduleHelper.NormalizeToEndOfLocalDay(
+                                        nextDueDateUtc.Value,
+                                        TrelloBoardScheduleHelper.ParseLocalTimeOffset(_configuration["Trello:LocalTime"]));
+                            }
+
+                            // Drop template cards for roles the team doesn't have (same rule as add mode).
+                            await ApplyTeamRoleCardFilterAsync(boardId, trelloRequest);
 
                             var nextListId = await _trelloService.EnsureNextEmptySprintOnBoardAsync(boardId, trelloRequest, sprintNumber + 1, nextDueDateUtc);
                             if (!string.IsNullOrEmpty(nextListId))
@@ -382,6 +409,84 @@ namespace strAppersBackend.Services
             }
 
             return (true, null, cardsToApply.Count, false);
+        }
+
+        /// <summary>
+        /// Loads the board's team and drops template cards for roles nobody on the team has —
+        /// the same filtering CreateBoard applies at creation (which the template JSON never sees).
+        /// No-op when the board has no students (no team info → leave the template untouched).
+        /// </summary>
+        private async Task ApplyTeamRoleCardFilterAsync(string boardId, TrelloProjectCreationRequest trelloRequest)
+        {
+            var isSingleRole = await _context.ProjectBoards.AsNoTracking()
+                .Where(b => b.Id == boardId)
+                .Select(b => (bool?)b.IsSingleRole)
+                .FirstOrDefaultAsync() ?? false;
+
+            var students = await _context.Students.AsNoTracking()
+                .Include(s => s.StudentRoles)
+                .ThenInclude(sr => sr.Role)
+                .Where(s => s.BoardId == boardId)
+                .ToListAsync();
+
+            if (students.Count == 0)
+                return;
+
+            var teamRoleNames = BuildTeamRoleNameSet(students, isSingleRole);
+            var removed = FilterSprintPlanCardsToTeam(trelloRequest, teamRoleNames);
+            if (removed > 0)
+                _logger.LogInformation("[MERGE-SPRINT] Filtered {Removed} template card(s) for roles not on team (board {BoardId}). Team roles: [{Roles}]",
+                    removed, boardId, string.Join(", ", teamRoleNames));
+        }
+
+        /// <summary>
+        /// Role names the board's team covers, mirroring CreateBoard's filter rules:
+        /// all students' role names; Full Stack teams also cover Frontend/Backend Developer cards;
+        /// single-role boards use indexed labels ("{RoleName} {RoleIndex}").
+        /// </summary>
+        internal static HashSet<string> BuildTeamRoleNameSet(IEnumerable<Student> teamStudents, bool isSingleRole)
+        {
+            var names = teamStudents
+                .SelectMany(s => s.StudentRoles ?? Enumerable.Empty<StudentRole>())
+                .Where(sr => sr?.Role != null)
+                .Select(sr => sr!.Role!.Name)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+            if (names.Any(r => r.Contains("Fullstack", StringComparison.OrdinalIgnoreCase) || r.Contains("Full Stack", StringComparison.OrdinalIgnoreCase)))
+            {
+                names.Add("Frontend Developer");
+                names.Add("Backend Developer");
+            }
+
+            if (isSingleRole)
+            {
+                foreach (var s in teamStudents)
+                {
+                    var roleName = s.StudentRoles?.FirstOrDefault(sr => sr.IsActive)?.Role?.Name;
+                    if (!string.IsNullOrEmpty(roleName) && s.RoleIndex > 0)
+                        names.Add($"{roleName} {s.RoleIndex}");
+                }
+            }
+
+            return names;
+        }
+
+        /// <summary>
+        /// Drops SprintPlan cards whose RoleName is not covered by the team. "User Stories" list
+        /// cards are always kept (same as CreateBoard). Returns the number of cards removed.
+        /// </summary>
+        internal static int FilterSprintPlanCardsToTeam(TrelloProjectCreationRequest request, HashSet<string> teamRoleNames)
+        {
+            if (request.SprintPlan?.Cards == null || teamRoleNames.Count == 0)
+                return 0;
+
+            var before = request.SprintPlan.Cards.Count;
+            request.SprintPlan.Cards = request.SprintPlan.Cards
+                .Where(c => string.Equals(c.ListName, "User Stories", StringComparison.OrdinalIgnoreCase)
+                            || (!string.IsNullOrEmpty(c.RoleName) && teamRoleNames.Contains(c.RoleName)))
+                .ToList();
+            return before - request.SprintPlan.Cards.Count;
         }
 
         /// <summary>Returns true if the template has a list or any cards for the given sprint list name (e.g. "Sprint 2").</summary>
