@@ -2,6 +2,7 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using strAppersBackend.Data;
 using strAppersBackend.Models;
+using strAppersBackend.Services;
 
 namespace strAppersBackend.Controllers;
 
@@ -11,11 +12,15 @@ public class SkillInWebsiteController : ControllerBase
 {
     private readonly ApplicationDbContext _context;
     private readonly ILogger<SkillInWebsiteController> _logger;
+    private readonly ISmtpEmailService _email;
 
-    public SkillInWebsiteController(ApplicationDbContext context, ILogger<SkillInWebsiteController> logger)
+    private const string NotifyEmail = "guy@skill-in.com";
+
+    public SkillInWebsiteController(ApplicationDbContext context, ILogger<SkillInWebsiteController> logger, ISmtpEmailService email)
     {
         _context = context;
         _logger = logger;
+        _email = email;
     }
 
     /// <summary>
@@ -231,8 +236,26 @@ public class SkillInWebsiteController : ControllerBase
             _context.EarlyBirds.Add(earlyBird);
             await _context.SaveChangesAsync();
 
-            _logger.LogInformation("✅ [EARLY-BIRD-REGISTER] Successfully registered early bird with Id: {Id}, Type: {Type}, Email: {Email}", 
+            _logger.LogInformation("✅ [EARLY-BIRD-REGISTER] Successfully registered early bird with Id: {Id}, Type: {Type}, Email: {Email}",
                 earlyBird.Id, earlyBird.Type, earlyBird.Email);
+
+            _ = _email.SendPlainEmailAsync(
+                NotifyEmail,
+                $"[skill-in] New registration: {earlyBird.Type} — {earlyBird.Name}",
+                $"""
+                <html><body style='font-family:Arial,sans-serif;color:#333;'>
+                <h2 style='color:#2147aa;'>New Early Bird Registration</h2>
+                <table style='border-collapse:collapse;width:100%;max-width:500px;'>
+                  <tr><td style='padding:8px;font-weight:bold;width:120px;'>ID</td><td style='padding:8px;'>{earlyBird.Id}</td></tr>
+                  <tr style='background:#f5f5f5;'><td style='padding:8px;font-weight:bold;'>Type</td><td style='padding:8px;'>{earlyBird.Type}</td></tr>
+                  <tr><td style='padding:8px;font-weight:bold;'>Name</td><td style='padding:8px;'>{System.Net.WebUtility.HtmlEncode(earlyBird.Name)}</td></tr>
+                  <tr style='background:#f5f5f5;'><td style='padding:8px;font-weight:bold;'>Email</td><td style='padding:8px;'>{System.Net.WebUtility.HtmlEncode(earlyBird.Email)}</td></tr>
+                  <tr><td style='padding:8px;font-weight:bold;'>Org</td><td style='padding:8px;'>{System.Net.WebUtility.HtmlEncode(earlyBird.OrgName ?? "—")}</td></tr>
+                  <tr style='background:#f5f5f5;'><td style='padding:8px;font-weight:bold;'>Future Role</td><td style='padding:8px;'>{System.Net.WebUtility.HtmlEncode(earlyBird.FutureRole ?? "—")}</td></tr>
+                  <tr><td style='padding:8px;font-weight:bold;'>Registered</td><td style='padding:8px;'>{earlyBird.CreatedAt:yyyy-MM-dd HH:mm:ss} UTC</td></tr>
+                </table>
+                </body></html>
+                """);
 
             return Ok(new
             {
