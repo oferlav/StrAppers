@@ -627,10 +627,24 @@ public partial class MetricsController
         return trusted;
     }
 
-    private static string FormatAssessmentReviewContent(string metricName, GapAnalysisLlmResult dto)
+    /// <summary>Simple arithmetic mean of the (already-clamped 0-100) category scores, rounded to the nearest integer. Null when there are no named categories to average.</summary>
+    internal static int? ComputeFinalScore(List<GapAnalysisCategoryScore> categories)
+    {
+        var scores = categories
+            .Where(c => !string.IsNullOrWhiteSpace(c.Name))
+            .Select(c => Math.Clamp(c.Score, 0, 100))
+            .ToList();
+        return scores.Count > 0 ? (int)Math.Round(scores.Average()) : null;
+    }
+
+    internal static string FormatAssessmentReviewContent(string metricName, GapAnalysisLlmResult dto)
     {
         var sb = new StringBuilder();
-        sb.AppendLine($"## {metricName} Assessment");
+        var finalScore = ComputeFinalScore(dto.Categories);
+        sb.Append($"## {metricName} Assessment");
+        if (finalScore.HasValue)
+            sb.Append($" — **Final Score: {finalScore.Value}**");
+        sb.AppendLine();
         if (!string.IsNullOrWhiteSpace(dto.Narrative))
         {
             sb.AppendLine();

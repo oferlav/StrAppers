@@ -116,7 +116,7 @@ public class MetricsAssessmentEngineTests
             Narrative  = "Strong research overall.",
         };
 
-        var content = FormatReviewContent("Research Depth", dto);
+        var content = MetricsController.FormatAssessmentReviewContent("Research Depth", dto);
 
         Assert.Contains("## Research Depth Assessment", content);
     }
@@ -130,7 +130,7 @@ public class MetricsAssessmentEngineTests
             Narrative  = "Excellent primary-source usage.",
         };
 
-        var content = FormatReviewContent("Research Depth", dto);
+        var content = MetricsController.FormatAssessmentReviewContent("Research Depth", dto);
 
         Assert.Contains("Excellent primary-source usage.", content);
     }
@@ -148,7 +148,7 @@ public class MetricsAssessmentEngineTests
             Narrative = "Good work.",
         };
 
-        var content = FormatReviewContent("Research Depth", dto);
+        var content = MetricsController.FormatAssessmentReviewContent("Research Depth", dto);
 
         Assert.Contains("**Source quality** (75):", content);
         Assert.Contains("**Citation accuracy** (90):", content);
@@ -163,7 +163,7 @@ public class MetricsAssessmentEngineTests
             Narrative  = "",
         };
 
-        var content = FormatReviewContent("Test Metric", dto);
+        var content = MetricsController.FormatAssessmentReviewContent("Test Metric", dto);
 
         Assert.Contains("(100):", content); // clamped from 120
     }
@@ -181,10 +181,94 @@ public class MetricsAssessmentEngineTests
             Narrative = "",
         };
 
-        var content = FormatReviewContent("Test Metric", dto);
+        var content = MetricsController.FormatAssessmentReviewContent("Test Metric", dto);
 
         Assert.DoesNotContain("Should not appear.", content);
         Assert.Contains("**Valid** (60):", content);
+    }
+
+    // ── ComputeFinalScore / "Final Score" header ────────────────────────────────
+
+    [Fact]
+    public void ComputeFinalScore_AveragesClampedCategoryScores()
+    {
+        var categories = new List<GapAnalysisCategoryScore>
+        {
+            new() { Name = "A", Score = 80 },
+            new() { Name = "B", Score = 60 },
+        };
+
+        Assert.Equal(70, MetricsController.ComputeFinalScore(categories));
+    }
+
+    [Fact]
+    public void ComputeFinalScore_RoundsToNearestInteger()
+    {
+        var categories = new List<GapAnalysisCategoryScore>
+        {
+            new() { Name = "A", Score = 80 },
+            new() { Name = "B", Score = 65 },
+            new() { Name = "C", Score = 60 },
+        };
+        // (80+65+60)/3 = 68.33... → 68
+        Assert.Equal(68, MetricsController.ComputeFinalScore(categories));
+    }
+
+    [Fact]
+    public void ComputeFinalScore_ClampsOutOfRangeScoresBeforeAveraging()
+    {
+        var categories = new List<GapAnalysisCategoryScore>
+        {
+            new() { Name = "A", Score = 250 }, // clamped to 100
+            new() { Name = "B", Score = -50 }, // clamped to 0
+        };
+        Assert.Equal(50, MetricsController.ComputeFinalScore(categories));
+    }
+
+    [Fact]
+    public void ComputeFinalScore_IgnoresBlankNamedCategories()
+    {
+        var categories = new List<GapAnalysisCategoryScore>
+        {
+            new() { Name = "", Score = 0 },
+            new() { Name = "Valid", Score = 90 },
+        };
+        Assert.Equal(90, MetricsController.ComputeFinalScore(categories));
+    }
+
+    [Fact]
+    public void ComputeFinalScore_ReturnsNull_WhenNoCategories()
+    {
+        Assert.Null(MetricsController.ComputeFinalScore(new List<GapAnalysisCategoryScore>()));
+    }
+
+    [Fact]
+    public void FormatReview_HeaderIncludesFinalScore_NextToMetricName()
+    {
+        var dto = new GapAnalysisLlmResult
+        {
+            Categories =
+            [
+                new GapAnalysisCategoryScore { Name = "Clarity", Score = 80, Rationale = "Clear." },
+                new GapAnalysisCategoryScore { Name = "Completeness", Score = 60, Rationale = "Mostly complete." },
+            ],
+            Narrative = "Solid work overall.",
+        };
+
+        var content = MetricsController.FormatAssessmentReviewContent("Customer Requirements Fidelity", dto);
+
+        Assert.Contains("## Customer Requirements Fidelity Assessment — **Final Score: 70**", content);
+    }
+
+    [Fact]
+    public void FormatReview_HeaderOmitsFinalScore_WhenNoCategories()
+    {
+        var dto = new GapAnalysisLlmResult { Categories = new List<GapAnalysisCategoryScore>(), Narrative = "No evidence." };
+
+        var content = MetricsController.FormatAssessmentReviewContent("Test Metric", dto);
+
+        Assert.Contains("## Test Metric Assessment", content);
+        Assert.DoesNotContain("Final Score", content);
     }
 
     // ── BoardId validation ────────────────────────────────────────────────────
@@ -206,31 +290,6 @@ public class MetricsAssessmentEngineTests
         Assert.True(valid);
     }
 
-    // ── Helper (mirrors FormatAssessmentReviewContent in the controller) ──────
-
-    private static string FormatReviewContent(string metricName, GapAnalysisLlmResult dto)
-    {
-        var sb = new System.Text.StringBuilder();
-        sb.AppendLine($"## {metricName} Assessment");
-        if (!string.IsNullOrWhiteSpace(dto.Narrative))
-        {
-            sb.AppendLine();
-            sb.AppendLine(dto.Narrative.Trim());
-        }
-        if (dto.Categories.Count > 0)
-        {
-            sb.AppendLine();
-            sb.AppendLine("### Scores");
-            foreach (var c in dto.Categories)
-            {
-                if (string.IsNullOrWhiteSpace(c.Name)) continue;
-                sb.Append("- **").Append(c.Name.Trim())
-                  .Append("** (").Append(Math.Clamp(c.Score, 0, 100)).Append("): ")
-                  .AppendLine(string.IsNullOrWhiteSpace(c.Rationale) ? "(no rationale)" : c.Rationale.Trim());
-            }
-        }
-        return sb.ToString().Trim();
-    }
 }
 
 /// <summary>
