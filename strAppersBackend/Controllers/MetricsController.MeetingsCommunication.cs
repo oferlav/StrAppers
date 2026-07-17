@@ -349,7 +349,14 @@ public partial class MetricsController
         var sprintContextMd = await BuildMeetingsCommunicationContextAsync(
             boardId, board, request.SprintNumber, activeRole?.Role, student.RoleIndex, cancellationToken);
 
-        var systemPrompt = LoadMeetingsCommunicationSystemPrompt();
+        // Institute Skill rubric OVERRIDES the hardcoded prompt when set (see MetricsController.SkillRubricPrompts.cs).
+        var metricRow = await _context.Metrics.AsNoTracking()
+            .FirstOrDefaultAsync(m => m.Id == metricId, cancellationToken);
+        var systemPrompt = ResolveSystemPrompt(
+            metricRow?.Skill,
+            LoadMeetingsCommunicationSystemPrompt(),
+            metricRow?.AIExpertise,
+            "expert communication coach reviewing a student's performance in a team meeting");
         var userPrompt = new StringBuilder()
             .AppendLine("## MEETING TRANSCRIPT")
             .AppendLine($"Student being evaluated: **{studentDisplayName}**")
