@@ -96,6 +96,8 @@ public partial class MetricsController
             ? "professional academic skills assessment expert"
             : metric.AIExpertise.Trim();
 
+        var explicitRulesBlock = BuildExplicitRulesBlock(metric.ExplicitRules);
+
         // Layer 1 (rubric authority): the skill rubric lives in the system prompt, above the evidence.
         var systemPrompt = $$"""
             You are a {{expertise}}.
@@ -106,7 +108,7 @@ public partial class MetricsController
 
             === ASSESSMENT RUBRIC ===
             {{skillRubric}}
-            === END RUBRIC ===
+            === END RUBRIC ==={{explicitRulesBlock}}
 
             Scoring rules:
             - Return scores for exactly these categories and no others: {{string.Join(" | ", expectedCategories)}}
@@ -474,6 +476,26 @@ public partial class MetricsController
                 sb.AppendLine(Truncate(m.TranscriptVtt.Trim(), 6000));
             }
         }
+    }
+
+    /// <summary>
+    /// Formats <see cref="Metric.ExplicitRules"/> as a labeled block appended after the rubric in the
+    /// system prompt (see <see cref="RunAssessmentEngine"/>). Kept separate from <c>skillRubric</c> so
+    /// <see cref="ParseRubricCategories"/> never sees rules text as candidate scoring dimensions.
+    /// Returns an empty string when there are no explicit rules, so the prompt is unchanged for metrics
+    /// that don't use this field.
+    /// </summary>
+    internal static string BuildExplicitRulesBlock(string? explicitRules)
+    {
+        var trimmed = explicitRules?.Trim();
+        if (string.IsNullOrEmpty(trimmed))
+            return string.Empty;
+
+        return "\n\n" + $$"""
+            === EXPLICIT RULES ===
+            {{trimmed}}
+            === END EXPLICIT RULES ===
+            """;
     }
 
     /// <summary>

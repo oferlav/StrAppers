@@ -1788,6 +1788,9 @@ namespace strAppersBackend.Migrations
                         .HasMaxLength(100)
                         .HasColumnType("character varying(100)");
 
+                    b.Property<string>("ExplicitRules")
+                        .HasColumnType("text");
+
                     b.Property<int>("Influence")
                         .HasDefaultValue(3)
                         .HasColumnType("integer");

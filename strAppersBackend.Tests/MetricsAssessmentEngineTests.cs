@@ -758,3 +758,65 @@ public class TrelloCardCreationTimeTests
         Assert.False(ok);
     }
 }
+
+/// <summary>
+/// Tests for <see cref="MetricsController.BuildExplicitRulesBlock"/>: Metric.ExplicitRules must be
+/// appended after the rubric in the Assessment Engine's system prompt (see RunAssessmentEngine), and
+/// must never be visible to ParseRubricCategories as candidate scoring dimensions.
+/// </summary>
+public class ExplicitRulesBlockTests
+{
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("   \n  ")]
+    public void ReturnsEmptyString_WhenExplicitRulesIsBlank(string? explicitRules)
+    {
+        var result = MetricsController.BuildExplicitRulesBlock(explicitRules);
+        Assert.Equal(string.Empty, result);
+    }
+
+    [Fact]
+    public void EmbedsExplicitRulesText_Verbatim()
+    {
+        const string rules = "- Do not penalize a missing extraction as a quality gap.\n- Treat a merged PR as delivered work.";
+
+        var result = MetricsController.BuildExplicitRulesBlock(rules);
+
+        Assert.Contains(rules, result);
+        Assert.Contains("=== EXPLICIT RULES ===", result);
+        Assert.Contains("=== END EXPLICIT RULES ===", result);
+    }
+
+    [Fact]
+    public void TrimsExplicitRulesText()
+    {
+        var result = MetricsController.BuildExplicitRulesBlock("  Never penalize missing PRD extraction.  \n");
+
+        Assert.Contains("Never penalize missing PRD extraction.", result);
+        Assert.DoesNotContain("  Never penalize missing PRD extraction.  ", result);
+    }
+
+    [Fact]
+    public void Block_NeverParsedAsRubricCategory()
+    {
+        // RunAssessmentEngine calls ParseRubricCategories(skillRubric) BEFORE building the explicit
+        // rules block and concatenating it into the prompt — so even if explicit-rules text happens to
+        // contain a "Category:"-shaped line, it must never influence the parsed scoring dimensions.
+        const string skillRubric = "Category: Real Dimension — the only real one.";
+        const string explicitRules = "Category: Fake Dimension — this must not become a scored category.";
+
+        var categories = MetricsController.ParseRubricCategories(skillRubric);
+        MetricsController.BuildExplicitRulesBlock(explicitRules); // built separately, never fed to ParseRubricCategories
+
+        Assert.Single(categories);
+        Assert.Equal("Real Dimension", categories[0]);
+    }
+
+    [Fact]
+    public void StartsWithBlankLineSeparator_SoItDoesNotCollideWithEndRubricMarker()
+    {
+        var result = MetricsController.BuildExplicitRulesBlock("Some rule.");
+        Assert.StartsWith("\n\n=== EXPLICIT RULES ===", result);
+    }
+}

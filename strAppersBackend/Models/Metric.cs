@@ -28,6 +28,12 @@ public class Metric
     /// <summary>Full assessment rubric fed into the Data Assessment Engine prompt.</summary>
     public string? Skill { get; set; }
 
+    /// <summary>
+    /// Explicit, non-scored rules for the grading AI (edge cases, interpretation guidance) — appended
+    /// after the rubric in the Data Assessment Engine prompt.
+    /// </summary>
+    public string? ExplicitRules { get; set; }
+
     /// <summary>Expert persona for the LLM system prompt, e.g. "senior software engineering lead".</summary>
     [MaxLength(500)]
     public string? AIExpertise { get; set; }
