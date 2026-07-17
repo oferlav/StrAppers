@@ -117,6 +117,7 @@ public partial class MetricsController
             - Use the Sprint Context in the user message as your evidence — ground every score in verbatim evidence from it, unless the rubric instructs otherwise.
             - Sections marked _(squad-level)_ cover the whole team; only attribute activity to this student if they are explicitly named or identifiable.
             - Do not invent activity. Sections marked _(none for this sprint)_ have no data; do not speculate about them.
+            - When a resource under Resources & Figma shows "document content extracted on server", that text is the actual content of the uploaded document (e.g. a PRD, spec, or schema) — assess its substance directly rather than treating it as an unverified link. When extraction failed, that is a server-side limitation, not evidence of a missing or low-quality deliverable — do not lower the score solely because content could not be extracted.
             - Output valid JSON only, no markdown fences:
               {"categories":[{"name":"string","score":0,"rationale":"string"}],"narrative":"markdown"}
             - narrative: brief markdown summary of strengths, gaps, and 1–3 concrete follow-up suggestions.
@@ -357,7 +358,7 @@ public partial class MetricsController
         sb.AppendLine();
     }
 
-    private async Task AppendAssessmentResourcesAsync(StringBuilder sb, string boardId, int studentId, int sprintNumber, CancellationToken ct)
+    internal async Task AppendAssessmentResourcesAsync(StringBuilder sb, string boardId, int studentId, int sprintNumber, CancellationToken ct)
     {
         var resources = await _context.Resources.AsNoTracking()
             .Where(r => r.BoardId == boardId && r.StudentId == studentId
@@ -368,7 +369,30 @@ public partial class MetricsController
         sb.AppendLine("### Resources & Figma");
         if (resources.Count == 0) { sb.AppendLine("_(none for this sprint)_"); sb.AppendLine(); return; }
         foreach (var r in resources)
-            sb.AppendLine($"- {(r.IsFigma ? "[Figma]" : "[Resource]")} **{r.Name}**: {r.Url}");
+        {
+            if (r.IsFigma || LooksLikeImageUrl(r.Url))
+            {
+                sb.AppendLine($"- {(r.IsFigma ? "[Figma]" : "[Resource]")} **{r.Name}**: {r.Url}");
+                continue;
+            }
+
+            // Same extraction as GapAnalysis (TryExtractResourceDocumentTextAsync) — the model was
+            // previously shown only the URL for non-image resources, so it could never verify a
+            // deliverable's actual content (e.g. an uploaded PRD) even when UseResources was enabled.
+            var extracted = await TryExtractResourceDocumentTextAsync(r.Url, r.Name, ct);
+            if (extracted != null)
+            {
+                sb.AppendLine($"- [Resource] **{r.Name}**: {r.Url} (document content extracted on server — see below; score its actual content, not just its presence)");
+                sb.AppendLine($"  Extracted content of \"{r.Name}\":");
+                sb.AppendLine("  ```");
+                sb.AppendLine(extracted);
+                sb.AppendLine("  ```");
+            }
+            else
+            {
+                sb.AppendLine($"- [Resource] **{r.Name}**: {r.Url} (non-image — URL confirms storage; content could not be extracted for review, e.g. unsupported file type or empty/scanned document — do not penalise the student for a server-side extraction limitation)");
+            }
+        }
         sb.AppendLine();
     }
 
