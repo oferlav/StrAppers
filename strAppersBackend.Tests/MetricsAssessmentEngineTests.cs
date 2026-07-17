@@ -698,6 +698,115 @@ public class AssessmentCategoryNormalizationTests
 }
 
 /// <summary>
+/// Tests for the fix that lets a bold-bullet-format rubric (e.g. "**Communication Clarity (0-100)**",
+/// which ParseRubricCategories does not match) produce multiple scored categories through the generic
+/// Data Assessment Engine — same policy CustomerEngagement already uses for its Skill-rubric override —
+/// instead of collapsing to a single metric-name category.
+/// </summary>
+public class AssessmentCategoryPolicyTests
+{
+    private static GapAnalysisCategoryScore Cat(string name, int score, string rationale = "evidence") =>
+        new() { Name = name, Score = score, Rationale = rationale };
+
+    // ── BuildCategoryScoringInstruction ─────────────────────────────────────────
+
+    [Fact]
+    public void ScoringInstruction_WithExplicitCategories_ListsThemAndRequiresVerbatimNames()
+    {
+        var result = MetricsController.BuildCategoryScoringInstruction(new List<string> { "Initiative", "Communication" });
+
+        Assert.Contains("Return scores for exactly these categories and no others: Initiative | Communication", result);
+        Assert.Contains("Use the category names verbatim as given above.", result);
+    }
+
+    [Fact]
+    public void ScoringInstruction_WithNoExplicitCategories_LetsModelNameItsOwn()
+    {
+        var result = MetricsController.BuildCategoryScoringInstruction(new List<string>());
+
+        Assert.Contains("Name your output categories after the scoring dimensions defined in the rubric above.", result);
+        Assert.DoesNotContain("Return scores for exactly these categories", result);
+    }
+
+    // ── ApplyAssessmentCategoryPolicy ────────────────────────────────────────────
+
+    [Fact]
+    public void Policy_WithExplicitCategories_DelegatesToNormalize_ForcesFixedList()
+    {
+        var returned = new List<GapAnalysisCategoryScore> { Cat("Initiative", 70), Cat("Invented Category", 30) };
+
+        var result = MetricsController.ApplyAssessmentCategoryPolicy(returned, new List<string> { "Initiative" }, "Some Metric");
+
+        Assert.Single(result);
+        Assert.Equal("Initiative", result[0].Name);
+    }
+
+    [Fact]
+    public void Policy_WithNoExplicitCategories_TrustsAllReturnedCategories()
+    {
+        // This is the bug fix: a bold-bullet rubric with 4 dimensions must yield 4 categories,
+        // not collapse into one metric-name category the way it did before this fix.
+        var returned = new List<GapAnalysisCategoryScore>
+        {
+            Cat("Clarity of Requirements", 80),
+            Cat("Completeness of Requirements", 65),
+            Cat("Alignment with Customer Needs", 90),
+            Cat("Traceability of Requirements", 40),
+            Cat("Prioritization of Requirements", 55),
+        };
+
+        var result = MetricsController.ApplyAssessmentCategoryPolicy(returned, new List<string>(), "Customer Requirements Fidelity");
+
+        Assert.Equal(5, result.Count);
+        Assert.Contains(result, c => c.Name == "Clarity of Requirements" && c.Score == 80);
+        Assert.Contains(result, c => c.Name == "Prioritization of Requirements" && c.Score == 55);
+    }
+
+    [Fact]
+    public void Policy_WithNoExplicitCategories_DropsBlankNames()
+    {
+        var returned = new List<GapAnalysisCategoryScore> { Cat("", 50), Cat("Valid", 60) };
+
+        var result = MetricsController.ApplyAssessmentCategoryPolicy(returned, new List<string>(), "Some Metric");
+
+        Assert.Single(result);
+        Assert.Equal("Valid", result[0].Name);
+    }
+
+    [Fact]
+    public void Policy_WithNoExplicitCategories_ClampsScores()
+    {
+        var returned = new List<GapAnalysisCategoryScore> { Cat("Depth", 250), Cat("Breadth", -10) };
+
+        var result = MetricsController.ApplyAssessmentCategoryPolicy(returned, new List<string>(), "Some Metric");
+
+        Assert.Equal(100, result.Single(c => c.Name == "Depth").Score);
+        Assert.Equal(0, result.Single(c => c.Name == "Breadth").Score);
+    }
+
+    [Fact]
+    public void Policy_WithNoExplicitCategories_FallsBackToMetricName_WhenModelReturnsNothing()
+    {
+        var result = MetricsController.ApplyAssessmentCategoryPolicy(
+            new List<GapAnalysisCategoryScore>(), new List<string>(), "Customer Requirements Fidelity");
+
+        Assert.Single(result);
+        Assert.Equal("Customer Requirements Fidelity", result[0].Name);
+        Assert.Equal(0, result[0].Score);
+    }
+
+    [Fact]
+    public void Policy_WithNoExplicitCategories_TrimsCategoryNames()
+    {
+        var returned = new List<GapAnalysisCategoryScore> { Cat("  Padded Name  ", 50) };
+
+        var result = MetricsController.ApplyAssessmentCategoryPolicy(returned, new List<string>(), "Some Metric");
+
+        Assert.Equal("Padded Name", result[0].Name);
+    }
+}
+
+/// <summary>
 /// Core metrics (hardcoded BE logic, routed by name slug) must be protected from deletion,
 /// and their display names must map onto the protected slug set.
 /// </summary>

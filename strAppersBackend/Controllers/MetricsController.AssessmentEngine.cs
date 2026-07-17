@@ -82,21 +82,22 @@ public partial class MetricsController
             cancellationToken);
 
         // Layer 2 (deterministic categories): the skill definition is the authority. If it defines
-        // "Category:" lines those become the score dimensions; otherwise the metric name is the single
-        // dimension. Blank skill falls back to a generic rubric built from the metric name.
+        // "Category:" lines those become the score dimensions (deterministic, code-enforced). Otherwise
+        // — e.g. a rubric written in bold-bullet format — the model names its own categories after the
+        // rubric's dimensions, same policy as CustomerEngagement's Skill-rubric override, so a rubric
+        // with N dimensions produces N scored categories instead of collapsing to one.
         var skillRubric = metric.Skill?.Trim() ?? string.Empty;
         if (string.IsNullOrEmpty(skillRubric))
             skillRubric = $"Assess the student's overall \"{metric.Name}\" for this sprint based on the available evidence.";
 
-        var expectedCategories = ParseRubricCategories(skillRubric);
-        if (expectedCategories.Count == 0)
-            expectedCategories.Add(metric.Name.Trim());
+        var parsedCategories = ParseRubricCategories(skillRubric);
 
         var expertise = string.IsNullOrWhiteSpace(metric.AIExpertise)
             ? "professional academic skills assessment expert"
             : metric.AIExpertise.Trim();
 
         var explicitRulesBlock = BuildExplicitRulesBlock(metric.ExplicitRules);
+        var categoryScoringInstruction = BuildCategoryScoringInstruction(parsedCategories);
 
         // Layer 1 (rubric authority): the skill rubric lives in the system prompt, above the evidence.
         var systemPrompt = $$"""
@@ -111,8 +112,7 @@ public partial class MetricsController
             === END RUBRIC ==={{explicitRulesBlock}}
 
             Scoring rules:
-            - Return scores for exactly these categories and no others: {{string.Join(" | ", expectedCategories)}}
-            - Use the category names verbatim as given above.
+            {{categoryScoringInstruction}}
             - Scores are integers on a 0–100 scale. Calibrate to these bands: 0–19 = no meaningful evidence,
               20–39 = minimal, 40–59 = partial, 60–79 = good, 80–100 = excellent. Use the full range —
               a weak-but-present performance is ~20–40, not a single-digit score.
@@ -180,9 +180,9 @@ public partial class MetricsController
                 });
             }
 
-            // Layer 3 (code enforcement): the report only ever shows the expected category names,
-            // regardless of what the model returned.
-            dto.Categories = NormalizeAssessmentCategories(dto.Categories, expectedCategories);
+            // Layer 3 (code enforcement) — only forced to a fixed category list when the rubric
+            // actually defines one via "Category:" lines; see ApplyAssessmentCategoryPolicy.
+            dto.Categories = ApplyAssessmentCategoryPolicy(dto.Categories, parsedCategories, metric.Name);
 
             var rows = dto.Categories
                 .Select(c => (c.Name, Math.Clamp(c.Score, 0, 100)))
@@ -576,6 +576,55 @@ public partial class MetricsController
             });
         }
         return result;
+    }
+
+    /// <summary>
+    /// Scoring-rules instruction for the system prompt: when the rubric defines explicit "Category:"
+    /// lines, the model is told to use exactly those names (deterministic categories). Otherwise —
+    /// e.g. a rubric written in bold-bullet format like "**Communication Clarity (0-100)**", which
+    /// ParseRubricCategories does not match — the model is told to name its own categories after the
+    /// rubric's dimensions, same policy as CustomerEngagement's Skill-rubric override.
+    /// </summary>
+    internal static string BuildCategoryScoringInstruction(List<string> parsedCategories)
+    {
+        return parsedCategories.Count > 0
+            ? $"- Return scores for exactly these categories and no others: {string.Join(" | ", parsedCategories)}\n            - Use the category names verbatim as given above."
+            : "- Name your output categories after the scoring dimensions defined in the rubric above.";
+    }
+
+    /// <summary>
+    /// Layer 3 (category enforcement) — only forces the LLM's categories to the parsed "Category:" list
+    /// when the rubric actually defines that format (<see cref="NormalizeAssessmentCategories"/>).
+    /// Otherwise trusts whatever category names the model returned (matching
+    /// <see cref="BuildCategoryScoringInstruction"/>'s free-form instruction in that case) — just
+    /// clamping scores and dropping blank names, with a single metric-name fallback category if the
+    /// model returned nothing at all.
+    /// </summary>
+    internal static List<GapAnalysisCategoryScore> ApplyAssessmentCategoryPolicy(
+        List<GapAnalysisCategoryScore> returned, List<string> parsedCategories, string metricName)
+    {
+        if (parsedCategories.Count > 0)
+            return NormalizeAssessmentCategories(returned, parsedCategories);
+
+        var trusted = returned
+            .Where(c => !string.IsNullOrWhiteSpace(c.Name))
+            .Select(c => new GapAnalysisCategoryScore
+            {
+                Name = c.Name.Trim(),
+                Score = Math.Clamp(c.Score, 0, 100),
+                Rationale = c.Rationale,
+            })
+            .ToList();
+
+        if (trusted.Count == 0)
+            trusted.Add(new GapAnalysisCategoryScore
+            {
+                Name = metricName.Trim(),
+                Score = 0,
+                Rationale = "(no score returned)",
+            });
+
+        return trusted;
     }
 
     private static string FormatAssessmentReviewContent(string metricName, GapAnalysisLlmResult dto)
