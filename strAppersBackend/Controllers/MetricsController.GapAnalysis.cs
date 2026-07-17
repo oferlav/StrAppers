@@ -50,6 +50,13 @@ public partial class MetricsController
         var boardId = request.BoardId.Trim();
         var metricId = request.MetricIdOverride ?? GapAnalysisMetricId;
 
+        // Institute Skill rubric is ADDED to (not a replacement for) the hardcoded prompt's domain
+        // rules — see MetricsController.SkillRubricPrompts.cs for why GapAnalysis differs from
+        // CustomerEngagement/MeetingsCommunication, which fully override on a Skill rubric.
+        var metricRow = await _context.Metrics.AsNoTracking()
+            .FirstOrDefaultAsync(m => m.Id == metricId, cancellationToken);
+        var skillRubric = metricRow?.Skill;
+
         var student = await _context.Students
             .AsNoTracking()
             .Include(s => s.StudentRoles)
@@ -138,7 +145,7 @@ public partial class MetricsController
                         var singleFsPrompts = await BuildGapAnalysisPromptsForTrackAsync(
                             boardId, board, student.Id, request.SprintNumber, fsLabelsTest[0], roleDesc, roleName,
                             isBackend: backendFirstFsTest, includeCustomerContext, cancellationToken,
-                            includeBothRepos: gaCheckBackendTest && gaCheckFrontendTest);
+                            includeBothRepos: gaCheckBackendTest && gaCheckFrontendTest, skillRubric: skillRubric);
                         return Ok(new
                         {
                             success = true,
@@ -154,7 +161,8 @@ public partial class MetricsController
                     if (gaCheckBackendTest && !gaCheckFrontendTest)
                     {
                         var beOnlyPrompts = await BuildGapAnalysisPromptsForTrackAsync(
-                            boardId, board, student.Id, request.SprintNumber, "Backend Developer", $"{roleDesc} (backend repository)", roleName, isBackend: true, includeCustomerContext, cancellationToken);
+                            boardId, board, student.Id, request.SprintNumber, "Backend Developer", $"{roleDesc} (backend repository)", roleName, isBackend: true, includeCustomerContext, cancellationToken,
+                            skillRubric: skillRubric);
                         return Ok(new
                         {
                             success = true,
@@ -169,7 +177,8 @@ public partial class MetricsController
                     if (!gaCheckBackendTest && gaCheckFrontendTest)
                     {
                         var feOnlyPrompts = await BuildGapAnalysisPromptsForTrackAsync(
-                            boardId, board, student.Id, request.SprintNumber, "Frontend Developer", $"{roleDesc} (frontend repository)", roleName, isBackend: false, includeCustomerContext, cancellationToken);
+                            boardId, board, student.Id, request.SprintNumber, "Frontend Developer", $"{roleDesc} (frontend repository)", roleName, isBackend: false, includeCustomerContext, cancellationToken,
+                            skillRubric: skillRubric);
                         return Ok(new
                         {
                             success = true,
@@ -182,9 +191,11 @@ public partial class MetricsController
                         });
                     }
                     var bePrompts = await BuildGapAnalysisPromptsForTrackAsync(
-                        boardId, board, student.Id, request.SprintNumber, "Backend Developer", $"{roleDesc} (backend repository)", roleName, isBackend: true, includeCustomerContext, cancellationToken);
+                        boardId, board, student.Id, request.SprintNumber, "Backend Developer", $"{roleDesc} (backend repository)", roleName, isBackend: true, includeCustomerContext, cancellationToken,
+                        skillRubric: skillRubric);
                     var fePrompts = await BuildGapAnalysisPromptsForTrackAsync(
-                        boardId, board, student.Id, request.SprintNumber, "Frontend Developer", $"{roleDesc} (frontend repository)", roleName, isBackend: false, includeCustomerContext, cancellationToken);
+                        boardId, board, student.Id, request.SprintNumber, "Frontend Developer", $"{roleDesc} (frontend repository)", roleName, isBackend: false, includeCustomerContext, cancellationToken,
+                        skillRubric: skillRubric);
                     return Ok(new
                     {
                         success = true,
@@ -214,7 +225,7 @@ public partial class MetricsController
                 var singlePrompts = await BuildGapAnalysisPromptsForTrackAsync(
                     boardId, board, student.Id, request.SprintNumber, trelloLabelTest, roleDesc, roleName,
                     isBackend: backendFirstTest, includeCustomerContext,
-                    cancellationToken);
+                    cancellationToken, skillRubric: skillRubric);
                 return Ok(new
                 {
                     success = true,
@@ -263,7 +274,7 @@ public partial class MetricsController
                     var fsTrackResult = await RunGapAnalysisForTrackAsync(
                         boardId, board, student.Id, request.SprintNumber, fsLabels[0], roleDesc, roleName,
                         isBackend: backendFirstFs, includeCustomerContext, cancellationToken,
-                        includeBothRepos: gaCheckBackend && gaCheckFrontend);
+                        includeBothRepos: gaCheckBackend && gaCheckFrontend, skillRubric: skillRubric);
 
                     if (!fsTrackResult.ParsedOk)
                     {
@@ -294,7 +305,8 @@ public partial class MetricsController
                 if (gaCheckBackend && !gaCheckFrontend)
                 {
                     var beSingle = await RunGapAnalysisForTrackAsync(
-                        boardId, board, student.Id, request.SprintNumber, "Backend Developer", $"{roleDesc} (backend repository)", roleName, isBackend: true, includeCustomerContext, cancellationToken);
+                        boardId, board, student.Id, request.SprintNumber, "Backend Developer", $"{roleDesc} (backend repository)", roleName, isBackend: true, includeCustomerContext, cancellationToken,
+                        skillRubric: skillRubric);
                     if (!beSingle.ParsedOk)
                         return UnprocessableEntity(new { success = false, message = "Gap analysis did not return valid JSON for the backend track. Nothing was saved to CacheMetrics.", preview = Truncate(beSingle.Narrative, 4000) });
                     var beSingleGraph = GapAnalysisBarChartRenderer.ToBase64Png(GapAnalysisBarChartRenderer.RenderSingleChart(beSingle.ChartRows, "Backend"));
@@ -305,7 +317,8 @@ public partial class MetricsController
                 if (!gaCheckBackend && gaCheckFrontend)
                 {
                     var feSingle = await RunGapAnalysisForTrackAsync(
-                        boardId, board, student.Id, request.SprintNumber, "Frontend Developer", $"{roleDesc} (frontend repository)", roleName, isBackend: false, includeCustomerContext, cancellationToken);
+                        boardId, board, student.Id, request.SprintNumber, "Frontend Developer", $"{roleDesc} (frontend repository)", roleName, isBackend: false, includeCustomerContext, cancellationToken,
+                        skillRubric: skillRubric);
                     if (!feSingle.ParsedOk)
                         return UnprocessableEntity(new { success = false, message = "Gap analysis did not return valid JSON for the frontend track. Nothing was saved to CacheMetrics.", preview = Truncate(feSingle.Narrative, 4000) });
                     var feSingleGraph = GapAnalysisBarChartRenderer.ToBase64Png(GapAnalysisBarChartRenderer.RenderSingleChart(feSingle.ChartRows, "Frontend"));
@@ -315,7 +328,8 @@ public partial class MetricsController
 
                 // Both tracks — B2C or no/ambiguous CardId (existing behavior)
                 var be = await RunGapAnalysisForTrackAsync(
-                    boardId, board, student.Id, request.SprintNumber, "Backend Developer", $"{roleDesc} (backend repository)", roleName, isBackend: true, includeCustomerContext, cancellationToken);
+                    boardId, board, student.Id, request.SprintNumber, "Backend Developer", $"{roleDesc} (backend repository)", roleName, isBackend: true, includeCustomerContext, cancellationToken,
+                    skillRubric: skillRubric);
 
                 if (!be.ParsedOk)
                 {
@@ -333,7 +347,8 @@ public partial class MetricsController
                 await UpsertCacheMetricsAsync(boardId, student.Id, request.SprintNumber, metricId, beSection, beGraphB64, cancellationToken);
 
                 var fe = await RunGapAnalysisForTrackAsync(
-                    boardId, board, student.Id, request.SprintNumber, "Frontend Developer", $"{roleDesc} (frontend repository)", roleName, isBackend: false, includeCustomerContext, cancellationToken);
+                    boardId, board, student.Id, request.SprintNumber, "Frontend Developer", $"{roleDesc} (frontend repository)", roleName, isBackend: false, includeCustomerContext, cancellationToken,
+                    skillRubric: skillRubric);
 
                 if (!fe.ParsedOk)
                 {
@@ -378,7 +393,7 @@ public partial class MetricsController
             var single = await RunGapAnalysisForTrackAsync(
                 boardId, board, student.Id, request.SprintNumber, trelloLabel, roleDesc, roleName,
                 isBackend: backendFirst, includeCustomerContext,
-                cancellationToken);
+                cancellationToken, skillRubric: skillRubric);
 
             if (!single.ParsedOk)
             {
@@ -454,7 +469,8 @@ public partial class MetricsController
         bool isBackend,
         bool includeCustomerContext,
         CancellationToken cancellationToken,
-        bool includeBothRepos = false)
+        bool includeBothRepos = false,
+        string? skillRubric = null)
     {
         var contextTrace = new List<string>();
         var contextMd = await BuildGapAnalysisContextAsync(boardId, board, studentId, sprintNumber, trelloRoleLabel, originalRoleName, includeCustomerContext, cancellationToken, contextTrace);
@@ -462,6 +478,7 @@ public partial class MetricsController
 
         var systemTemplate = LoadGapAnalysisSystemPrompt();
         var systemPrompt = systemTemplate.Replace("{{ROLE_DESCRIPTION}}", expertRoleDescription, StringComparison.Ordinal);
+        systemPrompt = AppendInstituteSkillRubric(systemPrompt, skillRubric);
 
         var userPrompt = new StringBuilder()
             .AppendLine("## CONTEXT (requirements / sprint intent)")
@@ -493,10 +510,12 @@ public partial class MetricsController
         bool isBackend,
         bool includeCustomerContext,
         CancellationToken cancellationToken,
-        bool includeBothRepos = false)
+        bool includeBothRepos = false,
+        string? skillRubric = null)
     {
         var prompts = await BuildGapAnalysisPromptsForTrackAsync(
-            boardId, board, studentId, sprintNumber, trelloRoleLabel, expertRoleDescription, originalRoleName, isBackend, includeCustomerContext, cancellationToken, includeBothRepos);
+            boardId, board, studentId, sprintNumber, trelloRoleLabel, expertRoleDescription, originalRoleName, isBackend, includeCustomerContext, cancellationToken, includeBothRepos,
+            skillRubric: skillRubric);
         var systemPrompt = prompts.SystemPrompt;
         var userPrompt = prompts.UserPrompt;
 

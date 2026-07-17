@@ -114,7 +114,14 @@ public partial class MetricsController
         var contextMd = await BuildCustomerEngagementContextMarkdownAsync(
             boardId, board, request.StudentId, request.SprintNumber, activeRole?.Role, student.RoleIndex, cancellationToken);
 
-        var systemPrompt = LoadCustomerEngagementSystemPrompt();
+        // Institute Skill rubric OVERRIDES the hardcoded prompt when set (see MetricsController.SkillRubricPrompts.cs).
+        var metricRow = await _context.Metrics.AsNoTracking()
+            .FirstOrDefaultAsync(m => m.Id == metricId, cancellationToken);
+        var systemPrompt = ResolveSystemPrompt(
+            metricRow?.Skill,
+            LoadCustomerEngagementSystemPrompt(),
+            metricRow?.AIExpertise,
+            "expert reviewer of professional communication between a student and the AI Customer");
         var userPromptText = new StringBuilder()
             .AppendLine("## CONTEXT (customer narrative, AI Customer chat, and optional module for this sprint)")
             .AppendLine(contextMd)
