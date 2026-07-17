@@ -116,6 +116,12 @@ public class ApplicationDbContext : DbContext
             entity.Property(e => e.Coupon).HasMaxLength(100);
             entity.Property(e => e.SingleQuest).HasDefaultValue(true);
 
+            entity.HasIndex(e => e.AssessmentEngineAIModelId);
+            entity.HasOne(e => e.AssessmentEngineAIModel)
+                .WithMany()
+                .HasForeignKey(e => e.AssessmentEngineAIModelId)
+                .OnDelete(DeleteBehavior.SetNull);
+
             entity.HasData(
                 new Institute
                 {

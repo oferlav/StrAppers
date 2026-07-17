@@ -165,15 +165,7 @@ public partial class MetricsController
 
         try
         {
-            var modelName = _configuration["OpenAI:CheapModel"] ?? "gpt-4o-mini";
-            var aiModel = new AIModel
-            {
-                Name               = modelName,
-                Provider           = "OpenAI",
-                BaseUrl            = _configuration["OpenAI:BaseUrl"] ?? "https://api.openai.com/v1",
-                MaxTokens          = 16384,
-                DefaultTemperature = 0.2f,
-            };
+            var aiModel = await ResolveAssessmentEngineModelAsync(student.InstituteId, cancellationToken);
 
             var (llmText, inputTokens, outputTokens) = await _chatCompletionService.GetChatCompletionAsync(
                 aiModel, systemPrompt, userPrompt, null);
@@ -211,7 +203,7 @@ public partial class MetricsController
                 metricId   = request.MetricId,
                 reviewContent,
                 graphBase64,
-                model      = modelName,
+                model      = aiModel.Name,
                 inputTokens,
                 outputTokens,
             });
@@ -476,6 +468,39 @@ public partial class MetricsController
                 sb.AppendLine(Truncate(m.TranscriptVtt.Trim(), 6000));
             }
         }
+    }
+
+    /// <summary>
+    /// Resolves the LLM used by <see cref="RunAssessmentEngine"/>: the institute's
+    /// <see cref="Institute.AssessmentEngineAIModelId"/> selection when set and still an active
+    /// <see cref="AIModel"/> row, otherwise the same OpenAI:CheapModel config default used before this
+    /// setting existed. MaxTokens/DefaultTemperature always stay at the engine's own tuning (16384 /
+    /// 0.2), regardless of what the selected row itself stores, so a catalog row with a smaller or null
+    /// MaxTokens can never truncate the engine's required JSON output.
+    /// </summary>
+    internal async Task<AIModel> ResolveAssessmentEngineModelAsync(int? instituteId, CancellationToken cancellationToken)
+    {
+        AIModel? selected = null;
+        if (instituteId.HasValue)
+        {
+            var modelId = await _context.Institutes.AsNoTracking()
+                .Where(i => i.Id == instituteId.Value)
+                .Select(i => i.AssessmentEngineAIModelId)
+                .FirstOrDefaultAsync(cancellationToken);
+            if (modelId.HasValue)
+                selected = await _context.AIModels.AsNoTracking()
+                    .FirstOrDefaultAsync(m => m.Id == modelId.Value && m.IsActive, cancellationToken);
+        }
+
+        return new AIModel
+        {
+            Name               = selected?.Name ?? _configuration["OpenAI:CheapModel"] ?? "gpt-4o-mini",
+            Provider           = selected?.Provider ?? "OpenAI",
+            BaseUrl            = selected?.BaseUrl ?? _configuration["OpenAI:BaseUrl"] ?? "https://api.openai.com/v1",
+            ApiVersion         = selected?.ApiVersion,
+            MaxTokens          = 16384,
+            DefaultTemperature = 0.2,
+        };
     }
 
     /// <summary>
