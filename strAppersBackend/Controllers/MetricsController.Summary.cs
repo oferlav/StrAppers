@@ -267,8 +267,8 @@ public partial class MetricsController
             Your task: write one consolidated COURSE SUMMARY of a single student's performance across the whole course, based EXCLUSIVELY on the per-sprint summaries provided in the user message. Those summaries are your only source of truth — do not use outside knowledge, do not invent activity, evidence, or scores they do not support.
 
             Rules:
-            - Return one categories[] entry PER SPRINT, named exactly "Sprint N" (matching the section headers), with a 0-100 score reflecting the student's overall performance in that sprint according to its summary (use its Final Score when stated). Together the categories show the student's progression across the course.
-            - narrative: a concise markdown report of the whole course — the student's trajectory (improving, declining, steady), enduring strengths, recurring gaps, and an overall closing evaluation suitable for sharing with the student.
+            - Return one categories[] entry PER METRIC that appears in the sprint summaries' Scores sections, named exactly after that metric, with a 0-100 course-level score for the student's performance in that metric across ALL sprints. Derive it from that metric's per-sprint scores — weight a clear improving or declining trend rather than blindly averaging. Each rationale must note the metric's trajectory across the sprints.
+            - narrative: a concise markdown report of the whole course — the student's trajectory (improving, declining, steady), enduring strengths, recurring gaps, and an overall closing evaluation suitable for sharing with the student. Include the per-sprint overall scores in the narrative (e.g. "Sprint 1: 60 → Sprint 2: 75") so the progression stays visible.
             - Output valid JSON only, no markdown fences:
               {"categories":[{"name":"string","score":0,"rationale":"string"}],"narrative":"markdown"}
             """;

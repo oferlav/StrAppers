@@ -74,14 +74,17 @@ public class SummaryAssessmentTests
     // ── Course Summary prompts ───────────────────────────────────────────────────
 
     [Fact]
-    public void CourseSummarySystemPrompt_RestrictsToProvidedDataOnly_AndAsksPerSprintCategories()
+    public void CourseSummarySystemPrompt_RestrictsToProvidedDataOnly_AndAsksPerMetricCategories()
     {
         var prompt = MetricsController.BuildCourseSummarySystemPrompt();
 
         Assert.Contains("EXCLUSIVELY", prompt);
-        Assert.Contains("PER SPRINT", prompt);
-        Assert.Contains("\"Sprint N\"", prompt);
-        Assert.Contains("progression", prompt);
+        // Categories (→ ### Scores + chart) are per REQUIRED METRIC across the course — the
+        // per-sprint progression lives in the narrative instead.
+        Assert.Contains("PER METRIC", prompt);
+        Assert.Contains("named exactly after that metric", prompt);
+        Assert.Contains("per-sprint overall scores in the narrative", prompt);
+        Assert.Contains("trajectory", prompt);
     }
 
     [Fact]
