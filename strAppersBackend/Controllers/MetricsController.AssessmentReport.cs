@@ -1,5 +1,6 @@
 using System.Text.Json.Serialization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.Mvc.Infrastructure;
 using Microsoft.EntityFrameworkCore;
 using strAppersBackend.Models;
 
@@ -364,32 +365,52 @@ public partial class MetricsController
         {
             try
             {
+                IActionResult? result;
                 switch (ToSlugKey(metric.Name))
                 {
                     case "adherence":
-                        await Adherence(new AdherenceRequest { BoardId = boardId, StudentId = request.StudentId, SprintNumber = request.SprintNumber, MetricIdOverride = metric.Id }, cancellationToken);
+                        result = (await Adherence(new AdherenceRequest { BoardId = boardId, StudentId = request.StudentId, SprintNumber = request.SprintNumber, MetricIdOverride = metric.Id }, cancellationToken)).Result;
                         break;
                     case "gapanalysis":
-                        await GapAnalysis(new GapAnalysisRequest { BoardId = boardId, StudentId = request.StudentId, SprintNumber = request.SprintNumber, MetricIdOverride = metric.Id }, cancellationToken);
+                        result = (await GapAnalysis(new GapAnalysisRequest { BoardId = boardId, StudentId = request.StudentId, SprintNumber = request.SprintNumber, MetricIdOverride = metric.Id }, cancellationToken)).Result;
                         break;
                     case "attendance":
-                        await Attendance(boardId, request.SprintNumber, request.StudentId, cancellationToken, metricIdOverride: metric.Id);
+                        result = (await Attendance(boardId, request.SprintNumber, request.StudentId, cancellationToken, metricIdOverride: metric.Id)).Result;
                         break;
                     case "customerengagement":
-                        await CustomerEngagement(new CustomerEngagementRequest { BoardId = boardId, StudentId = request.StudentId, SprintNumber = request.SprintNumber, MetricIdOverride = metric.Id }, cancellationToken);
+                        result = (await CustomerEngagement(new CustomerEngagementRequest { BoardId = boardId, StudentId = request.StudentId, SprintNumber = request.SprintNumber, MetricIdOverride = metric.Id }, cancellationToken)).Result;
                         break;
                     case "communication":
-                        await MeetingsCommunication(new MeetingsCommunicationRequest { BoardId = boardId, StudentId = request.StudentId, SprintNumber = request.SprintNumber, MetricIdOverride = metric.Id }, cancellationToken);
+                        result = (await MeetingsCommunication(new MeetingsCommunicationRequest { BoardId = boardId, StudentId = request.StudentId, SprintNumber = request.SprintNumber, MetricIdOverride = metric.Id }, cancellationToken)).Result;
                         break;
                     default:
-                        await RunAssessmentEngine(new AssessmentEngineRequest(
+                        result = await RunAssessmentEngine(new AssessmentEngineRequest(
                             MetricId: metric.Id,
                             BoardId: boardId,
                             StudentId: request.StudentId,
                             SprintNumber: request.SprintNumber), cancellationToken);
                         break;
                 }
-                _logger.LogInformation("[RUN-STUDENT-SPRINT] Metric {MetricId} ({MetricName}) OK for student {StudentId}, sprint {Sprint}.", metric.Id, metric.Name, request.StudentId, request.SprintNumber);
+
+                // Every handler above returns the outcome via its ActionResult (Ok/BadRequest/NotFound/
+                // UnprocessableEntity/StatusCode) — previously this loop only awaited the call and
+                // discarded that result, so a handler returning e.g. UnprocessableEntity (invalid LLM
+                // JSON — see TryParseGapAnalysisJson) was silently treated as success: no CacheMetrics
+                // row was written, nothing landed in `errors`, and the "OK" log line fired anyway.
+                var statusCode = (result as IStatusCodeActionResult)?.StatusCode;
+                var isSuccess = IsSuccessStatusCode(statusCode);
+                if (isSuccess)
+                {
+                    _logger.LogInformation("[RUN-STUDENT-SPRINT] Metric {MetricId} ({MetricName}) OK for student {StudentId}, sprint {Sprint}.", metric.Id, metric.Name, request.StudentId, request.SprintNumber);
+                }
+                else
+                {
+                    var detail = DescribeFailedActionResult(result);
+                    errors.Add($"Metric {metric.Id} ({metric.Name}): HTTP {statusCode?.ToString() ?? "?"} — {detail}");
+                    _logger.LogWarning(
+                        "[RUN-STUDENT-SPRINT] Metric {MetricId} ({MetricName}) failed for student {StudentId}, sprint {Sprint}: HTTP {StatusCode} {Detail}",
+                        metric.Id, metric.Name, request.StudentId, request.SprintNumber, statusCode, detail);
+                }
             }
             catch (Exception ex)
             {
@@ -399,6 +420,20 @@ public partial class MetricsController
         }
 
         return Ok(new { success = true, errors });
+    }
+
+    /// <summary>True only for a determinable 2xx status code — null (no status code found on the result) and anything outside 200-299 count as failure.</summary>
+    internal static bool IsSuccessStatusCode(int? statusCode) => statusCode is >= 200 and < 300;
+
+    /// <summary>Best-effort JSON dump of a non-2xx ActionResult's payload, for the errors list above.</summary>
+    internal static string DescribeFailedActionResult(IActionResult? result)
+    {
+        if (result is ObjectResult { Value: { } value })
+        {
+            try { return System.Text.Json.JsonSerializer.Serialize(value); }
+            catch { return value.ToString() ?? "(no detail)"; }
+        }
+        return result?.GetType().Name ?? "(null result)";
     }
 
     public sealed class RunStudentSprintRequest

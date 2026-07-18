@@ -170,6 +170,23 @@ public partial class MetricsController
             var (llmText, inputTokens, outputTokens) = await _chatCompletionService.GetChatCompletionAsync(
                 aiModel, systemPrompt, userPrompt, null);
 
+            // Debug:AiContext=true → email the raw response too (same pipeline as GapAnalysis's
+            // LLM-RESPONSE debug email) — previously only the prompt was captured here, so a metric
+            // whose response failed TryParseGapAnalysisJson left no trace of what the model actually said.
+            if (DebugAiContext)
+            {
+                try
+                {
+                    var responseDbg = $"Metric={metric.Id} ({metric.Name}) | Student={request.StudentId} | Sprint={request.SprintNumber} | " +
+                                       $"Model={aiModel.Name} ({aiModel.Provider}) | InputTokens={inputTokens} | OutputTokens={outputTokens}\n\n{llmText}";
+                    await _smtpEmailService.SendPlainEmailAsync(
+                        "ofer@skill-in.com",
+                        $"[AssessmentEngine Debug] LLM-RESPONSE {metric.Name} | Student {request.StudentId} | Sprint {request.SprintNumber}",
+                        responseDbg);
+                }
+                catch { /* never interrupt the AI flow */ }
+            }
+
             if (!TryParseGapAnalysisJson(llmText, out var dto) || dto == null)
             {
                 return UnprocessableEntity(new
