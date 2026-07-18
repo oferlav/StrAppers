@@ -583,9 +583,16 @@ public partial class MetricsController
         return sb.Length == 0 ? "(No sprint context available.)" : sb.ToString().Trim();
     }
 
-    private static string FormatMeetingsCommunicationReviewContent(GapAnalysisLlmResult dto)
+    internal static string FormatMeetingsCommunicationReviewContent(GapAnalysisLlmResult dto)
     {
         var sb = new StringBuilder();
+        // Same average-of-categories Final Score the generic engine's reviews lead with.
+        var finalScore = ComputeFinalScore(dto.Categories);
+        if (finalScore.HasValue)
+        {
+            sb.AppendLine($"**Final Score: {finalScore.Value}**");
+            sb.AppendLine();
+        }
         sb.AppendLine(dto.Narrative.Trim());
         if (dto.Categories.Count > 0)
         {

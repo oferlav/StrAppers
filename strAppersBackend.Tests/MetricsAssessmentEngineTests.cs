@@ -271,6 +271,56 @@ public class MetricsAssessmentEngineTests
         Assert.DoesNotContain("Final Score", content);
     }
 
+    [Fact]
+    public void CustomerEngagementReview_LeadsWithFinalScore()
+    {
+        var dto = new GapAnalysisLlmResult
+        {
+            Categories =
+            [
+                new GapAnalysisCategoryScore { Name = "Clarity & tone", Score = 80, Rationale = "Clear." },
+                new GapAnalysisCategoryScore { Name = "Active listening", Score = 60, Rationale = "OK." },
+            ],
+            Narrative = "Good communication overall.",
+        };
+
+        var content = MetricsController.FormatCustomerEngagementReviewContent(dto);
+
+        Assert.StartsWith("**Final Score: 70**", content);
+        Assert.Contains("Good communication overall.", content);
+        Assert.Contains("**Clarity & tone** (80):", content);
+    }
+
+    [Fact]
+    public void CustomerEngagementReview_OmitsFinalScore_WhenNoCategories()
+    {
+        var dto = new GapAnalysisLlmResult { Categories = new List<GapAnalysisCategoryScore>(), Narrative = "Nothing scored." };
+
+        var content = MetricsController.FormatCustomerEngagementReviewContent(dto);
+
+        Assert.DoesNotContain("Final Score", content);
+        Assert.StartsWith("Nothing scored.", content);
+    }
+
+    [Fact]
+    public void MeetingsCommunicationReview_LeadsWithFinalScore()
+    {
+        var dto = new GapAnalysisLlmResult
+        {
+            Categories =
+            [
+                new GapAnalysisCategoryScore { Name = "Participation", Score = 90, Rationale = "Active." },
+                new GapAnalysisCategoryScore { Name = "Technical Depth", Score = 50, Rationale = "Some." },
+            ],
+            Narrative = "Solid meeting presence.",
+        };
+
+        var content = MetricsController.FormatMeetingsCommunicationReviewContent(dto);
+
+        Assert.StartsWith("**Final Score: 70**", content);
+        Assert.Contains("Solid meeting presence.", content);
+    }
+
     // ── BoardId validation ────────────────────────────────────────────────────
 
     [Theory]

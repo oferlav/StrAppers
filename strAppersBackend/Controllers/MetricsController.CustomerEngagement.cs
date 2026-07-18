@@ -189,9 +189,17 @@ public partial class MetricsController
         }
     }
 
-    private static string FormatCustomerEngagementReviewContent(GapAnalysisLlmResult dto)
+    internal static string FormatCustomerEngagementReviewContent(GapAnalysisLlmResult dto)
     {
         var sb = new StringBuilder();
+        // Same average-of-categories Final Score the generic engine's reviews lead with; the metric
+        // name itself is rendered by the report UI as the card heading, so the score line comes first.
+        var finalScore = ComputeFinalScore(dto.Categories);
+        if (finalScore.HasValue)
+        {
+            sb.AppendLine($"**Final Score: {finalScore.Value}**");
+            sb.AppendLine();
+        }
         sb.AppendLine(dto.Narrative.Trim());
         if (dto.Categories.Count > 0)
         {
