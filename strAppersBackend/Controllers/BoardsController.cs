@@ -3357,7 +3357,14 @@ public partial class BoardsController : ControllerBase
 
             // Create Teams meeting AFTER ProjectBoard is committed (so TeamsController can find it)
             // Use the create-meeting-smtp-for-board-auth endpoint which handles custom URLs and tracking
-            if (!string.IsNullOrEmpty(request.Title) && request.DurationMinutes.HasValue && !request.IsQuestMode)
+            //
+            // DISABLED: auto-scheduling the kickoff meeting (and its email) at board-creation time.
+            // NextMeetingTime/NextMeetingUrl now stay null until staff schedule one manually from
+            // BoardRoom ("Schedule a Meeting") — that flow calls create-meeting-smtp-for-board-auth
+            // directly and is unaffected. MeetingStrip already renders a null next meeting as
+            // "No meeting scheduled" with a disabled "Go to Meeting" button, so no FE change needed.
+            const bool autoScheduleKickoffMeetingOnBoardCreation = false;
+            if (autoScheduleKickoffMeetingOnBoardCreation && !string.IsNullOrEmpty(request.Title) && request.DurationMinutes.HasValue && !request.IsQuestMode)
             {
                 try
                 {
