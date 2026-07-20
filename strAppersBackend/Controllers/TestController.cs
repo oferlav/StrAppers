@@ -403,6 +403,61 @@ namespace strAppersBackend.Controllers
         }
 
         /// <summary>
+        /// Send a test welcome email (the board-creation "Welcome to Skill-In" email) using the
+        /// configured Smtp:WelcomeEmailTemplate — isolated from board creation, purely for previewing
+        /// template edits in a real inbox.
+        /// </summary>
+        [HttpPost("email/test-welcome")]
+        public async Task<ActionResult> SendTestWelcomeEmail([FromBody] TestWelcomeEmailRequest request)
+        {
+            try
+            {
+                if (request == null || string.IsNullOrWhiteSpace(request.RecipientEmail))
+                {
+                    return BadRequest(new { success = false, message = "RecipientEmail is required" });
+                }
+
+                var firstName = string.IsNullOrWhiteSpace(request.FirstName) ? "Test" : request.FirstName;
+                var projectName = string.IsNullOrWhiteSpace(request.ProjectName) ? "Sample Project" : request.ProjectName;
+                var projectLengthWeeks = request.ProjectLengthWeeks ?? 8;
+
+                _logger.LogInformation("Sending welcome test email to {Recipient} from controller", request.RecipientEmail);
+
+                var success = await _smtpEmailService.SendWelcomeEmailAsync(
+                    request.RecipientEmail,
+                    firstName,
+                    projectName,
+                    projectLengthWeeks
+                );
+
+                return Ok(new
+                {
+                    success,
+                    message = success
+                        ? "Welcome test email sent successfully"
+                        : "Welcome test email failed to send (check logs — likely WelcomeEmailTemplate not configured or SMTP failure)",
+                    details = new
+                    {
+                        request.RecipientEmail,
+                        firstName,
+                        projectName,
+                        projectLengthWeeks
+                    }
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Welcome test email failed: {Message}", ex.Message);
+                return StatusCode(500, new
+                {
+                    success = false,
+                    message = "An error occurred while sending the welcome test email",
+                    error = ex.Message
+                });
+            }
+        }
+
+        /// <summary>
         /// Test application health and configuration
         /// </summary>
         [HttpGet("application/health")]
@@ -5047,4 +5102,12 @@ public class TestSmtpEmailRequest
     public string? MeetingLink { get; set; }
     public DateTime? StartTime { get; set; }
     public DateTime? EndTime { get; set; }
+}
+
+public class TestWelcomeEmailRequest
+{
+    public string RecipientEmail { get; set; } = string.Empty;
+    public string? FirstName { get; set; }
+    public string? ProjectName { get; set; }
+    public int? ProjectLengthWeeks { get; set; }
 }
