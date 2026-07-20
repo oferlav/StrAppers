@@ -417,11 +417,45 @@ namespace strAppersBackend.Controllers
                     return BadRequest(new { success = false, message = "RecipientEmail is required" });
                 }
 
-                var firstName = string.IsNullOrWhiteSpace(request.FirstName) ? "Test" : request.FirstName;
-                var projectName = string.IsNullOrWhiteSpace(request.ProjectName) ? "Sample Project" : request.ProjectName;
+                string firstName;
+                string projectName;
+                string resolvedFrom;
+
+                // StudentEmail: pull the SAME field (Project.Title via the student's board) that
+                // BoardsController.CreateBoard actually passes today — not the institute-aware
+                // EffectiveTitle. This mirrors production exactly, bug included, so a mismatch here
+                // is a mismatch there too.
+                if (!string.IsNullOrWhiteSpace(request.StudentEmail))
+                {
+                    var student = await _context.Students
+                        .FirstOrDefaultAsync(s => s.Email == request.StudentEmail);
+                    if (student == null)
+                        return NotFound(new { success = false, message = $"No student found with email {request.StudentEmail}" });
+                    if (string.IsNullOrWhiteSpace(student.BoardId))
+                        return BadRequest(new { success = false, message = $"Student {request.StudentEmail} has no BoardId (not on a board)" });
+
+                    var board = await _context.ProjectBoards.FirstOrDefaultAsync(b => b.Id == student.BoardId);
+                    if (board == null)
+                        return NotFound(new { success = false, message = $"ProjectBoard {student.BoardId} not found for student {request.StudentEmail}" });
+
+                    var linkedProject = await _context.Projects.FirstOrDefaultAsync(p => p.Id == board.ProjectId);
+                    if (linkedProject == null)
+                        return NotFound(new { success = false, message = $"Project {board.ProjectId} not found for board {student.BoardId}" });
+
+                    firstName = student.FirstName ?? "Test";
+                    projectName = linkedProject.Title;
+                    resolvedFrom = $"StudentEmail={request.StudentEmail} → BoardId={student.BoardId} → ProjectId={board.ProjectId} → project.Title (same field CreateBoard uses)";
+                }
+                else
+                {
+                    firstName = string.IsNullOrWhiteSpace(request.FirstName) ? "Test" : request.FirstName;
+                    projectName = string.IsNullOrWhiteSpace(request.ProjectName) ? "Sample Project" : request.ProjectName;
+                    resolvedFrom = "manual FirstName/ProjectName from request";
+                }
+
                 var projectLengthWeeks = request.ProjectLengthWeeks ?? 8;
 
-                _logger.LogInformation("Sending welcome test email to {Recipient} from controller", request.RecipientEmail);
+                _logger.LogInformation("Sending welcome test email to {Recipient} from controller ({ResolvedFrom})", request.RecipientEmail, resolvedFrom);
 
                 var success = await _smtpEmailService.SendWelcomeEmailAsync(
                     request.RecipientEmail,
@@ -441,7 +475,8 @@ namespace strAppersBackend.Controllers
                         request.RecipientEmail,
                         firstName,
                         projectName,
-                        projectLengthWeeks
+                        projectLengthWeeks,
+                        resolvedFrom
                     }
                 });
             }
@@ -5107,6 +5142,8 @@ public class TestSmtpEmailRequest
 public class TestWelcomeEmailRequest
 {
     public string RecipientEmail { get; set; } = string.Empty;
+    /// <summary>Existing student email; if set, ProjectName is pulled from their real linked board/project (ignores FirstName/ProjectName below).</summary>
+    public string? StudentEmail { get; set; }
     public string? FirstName { get; set; }
     public string? ProjectName { get; set; }
     public int? ProjectLengthWeeks { get; set; }
