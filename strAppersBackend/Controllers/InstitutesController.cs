@@ -484,7 +484,14 @@ public class InstitutesController : ControllerBase
                 })
                 .ToListAsync();
 
-            return Ok(new { Success = true, InstituteName = institute.Name, QuestMode = institute.QuestMode, Teachers = teachers });
+            return Ok(new
+            {
+                Success = true,
+                InstituteName = institute.Name,
+                QuestMode = institute.QuestMode,
+                AssessmentEngineAIModelId = institute.AssessmentEngineAIModelId,
+                Teachers = teachers,
+            });
         }
         catch (Exception ex)
         {
@@ -590,7 +597,9 @@ public class InstitutesController : ControllerBase
     }
 
     /// <summary>
-    /// Update institute feature settings (e.g. QuestMode).
+    /// Update institute feature settings (e.g. QuestMode, AssessmentEngineAIModelId).
+    /// Callers should send the full current settings object each time (not just the changed field) —
+    /// any field omitted here overwrites the institute's existing value with this request's default.
     /// PATCH /api/Institutes/{id}/settings
     /// </summary>
     [HttpPatch("{id}/settings")]
@@ -602,12 +611,28 @@ public class InstitutesController : ControllerBase
             if (institute == null)
                 return NotFound(new { Success = false, Message = "Institute not found" });
 
+            if (request.AssessmentEngineAIModelId.HasValue)
+            {
+                var modelExists = await _context.AIModels.AnyAsync(
+                    m => m.Id == request.AssessmentEngineAIModelId.Value && m.IsActive);
+                if (!modelExists)
+                    return BadRequest(new { Success = false, Message = $"AI model {request.AssessmentEngineAIModelId.Value} not found or inactive." });
+            }
+
             institute.QuestMode = request.QuestMode;
+            institute.AssessmentEngineAIModelId = request.AssessmentEngineAIModelId;
             institute.UpdatedAt = DateTime.UtcNow;
             await _context.SaveChangesAsync();
 
-            _logger.LogInformation("Settings updated for institute {InstituteId}: QuestMode={QuestMode}", id, institute.QuestMode);
-            return Ok(new { Success = true, QuestMode = institute.QuestMode });
+            _logger.LogInformation(
+                "Settings updated for institute {InstituteId}: QuestMode={QuestMode} AssessmentEngineAIModelId={AssessmentEngineAIModelId}",
+                id, institute.QuestMode, institute.AssessmentEngineAIModelId);
+            return Ok(new
+            {
+                Success = true,
+                QuestMode = institute.QuestMode,
+                AssessmentEngineAIModelId = institute.AssessmentEngineAIModelId,
+            });
         }
         catch (Exception ex)
         {
@@ -679,4 +704,7 @@ public class UpdateInstituteLogoRequest
 public class UpdateInstituteSettingsRequest
 {
     public bool QuestMode { get; set; }
+
+    /// <summary>AIModels.Id for the generic Data Assessment Engine. Null clears the override (falls back to config default).</summary>
+    public int? AssessmentEngineAIModelId { get; set; }
 }

@@ -403,6 +403,134 @@ namespace strAppersBackend.Controllers
         }
 
         /// <summary>
+        /// Send a test welcome email (the board-creation "Welcome to Skill-In" email) using the
+        /// configured Smtp:WelcomeEmailTemplate — isolated from board creation, purely for previewing
+        /// template edits in a real inbox.
+        /// </summary>
+        [HttpPost("email/test-welcome")]
+        public async Task<ActionResult> SendTestWelcomeEmail([FromBody] TestWelcomeEmailRequest request)
+        {
+            try
+            {
+                if (request == null || string.IsNullOrWhiteSpace(request.RecipientEmail))
+                {
+                    return BadRequest(new { success = false, message = "RecipientEmail is required" });
+                }
+
+                string firstName;
+                string projectName;
+                string resolvedFrom;
+                object? diagnostics = null;
+
+                // Which DB this running instance is actually querying — compare against wherever
+                // your SQL client is pointed. A mismatch here (not the code) explains a query
+                // returning nothing while the API finds a row.
+                var dbConn = _context.Database.GetDbConnection();
+                var dbInfo = new { host = dbConn.DataSource, database = dbConn.Database };
+
+                // StudentEmail: pull the SAME field (Project.Title via the student's board) that
+                // BoardsController.CreateBoard actually passes today — not the institute-aware
+                // EffectiveTitle. This mirrors production exactly, bug included, so a mismatch here
+                // is a mismatch there too.
+                if (!string.IsNullOrWhiteSpace(request.StudentEmail))
+                {
+                    // Case-insensitive + trimmed: rules out a casing/whitespace mismatch as the
+                    // reason a lookup fails. Also surfaces if MULTIPLE students share this email
+                    // (EF's FirstOrDefault would silently pick one nondeterministically).
+                    var needle = request.StudentEmail.Trim();
+                    var matches = await _context.Students
+                        .Where(s => s.Email != null && s.Email.ToLower() == needle.ToLower())
+                        .Select(s => new { s.Id, s.Email, s.BoardId, s.FirstName, s.LastName })
+                        .ToListAsync();
+
+                    if (matches.Count == 0)
+                    {
+                        return NotFound(new { success = false, message = $"No student found with email '{needle}' (case-insensitive)", database = dbInfo });
+                    }
+
+                    var student = matches[0];
+                    diagnostics = new { studentMatchCount = matches.Count, allMatches = matches, database = dbInfo };
+
+                    if (string.IsNullOrWhiteSpace(student.BoardId))
+                        return BadRequest(new { success = false, message = $"Student {student.Email} (Id={student.Id}) has no BoardId (not on a board)", diagnostics });
+
+                    var board = await _context.ProjectBoards
+                        .Where(b => b.Id == student.BoardId)
+                        .Select(b => new { b.Id, b.ProjectId, b.InstituteProjectId })
+                        .FirstOrDefaultAsync();
+                    if (board == null)
+                        return NotFound(new { success = false, message = $"ProjectBoard '{student.BoardId}' not found for student {student.Email}", diagnostics });
+
+                    var linkedProject = await _context.Projects
+                        .Where(p => p.Id == board.ProjectId)
+                        .Select(p => new { p.Id, p.Title })
+                        .FirstOrDefaultAsync();
+                    if (linkedProject == null)
+                        return NotFound(new { success = false, message = $"Project {board.ProjectId} not found for board '{student.BoardId}'", diagnostics = new { board, diagnostics } });
+
+                    object? instituteProject = null;
+                    if (board.InstituteProjectId.HasValue)
+                    {
+                        instituteProject = await _context.InstituteProjects
+                            .Where(ip => ip.Id == board.InstituteProjectId.Value)
+                            .Select(ip => new { ip.Id, ip.Title })
+                            .FirstOrDefaultAsync();
+                    }
+
+                    firstName = student.FirstName ?? "Test";
+                    projectName = linkedProject.Title;
+                    resolvedFrom = $"StudentEmail='{student.Email}' (Id={student.Id}) → BoardId='{student.BoardId}' → ProjectId={board.ProjectId} → Projects.Title (same field CreateBoard uses)";
+                    diagnostics = new { student, board, linkedProject, instituteProject, studentMatchCount = matches.Count, allMatches = matches, database = dbInfo };
+                }
+                else
+                {
+                    firstName = string.IsNullOrWhiteSpace(request.FirstName) ? "Test" : request.FirstName;
+                    projectName = string.IsNullOrWhiteSpace(request.ProjectName) ? "Sample Project" : request.ProjectName;
+                    resolvedFrom = "manual FirstName/ProjectName from request";
+                    diagnostics = new { database = dbInfo };
+                }
+
+                var projectLengthWeeks = request.ProjectLengthWeeks ?? 8;
+
+                _logger.LogInformation("Sending welcome test email to {Recipient} from controller ({ResolvedFrom})", request.RecipientEmail, resolvedFrom);
+
+                var success = await _smtpEmailService.SendWelcomeEmailAsync(
+                    request.RecipientEmail,
+                    firstName,
+                    projectName,
+                    projectLengthWeeks
+                );
+
+                return Ok(new
+                {
+                    success,
+                    message = success
+                        ? "Welcome test email sent successfully"
+                        : "Welcome test email failed to send (check logs — likely WelcomeEmailTemplate not configured or SMTP failure)",
+                    details = new
+                    {
+                        request.RecipientEmail,
+                        firstName,
+                        projectName,
+                        projectLengthWeeks,
+                        resolvedFrom,
+                        diagnostics
+                    }
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Welcome test email failed: {Message}", ex.Message);
+                return StatusCode(500, new
+                {
+                    success = false,
+                    message = "An error occurred while sending the welcome test email",
+                    error = ex.Message
+                });
+            }
+        }
+
+        /// <summary>
         /// Test application health and configuration
         /// </summary>
         [HttpGet("application/health")]
@@ -5047,4 +5175,14 @@ public class TestSmtpEmailRequest
     public string? MeetingLink { get; set; }
     public DateTime? StartTime { get; set; }
     public DateTime? EndTime { get; set; }
+}
+
+public class TestWelcomeEmailRequest
+{
+    public string RecipientEmail { get; set; } = string.Empty;
+    /// <summary>Existing student email; if set, ProjectName is pulled from their real linked board/project (ignores FirstName/ProjectName below).</summary>
+    public string? StudentEmail { get; set; }
+    public string? FirstName { get; set; }
+    public string? ProjectName { get; set; }
+    public int? ProjectLengthWeeks { get; set; }
 }

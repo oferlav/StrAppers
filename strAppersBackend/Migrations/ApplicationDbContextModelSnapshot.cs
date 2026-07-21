@@ -886,6 +886,9 @@ namespace strAppersBackend.Migrations
                         .HasMaxLength(200)
                         .HasColumnType("character varying(200)");
 
+                    b.Property<int?>("AssessmentEngineAIModelId")
+                        .HasColumnType("integer");
+
                     b.Property<string>("ContactEmail")
                         .HasMaxLength(255)
                         .HasColumnType("character varying(255)");
@@ -960,6 +963,8 @@ namespace strAppersBackend.Migrations
                         .HasColumnType("character varying(100)");
 
                     b.HasKey("Id");
+
+                    b.HasIndex("AssessmentEngineAIModelId");
 
                     b.ToTable("Institutes", (string)null);
 
@@ -1787,6 +1792,9 @@ namespace strAppersBackend.Migrations
                     b.Property<string>("Endpoint")
                         .HasMaxLength(100)
                         .HasColumnType("character varying(100)");
+
+                    b.Property<string>("ExplicitRules")
+                        .HasColumnType("text");
 
                     b.Property<int>("Influence")
                         .HasDefaultValue(3)
@@ -4753,6 +4761,13 @@ namespace strAppersBackend.Migrations
 
             modelBuilder.Entity("strAppersBackend.Models.Institute", b =>
                 {
+                    b.HasOne("strAppersBackend.Models.AIModel", "AssessmentEngineAIModel")
+                        .WithMany()
+                        .HasForeignKey("AssessmentEngineAIModelId")
+                        .OnDelete(DeleteBehavior.SetNull);
+
+                    b.Navigation("AssessmentEngineAIModel");
+
                     b.Navigation("InstituteProjects");
 
                     b.Navigation("InstituteRoles");

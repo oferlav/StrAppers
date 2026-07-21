@@ -82,19 +82,22 @@ public partial class MetricsController
             cancellationToken);
 
         // Layer 2 (deterministic categories): the skill definition is the authority. If it defines
-        // "Category:" lines those become the score dimensions; otherwise the metric name is the single
-        // dimension. Blank skill falls back to a generic rubric built from the metric name.
+        // "Category:" lines those become the score dimensions (deterministic, code-enforced). Otherwise
+        // — e.g. a rubric written in bold-bullet format — the model names its own categories after the
+        // rubric's dimensions, same policy as CustomerEngagement's Skill-rubric override, so a rubric
+        // with N dimensions produces N scored categories instead of collapsing to one.
         var skillRubric = metric.Skill?.Trim() ?? string.Empty;
         if (string.IsNullOrEmpty(skillRubric))
             skillRubric = $"Assess the student's overall \"{metric.Name}\" for this sprint based on the available evidence.";
 
-        var expectedCategories = ParseRubricCategories(skillRubric);
-        if (expectedCategories.Count == 0)
-            expectedCategories.Add(metric.Name.Trim());
+        var parsedCategories = ParseRubricCategories(skillRubric);
 
         var expertise = string.IsNullOrWhiteSpace(metric.AIExpertise)
             ? "professional academic skills assessment expert"
             : metric.AIExpertise.Trim();
+
+        var explicitRulesBlock = BuildExplicitRulesBlock(metric.ExplicitRules);
+        var categoryScoringInstruction = BuildCategoryScoringInstruction(parsedCategories);
 
         // Layer 1 (rubric authority): the skill rubric lives in the system prompt, above the evidence.
         var systemPrompt = $$"""
@@ -106,17 +109,17 @@ public partial class MetricsController
 
             === ASSESSMENT RUBRIC ===
             {{skillRubric}}
-            === END RUBRIC ===
+            === END RUBRIC ==={{explicitRulesBlock}}
 
             Scoring rules:
-            - Return scores for exactly these categories and no others: {{string.Join(" | ", expectedCategories)}}
-            - Use the category names verbatim as given above.
+            {{categoryScoringInstruction}}
             - Scores are integers on a 0–100 scale. Calibrate to these bands: 0–19 = no meaningful evidence,
               20–39 = minimal, 40–59 = partial, 60–79 = good, 80–100 = excellent. Use the full range —
               a weak-but-present performance is ~20–40, not a single-digit score.
             - Use the Sprint Context in the user message as your evidence — ground every score in verbatim evidence from it, unless the rubric instructs otherwise.
             - Sections marked _(squad-level)_ cover the whole team; only attribute activity to this student if they are explicitly named or identifiable.
             - Do not invent activity. Sections marked _(none for this sprint)_ have no data; do not speculate about them.
+            - When a resource under Resources & Figma shows "document content extracted on server", that text is the actual content of the uploaded document (e.g. a PRD, spec, or schema) — assess its substance directly rather than treating it as an unverified link. When extraction failed, that is a server-side limitation, not evidence of a missing or low-quality deliverable — do not lower the score solely because content could not be extracted.
             - Output valid JSON only, no markdown fences:
               {"categories":[{"name":"string","score":0,"rationale":"string"}],"narrative":"markdown"}
             - narrative: brief markdown summary of strengths, gaps, and 1–3 concrete follow-up suggestions.
@@ -162,18 +165,27 @@ public partial class MetricsController
 
         try
         {
-            var modelName = _configuration["OpenAI:CheapModel"] ?? "gpt-4o-mini";
-            var aiModel = new AIModel
-            {
-                Name               = modelName,
-                Provider           = "OpenAI",
-                BaseUrl            = _configuration["OpenAI:BaseUrl"] ?? "https://api.openai.com/v1",
-                MaxTokens          = 16384,
-                DefaultTemperature = 0.2f,
-            };
+            var aiModel = await ResolveAssessmentEngineModelAsync(student.InstituteId, cancellationToken);
 
             var (llmText, inputTokens, outputTokens) = await _chatCompletionService.GetChatCompletionAsync(
                 aiModel, systemPrompt, userPrompt, null);
+
+            // Debug:AiContext=true → email the raw response too (same pipeline as GapAnalysis's
+            // LLM-RESPONSE debug email) — previously only the prompt was captured here, so a metric
+            // whose response failed TryParseGapAnalysisJson left no trace of what the model actually said.
+            if (DebugAiContext)
+            {
+                try
+                {
+                    var responseDbg = $"Metric={metric.Id} ({metric.Name}) | Student={request.StudentId} | Sprint={request.SprintNumber} | " +
+                                       $"Model={aiModel.Name} ({aiModel.Provider}) | InputTokens={inputTokens} | OutputTokens={outputTokens}\n\n{llmText}";
+                    await _smtpEmailService.SendPlainEmailAsync(
+                        "ofer@skill-in.com",
+                        $"[AssessmentEngine Debug] LLM-RESPONSE {metric.Name} | Student {request.StudentId} | Sprint {request.SprintNumber}",
+                        responseDbg);
+                }
+                catch { /* never interrupt the AI flow */ }
+            }
 
             if (!TryParseGapAnalysisJson(llmText, out var dto) || dto == null)
             {
@@ -185,9 +197,9 @@ public partial class MetricsController
                 });
             }
 
-            // Layer 3 (code enforcement): the report only ever shows the expected category names,
-            // regardless of what the model returned.
-            dto.Categories = NormalizeAssessmentCategories(dto.Categories, expectedCategories);
+            // Layer 3 (code enforcement) — only forced to a fixed category list when the rubric
+            // actually defines one via "Category:" lines; see ApplyAssessmentCategoryPolicy.
+            dto.Categories = ApplyAssessmentCategoryPolicy(dto.Categories, parsedCategories, metric.Name);
 
             var rows = dto.Categories
                 .Select(c => (c.Name, Math.Clamp(c.Score, 0, 100)))
@@ -208,7 +220,7 @@ public partial class MetricsController
                 metricId   = request.MetricId,
                 reviewContent,
                 graphBase64,
-                model      = modelName,
+                model      = aiModel.Name,
                 inputTokens,
                 outputTokens,
             });
@@ -357,7 +369,7 @@ public partial class MetricsController
         sb.AppendLine();
     }
 
-    private async Task AppendAssessmentResourcesAsync(StringBuilder sb, string boardId, int studentId, int sprintNumber, CancellationToken ct)
+    internal async Task AppendAssessmentResourcesAsync(StringBuilder sb, string boardId, int studentId, int sprintNumber, CancellationToken ct)
     {
         var resources = await _context.Resources.AsNoTracking()
             .Where(r => r.BoardId == boardId && r.StudentId == studentId
@@ -368,7 +380,30 @@ public partial class MetricsController
         sb.AppendLine("### Resources & Figma");
         if (resources.Count == 0) { sb.AppendLine("_(none for this sprint)_"); sb.AppendLine(); return; }
         foreach (var r in resources)
-            sb.AppendLine($"- {(r.IsFigma ? "[Figma]" : "[Resource]")} **{r.Name}**: {r.Url}");
+        {
+            if (r.IsFigma || LooksLikeImageUrl(r.Url))
+            {
+                sb.AppendLine($"- {(r.IsFigma ? "[Figma]" : "[Resource]")} **{r.Name}**: {r.Url}");
+                continue;
+            }
+
+            // Same extraction as GapAnalysis (TryExtractResourceDocumentTextAsync) — the model was
+            // previously shown only the URL for non-image resources, so it could never verify a
+            // deliverable's actual content (e.g. an uploaded PRD) even when UseResources was enabled.
+            var extracted = await TryExtractResourceDocumentTextAsync(r.Url, r.Name, ct);
+            if (extracted != null)
+            {
+                sb.AppendLine($"- [Resource] **{r.Name}**: {r.Url} (document content extracted on server — see below; score its actual content, not just its presence)");
+                sb.AppendLine($"  Extracted content of \"{r.Name}\":");
+                sb.AppendLine("  ```");
+                sb.AppendLine(extracted);
+                sb.AppendLine("  ```");
+            }
+            else
+            {
+                sb.AppendLine($"- [Resource] **{r.Name}**: {r.Url} (non-image — URL confirms storage; content could not be extracted for review, e.g. unsupported file type or empty/scanned document — do not penalise the student for a server-side extraction limitation)");
+            }
+        }
         sb.AppendLine();
     }
 
@@ -453,6 +488,59 @@ public partial class MetricsController
     }
 
     /// <summary>
+    /// Resolves the LLM used by <see cref="RunAssessmentEngine"/>: the institute's
+    /// <see cref="Institute.AssessmentEngineAIModelId"/> selection when set and still an active
+    /// <see cref="AIModel"/> row, otherwise the same OpenAI:CheapModel config default used before this
+    /// setting existed. MaxTokens/DefaultTemperature always stay at the engine's own tuning (16384 /
+    /// 0.2), regardless of what the selected row itself stores, so a catalog row with a smaller or null
+    /// MaxTokens can never truncate the engine's required JSON output.
+    /// </summary>
+    internal async Task<AIModel> ResolveAssessmentEngineModelAsync(int? instituteId, CancellationToken cancellationToken)
+    {
+        AIModel? selected = null;
+        if (instituteId.HasValue)
+        {
+            var modelId = await _context.Institutes.AsNoTracking()
+                .Where(i => i.Id == instituteId.Value)
+                .Select(i => i.AssessmentEngineAIModelId)
+                .FirstOrDefaultAsync(cancellationToken);
+            if (modelId.HasValue)
+                selected = await _context.AIModels.AsNoTracking()
+                    .FirstOrDefaultAsync(m => m.Id == modelId.Value && m.IsActive, cancellationToken);
+        }
+
+        return new AIModel
+        {
+            Name               = selected?.Name ?? _configuration["OpenAI:CheapModel"] ?? "gpt-4o-mini",
+            Provider           = selected?.Provider ?? "OpenAI",
+            BaseUrl            = selected?.BaseUrl ?? _configuration["OpenAI:BaseUrl"] ?? "https://api.openai.com/v1",
+            ApiVersion         = selected?.ApiVersion,
+            MaxTokens          = 16384,
+            DefaultTemperature = 0.2,
+        };
+    }
+
+    /// <summary>
+    /// Formats <see cref="Metric.ExplicitRules"/> as a labeled block appended after the rubric in the
+    /// system prompt (see <see cref="RunAssessmentEngine"/>). Kept separate from <c>skillRubric</c> so
+    /// <see cref="ParseRubricCategories"/> never sees rules text as candidate scoring dimensions.
+    /// Returns an empty string when there are no explicit rules, so the prompt is unchanged for metrics
+    /// that don't use this field.
+    /// </summary>
+    internal static string BuildExplicitRulesBlock(string? explicitRules)
+    {
+        var trimmed = explicitRules?.Trim();
+        if (string.IsNullOrEmpty(trimmed))
+            return string.Empty;
+
+        return "\n\n" + $$"""
+            === EXPLICIT RULES ===
+            {{trimmed}}
+            === END EXPLICIT RULES ===
+            """;
+    }
+
+    /// <summary>
     /// Extracts named score dimensions from a skill rubric. A dimension is a line starting with
     /// "Category:" (optionally bulleted), e.g. "Category: Initiative — visible activity in chats and tasks".
     /// The name is the text before the first separator (—, –, -, or :). Returns an empty list for free-form prose.
@@ -507,10 +595,73 @@ public partial class MetricsController
         return result;
     }
 
-    private static string FormatAssessmentReviewContent(string metricName, GapAnalysisLlmResult dto)
+    /// <summary>
+    /// Scoring-rules instruction for the system prompt: when the rubric defines explicit "Category:"
+    /// lines, the model is told to use exactly those names (deterministic categories). Otherwise —
+    /// e.g. a rubric written in bold-bullet format like "**Communication Clarity (0-100)**", which
+    /// ParseRubricCategories does not match — the model is told to name its own categories after the
+    /// rubric's dimensions, same policy as CustomerEngagement's Skill-rubric override.
+    /// </summary>
+    internal static string BuildCategoryScoringInstruction(List<string> parsedCategories)
+    {
+        return parsedCategories.Count > 0
+            ? $"- Return scores for exactly these categories and no others: {string.Join(" | ", parsedCategories)}\n            - Use the category names verbatim as given above."
+            : "- Name your output categories after the scoring dimensions defined in the rubric above.";
+    }
+
+    /// <summary>
+    /// Layer 3 (category enforcement) — only forces the LLM's categories to the parsed "Category:" list
+    /// when the rubric actually defines that format (<see cref="NormalizeAssessmentCategories"/>).
+    /// Otherwise trusts whatever category names the model returned (matching
+    /// <see cref="BuildCategoryScoringInstruction"/>'s free-form instruction in that case) — just
+    /// clamping scores and dropping blank names, with a single metric-name fallback category if the
+    /// model returned nothing at all.
+    /// </summary>
+    internal static List<GapAnalysisCategoryScore> ApplyAssessmentCategoryPolicy(
+        List<GapAnalysisCategoryScore> returned, List<string> parsedCategories, string metricName)
+    {
+        if (parsedCategories.Count > 0)
+            return NormalizeAssessmentCategories(returned, parsedCategories);
+
+        var trusted = returned
+            .Where(c => !string.IsNullOrWhiteSpace(c.Name))
+            .Select(c => new GapAnalysisCategoryScore
+            {
+                Name = c.Name.Trim(),
+                Score = Math.Clamp(c.Score, 0, 100),
+                Rationale = c.Rationale,
+            })
+            .ToList();
+
+        if (trusted.Count == 0)
+            trusted.Add(new GapAnalysisCategoryScore
+            {
+                Name = metricName.Trim(),
+                Score = 0,
+                Rationale = "(no score returned)",
+            });
+
+        return trusted;
+    }
+
+    /// <summary>Simple arithmetic mean of the (already-clamped 0-100) category scores, rounded to the nearest integer. Null when there are no named categories to average.</summary>
+    internal static int? ComputeFinalScore(List<GapAnalysisCategoryScore> categories)
+    {
+        var scores = categories
+            .Where(c => !string.IsNullOrWhiteSpace(c.Name))
+            .Select(c => Math.Clamp(c.Score, 0, 100))
+            .ToList();
+        return scores.Count > 0 ? (int)Math.Round(scores.Average()) : null;
+    }
+
+    internal static string FormatAssessmentReviewContent(string metricName, GapAnalysisLlmResult dto)
     {
         var sb = new StringBuilder();
-        sb.AppendLine($"## {metricName} Assessment");
+        var finalScore = ComputeFinalScore(dto.Categories);
+        sb.Append($"## {metricName} Assessment");
+        if (finalScore.HasValue)
+            sb.Append($" — **Final Score: {finalScore.Value}**");
+        sb.AppendLine();
         if (!string.IsNullOrWhiteSpace(dto.Narrative))
         {
             sb.AppendLine();

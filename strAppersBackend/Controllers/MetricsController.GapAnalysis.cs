@@ -612,12 +612,23 @@ public partial class MetricsController
         return "You are an expert reviewer. Output JSON with categories (name, score 0-100, rationale) and a narrative field.";
     }
 
-    private static bool TryParseGapAnalysisJson(string llmText, out GapAnalysisLlmResult? dto)
+    internal static bool TryParseGapAnalysisJson(string llmText, out GapAnalysisLlmResult? dto)
     {
         dto = null;
         var json = ExtractJsonObject(llmText);
         if (string.IsNullOrWhiteSpace(json))
             return false;
+        if (TryDeserializeGapAnalysisJson(json, out dto))
+            return true;
+        // Models occasionally emit prose quotes unescaped inside string values (e.g. a narrative
+        // containing: acknowledgment (e.g., "Got it") ...) which invalidates the whole payload and
+        // used to fail the metric with 422. Attempt a targeted repair before giving up.
+        return TryDeserializeGapAnalysisJson(RepairUnescapedQuotesInJsonStrings(json), out dto);
+    }
+
+    private static bool TryDeserializeGapAnalysisJson(string json, out GapAnalysisLlmResult? dto)
+    {
+        dto = null;
         try
         {
             dto = JsonSerializer.Deserialize<GapAnalysisLlmResult>(json, new JsonSerializerOptions
@@ -630,6 +641,62 @@ public partial class MetricsController
         {
             return false;
         }
+    }
+
+    /// <summary>
+    /// Escapes double quotes that sit inside JSON string values without being escaped. Walks the
+    /// text tracking in-string state; a quote inside a string only closes it when the next
+    /// non-whitespace character is structural (',', '}', ']', ':') — otherwise it's prose and gets
+    /// escaped. Heuristic (a prose quote directly followed by a comma still misparses), but it's
+    /// only ever applied to payloads that already failed strict parsing, so the worst case is the
+    /// same failure as before.
+    /// </summary>
+    internal static string RepairUnescapedQuotesInJsonStrings(string json)
+    {
+        var sb = new StringBuilder(json.Length + 16);
+        var inString = false;
+        for (var i = 0; i < json.Length; i++)
+        {
+            var c = json[i];
+            if (!inString)
+            {
+                if (c == '"') inString = true;
+                sb.Append(c);
+                continue;
+            }
+
+            if (c == '\\')
+            {
+                sb.Append(c);
+                if (i + 1 < json.Length)
+                {
+                    sb.Append(json[i + 1]);
+                    i++;
+                }
+                continue;
+            }
+
+            if (c == '"')
+            {
+                var j = i + 1;
+                while (j < json.Length && char.IsWhiteSpace(json[j])) j++;
+                var next = j < json.Length ? json[j] : '\0';
+                if (next is ',' or '}' or ']' or ':' or '\0')
+                {
+                    inString = false;
+                    sb.Append(c);
+                }
+                else
+                {
+                    sb.Append("\\\"");
+                }
+                continue;
+            }
+
+            sb.Append(c);
+        }
+
+        return sb.ToString();
     }
 
     private static string? ExtractJsonObject(string text)

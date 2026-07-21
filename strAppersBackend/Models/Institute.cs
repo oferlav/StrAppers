@@ -59,6 +59,13 @@ public class Institute
     /// <summary>Only meaningful when QuestMode=true. When true, board creation kicks off for each eligible student individually (no team required).</summary>
     public bool SingleQuest { get; set; } = true;
 
+    /// <summary>
+    /// Institute-selected model for the generic Data Assessment Engine (use/assess). Null falls back
+    /// to the OpenAI:CheapModel config default. See MetricsController.ResolveAssessmentEngineModelAsync.
+    /// </summary>
+    public int? AssessmentEngineAIModelId { get; set; }
+    public AIModel? AssessmentEngineAIModel { get; set; }
+
     public ICollection<Student> Students { get; set; } = new List<Student>();
 
     public ICollection<Teacher> Teachers { get; set; } = new List<Teacher>();

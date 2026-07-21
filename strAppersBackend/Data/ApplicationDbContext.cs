@@ -116,6 +116,12 @@ public class ApplicationDbContext : DbContext
             entity.Property(e => e.Coupon).HasMaxLength(100);
             entity.Property(e => e.SingleQuest).HasDefaultValue(true);
 
+            entity.HasIndex(e => e.AssessmentEngineAIModelId);
+            entity.HasOne(e => e.AssessmentEngineAIModel)
+                .WithMany()
+                .HasForeignKey(e => e.AssessmentEngineAIModelId)
+                .OnDelete(DeleteBehavior.SetNull);
+
             entity.HasData(
                 new Institute
                 {
@@ -1099,6 +1105,7 @@ public class ApplicationDbContext : DbContext
             entity.Property(e => e.Required).HasDefaultValue(false);
             entity.Property(e => e.Influence).HasDefaultValue(3);
             entity.Property(e => e.Skill).HasColumnType("text");
+            entity.Property(e => e.ExplicitRules).HasColumnType("text");
             entity.Property(e => e.AIExpertise).HasMaxLength(500);
             entity.HasOne(e => e.Institute)
                 .WithMany()

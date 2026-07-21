@@ -720,7 +720,17 @@ public partial class MetricsController : ControllerBase
 
     /// <param name="graph2Base64">Optional second chart (e.g. frontend track). Ignored when null in append mode.</param>
     /// <param name="appendReviewContent">When true, appends <paramref name="reviewContent"/> and only sets Graph/Graph2 when the corresponding argument is non-null.</param>
-    private async Task UpsertCacheMetricsAsync(
+    /// <summary>
+    /// Persists a metric's review content/chart(s). Failures are logged and rethrown — this used to
+    /// swallow every exception silently (log-only, no rethrow), so a failed save here still returned
+    /// success from the calling handler: RunStudentSprintAssessment saw a 2xx result and reported no
+    /// error, while no CacheMetrics row was ever written. Callers with their own try/catch (GapAnalysis,
+    /// RunAssessmentEngine) will turn this into a proper 500; callers without one (a few early-exit
+    /// paths in Attendance/CustomerEngagement/MeetingsCommunication) let ASP.NET Core's default
+    /// unhandled-exception handling produce a 500 instead of a silently-incorrect 200 — either way,
+    /// RunStudentSprintAssessment's per-metric try/catch now actually sees the failure.
+    /// </summary>
+    internal async Task UpsertCacheMetricsAsync(
         string boardId,
         int studentId,
         int sprintNumber,
@@ -774,7 +784,8 @@ public partial class MetricsController : ControllerBase
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "CacheMetrics upsert failed for board {BoardId}, metric {MetricId}", boardId, metricId);
+            _logger.LogError(ex, "CacheMetrics upsert failed for board {BoardId}, metric {MetricId}", boardId, metricId);
+            throw;
         }
     }
 }

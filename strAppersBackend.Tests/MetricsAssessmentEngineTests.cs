@@ -116,7 +116,7 @@ public class MetricsAssessmentEngineTests
             Narrative  = "Strong research overall.",
         };
 
-        var content = FormatReviewContent("Research Depth", dto);
+        var content = MetricsController.FormatAssessmentReviewContent("Research Depth", dto);
 
         Assert.Contains("## Research Depth Assessment", content);
     }
@@ -130,7 +130,7 @@ public class MetricsAssessmentEngineTests
             Narrative  = "Excellent primary-source usage.",
         };
 
-        var content = FormatReviewContent("Research Depth", dto);
+        var content = MetricsController.FormatAssessmentReviewContent("Research Depth", dto);
 
         Assert.Contains("Excellent primary-source usage.", content);
     }
@@ -148,7 +148,7 @@ public class MetricsAssessmentEngineTests
             Narrative = "Good work.",
         };
 
-        var content = FormatReviewContent("Research Depth", dto);
+        var content = MetricsController.FormatAssessmentReviewContent("Research Depth", dto);
 
         Assert.Contains("**Source quality** (75):", content);
         Assert.Contains("**Citation accuracy** (90):", content);
@@ -163,7 +163,7 @@ public class MetricsAssessmentEngineTests
             Narrative  = "",
         };
 
-        var content = FormatReviewContent("Test Metric", dto);
+        var content = MetricsController.FormatAssessmentReviewContent("Test Metric", dto);
 
         Assert.Contains("(100):", content); // clamped from 120
     }
@@ -181,10 +181,144 @@ public class MetricsAssessmentEngineTests
             Narrative = "",
         };
 
-        var content = FormatReviewContent("Test Metric", dto);
+        var content = MetricsController.FormatAssessmentReviewContent("Test Metric", dto);
 
         Assert.DoesNotContain("Should not appear.", content);
         Assert.Contains("**Valid** (60):", content);
+    }
+
+    // ── ComputeFinalScore / "Final Score" header ────────────────────────────────
+
+    [Fact]
+    public void ComputeFinalScore_AveragesClampedCategoryScores()
+    {
+        var categories = new List<GapAnalysisCategoryScore>
+        {
+            new() { Name = "A", Score = 80 },
+            new() { Name = "B", Score = 60 },
+        };
+
+        Assert.Equal(70, MetricsController.ComputeFinalScore(categories));
+    }
+
+    [Fact]
+    public void ComputeFinalScore_RoundsToNearestInteger()
+    {
+        var categories = new List<GapAnalysisCategoryScore>
+        {
+            new() { Name = "A", Score = 80 },
+            new() { Name = "B", Score = 65 },
+            new() { Name = "C", Score = 60 },
+        };
+        // (80+65+60)/3 = 68.33... → 68
+        Assert.Equal(68, MetricsController.ComputeFinalScore(categories));
+    }
+
+    [Fact]
+    public void ComputeFinalScore_ClampsOutOfRangeScoresBeforeAveraging()
+    {
+        var categories = new List<GapAnalysisCategoryScore>
+        {
+            new() { Name = "A", Score = 250 }, // clamped to 100
+            new() { Name = "B", Score = -50 }, // clamped to 0
+        };
+        Assert.Equal(50, MetricsController.ComputeFinalScore(categories));
+    }
+
+    [Fact]
+    public void ComputeFinalScore_IgnoresBlankNamedCategories()
+    {
+        var categories = new List<GapAnalysisCategoryScore>
+        {
+            new() { Name = "", Score = 0 },
+            new() { Name = "Valid", Score = 90 },
+        };
+        Assert.Equal(90, MetricsController.ComputeFinalScore(categories));
+    }
+
+    [Fact]
+    public void ComputeFinalScore_ReturnsNull_WhenNoCategories()
+    {
+        Assert.Null(MetricsController.ComputeFinalScore(new List<GapAnalysisCategoryScore>()));
+    }
+
+    [Fact]
+    public void FormatReview_HeaderIncludesFinalScore_NextToMetricName()
+    {
+        var dto = new GapAnalysisLlmResult
+        {
+            Categories =
+            [
+                new GapAnalysisCategoryScore { Name = "Clarity", Score = 80, Rationale = "Clear." },
+                new GapAnalysisCategoryScore { Name = "Completeness", Score = 60, Rationale = "Mostly complete." },
+            ],
+            Narrative = "Solid work overall.",
+        };
+
+        var content = MetricsController.FormatAssessmentReviewContent("Customer Requirements Fidelity", dto);
+
+        Assert.Contains("## Customer Requirements Fidelity Assessment — **Final Score: 70**", content);
+    }
+
+    [Fact]
+    public void FormatReview_HeaderOmitsFinalScore_WhenNoCategories()
+    {
+        var dto = new GapAnalysisLlmResult { Categories = new List<GapAnalysisCategoryScore>(), Narrative = "No evidence." };
+
+        var content = MetricsController.FormatAssessmentReviewContent("Test Metric", dto);
+
+        Assert.Contains("## Test Metric Assessment", content);
+        Assert.DoesNotContain("Final Score", content);
+    }
+
+    [Fact]
+    public void CustomerEngagementReview_LeadsWithFinalScore()
+    {
+        var dto = new GapAnalysisLlmResult
+        {
+            Categories =
+            [
+                new GapAnalysisCategoryScore { Name = "Clarity & tone", Score = 80, Rationale = "Clear." },
+                new GapAnalysisCategoryScore { Name = "Active listening", Score = 60, Rationale = "OK." },
+            ],
+            Narrative = "Good communication overall.",
+        };
+
+        var content = MetricsController.FormatCustomerEngagementReviewContent(dto);
+
+        Assert.StartsWith("**Final Score: 70**", content);
+        Assert.Contains("Good communication overall.", content);
+        Assert.Contains("**Clarity & tone** (80):", content);
+    }
+
+    [Fact]
+    public void CustomerEngagementReview_OmitsFinalScore_WhenNoCategories()
+    {
+        var dto = new GapAnalysisLlmResult { Categories = new List<GapAnalysisCategoryScore>(), Narrative = "Nothing scored." };
+
+        var content = MetricsController.FormatCustomerEngagementReviewContent(dto);
+
+        Assert.DoesNotContain("Final Score", content);
+        Assert.StartsWith("Nothing scored.", content);
+    }
+
+    [Fact]
+    public void MeetingsCommunicationReview_LeadsWithFinalScore()
+    {
+        var dto = new GapAnalysisLlmResult
+        {
+            Categories =
+            [
+                new GapAnalysisCategoryScore { Name = "Participation", Score = 90, Rationale = "Active." },
+                new GapAnalysisCategoryScore { Name = "Technical Depth", Score = 50, Rationale = "Some." },
+            ],
+            Narrative = "Solid meeting presence.",
+        };
+
+        var content = MetricsController.FormatMeetingsCommunicationReviewContent(dto);
+
+        Assert.StartsWith("**Final Score: 70**", content);
+        Assert.Contains("Solid meeting presence.", content);
     }
 
     // ── BoardId validation ────────────────────────────────────────────────────
@@ -206,31 +340,6 @@ public class MetricsAssessmentEngineTests
         Assert.True(valid);
     }
 
-    // ── Helper (mirrors FormatAssessmentReviewContent in the controller) ──────
-
-    private static string FormatReviewContent(string metricName, GapAnalysisLlmResult dto)
-    {
-        var sb = new System.Text.StringBuilder();
-        sb.AppendLine($"## {metricName} Assessment");
-        if (!string.IsNullOrWhiteSpace(dto.Narrative))
-        {
-            sb.AppendLine();
-            sb.AppendLine(dto.Narrative.Trim());
-        }
-        if (dto.Categories.Count > 0)
-        {
-            sb.AppendLine();
-            sb.AppendLine("### Scores");
-            foreach (var c in dto.Categories)
-            {
-                if (string.IsNullOrWhiteSpace(c.Name)) continue;
-                sb.Append("- **").Append(c.Name.Trim())
-                  .Append("** (").Append(Math.Clamp(c.Score, 0, 100)).Append("): ")
-                  .AppendLine(string.IsNullOrWhiteSpace(c.Rationale) ? "(no rationale)" : c.Rationale.Trim());
-            }
-        }
-        return sb.ToString().Trim();
-    }
 }
 
 /// <summary>
@@ -698,6 +807,115 @@ public class AssessmentCategoryNormalizationTests
 }
 
 /// <summary>
+/// Tests for the fix that lets a bold-bullet-format rubric (e.g. "**Communication Clarity (0-100)**",
+/// which ParseRubricCategories does not match) produce multiple scored categories through the generic
+/// Data Assessment Engine — same policy CustomerEngagement already uses for its Skill-rubric override —
+/// instead of collapsing to a single metric-name category.
+/// </summary>
+public class AssessmentCategoryPolicyTests
+{
+    private static GapAnalysisCategoryScore Cat(string name, int score, string rationale = "evidence") =>
+        new() { Name = name, Score = score, Rationale = rationale };
+
+    // ── BuildCategoryScoringInstruction ─────────────────────────────────────────
+
+    [Fact]
+    public void ScoringInstruction_WithExplicitCategories_ListsThemAndRequiresVerbatimNames()
+    {
+        var result = MetricsController.BuildCategoryScoringInstruction(new List<string> { "Initiative", "Communication" });
+
+        Assert.Contains("Return scores for exactly these categories and no others: Initiative | Communication", result);
+        Assert.Contains("Use the category names verbatim as given above.", result);
+    }
+
+    [Fact]
+    public void ScoringInstruction_WithNoExplicitCategories_LetsModelNameItsOwn()
+    {
+        var result = MetricsController.BuildCategoryScoringInstruction(new List<string>());
+
+        Assert.Contains("Name your output categories after the scoring dimensions defined in the rubric above.", result);
+        Assert.DoesNotContain("Return scores for exactly these categories", result);
+    }
+
+    // ── ApplyAssessmentCategoryPolicy ────────────────────────────────────────────
+
+    [Fact]
+    public void Policy_WithExplicitCategories_DelegatesToNormalize_ForcesFixedList()
+    {
+        var returned = new List<GapAnalysisCategoryScore> { Cat("Initiative", 70), Cat("Invented Category", 30) };
+
+        var result = MetricsController.ApplyAssessmentCategoryPolicy(returned, new List<string> { "Initiative" }, "Some Metric");
+
+        Assert.Single(result);
+        Assert.Equal("Initiative", result[0].Name);
+    }
+
+    [Fact]
+    public void Policy_WithNoExplicitCategories_TrustsAllReturnedCategories()
+    {
+        // This is the bug fix: a bold-bullet rubric with 4 dimensions must yield 4 categories,
+        // not collapse into one metric-name category the way it did before this fix.
+        var returned = new List<GapAnalysisCategoryScore>
+        {
+            Cat("Clarity of Requirements", 80),
+            Cat("Completeness of Requirements", 65),
+            Cat("Alignment with Customer Needs", 90),
+            Cat("Traceability of Requirements", 40),
+            Cat("Prioritization of Requirements", 55),
+        };
+
+        var result = MetricsController.ApplyAssessmentCategoryPolicy(returned, new List<string>(), "Customer Requirements Fidelity");
+
+        Assert.Equal(5, result.Count);
+        Assert.Contains(result, c => c.Name == "Clarity of Requirements" && c.Score == 80);
+        Assert.Contains(result, c => c.Name == "Prioritization of Requirements" && c.Score == 55);
+    }
+
+    [Fact]
+    public void Policy_WithNoExplicitCategories_DropsBlankNames()
+    {
+        var returned = new List<GapAnalysisCategoryScore> { Cat("", 50), Cat("Valid", 60) };
+
+        var result = MetricsController.ApplyAssessmentCategoryPolicy(returned, new List<string>(), "Some Metric");
+
+        Assert.Single(result);
+        Assert.Equal("Valid", result[0].Name);
+    }
+
+    [Fact]
+    public void Policy_WithNoExplicitCategories_ClampsScores()
+    {
+        var returned = new List<GapAnalysisCategoryScore> { Cat("Depth", 250), Cat("Breadth", -10) };
+
+        var result = MetricsController.ApplyAssessmentCategoryPolicy(returned, new List<string>(), "Some Metric");
+
+        Assert.Equal(100, result.Single(c => c.Name == "Depth").Score);
+        Assert.Equal(0, result.Single(c => c.Name == "Breadth").Score);
+    }
+
+    [Fact]
+    public void Policy_WithNoExplicitCategories_FallsBackToMetricName_WhenModelReturnsNothing()
+    {
+        var result = MetricsController.ApplyAssessmentCategoryPolicy(
+            new List<GapAnalysisCategoryScore>(), new List<string>(), "Customer Requirements Fidelity");
+
+        Assert.Single(result);
+        Assert.Equal("Customer Requirements Fidelity", result[0].Name);
+        Assert.Equal(0, result[0].Score);
+    }
+
+    [Fact]
+    public void Policy_WithNoExplicitCategories_TrimsCategoryNames()
+    {
+        var returned = new List<GapAnalysisCategoryScore> { Cat("  Padded Name  ", 50) };
+
+        var result = MetricsController.ApplyAssessmentCategoryPolicy(returned, new List<string>(), "Some Metric");
+
+        Assert.Equal("Padded Name", result[0].Name);
+    }
+}
+
+/// <summary>
 /// Core metrics (hardcoded BE logic, routed by name slug) must be protected from deletion,
 /// and their display names must map onto the protected slug set.
 /// </summary>
@@ -756,5 +974,67 @@ public class TrelloCardCreationTimeTests
     {
         var ok = strAppersBackend.Services.TrelloService.TryGetCardCreationUtc(cardId, out _);
         Assert.False(ok);
+    }
+}
+
+/// <summary>
+/// Tests for <see cref="MetricsController.BuildExplicitRulesBlock"/>: Metric.ExplicitRules must be
+/// appended after the rubric in the Assessment Engine's system prompt (see RunAssessmentEngine), and
+/// must never be visible to ParseRubricCategories as candidate scoring dimensions.
+/// </summary>
+public class ExplicitRulesBlockTests
+{
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("   \n  ")]
+    public void ReturnsEmptyString_WhenExplicitRulesIsBlank(string? explicitRules)
+    {
+        var result = MetricsController.BuildExplicitRulesBlock(explicitRules);
+        Assert.Equal(string.Empty, result);
+    }
+
+    [Fact]
+    public void EmbedsExplicitRulesText_Verbatim()
+    {
+        const string rules = "- Do not penalize a missing extraction as a quality gap.\n- Treat a merged PR as delivered work.";
+
+        var result = MetricsController.BuildExplicitRulesBlock(rules);
+
+        Assert.Contains(rules, result);
+        Assert.Contains("=== EXPLICIT RULES ===", result);
+        Assert.Contains("=== END EXPLICIT RULES ===", result);
+    }
+
+    [Fact]
+    public void TrimsExplicitRulesText()
+    {
+        var result = MetricsController.BuildExplicitRulesBlock("  Never penalize missing PRD extraction.  \n");
+
+        Assert.Contains("Never penalize missing PRD extraction.", result);
+        Assert.DoesNotContain("  Never penalize missing PRD extraction.  ", result);
+    }
+
+    [Fact]
+    public void Block_NeverParsedAsRubricCategory()
+    {
+        // RunAssessmentEngine calls ParseRubricCategories(skillRubric) BEFORE building the explicit
+        // rules block and concatenating it into the prompt — so even if explicit-rules text happens to
+        // contain a "Category:"-shaped line, it must never influence the parsed scoring dimensions.
+        const string skillRubric = "Category: Real Dimension — the only real one.";
+        const string explicitRules = "Category: Fake Dimension — this must not become a scored category.";
+
+        var categories = MetricsController.ParseRubricCategories(skillRubric);
+        MetricsController.BuildExplicitRulesBlock(explicitRules); // built separately, never fed to ParseRubricCategories
+
+        Assert.Single(categories);
+        Assert.Equal("Real Dimension", categories[0]);
+    }
+
+    [Fact]
+    public void StartsWithBlankLineSeparator_SoItDoesNotCollideWithEndRubricMarker()
+    {
+        var result = MetricsController.BuildExplicitRulesBlock("Some rule.");
+        Assert.StartsWith("\n\n=== EXPLICIT RULES ===", result);
     }
 }
