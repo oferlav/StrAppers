@@ -8083,6 +8083,8 @@ test('add with negative numbers returns correct sum', () => {
 "            config.setUsername(username);\n" +
 "            config.setPassword(password);\n" +
 "            config.setMaximumPoolSize(10);\n" +
+"            // BUILD-VERIFY-MARKER-20260721-01: if you can see this comment in a newly generated\n" +
+"            // board's DataSourceConfig.java, the running strAppersBackend process is on this branch.\n" +
 "            // Let the pool drain to zero connections when idle so Neon's compute can auto-suspend\n" +
 "            // instead of being held active indefinitely by parked connections.\n" +
 "            config.setMinimumIdle(0);\n" +
