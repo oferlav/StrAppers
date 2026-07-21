@@ -8083,6 +8083,10 @@ test('add with negative numbers returns correct sum', () => {
 "            config.setUsername(username);\n" +
 "            config.setPassword(password);\n" +
 "            config.setMaximumPoolSize(10);\n" +
+"            // Let the pool drain to zero connections when idle so Neon's compute can auto-suspend\n" +
+"            // instead of being held active indefinitely by parked connections.\n" +
+"            config.setMinimumIdle(0);\n" +
+"            config.setIdleTimeout(60000);\n" +
 "            \n" +
 "            return new HikariDataSource(config);\n" +
 "        } catch (Exception e) {\n" +
