@@ -164,220 +164,239 @@ namespace strAppersBackend.Services
                         .Where(r => r.InstituteId == null && r.IsActive)
                         .ToListAsync();
 
-                // Check each priority level in order (highest priority first)
-                Func<Student, int?>[] priorityAccessors = new Func<Student, int?>[]
-                {
-                    s => s.InstitutePriority1,
-                    s => s.InstitutePriority2,
-                    s => s.InstitutePriority3,
-                    s => s.InstitutePriority4,
-                };
+                // Pool a project's applicants across ALL 4 priority ranks before evaluating them.
+                // Evaluating one priority rank at a time (the previous approach) silently dropped
+                // viable squads whose members ranked the project at different ranks (e.g. Product
+                // Manager at P1, UI/UX Designer at P3) — each single-rank pass saw an incomplete
+                // roster and rejected it, even though the full set of applicants (pooled across
+                // ranks) satisfied every mandatory role. Mirrors the legacy ProjectPriorityX unpivot
+                // in StudentTeamBuilderService\Worker.cs, which pools every applicant of a project
+                // together regardless of priority rank, using the rank only as an ordering/tiebreak
+                // signal for who gets picked when a role has multiple candidates.
+                var expandedPriorities = instituteStudents
+                    .SelectMany(s => new[]
+                    {
+                        (Student: s, ProjectId: s.InstitutePriority1, Rank: 1),
+                        (Student: s, ProjectId: s.InstitutePriority2, Rank: 2),
+                        (Student: s, ProjectId: s.InstitutePriority3, Rank: 3),
+                        (Student: s, ProjectId: s.InstitutePriority4, Rank: 4),
+                    })
+                    .Where(x => x.ProjectId != null)
+                    .ToList();
 
-                foreach (var getPriority in priorityAccessors)
+                var byProject = expandedPriorities
+                    .GroupBy(x => x.ProjectId!.Value)
+                    .OrderBy(g => g.Min(x => x.Rank))
+                    .ThenBy(g => g.Min(x => x.Student.StartPendingAt ?? DateTime.UtcNow))
+                    .Select(g => new
+                    {
+                        Key = g.Key,
+                        // One entry per student, keeping their best (lowest) rank. Ordered so the
+                        // FirstOrDefault role-matching below prefers higher-priority, longer-waiting students.
+                        Students = g.GroupBy(x => x.Student.Id)
+                            .Select(sg => sg.OrderBy(x => x.Rank).First())
+                            .OrderBy(x => x.Rank)
+                            .ThenBy(x => x.Student.StartPendingAt ?? DateTime.UtcNow)
+                            .Select(x => x.Student)
+                            .ToList()
+                    })
+                    .ToList();
+
+                foreach (var projectGroup in byProject)
                 {
-                    var studentsAtPriority = instituteStudents
-                        .Where(s => getPriority(s) != null && !processedStudentIds.Contains(s.Id))
+                    var ipId = projectGroup.Key;
+                    var candidates = projectGroup.Students.Where(s => !processedStudentIds.Contains(s.Id)).ToList();
+                    if (!candidates.Any()) continue;
+
+                    var template = activeTemplates.FirstOrDefault(t => t.InstituteProjectId == ipId);
+
+                    var ip = await _context.InstituteProjects.FirstOrDefaultAsync(p => p.Id == ipId);
+                    if (ip == null)
+                    {
+                        _logger.LogWarning("[INSTITUTE-TEAM-BUILDER] Institute {InstituteId}, IpId {IpId}: InstituteProject not found, skipping.", instituteId, ipId);
+                        skipped++;
+                        continue;
+                    }
+                    if (!ip.BaseProjectId.HasValue)
+                    {
+                        _logger.LogWarning("[INSTITUTE-TEAM-BUILDER] Institute {InstituteId}, IpId {IpId}: no BaseProjectId, skipping.", instituteId, ipId);
+                        skipped++;
+                        continue;
+                    }
+
+                    // Partition candidates by coupon: students with a coupon only team with
+                    // same-coupon students; students without a coupon form their own pool.
+                    var couponGroups = candidates
+                        .GroupBy(s => string.IsNullOrWhiteSpace(s.Coupon) ? (string?)null : s.Coupon)
                         .ToList();
 
-                    if (!studentsAtPriority.Any()) continue;
-
-                    var byProject = studentsAtPriority.GroupBy(s => getPriority(s)!.Value);
-
-                    foreach (var projectGroup in byProject)
+                    foreach (var couponGroup in couponGroups)
                     {
-                        var ipId = projectGroup.Key;
-                        var candidates = projectGroup.ToList();
+                        var couponCandidates = couponGroup.ToList();
+                        var couponLabel = couponGroup.Key ?? "(no coupon)";
 
-                        var template = activeTemplates.FirstOrDefault(t => t.InstituteProjectId == ipId);
-
-                        var ip = await _context.InstituteProjects.FirstOrDefaultAsync(p => p.Id == ipId);
-                        if (ip == null)
+                        // SingleQuest: QuestMode institute where each student gets their own board immediately
+                        if (isSingleQuestMode)
                         {
-                            _logger.LogWarning("[INSTITUTE-TEAM-BUILDER] Institute {InstituteId}, IpId {IpId}: InstituteProject not found, skipping.", instituteId, ipId);
-                            skipped++;
-                            continue;
-                        }
-                        if (!ip.BaseProjectId.HasValue)
-                        {
-                            _logger.LogWarning("[INSTITUTE-TEAM-BUILDER] Institute {InstituteId}, IpId {IpId}: no BaseProjectId, skipping.", instituteId, ipId);
-                            skipped++;
-                            continue;
-                        }
+                            var eligible = couponCandidates.Where(s => !processedStudentIds.Contains(s.Id)).ToList();
+                            var batchStart = DateTime.UtcNow;
+                            _logger.LogInformation("[INSTITUTE-TEAM-BUILDER] SingleQuest batch start — Institute={InstituteId}, IpId={IpId}, Coupon={Coupon}, Students={Count}, Time={Time:O}",
+                                instituteId, ipId, couponLabel, eligible.Count, batchStart);
 
-                        // Partition candidates by coupon: students with a coupon only team with
-                        // same-coupon students; students without a coupon form their own pool.
-                        var couponGroups = candidates
-                            .GroupBy(s => string.IsNullOrWhiteSpace(s.Coupon) ? (string?)null : s.Coupon)
-                            .ToList();
+                            var sem = new SemaphoreSlim(5);
+                            var localMessages = new System.Collections.Concurrent.ConcurrentBag<(bool Success, int StudentId, string Msg, TimeSpan Elapsed)>();
 
-                        foreach (var couponGroup in couponGroups)
-                        {
-                            var couponCandidates = couponGroup.ToList();
-                            var couponLabel = couponGroup.Key ?? "(no coupon)";
-
-                            // SingleQuest: QuestMode institute where each student gets their own board immediately
-                            if (isSingleQuestMode)
+                            await Task.WhenAll(eligible.Select(async student =>
                             {
-                                var eligible = couponCandidates.Where(s => !processedStudentIds.Contains(s.Id)).ToList();
-                                var batchStart = DateTime.UtcNow;
-                                _logger.LogInformation("[INSTITUTE-TEAM-BUILDER] SingleQuest batch start — Institute={InstituteId}, IpId={IpId}, Coupon={Coupon}, Students={Count}, Time={Time:O}",
-                                    instituteId, ipId, couponLabel, eligible.Count, batchStart);
-
-                                var sem = new SemaphoreSlim(5);
-                                var localMessages = new System.Collections.Concurrent.ConcurrentBag<(bool Success, int StudentId, string Msg, TimeSpan Elapsed)>();
-
-                                await Task.WhenAll(eligible.Select(async student =>
-                                {
-                                    await sem.WaitAsync();
-                                    var studentStart = DateTime.UtcNow;
-                                    _logger.LogInformation("[INSTITUTE-TEAM-BUILDER] SingleQuest provisioning start — StudentId={StudentId}, Time={Time:O}", student.Id, studentStart);
-                                    try
-                                    {
-                                        var singleBoard = await CallCreateBoardAsync(ip.BaseProjectId.Value, ip.Id, new List<Student> { student }, false, ip.Title);
-                                        var elapsed = DateTime.UtcNow - studentStart;
-                                        var msg = singleBoard.Success
-                                            ? $"Institute {instituteId}, IpId {ipId}, Coupon={couponLabel} (SingleQuest): board created for student {student.Id} in {elapsed.TotalSeconds:F1}s."
-                                            : $"Institute {instituteId}, IpId {ipId}, Coupon={couponLabel} (SingleQuest): CreateBoard FAILED for student {student.Id} after {elapsed.TotalSeconds:F1}s — {singleBoard.Error}";
-                                        _logger.LogInformation("[INSTITUTE-TEAM-BUILDER] SingleQuest provisioning end — StudentId={StudentId}, Success={Success}, ElapsedSeconds={Elapsed:F1}",
-                                            student.Id, singleBoard.Success, elapsed.TotalSeconds);
-                                        localMessages.Add((singleBoard.Success, student.Id, msg, elapsed));
-                                    }
-                                    finally { sem.Release(); }
-                                }));
-
-                                var batchElapsed = DateTime.UtcNow - batchStart;
-                                var successCount = localMessages.Count(r => r.Success);
-                                var failCount = localMessages.Count(r => !r.Success);
-
-                                _logger.LogInformation("[INSTITUTE-TEAM-BUILDER] SingleQuest batch end — Institute={InstituteId}, IpId={IpId}, Success={S}, Failed={F}, TotalSeconds={Elapsed:F1}",
-                                    instituteId, ipId, successCount, failCount, batchElapsed.TotalSeconds);
-
-                                foreach (var (success, studentId, msg, _) in localMessages)
-                                {
-                                    messages.Add(msg);
-                                    if (success) { created++; processedStudentIds.Add(studentId); _logger.LogInformation("[INSTITUTE-TEAM-BUILDER] {Message}", msg); }
-                                    else { skipped++; _logger.LogWarning("[INSTITUTE-TEAM-BUILDER] {Message}", msg); }
-                                }
-
-                                // Email timing report
+                                await sem.WaitAsync();
+                                var studentStart = DateTime.UtcNow;
+                                _logger.LogInformation("[INSTITUTE-TEAM-BUILDER] SingleQuest provisioning start — StudentId={StudentId}, Time={Time:O}", student.Id, studentStart);
                                 try
                                 {
-                                    var adminEmail = _configuration["AdminNotificationEmail"] ?? "oferlav@gmail.com";
-                                    var rows = localMessages
-                                        .OrderBy(r => r.StudentId)
-                                        .Select(r => $"  Student {r.StudentId}: {(r.Success ? "OK" : "FAILED")} — {r.Elapsed.TotalSeconds:F1}s  {(r.Success ? "" : r.Msg.Split('—').LastOrDefault()?.Trim())}");
-                                    var body = $"SingleQuest Provisioning Report\n" +
-                                               $"================================\n" +
-                                               $"Institute:    {instituteId}\n" +
-                                               $"Project:      {ip.Title} (IpId={ipId})\n" +
-                                               $"Coupon:       {couponLabel}\n" +
-                                               $"Started:      {batchStart:yyyy-MM-dd HH:mm:ss} UTC\n" +
-                                               $"Total time:   {batchElapsed.TotalSeconds:F1}s\n" +
-                                               $"Students:     {eligible.Count} total, {successCount} OK, {failCount} failed\n\n" +
-                                               $"Per-student timings:\n" +
-                                               string.Join("\n", rows);
-                                    await _emailService.SendPlainEmailAsync(adminEmail, $"[SingleQuest] {successCount}/{eligible.Count} boards created — {batchElapsed.TotalSeconds:F1}s", body);
+                                    var singleBoard = await CallCreateBoardAsync(ip.BaseProjectId.Value, ip.Id, new List<Student> { student }, false, ip.Title);
+                                    var elapsed = DateTime.UtcNow - studentStart;
+                                    var msg = singleBoard.Success
+                                        ? $"Institute {instituteId}, IpId {ipId}, Coupon={couponLabel} (SingleQuest): board created for student {student.Id} in {elapsed.TotalSeconds:F1}s."
+                                        : $"Institute {instituteId}, IpId {ipId}, Coupon={couponLabel} (SingleQuest): CreateBoard FAILED for student {student.Id} after {elapsed.TotalSeconds:F1}s — {singleBoard.Error}";
+                                    _logger.LogInformation("[INSTITUTE-TEAM-BUILDER] SingleQuest provisioning end — StudentId={StudentId}, Success={Success}, ElapsedSeconds={Elapsed:F1}",
+                                        student.Id, singleBoard.Success, elapsed.TotalSeconds);
+                                    localMessages.Add((singleBoard.Success, student.Id, msg, elapsed));
                                 }
-                                catch (Exception emailEx)
-                                {
-                                    _logger.LogWarning(emailEx, "[INSTITUTE-TEAM-BUILDER] SingleQuest: failed to send timing email (non-critical)");
-                                }
+                                finally { sem.Release(); }
+                            }));
 
+                            var batchElapsed = DateTime.UtcNow - batchStart;
+                            var successCount = localMessages.Count(r => r.Success);
+                            var failCount = localMessages.Count(r => !r.Success);
+
+                            _logger.LogInformation("[INSTITUTE-TEAM-BUILDER] SingleQuest batch end — Institute={InstituteId}, IpId={IpId}, Success={S}, Failed={F}, TotalSeconds={Elapsed:F1}",
+                                instituteId, ipId, successCount, failCount, batchElapsed.TotalSeconds);
+
+                            foreach (var (success, studentId, msg, _) in localMessages)
+                            {
+                                messages.Add(msg);
+                                if (success) { created++; processedStudentIds.Add(studentId); _logger.LogInformation("[INSTITUTE-TEAM-BUILDER] {Message}", msg); }
+                                else { skipped++; _logger.LogWarning("[INSTITUTE-TEAM-BUILDER] {Message}", msg); }
+                            }
+
+                            // Email timing report
+                            try
+                            {
+                                var adminEmail = _configuration["AdminNotificationEmail"] ?? "oferlav@gmail.com";
+                                var rows = localMessages
+                                    .OrderBy(r => r.StudentId)
+                                    .Select(r => $"  Student {r.StudentId}: {(r.Success ? "OK" : "FAILED")} — {r.Elapsed.TotalSeconds:F1}s  {(r.Success ? "" : r.Msg.Split('—').LastOrDefault()?.Trim())}");
+                                var body = $"SingleQuest Provisioning Report\n" +
+                                           $"================================\n" +
+                                           $"Institute:    {instituteId}\n" +
+                                           $"Project:      {ip.Title} (IpId={ipId})\n" +
+                                           $"Coupon:       {couponLabel}\n" +
+                                           $"Started:      {batchStart:yyyy-MM-dd HH:mm:ss} UTC\n" +
+                                           $"Total time:   {batchElapsed.TotalSeconds:F1}s\n" +
+                                           $"Students:     {eligible.Count} total, {successCount} OK, {failCount} failed\n\n" +
+                                           $"Per-student timings:\n" +
+                                           string.Join("\n", rows);
+                                await _emailService.SendPlainEmailAsync(adminEmail, $"[SingleQuest] {successCount}/{eligible.Count} boards created — {batchElapsed.TotalSeconds:F1}s", body);
+                            }
+                            catch (Exception emailEx)
+                            {
+                                _logger.LogWarning(emailEx, "[INSTITUTE-TEAM-BUILDER] SingleQuest: failed to send timing email (non-critical)");
+                            }
+
+                            continue;
+                        }
+
+                        if (template == null)
+                        {
+                            // No active template — handle as built-in project using institute base roles
+                            if (!ip.IsAvailable)
+                            {
+                                _logger.LogInformation("[INSTITUTE-TEAM-BUILDER] Institute {InstituteId}, IpId {IpId}: no template and project not available, skipping.", instituteId, ipId);
                                 continue;
                             }
-
-                            if (template == null)
-                            {
-                                // No active template — handle as built-in project using institute base roles
-                                if (!ip.IsAvailable)
-                                {
-                                    _logger.LogInformation("[INSTITUTE-TEAM-BUILDER] Institute {InstituteId}, IpId {IpId}: no template and project not available, skipping.", instituteId, ipId);
-                                    continue;
-                                }
-                                _logger.LogInformation("[INSTITUTE-TEAM-BUILDER] Institute {InstituteId}, IpId {IpId}, Coupon={Coupon}: no active template, attempting built-in team build.", instituteId, ipId, couponLabel);
-                                var builtInTeam = TryBuildBuiltInTeam(couponCandidates, baseRoles, instituteId, ipId, ref skipped);
-                                if (builtInTeam == null || builtInTeam.Count == 0)
-                                    continue;
-
-                                var builtInBoard = await CallCreateBoardAsync(ip.BaseProjectId.Value, ip.Id, builtInTeam, false, ip.Title);
-                                if (builtInBoard.Success)
-                                {
-                                    created++;
-                                    foreach (var s in builtInTeam) processedStudentIds.Add(s.Id);
-                                    var msg = $"Institute {instituteId}, IpId {ipId}, Coupon={couponLabel} (built-in): board created for {builtInTeam.Count} student(s).";
-                                    messages.Add(msg);
-                                    _logger.LogInformation("[INSTITUTE-TEAM-BUILDER] {Message}", msg);
-                                }
-                                else
-                                {
-                                    skipped++;
-                                    var msg = $"Institute {instituteId}, IpId {ipId}, Coupon={couponLabel} (built-in): CreateBoard failed — {builtInBoard.Error}";
-                                    messages.Add(msg);
-                                    _logger.LogWarning("[INSTITUTE-TEAM-BUILDER] {Message}", msg);
-                                }
-                                continue;
-                            }
-
-                            if (string.IsNullOrWhiteSpace(ip.TrelloBoardJson))
-                            {
-                                _logger.LogWarning("[INSTITUTE-TEAM-BUILDER] Institute {InstituteId}, IpId {IpId}: TrelloBoardJson is empty, skipping.", instituteId, ipId);
-                                skipped++;
-                                continue;
-                            }
-
-                            List<Student>? team = null;
-                            var isSingleRole = false;
-
-                            if (string.Equals(template.CourseType, "Role", StringComparison.OrdinalIgnoreCase))
-                            {
-                                (team, isSingleRole) = TryBuildRoleTeam(couponCandidates, template, instituteId, ipId, ref skipped);
-                            }
-                            else
-                            {
-                                team = TryBuildSquadTeam(couponCandidates, template, instituteId, ipId, ref skipped);
-                            }
-
-                            if (team == null || team.Count == 0)
+                            _logger.LogInformation("[INSTITUTE-TEAM-BUILDER] Institute {InstituteId}, IpId {IpId}, Coupon={Coupon}: no active template, attempting built-in team build.", instituteId, ipId, couponLabel);
+                            var builtInTeam = TryBuildBuiltInTeam(couponCandidates, baseRoles, instituteId, ipId, ref skipped);
+                            if (builtInTeam == null || builtInTeam.Count == 0)
                                 continue;
 
-                            // Assign RoleIndex for role-based courses before calling CreateBoard
-                            if (isSingleRole)
-                            {
-                                for (var i = 0; i < team.Count; i++)
-                                {
-                                    team[i].RoleIndex = i + 1;
-                                    team[i].UpdatedAt = DateTime.UtcNow;
-                                    _context.Entry(team[i]).Property(x => x.RoleIndex).IsModified = true;
-                                }
-                                try { await _context.SaveChangesAsync(); }
-                                catch (Exception ex)
-                                {
-                                    _logger.LogError(ex, "[INSTITUTE-TEAM-BUILDER] Failed to save RoleIndex assignments for IpId {IpId}.", ipId);
-                                    skipped++;
-                                    continue;
-                                }
-                                _logger.LogInformation("[INSTITUTE-TEAM-BUILDER] Assigned RoleIndex 1..{Count} for IpId {IpId}.", team.Count, ipId);
-                            }
-
-                            var boardCreated = await CallCreateBoardAsync(ip.BaseProjectId.Value, ip.Id, team, isSingleRole, ip.Title);
-                            if (boardCreated.Success)
+                            var builtInBoard = await CallCreateBoardAsync(ip.BaseProjectId.Value, ip.Id, builtInTeam, false, ip.Title);
+                            if (builtInBoard.Success)
                             {
                                 created++;
-                                foreach (var s in team) processedStudentIds.Add(s.Id);
-                                var msg = $"Institute {instituteId}, IpId {ipId}, Coupon={couponLabel}: board created for {team.Count} student(s).";
+                                foreach (var s in builtInTeam) processedStudentIds.Add(s.Id);
+                                var msg = $"Institute {instituteId}, IpId {ipId}, Coupon={couponLabel} (built-in): board created for {builtInTeam.Count} student(s).";
                                 messages.Add(msg);
                                 _logger.LogInformation("[INSTITUTE-TEAM-BUILDER] {Message}", msg);
                             }
                             else
                             {
                                 skipped++;
-                                var msg = $"Institute {instituteId}, IpId {ipId}, Coupon={couponLabel}: CreateBoard failed — {boardCreated.Error}";
+                                var msg = $"Institute {instituteId}, IpId {ipId}, Coupon={couponLabel} (built-in): CreateBoard failed — {builtInBoard.Error}";
                                 messages.Add(msg);
                                 _logger.LogWarning("[INSTITUTE-TEAM-BUILDER] {Message}", msg);
-                                // Note: RoleIndex is NOT reverted on failure. The HTTP call to BoardsController
-                                // can time out (Azure 230s request limit) while the board is still being created
-                                // server-side. Reverting would clobber a valid assignment.
                             }
+                            continue;
+                        }
+
+                        if (string.IsNullOrWhiteSpace(ip.TrelloBoardJson))
+                        {
+                            _logger.LogWarning("[INSTITUTE-TEAM-BUILDER] Institute {InstituteId}, IpId {IpId}: TrelloBoardJson is empty, skipping.", instituteId, ipId);
+                            skipped++;
+                            continue;
+                        }
+
+                        List<Student>? team = null;
+                        var isSingleRole = false;
+
+                        if (string.Equals(template.CourseType, "Role", StringComparison.OrdinalIgnoreCase))
+                        {
+                            (team, isSingleRole) = TryBuildRoleTeam(couponCandidates, template, instituteId, ipId, ref skipped);
+                        }
+                        else
+                        {
+                            team = TryBuildSquadTeam(couponCandidates, template, instituteId, ipId, ref skipped);
+                        }
+
+                        if (team == null || team.Count == 0)
+                            continue;
+
+                        // Assign RoleIndex for role-based courses before calling CreateBoard
+                        if (isSingleRole)
+                        {
+                            for (var i = 0; i < team.Count; i++)
+                            {
+                                team[i].RoleIndex = i + 1;
+                                team[i].UpdatedAt = DateTime.UtcNow;
+                                _context.Entry(team[i]).Property(x => x.RoleIndex).IsModified = true;
+                            }
+                            try { await _context.SaveChangesAsync(); }
+                            catch (Exception ex)
+                            {
+                                _logger.LogError(ex, "[INSTITUTE-TEAM-BUILDER] Failed to save RoleIndex assignments for IpId {IpId}.", ipId);
+                                skipped++;
+                                continue;
+                            }
+                            _logger.LogInformation("[INSTITUTE-TEAM-BUILDER] Assigned RoleIndex 1..{Count} for IpId {IpId}.", team.Count, ipId);
+                        }
+
+                        var boardCreated = await CallCreateBoardAsync(ip.BaseProjectId.Value, ip.Id, team, isSingleRole, ip.Title);
+                        if (boardCreated.Success)
+                        {
+                            created++;
+                            foreach (var s in team) processedStudentIds.Add(s.Id);
+                            var msg = $"Institute {instituteId}, IpId {ipId}, Coupon={couponLabel}: board created for {team.Count} student(s).";
+                            messages.Add(msg);
+                            _logger.LogInformation("[INSTITUTE-TEAM-BUILDER] {Message}", msg);
+                        }
+                        else
+                        {
+                            skipped++;
+                            var msg = $"Institute {instituteId}, IpId {ipId}, Coupon={couponLabel}: CreateBoard failed — {boardCreated.Error}";
+                            messages.Add(msg);
+                            _logger.LogWarning("[INSTITUTE-TEAM-BUILDER] {Message}", msg);
+                            // Note: RoleIndex is NOT reverted on failure. The HTTP call to BoardsController
+                            // can time out (Azure 230s request limit) while the board is still being created
+                            // server-side. Reverting would clobber a valid assignment.
                         }
                     }
                 }
