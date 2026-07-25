@@ -3763,7 +3763,8 @@ public partial class BoardsController : ControllerBase
                         <p>Hi {WebUtility.HtmlEncode(recipientFirstName)},</p>
                         <p>{WebUtility.HtmlEncode(proposerName)} suggested a kickoff meeting time for your squad:</p>
                         <p style='font-size: 16px; font-weight: bold; color: #C2410C;'>📅 {WebUtility.HtmlEncode(formattedDate)}</p>
-                        <p>Please log in to Skill-in to approve this time, or suggest a different one if you can't make it.</p>
+                        <p>Your kickoff meeting is your squad's first meeting — it's where you'll meet each other, align on goals and roles, and set the tone for how you'll work together. Getting it scheduled quickly means your project can start on time.</p>
+                        <p>Please log in to Skill-in to approve this time. If it doesn't work for you, jump into your squad room's group chat to find a time that works for everyone before suggesting a different one.</p>
                         <p><a href='https://www.skill-in.com' style='background-color: #3D76FF; color: white; padding: 12px 24px; text-decoration: none; border-radius: 5px; font-weight: bold; display: inline-block;'>Log In to Skill-in</a></p>");
                     await _smtpEmailService.SendPlainEmailAsync(
                         s.Email,
