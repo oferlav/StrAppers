@@ -80,13 +80,13 @@ public partial class BoardsController : ControllerBase
     private static string Truncate(string? s, int max)
         => string.IsNullOrEmpty(s) ? "" : s.Length <= max ? s : s[..max] + "…";
 
-    private async Task FlushDebugLog(System.Text.StringBuilder? debugLog, string boardId)
+    private async Task FlushDebugLog(System.Text.StringBuilder? debugLog, string boardId, string subjectPrefix = "BoardCreation Debug")
     {
         if (debugLog == null) return;
         var content = debugLog.ToString();
         var fileName = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"BoardCreation_{boardId}_{DateTime.UtcNow:yyyyMMdd_HHmmss}.txt");
         try { System.IO.File.WriteAllText(fileName, content); } catch { /* ignore */ }
-        try { await _smtpEmailService.SendPlainEmailAsync("ofer@skill-in.com", $"[BoardCreation Debug] BoardId={boardId}", content); } catch { /* ignore */ }
+        try { await _smtpEmailService.SendPlainEmailAsync("ofer@skill-in.com", $"[{subjectPrefix}] BoardId={boardId}", content); } catch { /* ignore */ }
     }
 
     /// <summary>
@@ -3768,7 +3768,8 @@ public partial class BoardsController : ControllerBase
                 Message = "Kickoff time suggested.",
                 KickoffState = board.KickoffState ?? 1,
                 SuggestedKickoffDate = board.SuggestedKickoffDate,
-                LastDateStudentId = board.LastDateStudentId
+                LastDateStudentId = board.LastDateStudentId,
+                LastDateStudentName = proposerName
             });
         }
         catch (Exception ex)
@@ -3787,13 +3788,23 @@ public partial class BoardsController : ControllerBase
     [HttpPost("kickoff-approve")]
     public async Task<ActionResult<KickoffActionResponse>> ApproveKickoffDate([FromBody] KickoffApproveRequest request)
     {
+        // Diagnostics for the reported "last approval times out" issue: always time each stage,
+        // and only email the log (via the existing debug-email pipeline) when something is slow
+        // or throws, so normal fast approvals stay silent.
+        var debugLog = new System.Text.StringBuilder();
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        const long SlowThresholdMs = 8000;
+        Exception? failure = null;
         try
         {
+            DbgLog(debugLog, $"[KICKOFF-APPROVE] START board={request.BoardId} student={request.StudentId}");
+
             using var transaction = await _context.Database.BeginTransactionAsync();
 
             var lockedBoard = await _context.ProjectBoards
                 .FromSqlInterpolated($"SELECT * FROM \"ProjectBoards\" WHERE \"BoardId\" = {request.BoardId} FOR UPDATE")
                 .FirstOrDefaultAsync();
+            DbgLog(debugLog, $"[KICKOFF-APPROVE] Row lock acquired at {sw.ElapsedMilliseconds}ms");
 
             if (lockedBoard == null)
                 return NotFound(new KickoffActionResponse { Success = false, Message = $"Board with ID {request.BoardId} not found." });
@@ -3814,50 +3825,76 @@ public partial class BoardsController : ControllerBase
 
             approver.ApprovedKickoff = true;
             var allApproved = squad.All(s => s.ApprovedKickoff);
+            DbgLog(debugLog, $"[KICKOFF-APPROVE] allApproved={allApproved} squadSize={squad.Count} at {sw.ElapsedMilliseconds}ms");
 
             if (allApproved && lockedBoard.SuggestedKickoffDate.HasValue)
             {
                 lockedBoard.KickoffState = 2;
                 lockedBoard.NextMeetingTime = lockedBoard.SuggestedKickoffDate;
                 lockedBoard.UpdatedAt = DateTime.UtcNow;
-                await _context.SaveChangesAsync();
+            }
+            await _context.SaveChangesAsync();
+            DbgLog(debugLog, $"[KICKOFF-APPROVE] SaveChanges done at {sw.ElapsedMilliseconds}ms");
 
+            // Commit — and release the row lock — before any slow external work below, so a
+            // slow Teams/SMTP call never holds a Postgres lock on this board.
+            await transaction.CommitAsync();
+            DbgLog(debugLog, $"[KICKOFF-APPROVE] Transaction committed at {sw.ElapsedMilliseconds}ms");
+
+            string? lastDateStudentName = null;
+            if (lockedBoard.LastDateStudentId.HasValue)
+            {
+                var lds = squad.FirstOrDefault(s => s.Id == lockedBoard.LastDateStudentId.Value);
+                if (lds != null) lastDateStudentName = $"{lds.FirstName} {lds.LastName}".Trim();
+            }
+
+            if (allApproved && lockedBoard.SuggestedKickoffDate.HasValue)
+            {
                 var project = await _context.Projects.FirstOrDefaultAsync(p => p.Id == lockedBoard.ProjectId);
                 var attendeeEmails = squad.Where(s => !string.IsNullOrWhiteSpace(s.Email)).Select(s => s.Email).ToList();
+                DbgLog(debugLog, $"[KICKOFF-APPROVE] Starting Teams invite call at {sw.ElapsedMilliseconds}ms, attendees={attendeeEmails.Count}");
                 var meetingUrl = await CreateTeamsMeetingForBoardAsync(
                     lockedBoard.Id,
                     project != null ? $"{project.Title} Kickoff meeting" : "Kickoff meeting",
                     lockedBoard.SuggestedKickoffDate.Value,
                     30,
                     attendeeEmails,
-                    null);
+                    debugLog);
+                DbgLog(debugLog, $"[KICKOFF-APPROVE] Teams invite call finished at {sw.ElapsedMilliseconds}ms, meetingUrl={(string.IsNullOrEmpty(meetingUrl) ? "(none)" : meetingUrl)}");
 
                 if (!string.IsNullOrEmpty(meetingUrl))
                 {
                     lockedBoard.NextMeetingUrl = meetingUrl;
                     await _context.SaveChangesAsync();
+                    DbgLog(debugLog, $"[KICKOFF-APPROVE] NextMeetingUrl saved at {sw.ElapsedMilliseconds}ms");
                 }
             }
-            else
-            {
-                await _context.SaveChangesAsync();
-            }
 
-            await transaction.CommitAsync();
-
+            DbgLog(debugLog, $"[KICKOFF-APPROVE] DONE at {sw.ElapsedMilliseconds}ms");
             return Ok(new KickoffActionResponse
             {
                 Success = true,
                 Message = allApproved ? "Everyone approved — invite sent." : "Approval recorded.",
                 KickoffState = lockedBoard.KickoffState ?? 1,
                 SuggestedKickoffDate = lockedBoard.SuggestedKickoffDate,
-                LastDateStudentId = lockedBoard.LastDateStudentId
+                LastDateStudentId = lockedBoard.LastDateStudentId,
+                LastDateStudentName = lastDateStudentName
             });
         }
         catch (Exception ex)
         {
+            failure = ex;
             _logger.LogError(ex, "Error approving kickoff date for board {BoardId}", request.BoardId);
             return StatusCode(500, new KickoffActionResponse { Success = false, Message = "An error occurred while approving the kickoff date." });
+        }
+        finally
+        {
+            sw.Stop();
+            if (failure != null || sw.ElapsedMilliseconds > SlowThresholdMs)
+            {
+                DbgLog(debugLog, $"[KICKOFF-APPROVE] FINAL total={sw.ElapsedMilliseconds}ms failure={(failure != null ? failure.Message : "none")}");
+                await FlushDebugLog(debugLog, request.BoardId, "Kickoff Approve Debug");
+            }
         }
     }
 
@@ -4471,7 +4508,7 @@ public partial class BoardsController : ControllerBase
     /// <param name="boardId">The Trello board ID to get stats for</param>
     /// <returns>Comprehensive Trello board statistics</returns>
     [HttpGet("stats/{boardId}")]
-    public async Task<ActionResult<object>> GetBoardStats(string boardId)
+    public async Task<ActionResult<object>> GetBoardStats(string boardId, [FromQuery] int? studentId = null)
     {
         try
         {
@@ -4627,6 +4664,17 @@ public partial class BoardsController : ControllerBase
                         ?? await _context.Students.FirstOrDefaultAsync(s => s.Id == projectBoard.LastDateStudentId.Value);
                     if (lastDateStudent != null)
                         responseNode["lastDateStudentName"] = JsonValue.Create($"{lastDateStudent.FirstName} {lastDateStudent.LastName}".Trim());
+                }
+
+                // Lets the FE know whether *this* logged-in student already approved the current
+                // suggestion, so it can hide the Approve/Suggest buttons on reload instead of only
+                // right after the action (KickoffBand issue: buttons reappeared after a refresh).
+                if (studentId.HasValue)
+                {
+                    var currentStudent = studentsOnBoard.FirstOrDefault(s => s.Id == studentId.Value)
+                        ?? await _context.Students.FirstOrDefaultAsync(s => s.Id == studentId.Value && s.BoardId == boardId);
+                    if (currentStudent != null)
+                        responseNode["currentStudentApprovedKickoff"] = JsonValue.Create(currentStudent.ApprovedKickoff);
                 }
             }
 
@@ -9523,6 +9571,7 @@ public class KickoffActionResponse
     public int KickoffState { get; set; }
     public DateTime? SuggestedKickoffDate { get; set; }
     public int? LastDateStudentId { get; set; }
+    public string? LastDateStudentName { get; set; }
 }
 
 /// <summary>Request for POST /api/Boards/use/create-bug. Priority: 1=Low, 2=Medium, 3=High, 4=Critical (stored as integer in Trello).</summary>
