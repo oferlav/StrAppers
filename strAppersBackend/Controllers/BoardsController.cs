@@ -3752,7 +3752,10 @@ public partial class BoardsController : ControllerBase
             await _context.SaveChangesAsync();
 
             var proposerName = $"{proposer.FirstName} {proposer.LastName}".Trim();
-            var formattedDate = request.SuggestedDateTimeUtc.ToString("MMMM d, h:mm tt 'UTC'");
+            // DST-aware local conversion (Israel: UTC+2 winter / UTC+3 summer), matching the
+            // conversion already used for the real meeting invite (SmtpEmailService.CreateEmailBody).
+            var localSuggestedDate = TrelloBoardScheduleHelper.ConvertUtcToLocal(request.SuggestedDateTimeUtc, _configuration["Trello:TimeZoneId"]);
+            var formattedDate = localSuggestedDate.ToString("MMMM d, h:mm tt");
 
             foreach (var s in squad.Where(s => s.Id != request.StudentId && !string.IsNullOrWhiteSpace(s.Email)))
             {

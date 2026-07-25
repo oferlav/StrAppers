@@ -50,6 +50,38 @@ public static class TrelloBoardScheduleHelper
     }
 
     /// <summary>
+    /// Resolves the configured local timezone for DISPLAY conversion (Trello:TimeZoneId — a
+    /// Windows/ICU timezone id, e.g. "Israel Standard Time" for Asia/Jerusalem), with DST handled
+    /// automatically per-instant. Unlike <see cref="ParseLocalTimeOffset"/>'s fixed-offset string
+    /// (still used for the forward scheduling math elsewhere — first-day-of-week/sprint due dates —
+    /// which this method intentionally does not touch), this stays correct across DST transitions
+    /// without needing the config flipped twice a year. Falls back to a fixed UTC+2 offset (no DST)
+    /// if the configured id can't be resolved on this host, so callers never throw.
+    /// </summary>
+    public static TimeZoneInfo GetLocalTimeZone(string? timeZoneId)
+    {
+        var id = string.IsNullOrWhiteSpace(timeZoneId) ? "Israel Standard Time" : timeZoneId.Trim();
+        try
+        {
+            return TimeZoneInfo.FindSystemTimeZoneById(id);
+        }
+        catch (Exception)
+        {
+            return TimeZoneInfo.CreateCustomTimeZone("Fallback+2", TimeSpan.FromHours(2), "Fallback GMT+2 (no DST)", "Fallback GMT+2 (no DST)");
+        }
+    }
+
+    /// <summary>
+    /// Converts a UTC instant to the configured local timezone for display, correctly handling DST
+    /// for that specific date (e.g. Israel: UTC+2 in winter, UTC+3 in summer).
+    /// </summary>
+    public static DateTime ConvertUtcToLocal(DateTime utc, string? timeZoneId)
+    {
+        var utcKind = utc.Kind == DateTimeKind.Utc ? utc : DateTime.SpecifyKind(utc, DateTimeKind.Utc);
+        return TimeZoneInfo.ConvertTimeFromUtc(utcKind, GetLocalTimeZone(timeZoneId));
+    }
+
+    /// <summary>
     /// Get the next occurrence of firstDayOfWeek at 10:00 in local time, returned as UTC.
     /// </summary>
     public static DateTime GetNextKickoffUtc(DayOfWeek firstDayOfWeek, TimeSpan localOffset)
