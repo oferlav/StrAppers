@@ -67,7 +67,7 @@ public class StudentsController : ControllerBase
         lockedBoard.UpdatedAt = DateTime.UtcNow;
 
         var squad = await _context.Students.Where(s => s.BoardId == boardId).ToListAsync();
-        var resetEmails = new List<string>();
+        var resetRecipients = new List<(string Email, string FirstName)>();
         foreach (var s in squad)
         {
             s.Status = 0;
@@ -79,7 +79,7 @@ public class StudentsController : ControllerBase
             s.InstitutePriority4 = null;
             s.ApprovedKickoff = false;
             s.UpdatedAt = DateTime.UtcNow;
-            if (!string.IsNullOrWhiteSpace(s.Email)) resetEmails.Add(s.Email);
+            if (!string.IsNullOrWhiteSpace(s.Email)) resetRecipients.Add((s.Email, s.FirstName));
         }
 
         await _context.SaveChangesAsync();
@@ -87,14 +87,14 @@ public class StudentsController : ControllerBase
 
         _logger.LogInformation("[KICKOFF-RESET] Board {BoardId} reset via login trigger ({Count} students)", boardId, squad.Count);
 
-        foreach (var email in resetEmails)
+        foreach (var (email, firstName) in resetRecipients)
         {
             try
             {
                 await _smtpEmailService.SendPlainEmailAsync(
                     email,
                     "Your squad needs to restart project selection",
-                    "Your squad wasn't able to agree on a kickoff meeting time within the deadline, so it's been reset. Log back in to Skill-in and choose your projects again.");
+                    KickoffEmailTemplates.BuildResetNoticeEmailHtml(firstName));
             }
             catch (Exception ex)
             {

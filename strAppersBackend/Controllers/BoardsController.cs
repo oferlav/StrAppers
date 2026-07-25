@@ -90,28 +90,6 @@ public partial class BoardsController : ControllerBase
     }
 
     /// <summary>
-    /// Wraps kickoff-flow email body HTML in the same styling/signature used by the welcome email
-    /// (see WelcomeEmailTemplate_paste.json), with a clickable www.skill-in.com link so recipients
-    /// can get straight back to logging in.
-    /// </summary>
-    private static string BuildKickoffEmailHtml(string bodyHtml)
-    {
-        return $@"
-<html>
-<body style='font-family: Arial, sans-serif; line-height: 1.6; color: #333;'>
-  <div style='max-width: 600px; margin: 0 auto; padding: 20px;'>
-    {bodyHtml}
-    <p style='margin-top: 24px;'>
-      Best regards,<br>
-      The Skill-in Team<br>
-      <a href='https://www.skill-in.com' style='color: #3D76FF; text-decoration: none;'>www.skill-in.com</a>
-    </p>
-  </div>
-</body>
-</html>";
-    }
-
-    /// <summary>
     /// Creates the real Teams/SMTP meeting invite (with .ics attachment) for a board via
     /// create-meeting-smtp-for-board-auth. Shared by board creation (currently disabled there)
     /// and the kickoff "approve" endpoint, which calls this once the squad unanimously agrees.
@@ -3762,7 +3740,7 @@ public partial class BoardsController : ControllerBase
                 try
                 {
                     var recipientFirstName = string.IsNullOrWhiteSpace(s.FirstName) ? "there" : s.FirstName;
-                    var bodyHtml = BuildKickoffEmailHtml($@"
+                    var bodyHtml = KickoffEmailTemplates.BuildKickoffEmailHtml($@"
                         <p>Hi {WebUtility.HtmlEncode(recipientFirstName)},</p>
                         <p>{WebUtility.HtmlEncode(proposerName)} suggested a kickoff meeting time for your squad:</p>
                         <p style='font-size: 16px; font-weight: bold; color: #C2410C;'>📅 {WebUtility.HtmlEncode(formattedDate)}</p>
@@ -3785,7 +3763,7 @@ public partial class BoardsController : ControllerBase
                 try
                 {
                     var proposerFirstName = string.IsNullOrWhiteSpace(proposer.FirstName) ? "there" : proposer.FirstName;
-                    var bodyHtml = BuildKickoffEmailHtml($@"
+                    var bodyHtml = KickoffEmailTemplates.BuildKickoffEmailHtml($@"
                         <p>Hi {WebUtility.HtmlEncode(proposerFirstName)},</p>
                         <p>Thanks for suggesting <strong>{WebUtility.HtmlEncode(formattedDate)}</strong> as your squad's kickoff meeting time.</p>
                         <p>We'll let you know as soon as everyone approves, or if someone needs a different time.</p>");

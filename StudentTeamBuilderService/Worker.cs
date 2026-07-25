@@ -415,7 +415,7 @@ public class Worker : BackgroundService
                         ""UpdatedAt"" = NOW()
                     FROM stale_boards
                     WHERE s.""BoardId"" = stale_boards.""BoardId""
-                    RETURNING s.""Id"", s.""Email""";
+                    RETURNING s.""Id"", s.""Email"", s.""FirstName""";
 
         var resetStudents = (await conn.QueryAsync<StaleKickoffStudentRow>(new CommandDefinition(sql, new { TimeoutMinutes = timeoutMinutes }, cancellationToken: ct))).ToList();
         if (resetStudents.Count == 0) return;
@@ -429,13 +429,8 @@ public class Worker : BackgroundService
             if (string.IsNullOrWhiteSpace(student.Email)) continue;
             try
             {
-                var payload = new
-                {
-                    studentEmail = student.Email,
-                    emailTitle = "Your squad needs to restart project selection",
-                    emailBody = "Your squad wasn't able to agree on a kickoff meeting time within 3 days, so it's been reset. Log back in to Skill-in and choose your projects again."
-                };
-                await client.PostAsJsonAsync($"{baseUrl}/api/Email/use/notify-applicant", payload, ct);
+                var payload = new { studentEmail = student.Email, firstName = student.FirstName };
+                await client.PostAsJsonAsync($"{baseUrl}/api/Email/use/kickoff-reset-notice", payload, ct);
             }
             catch (Exception ex)
             {
@@ -1027,6 +1022,7 @@ public record StaleKickoffStudentRow
 {
     public int Id { get; init; }
     public string? Email { get; init; }
+    public string? FirstName { get; init; }
 }
 
 
