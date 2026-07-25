@@ -90,6 +90,28 @@ public partial class BoardsController : ControllerBase
     }
 
     /// <summary>
+    /// Wraps kickoff-flow email body HTML in the same styling/signature used by the welcome email
+    /// (see WelcomeEmailTemplate_paste.json), with a clickable www.skill-in.com link so recipients
+    /// can get straight back to logging in.
+    /// </summary>
+    private static string BuildKickoffEmailHtml(string bodyHtml)
+    {
+        return $@"
+<html>
+<body style='font-family: Arial, sans-serif; line-height: 1.6; color: #333;'>
+  <div style='max-width: 600px; margin: 0 auto; padding: 20px;'>
+    {bodyHtml}
+    <p style='margin-top: 24px;'>
+      Best regards,<br>
+      The Skill-in Team<br>
+      <a href='https://www.skill-in.com' style='color: #3D76FF; text-decoration: none;'>www.skill-in.com</a>
+    </p>
+  </div>
+</body>
+</html>";
+    }
+
+    /// <summary>
     /// Creates the real Teams/SMTP meeting invite (with .ics attachment) for a board via
     /// create-meeting-smtp-for-board-auth. Shared by board creation (currently disabled there)
     /// and the kickoff "approve" endpoint, which calls this once the squad unanimously agrees.
@@ -3736,10 +3758,17 @@ public partial class BoardsController : ControllerBase
             {
                 try
                 {
+                    var recipientFirstName = string.IsNullOrWhiteSpace(s.FirstName) ? "there" : s.FirstName;
+                    var bodyHtml = BuildKickoffEmailHtml($@"
+                        <p>Hi {WebUtility.HtmlEncode(recipientFirstName)},</p>
+                        <p>{WebUtility.HtmlEncode(proposerName)} suggested a kickoff meeting time for your squad:</p>
+                        <p style='font-size: 16px; font-weight: bold; color: #C2410C;'>📅 {WebUtility.HtmlEncode(formattedDate)}</p>
+                        <p>Please log in to Skill-in to approve this time, or suggest a different one if you can't make it.</p>
+                        <p><a href='https://www.skill-in.com' style='background-color: #3D76FF; color: white; padding: 12px 24px; text-decoration: none; border-radius: 5px; font-weight: bold; display: inline-block;'>Log In to Skill-in</a></p>");
                     await _smtpEmailService.SendPlainEmailAsync(
                         s.Email,
                         "Approve your squad's kickoff time",
-                        $"{proposerName} suggested {formattedDate} for your squad's kickoff meeting. Log in to Skill-in to approve it, or suggest a different time if you can't make it.");
+                        bodyHtml);
                 }
                 catch (Exception ex)
                 {
@@ -3751,10 +3780,15 @@ public partial class BoardsController : ControllerBase
             {
                 try
                 {
+                    var proposerFirstName = string.IsNullOrWhiteSpace(proposer.FirstName) ? "there" : proposer.FirstName;
+                    var bodyHtml = BuildKickoffEmailHtml($@"
+                        <p>Hi {WebUtility.HtmlEncode(proposerFirstName)},</p>
+                        <p>Thanks for suggesting <strong>{WebUtility.HtmlEncode(formattedDate)}</strong> as your squad's kickoff meeting time.</p>
+                        <p>We'll let you know as soon as everyone approves, or if someone needs a different time.</p>");
                     await _smtpEmailService.SendPlainEmailAsync(
                         proposer.Email,
                         "Kickoff time sent to your squad",
-                        "Thanks for suggesting a kickoff time. We'll let you know as soon as everyone approves, or if someone needs a different time.");
+                        bodyHtml);
                 }
                 catch (Exception ex)
                 {
