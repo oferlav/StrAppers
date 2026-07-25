@@ -48,6 +48,9 @@ public class Student
     // Status and project priorities
     public int? Status { get; set; }
     public DateTime? StartPendingAt { get; set; }
+
+    /// <summary>Whether this student has approved the board's currently-suggested kickoff date. Reset to false whenever a new date is suggested.</summary>
+    public bool ApprovedKickoff { get; set; }
     public int? ProjectPriority1 { get; set; }
     public int? ProjectPriority2 { get; set; }
     public int? ProjectPriority3 { get; set; }

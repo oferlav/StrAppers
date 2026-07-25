@@ -88,6 +88,85 @@ public partial class BoardsController : ControllerBase
         try { System.IO.File.WriteAllText(fileName, content); } catch { /* ignore */ }
         try { await _smtpEmailService.SendPlainEmailAsync("ofer@skill-in.com", $"[BoardCreation Debug] BoardId={boardId}", content); } catch { /* ignore */ }
     }
+
+    /// <summary>
+    /// Creates the real Teams/SMTP meeting invite (with .ics attachment) for a board via
+    /// create-meeting-smtp-for-board-auth. Shared by board creation (currently disabled there)
+    /// and the kickoff "approve" endpoint, which calls this once the squad unanimously agrees.
+    /// Returns the created meeting URL, or null if creation failed (caller decides what to do).
+    /// </summary>
+    private async Task<string?> CreateTeamsMeetingForBoardAsync(
+        string boardId, string? title, DateTime meetingTimeUtc, int durationMinutes,
+        List<string> attendeeEmails, System.Text.StringBuilder? debugLog)
+    {
+        if (!attendeeEmails.Any() || string.IsNullOrEmpty(boardId))
+        {
+            _logger.LogWarning("No valid student emails or board ID found for Teams meeting attendees");
+            return null;
+        }
+
+        try
+        {
+            var sanitizedTitle = title?.Replace("\r\n", " ").Replace("\n", " ").Replace("\r", " ").Trim() ?? "";
+            _logger.LogInformation("Creating Teams meeting via create-meeting-smtp-for-board-auth: {Title} at {DateTime} for {DurationMinutes} minutes",
+                sanitizedTitle, meetingTimeUtc.ToString("yyyy-MM-ddTHH:mm:ssZ"), durationMinutes);
+
+            var teamsMeetingRequest = new strAppersBackend.Controllers.CreateTeamsMeetingForBoardRequest
+            {
+                BoardId = boardId,
+                Title = sanitizedTitle,
+                DateTime = meetingTimeUtc.ToString("yyyy-MM-ddTHH:mm:ssZ"),
+                DurationMinutes = durationMinutes,
+                Attendees = attendeeEmails
+            };
+
+            using var httpClient = new HttpClient();
+            httpClient.BaseAddress = new Uri($"{Request.Scheme}://{Request.Host}");
+
+            var jsonContent = JsonSerializer.Serialize(teamsMeetingRequest, new JsonSerializerOptions
+            {
+                PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+                WriteIndented = false
+            });
+            var content = new StringContent(jsonContent, System.Text.Encoding.UTF8, "application/json");
+
+            _logger.LogInformation("Calling create-meeting-smtp-for-board-auth for board {BoardId} with {AttendeeCount} attendees",
+                boardId, attendeeEmails.Count);
+            DbgLog(debugLog, $"Teams API call START: boardId={boardId} attendees=[{string.Join(",", attendeeEmails)}] dateTime={meetingTimeUtc:yyyy-MM-dd HH:mm:ss}Z title={teamsMeetingRequest.Title}");
+
+            var response = await httpClient.PostAsync("/api/Teams/use/create-meeting-smtp-for-board-auth", content);
+            var responseContent = await response.Content.ReadAsStringAsync();
+            DbgLog(debugLog, $"Teams API response: StatusCode={(int)response.StatusCode} ({response.StatusCode}) Content={responseContent}");
+
+            if (!response.IsSuccessStatusCode)
+            {
+                _logger.LogWarning("Teams meeting creation failed via create-meeting-smtp-for-board-auth: {StatusCode} - {Content}.",
+                    response.StatusCode, responseContent);
+                return null;
+            }
+
+            var result = JsonSerializer.Deserialize<JsonElement>(responseContent);
+            string? meetingUrlFromResponse = null;
+            if (result.TryGetProperty("actualMeetingUrl", out var elem1) && elem1.ValueKind == JsonValueKind.String)
+                meetingUrlFromResponse = elem1.GetString();
+            else if (result.TryGetProperty("ActualMeetingUrl", out var elem2) && elem2.ValueKind == JsonValueKind.String)
+                meetingUrlFromResponse = elem2.GetString();
+
+            DbgLog(debugLog, $"Teams response parsed: actualMeetingUrl found={meetingUrlFromResponse != null} value={meetingUrlFromResponse ?? "(null)"}");
+
+            if (string.IsNullOrEmpty(meetingUrlFromResponse))
+            {
+                _logger.LogWarning("Teams meeting created but no actualMeetingUrl in response. Full response: {Response}", responseContent);
+            }
+
+            return meetingUrlFromResponse;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error creating Teams meeting via create-meeting-smtp-for-board-auth: {ErrorMessage}.", ex.Message);
+            return null;
+        }
+    }
     // =====================================
 
     /// <summary>
@@ -3204,8 +3283,11 @@ public partial class BoardsController : ControllerBase
                 SystemBoardId = trelloResponse.SystemBoardId, // Store SystemBoardId if CreatePMEmptyBoard is enabled
                 UserStoryBoardId  = trelloResponse.UserStoryBoardId,
                 UserStoryBoardUrl = trelloResponse.UserStoryBoardUrl,
-                NextMeetingTime = nextMeetingTime,
+                // Kickoff meeting time now requires squad agreement (see KickoffState) instead of
+                // being auto-picked; the approve endpoint sets NextMeetingTime once everyone agrees.
+                NextMeetingTime = null,
                 NextMeetingUrl = meetingUrl, // Will be updated after Teams meeting is created
+                KickoffState = 0,
                 GithubBackendUrl = backendRepositoryUrl,
                 GithubFrontendUrl = frontendRepositoryUrl,
                 WebApiUrl = swaggerUrl ?? webApiUrl ?? $"https://webapi{trelloBoardId}.up.railway.app", // Swagger URL from Railway deployment (fallback to base URL if swagger URL not set, or default Railway pattern)
@@ -3366,99 +3448,26 @@ public partial class BoardsController : ControllerBase
             const bool autoScheduleKickoffMeetingOnBoardCreation = false;
             if (autoScheduleKickoffMeetingOnBoardCreation && !string.IsNullOrEmpty(request.Title) && request.DurationMinutes.HasValue && !request.IsQuestMode)
             {
-                try
+                var attendeeEmails = students
+                    .Where(s => !string.IsNullOrWhiteSpace(s.Email))
+                    .Select(s => s.Email)
+                    .ToList();
+
+                var createdMeetingUrl = await CreateTeamsMeetingForBoardAsync(
+                    trelloBoardId, request.Title, nextMeetingTime, request.DurationMinutes.Value, attendeeEmails, debugLog);
+
+                if (!string.IsNullOrEmpty(createdMeetingUrl))
                 {
-                    _logger.LogInformation("Creating Teams meeting via create-meeting-smtp-for-board-auth: {Title} at {DateTime} (kickoff first day of week 10:00 local) for {DurationMinutes} minutes", 
-                        request.Title, nextMeetingTime.ToString("yyyy-MM-ddTHH:mm:ssZ"), request.DurationMinutes);
+                    meetingUrl = createdMeetingUrl;
+                    _logger.LogInformation("Teams meeting created successfully via create-meeting-smtp-for-board-auth: {MeetingUrl}", meetingUrl);
 
-                    // Get student emails for attendees
-                    var attendeeEmails = students
-                        .Where(s => !string.IsNullOrWhiteSpace(s.Email))
-                        .Select(s => s.Email)
-                        .ToList();
-
-                    if (attendeeEmails.Any() && !string.IsNullOrEmpty(trelloBoardId))
-                    {
-                        // Call the create-meeting-smtp-for-board-auth endpoint
-                        // This will create custom tracking URLs and send emails with those URLs
-                        var teamsMeetingRequest = new strAppersBackend.Controllers.CreateTeamsMeetingForBoardRequest
-                        {
-                            BoardId = trelloBoardId,
-                            Title = request.Title,
-                            DateTime = nextMeetingTime.ToString("yyyy-MM-ddTHH:mm:ssZ"),
-                            DurationMinutes = request.DurationMinutes.Value,
-                            Attendees = attendeeEmails
-                        };
-
-                        // Sanitize title to remove newlines that might cause JSON parsing issues
-                        var sanitizedTitle = request.Title?.Replace("\r\n", " ").Replace("\n", " ").Replace("\r", " ").Trim() ?? "";
-                        teamsMeetingRequest.Title = sanitizedTitle;
-                        
-                        // Use HttpClient to call our own API endpoint
-                        using var httpClient = new HttpClient();
-                        httpClient.BaseAddress = new Uri($"{Request.Scheme}://{Request.Host}");
-                        
-                        // Serialize with proper options - standard encoder will escape newlines properly
-                        var jsonContent = JsonSerializer.Serialize(teamsMeetingRequest, new JsonSerializerOptions 
-                        { 
-                            PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
-                            WriteIndented = false
-                        });
-                        var content = new StringContent(jsonContent, System.Text.Encoding.UTF8, "application/json");
-                        
-                        _logger.LogInformation("Calling create-meeting-smtp-for-board-auth for board {BoardId} with {AttendeeCount} attendees",
-                            trelloBoardId, attendeeEmails.Count);
-                        DbgLog(debugLog, $"Teams API call START: boardId={trelloBoardId} attendees=[{string.Join(",", attendeeEmails)}] dateTime={nextMeetingTime:yyyy-MM-dd HH:mm:ss}Z title={teamsMeetingRequest.Title}");
-
-                        var response = await httpClient.PostAsync("/api/Teams/use/create-meeting-smtp-for-board-auth", content);
-                        var responseContent = await response.Content.ReadAsStringAsync();
-                        DbgLog(debugLog, $"Teams API response: StatusCode={(int)response.StatusCode} ({response.StatusCode}) Content={responseContent}");
-
-                        if (response.IsSuccessStatusCode)
-                        {
-                            var result = JsonSerializer.Deserialize<JsonElement>(responseContent);
-                            // Try camelCase first (API default), fall back to PascalCase
-                            string? meetingUrlFromResponse = null;
-                            if (result.TryGetProperty("actualMeetingUrl", out var elem1) && elem1.ValueKind == JsonValueKind.String)
-                                meetingUrlFromResponse = elem1.GetString();
-                            else if (result.TryGetProperty("ActualMeetingUrl", out var elem2) && elem2.ValueKind == JsonValueKind.String)
-                                meetingUrlFromResponse = elem2.GetString();
-
-                            DbgLog(debugLog, $"Teams response parsed: actualMeetingUrl found={meetingUrlFromResponse != null} value={meetingUrlFromResponse ?? "(null)"}");
-
-                            if (!string.IsNullOrEmpty(meetingUrlFromResponse))
-                            {
-                                meetingUrl = meetingUrlFromResponse;
-                                _logger.LogInformation("Teams meeting created successfully via create-meeting-smtp-for-board-auth: {MeetingUrl}", meetingUrl);
-
-                                // Update ProjectBoard with the actual meeting URL (transaction already committed)
-                                // Note: TeamsController already saved NextMeetingUrl; this is a redundant confirm from BoardsController's tracked entity
-                                projectBoard.NextMeetingUrl = meetingUrl;
-                                projectBoard.NextMeetingTeacherAttendance = false;
-                                await _context.SaveChangesAsync();
-                                _logger.LogInformation("Updated ProjectBoard with meeting URL: {MeetingUrl}", meetingUrl);
-                                DbgLog(debugLog, $"ProjectBoard.NextMeetingUrl saved OK: {meetingUrl}");
-                            }
-                            else
-                            {
-                                _logger.LogWarning("Teams meeting created but no actualMeetingUrl in response. Full response: {Response}", responseContent);
-                                DbgLog(debugLog, $"WARNING: actualMeetingUrl not found in Teams response. TeamsController may have still saved it directly.");
-                            }
-                        }
-                        else
-                        {
-                            _logger.LogWarning("Teams meeting creation failed via create-meeting-smtp-for-board-auth: {StatusCode} - {Content}. Board creation will continue without meeting.",
-                                response.StatusCode, responseContent);
-                        }
-                    }
-                    else
-                    {
-                        _logger.LogWarning("No valid student emails or board ID found for Teams meeting attendees");
-                    }
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogError(ex, "Error creating Teams meeting via create-meeting-smtp-for-board-auth: {ErrorMessage}. Board creation will continue without meeting.", ex.Message);
+                    // Update ProjectBoard with the actual meeting URL (transaction already committed)
+                    // Note: TeamsController already saved NextMeetingUrl; this is a redundant confirm from BoardsController's tracked entity
+                    projectBoard.NextMeetingUrl = meetingUrl;
+                    projectBoard.NextMeetingTeacherAttendance = false;
+                    await _context.SaveChangesAsync();
+                    _logger.LogInformation("Updated ProjectBoard with meeting URL: {MeetingUrl}", meetingUrl);
+                    DbgLog(debugLog, $"ProjectBoard.NextMeetingUrl saved OK: {meetingUrl}");
                 }
             }
             else
@@ -3681,6 +3690,178 @@ public partial class BoardsController : ControllerBase
     }
 
     /// <summary>
+    /// Squad member proposes a kickoff meeting time (first proposal, or a counter-proposal while
+    /// waiting on approval). Auto-approves the proposer and clears everyone else's approval.
+    /// Only valid for boards already in the kickoff-agreement flow (KickoffState 0 or 1).
+    /// </summary>
+    [HttpPost("kickoff-suggest")]
+    public async Task<ActionResult<KickoffActionResponse>> SuggestKickoffDate([FromBody] KickoffSuggestRequest request)
+    {
+        try
+        {
+            var board = await _context.ProjectBoards.FirstOrDefaultAsync(pb => pb.Id == request.BoardId);
+            if (board == null)
+                return NotFound(new KickoffActionResponse { Success = false, Message = $"Board with ID {request.BoardId} not found." });
+
+            if (board.KickoffState == null)
+                return BadRequest(new KickoffActionResponse { Success = false, Message = "This board is not part of the kickoff agreement flow." });
+
+            if (board.KickoffState >= 2)
+                return BadRequest(new KickoffActionResponse { Success = false, Message = "This board's kickoff meeting has already been agreed." });
+
+            if (board.IsStale)
+                return BadRequest(new KickoffActionResponse { Success = false, Message = "This squad was reset after failing to agree on a kickoff time." });
+
+            var squad = await _context.Students.Where(s => s.BoardId == request.BoardId).ToListAsync();
+            var proposer = squad.FirstOrDefault(s => s.Id == request.StudentId);
+            if (proposer == null)
+                return BadRequest(new KickoffActionResponse { Success = false, Message = "Student is not a member of this board's squad." });
+
+            board.SuggestedKickoffDate = request.SuggestedDateTimeUtc;
+            board.LastDateStudentId = request.StudentId;
+            board.KickoffState = 1;
+            board.UpdatedAt = DateTime.UtcNow;
+
+            foreach (var s in squad)
+            {
+                s.ApprovedKickoff = s.Id == request.StudentId;
+            }
+
+            await _context.SaveChangesAsync();
+
+            var proposerName = $"{proposer.FirstName} {proposer.LastName}".Trim();
+            var formattedDate = request.SuggestedDateTimeUtc.ToString("MMMM d, h:mm tt 'UTC'");
+
+            foreach (var s in squad.Where(s => s.Id != request.StudentId && !string.IsNullOrWhiteSpace(s.Email)))
+            {
+                try
+                {
+                    await _smtpEmailService.SendPlainEmailAsync(
+                        s.Email,
+                        "Approve your squad's kickoff time",
+                        $"{proposerName} suggested {formattedDate} for your squad's kickoff meeting. Log in to Skill-in to approve it, or suggest a different time if you can't make it.");
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Failed to send kickoff-suggest email to {Email}", s.Email);
+                }
+            }
+
+            if (!string.IsNullOrWhiteSpace(proposer.Email))
+            {
+                try
+                {
+                    await _smtpEmailService.SendPlainEmailAsync(
+                        proposer.Email,
+                        "Kickoff time sent to your squad",
+                        "Thanks for suggesting a kickoff time. We'll let you know as soon as everyone approves, or if someone needs a different time.");
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Failed to send kickoff-suggest confirmation email to {Email}", proposer.Email);
+                }
+            }
+
+            return Ok(new KickoffActionResponse
+            {
+                Success = true,
+                Message = "Kickoff time suggested.",
+                KickoffState = board.KickoffState ?? 1,
+                SuggestedKickoffDate = board.SuggestedKickoffDate,
+                LastDateStudentId = board.LastDateStudentId
+            });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error suggesting kickoff date for board {BoardId}", request.BoardId);
+            return StatusCode(500, new KickoffActionResponse { Success = false, Message = "An error occurred while suggesting the kickoff date." });
+        }
+    }
+
+    /// <summary>
+    /// Squad member approves the board's currently-suggested kickoff time. Once every squad
+    /// member has approved, the board moves to KickoffState=2, NextMeetingTime is set, and the
+    /// real Teams/SMTP invite is sent. Row-locks the board so a concurrent approve (or the
+    /// 3-day auto-reset job in StudentTeamBuilderService) can't race this check.
+    /// </summary>
+    [HttpPost("kickoff-approve")]
+    public async Task<ActionResult<KickoffActionResponse>> ApproveKickoffDate([FromBody] KickoffApproveRequest request)
+    {
+        try
+        {
+            using var transaction = await _context.Database.BeginTransactionAsync();
+
+            var lockedBoard = await _context.ProjectBoards
+                .FromSqlInterpolated($"SELECT * FROM \"ProjectBoards\" WHERE \"BoardId\" = {request.BoardId} FOR UPDATE")
+                .FirstOrDefaultAsync();
+
+            if (lockedBoard == null)
+                return NotFound(new KickoffActionResponse { Success = false, Message = $"Board with ID {request.BoardId} not found." });
+
+            if (lockedBoard.KickoffState == null)
+                return BadRequest(new KickoffActionResponse { Success = false, Message = "This board is not part of the kickoff agreement flow." });
+
+            if (lockedBoard.KickoffState >= 2)
+                return BadRequest(new KickoffActionResponse { Success = false, Message = "This board's kickoff meeting has already been agreed." });
+
+            if (lockedBoard.IsStale)
+                return BadRequest(new KickoffActionResponse { Success = false, Message = "This squad was reset after failing to agree on a kickoff time." });
+
+            var squad = await _context.Students.Where(s => s.BoardId == request.BoardId).ToListAsync();
+            var approver = squad.FirstOrDefault(s => s.Id == request.StudentId);
+            if (approver == null)
+                return BadRequest(new KickoffActionResponse { Success = false, Message = "Student is not a member of this board's squad." });
+
+            approver.ApprovedKickoff = true;
+            var allApproved = squad.All(s => s.ApprovedKickoff);
+
+            if (allApproved && lockedBoard.SuggestedKickoffDate.HasValue)
+            {
+                lockedBoard.KickoffState = 2;
+                lockedBoard.NextMeetingTime = lockedBoard.SuggestedKickoffDate;
+                lockedBoard.UpdatedAt = DateTime.UtcNow;
+                await _context.SaveChangesAsync();
+
+                var project = await _context.Projects.FirstOrDefaultAsync(p => p.Id == lockedBoard.ProjectId);
+                var attendeeEmails = squad.Where(s => !string.IsNullOrWhiteSpace(s.Email)).Select(s => s.Email).ToList();
+                var meetingUrl = await CreateTeamsMeetingForBoardAsync(
+                    lockedBoard.Id,
+                    project != null ? $"{project.Title} Kickoff meeting" : "Kickoff meeting",
+                    lockedBoard.SuggestedKickoffDate.Value,
+                    30,
+                    attendeeEmails,
+                    null);
+
+                if (!string.IsNullOrEmpty(meetingUrl))
+                {
+                    lockedBoard.NextMeetingUrl = meetingUrl;
+                    await _context.SaveChangesAsync();
+                }
+            }
+            else
+            {
+                await _context.SaveChangesAsync();
+            }
+
+            await transaction.CommitAsync();
+
+            return Ok(new KickoffActionResponse
+            {
+                Success = true,
+                Message = allApproved ? "Everyone approved — invite sent." : "Approval recorded.",
+                KickoffState = lockedBoard.KickoffState ?? 1,
+                SuggestedKickoffDate = lockedBoard.SuggestedKickoffDate,
+                LastDateStudentId = lockedBoard.LastDateStudentId
+            });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error approving kickoff date for board {BoardId}", request.BoardId);
+            return StatusCode(500, new KickoffActionResponse { Success = false, Message = "An error occurred while approving the kickoff date." });
+        }
+    }
+
+    /// <summary>
     /// Add a message to the board's group chat or to a private chat (when Email2 is provided).
     /// </summary>
     /// <param name="request">Chat message request; optional Email2 for private chat between Email and Email2</param>
@@ -3865,6 +4046,7 @@ public partial class BoardsController : ControllerBase
             var board = await _context.ProjectBoards
                 .Include(pb => pb.Project)
                 .Include(pb => pb.Admin)
+                .Include(pb => pb.LastDateStudent)
                 .FirstOrDefaultAsync(pb => pb.Id == boardId);
 
             if (board == null)
@@ -3899,6 +4081,11 @@ public partial class BoardsController : ControllerBase
                 NextMeetingTime = board.NextMeetingTime,
                 NextMeetingUrl = board.NextMeetingUrl,
                 NextMeetingTitle = board.NextMeetingTitle,
+                KickoffState = board.KickoffState,
+                SuggestedKickoffDate = board.SuggestedKickoffDate,
+                LastDateStudentId = board.LastDateStudentId,
+                LastDateStudentName = board.LastDateStudent != null ? $"{board.LastDateStudent.FirstName} {board.LastDateStudent.LastName}" : null,
+                IsStale = board.IsStale,
                 GithubBackendUrl = board.GithubBackendUrl,
                 GithubFrontendUrl = board.GithubFrontendUrl,
                 WebApiUrl = board.WebApiUrl,
@@ -4414,6 +4601,30 @@ public partial class BoardsController : ControllerBase
 
             if (!string.IsNullOrWhiteSpace(projectBoard.NextMeetingTitle))
                 responseNode["nextMeetingTitle"] = JsonValue.Create(projectBoard.NextMeetingTitle);
+
+            // Kickoff meeting agreement flow (KickoffBand). kickoffState stays absent/null for
+            // legacy boards created before this feature — the frontend falls back to MeetingStrip.
+            if (projectBoard.KickoffState.HasValue)
+            {
+                responseNode["kickoffState"] = JsonValue.Create(projectBoard.KickoffState.Value);
+                responseNode["boardCreatedAt"] = JsonValue.Create(
+                    projectBoard.CreatedAt.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss.fffZ"));
+
+                if (projectBoard.SuggestedKickoffDate.HasValue)
+                {
+                    responseNode["suggestedKickoffDate"] = JsonValue.Create(
+                        projectBoard.SuggestedKickoffDate.Value.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss.fffZ"));
+                }
+
+                if (projectBoard.LastDateStudentId.HasValue)
+                {
+                    responseNode["lastDateStudentId"] = JsonValue.Create(projectBoard.LastDateStudentId.Value);
+                    var lastDateStudent = studentsOnBoard.FirstOrDefault(s => s.Id == projectBoard.LastDateStudentId.Value)
+                        ?? await _context.Students.FirstOrDefaultAsync(s => s.Id == projectBoard.LastDateStudentId.Value);
+                    if (lastDateStudent != null)
+                        responseNode["lastDateStudentName"] = JsonValue.Create($"{lastDateStudent.FirstName} {lastDateStudent.LastName}".Trim());
+                }
+            }
 
             return Content(JsonSerializer.Serialize(responseNode, camelOptions), "application/json");
         }
@@ -9286,6 +9497,28 @@ public class SetAdminResponse
     public string Message { get; set; } = string.Empty;
     public string BoardId { get; set; } = string.Empty;
     public int StudentId { get; set; }
+}
+
+public class KickoffSuggestRequest
+{
+    public string BoardId { get; set; } = string.Empty;
+    public int StudentId { get; set; }
+    public DateTime SuggestedDateTimeUtc { get; set; }
+}
+
+public class KickoffApproveRequest
+{
+    public string BoardId { get; set; } = string.Empty;
+    public int StudentId { get; set; }
+}
+
+public class KickoffActionResponse
+{
+    public bool Success { get; set; }
+    public string Message { get; set; } = string.Empty;
+    public int KickoffState { get; set; }
+    public DateTime? SuggestedKickoffDate { get; set; }
+    public int? LastDateStudentId { get; set; }
 }
 
 /// <summary>Request for POST /api/Boards/use/create-bug. Priority: 1=Low, 2=Medium, 3=High, 4=Critical (stored as integer in Trello).</summary>

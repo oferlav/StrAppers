@@ -128,6 +128,33 @@ namespace strAppersBackend.Models
         public bool NextMeetingTeacherAttendance { get; set; }
 
         /// <summary>
+        /// Kickoff-meeting agreement state: null = board predates this feature (legacy, unaffected);
+        /// 0 = nobody has proposed a kickoff time; 1 = a time is proposed, awaiting unanimous approval;
+        /// 2 = everyone approved (terminal) and the real invite has been sent.
+        /// </summary>
+        [Column("KickoffState")]
+        public int? KickoffState { get; set; }
+
+        /// <summary>
+        /// Student who most recently proposed <see cref="SuggestedKickoffDate"/>.
+        /// </summary>
+        [Column("LastDateStudentId")]
+        public int? LastDateStudentId { get; set; }
+
+        /// <summary>
+        /// Kickoff date/time currently proposed and awaiting approval (KickoffState 0/1) or already agreed (KickoffState 2).
+        /// </summary>
+        [Column("SuggestedKickoffDate")]
+        public DateTime? SuggestedKickoffDate { get; set; }
+
+        /// <summary>
+        /// True once the squad was auto-reset for failing to agree on a kickoff time within the deadline.
+        /// </summary>
+        [Required]
+        [Column("IsStale")]
+        public bool IsStale { get; set; }
+
+        /// <summary>
         /// GitHub backend repository URL for the project board
         /// </summary>
         [MaxLength(1000)]
@@ -365,6 +392,12 @@ namespace strAppersBackend.Models
         /// </summary>
         [ForeignKey(nameof(AdminId))]
         public virtual Student? Admin { get; set; }
+
+        /// <summary>
+        /// Navigation property to the student who last suggested a kickoff date
+        /// </summary>
+        [ForeignKey(nameof(LastDateStudentId))]
+        public virtual Student? LastDateStudent { get; set; }
 
         /// <summary>
         /// Navigation property to the system board (self-referencing)

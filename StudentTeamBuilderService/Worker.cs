@@ -47,6 +47,7 @@ public class Worker : BackgroundService
             {
                 _logger.LogInformation("[ITERATION] Starting iteration at {Time}", DateTime.UtcNow);
                 await ExpireOldPendingAsync(connectionString, stoppingToken);
+                await ResetStaleKickoffBoardsAsync(connectionString, baseUrl, stoppingToken);
                 await UpdateProjectCriteriaAsync(connectionString, stoppingToken);
 
                 var created = await TryCreateBoardsAsync(connectionString, baseUrl, stoppingToken);
@@ -370,6 +371,67 @@ public class Worker : BackgroundService
         if (affected > 0)
         {
             _logger.LogInformation("[EXPIRE] Reset {Count} students from pending due to timeout (>{Hours}h)", affected, hours);
+        }
+    }
+
+    /// <summary>
+    /// Squads have 3 days from board creation to unanimously agree on a kickoff meeting time
+    /// (KickoffState reaches 2). Boards still stuck below that after 3 days get reset: marked
+    /// IsStale, and every student on the board sent back to "available" (Status=0) so they can
+    /// pick new projects. Legacy boards (KickoffState IS NULL, predating this feature) are never
+    /// touched. See MeetingDispute_Kickoff_Plan.md section 5.4.
+    /// </summary>
+    private async Task ResetStaleKickoffBoardsAsync(string connectionString, string baseUrl, CancellationToken ct)
+    {
+        using var conn = new NpgsqlConnection(connectionString);
+        await conn.OpenAsync(ct);
+        var sql = @"WITH stale_boards AS (
+                      UPDATE ""ProjectBoards""
+                      SET ""IsStale"" = true
+                      WHERE ""KickoffState"" IS NOT NULL
+                        AND ""KickoffState"" < 2
+                        AND ""IsStale"" = false
+                        AND ""CreatedAt"" < NOW() - INTERVAL '3 days'
+                      RETURNING ""BoardId""
+                    )
+                    UPDATE ""Students"" s
+                    SET ""Status"" = 0,
+                        ""ProjectId"" = NULL,
+                        ""BoardId"" = NULL,
+                        ""InstitutePriority1"" = NULL,
+                        ""InstitutePriority2"" = NULL,
+                        ""InstitutePriority3"" = NULL,
+                        ""InstitutePriority4"" = NULL,
+                        ""ApprovedKickoff"" = false,
+                        ""UpdatedAt"" = NOW()
+                    FROM stale_boards
+                    WHERE s.""BoardId"" = stale_boards.""BoardId""
+                    RETURNING s.""Id"", s.""Email""";
+
+        var resetStudents = (await conn.QueryAsync<StaleKickoffStudentRow>(new CommandDefinition(sql, cancellationToken: ct))).ToList();
+        if (resetStudents.Count == 0) return;
+
+        _logger.LogInformation("[KICKOFF-RESET] Reset {Count} student(s) from stale kickoff board(s) (>3 days without unanimous kickoff agreement)", resetStudents.Count);
+
+        var client = _httpClientFactory.CreateClient();
+        client.Timeout = TimeSpan.FromSeconds(15);
+        foreach (var student in resetStudents)
+        {
+            if (string.IsNullOrWhiteSpace(student.Email)) continue;
+            try
+            {
+                var payload = new
+                {
+                    studentEmail = student.Email,
+                    emailTitle = "Your squad needs to restart project selection",
+                    emailBody = "Your squad wasn't able to agree on a kickoff meeting time within 3 days, so it's been reset. Log back in to Skill-in and choose your projects again."
+                };
+                await client.PostAsJsonAsync($"{baseUrl}/api/Email/use/notify-applicant", payload, ct);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "[KICKOFF-RESET] Failed to send reset-notice email to student {StudentId} ({Email})", student.Id, student.Email);
+            }
         }
     }
 
@@ -950,6 +1012,12 @@ public record InstituteProjectRow
     public string? RoleNames { get; init; }
     public string? RoleIndexes { get; init; }
     public string? Statuses { get; init; }
+}
+
+public record StaleKickoffStudentRow
+{
+    public int Id { get; init; }
+    public string? Email { get; init; }
 }
 
 
