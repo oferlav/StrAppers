@@ -15,17 +15,19 @@ public class Worker : BackgroundService
     private readonly IHttpClientFactory _httpClientFactory;
     private readonly IConfiguration _configuration;
     private readonly KickoffConfig _kickoffConfig;
+    private readonly KickoffConfig2 _kickoffConfig2;
     private readonly ProjectCriteriaConfig _criteriaConfig;
     private readonly Random _random = new();
 
     private bool DebugDiagnostics => _configuration.GetValue<bool>("Debug:DiagnosticsEmail", false);
 
-    public Worker(ILogger<Worker> logger, IHttpClientFactory httpClientFactory, IConfiguration configuration, IOptions<KickoffConfig> kickoffConfig, IOptions<ProjectCriteriaConfig> criteriaConfig)
+    public Worker(ILogger<Worker> logger, IHttpClientFactory httpClientFactory, IConfiguration configuration, IOptions<KickoffConfig> kickoffConfig, IOptions<KickoffConfig2> kickoffConfig2, IOptions<ProjectCriteriaConfig> criteriaConfig)
     {
         _logger = logger;
         _httpClientFactory = httpClientFactory;
         _configuration = configuration;
         _kickoffConfig = kickoffConfig.Value;
+        _kickoffConfig2 = kickoffConfig2.Value;
         _criteriaConfig = criteriaConfig.Value;
     }
 
@@ -40,6 +42,7 @@ public class Worker : BackgroundService
         _logger.LogInformation("[CONFIG] Config file path: {ConfigPath}", configFilePath);
         _logger.LogInformation("[CONFIG] KickoffConfig values: MinimumStudents={MinimumStudents}, RequireAdmin={RequireAdmin}, RequireUIUXDesigner={RequireUIUXDesigner}, RequireProductManager={RequireProductManager}, RequireDeveloperRule={RequireDeveloperRule}, MaxPendingTime={MaxPendingTime}",
             _kickoffConfig.MinimumStudents, _kickoffConfig.RequireAdmin, _kickoffConfig.RequireUIUXDesigner, _kickoffConfig.RequireProductManager, _kickoffConfig.RequireDeveloperRule, _kickoffConfig.MaxPendingTime);
+        _logger.LogInformation("[CONFIG] KickoffConfig2 values: BoardTimeout={BoardTimeout} minutes", _kickoffConfig2.BoardTimeout);
 
         while (!stoppingToken.IsCancellationRequested)
         {
@@ -375,14 +378,20 @@ public class Worker : BackgroundService
     }
 
     /// <summary>
-    /// Squads have 3 days from board creation to unanimously agree on a kickoff meeting time
-    /// (KickoffState reaches 2). Boards still stuck below that after 3 days get reset: marked
-    /// IsStale, and every student on the board sent back to "available" (Status=0) so they can
-    /// pick new projects. Legacy boards (KickoffState IS NULL, predating this feature) are never
-    /// touched. See MeetingDispute_Kickoff_Plan.md section 5.4.
+    /// Squads have KickoffConfig2:BoardTimeout minutes (default 4320 = 3 days) from board creation
+    /// to unanimously agree on a kickoff meeting time (KickoffState reaches 2). Boards still stuck
+    /// below that after the timeout get reset: marked IsStale, and every student on the board sent
+    /// back to "available" (Status=0) so they can pick new projects. Legacy boards (KickoffState IS
+    /// NULL, predating this feature) are never touched. See MeetingDispute_Kickoff_Plan.md section 5.4.
     /// </summary>
     private async Task ResetStaleKickoffBoardsAsync(string connectionString, string baseUrl, CancellationToken ct)
     {
+        var timeoutMinutes = _kickoffConfig2.BoardTimeout;
+        if (timeoutMinutes <= 0)
+        {
+            _logger.LogDebug("[KICKOFF-RESET] BoardTimeout is {Minutes}; skipping kickoff reset.", timeoutMinutes);
+            return;
+        }
         using var conn = new NpgsqlConnection(connectionString);
         await conn.OpenAsync(ct);
         var sql = @"WITH stale_boards AS (
@@ -391,7 +400,7 @@ public class Worker : BackgroundService
                       WHERE ""KickoffState"" IS NOT NULL
                         AND ""KickoffState"" < 2
                         AND ""IsStale"" = false
-                        AND ""CreatedAt"" < NOW() - INTERVAL '3 days'
+                        AND ""CreatedAt"" < NOW() - make_interval(mins => @TimeoutMinutes)
                       RETURNING ""BoardId""
                     )
                     UPDATE ""Students"" s
@@ -408,7 +417,7 @@ public class Worker : BackgroundService
                     WHERE s.""BoardId"" = stale_boards.""BoardId""
                     RETURNING s.""Id"", s.""Email""";
 
-        var resetStudents = (await conn.QueryAsync<StaleKickoffStudentRow>(new CommandDefinition(sql, cancellationToken: ct))).ToList();
+        var resetStudents = (await conn.QueryAsync<StaleKickoffStudentRow>(new CommandDefinition(sql, new { TimeoutMinutes = timeoutMinutes }, cancellationToken: ct))).ToList();
         if (resetStudents.Count == 0) return;
 
         _logger.LogInformation("[KICKOFF-RESET] Reset {Count} student(s) from stale kickoff board(s) (>3 days without unanimous kickoff agreement)", resetStudents.Count);

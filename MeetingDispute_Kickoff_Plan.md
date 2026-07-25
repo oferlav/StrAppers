@@ -93,6 +93,8 @@ Body: `{ studentId }`.
 ### 5.4 3-day reset job (`StudentTeamBuilderService/Worker.cs`)
 New method modeled directly on `ExpireOldPendingAsync` (`Worker.cs:348-374`), called from the same loop in `ExecuteAsync` (`Worker.cs:44-64`) alongside it — no new infrastructure, same 5-minute poll interval (`Worker:IntervalMinutes`).
 
+**Update (post-implementation):** the "3 days" is no longer a hardcoded interval — it's configurable via `KickoffConfig2:BoardTimeout` (minutes, default `4320` = 3 days), read the same way `KickoffConfig:MaxPendingTime` already is. `strAppersBackend` reads the same key (via `IConfiguration`, same default) to return `kickoffTimeoutMinutes` on the stats endpoint so the frontend countdown can never drift from the actual enforced deadline. Set the same value in both services' appsettings if you change it from the default.
+
 ```sql
 WITH stale_boards AS (
   UPDATE "ProjectBoards"
@@ -100,7 +102,7 @@ WITH stale_boards AS (
   WHERE "KickoffState" IS NOT NULL
     AND "KickoffState" < 2
     AND "IsStale" = false
-    AND "CreatedAt" < NOW() - INTERVAL '3 days'
+    AND "CreatedAt" < NOW() - make_interval(mins => @TimeoutMinutes)
   RETURNING "BoardId"
 )
 UPDATE "Students" s
@@ -118,7 +120,7 @@ WHERE s."BoardId" = stale_boards."BoardId"
 RETURNING s."Id", s."Email";
 ```
 
-This is a single atomic statement (data-modifying CTE) — it can't race with an in-flight approve, because the `IsStale = false` guard combined with row locking means only one of "reset" or "approve" wins for a given board. After it runs, iterate the returned student emails and send the reset-notice email (§5.5). Decided: the 3-day window is **fixed from `ProjectBoards.CreatedAt`**, not extended by counter-proposals.
+This is a single atomic statement (data-modifying CTE) — it can't race with an in-flight approve, because the `IsStale = false` guard combined with row locking means only one of "reset" or "approve" wins for a given board. After it runs, iterate the returned student emails and send the reset-notice email (§5.5). Decided: the window is **fixed from `ProjectBoards.CreatedAt`**, not extended by counter-proposals.
 
 ### 5.5 Email copy (draft — please review/edit before implementation)
 

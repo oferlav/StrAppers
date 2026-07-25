@@ -189,12 +189,15 @@ public class KickoffDisputeStateTests
     }
 
     // ── Replicates the reset-job WHERE clause (Worker.ResetStaleKickoffBoardsAsync) ────
+    // Default timeout mirrors KickoffConfig2.BoardTimeout's default (4320 min = 3 days).
 
-    private static bool IsStaleKickoffCandidate(ProjectBoard board, DateTime nowUtc) =>
+    private const int DefaultBoardTimeoutMinutes = 4320;
+
+    private static bool IsStaleKickoffCandidate(ProjectBoard board, DateTime nowUtc, int timeoutMinutes = DefaultBoardTimeoutMinutes) =>
         board.KickoffState != null
         && board.KickoffState < 2
         && !board.IsStale
-        && board.CreatedAt < nowUtc.AddDays(-3);
+        && board.CreatedAt < nowUtc.AddMinutes(-timeoutMinutes);
 
     [Fact]
     public void ResetCandidate_MatchesBoard_PastDeadlineStillUnresolved()
@@ -234,6 +237,16 @@ public class KickoffDisputeStateTests
         var now = DateTime.UtcNow;
         var board = Board("stale2", kickoffState: 1, createdAt: now.AddDays(-10), isStale: true);
         Assert.False(IsStaleKickoffCandidate(board, now));
+    }
+
+    [Fact]
+    public void ResetCandidate_RespectsConfiguredTimeout_ShorterThanDefault()
+    {
+        var now = DateTime.UtcNow;
+        // Configured to 60 minutes: a board created 2 hours ago is stale even though it's well within 3 days.
+        var board = Board("shorttimeout1", kickoffState: 0, createdAt: now.AddHours(-2));
+        Assert.True(IsStaleKickoffCandidate(board, now, timeoutMinutes: 60));
+        Assert.False(IsStaleKickoffCandidate(board, now)); // still within the default 3-day window
     }
 
     [Fact]

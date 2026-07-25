@@ -4609,6 +4609,10 @@ public partial class BoardsController : ControllerBase
                 responseNode["kickoffState"] = JsonValue.Create(projectBoard.KickoffState.Value);
                 responseNode["boardCreatedAt"] = JsonValue.Create(
                     projectBoard.CreatedAt.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss.fffZ"));
+                // Mirrors StudentTeamBuilderService's KickoffConfig2:BoardTimeout so the FE countdown
+                // can never drift from the actual enforced reset deadline. Configure the same value
+                // in both services' appsettings; defaults to 4320 (3 days) if unset here too.
+                responseNode["kickoffTimeoutMinutes"] = JsonValue.Create(_configuration.GetValue<int>("KickoffConfig2:BoardTimeout", 4320));
 
                 if (projectBoard.SuggestedKickoffDate.HasValue)
                 {
