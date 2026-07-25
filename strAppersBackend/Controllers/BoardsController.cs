@@ -53,8 +53,9 @@ public partial class BoardsController : ControllerBase
     private readonly IHttpClientFactory _httpClientFactory;
     private readonly ILoggerFactory _loggerFactory;
     private readonly IOptions<TestingConfig> _testingConfig;
+    private readonly IKickoffResetService _kickoffResetService;
 
-    public BoardsController(ApplicationDbContext context, ILogger<BoardsController> logger, ITrelloService trelloService, IAIService aiService, IGitHubService gitHubService, IMicrosoftGraphService graphService, ISmtpEmailService smtpEmailService, IConfiguration configuration, IHttpClientFactory httpClientFactory, ILoggerFactory loggerFactory, IOptions<TestingConfig> testingConfig)
+    public BoardsController(ApplicationDbContext context, ILogger<BoardsController> logger, ITrelloService trelloService, IAIService aiService, IGitHubService gitHubService, IMicrosoftGraphService graphService, ISmtpEmailService smtpEmailService, IConfiguration configuration, IHttpClientFactory httpClientFactory, ILoggerFactory loggerFactory, IOptions<TestingConfig> testingConfig, IKickoffResetService kickoffResetService)
     {
         _context = context;
         _logger = logger;
@@ -67,6 +68,7 @@ public partial class BoardsController : ControllerBase
         _httpClientFactory = httpClientFactory;
         _loggerFactory = loggerFactory;
         _testingConfig = testingConfig;
+        _kickoffResetService = kickoffResetService;
     }
 
     // ===== BOARD CREATION DEBUG LOG =====
@@ -4519,6 +4521,19 @@ public partial class BoardsController : ControllerBase
     }
 
     /// <summary>
+    /// Debug endpoint: shows exactly what the kickoff-reset check sees for a board (KickoffState,
+    /// IsStale, CreatedAt, configured timeout, computed deadline, minutes remaining) and — like the
+    /// login/page-load triggers — actually performs the reset if the board is eligible. Hit this
+    /// directly to diagnose why a board isn't resetting when expected.
+    /// </summary>
+    [HttpGet("kickoff-debug/{boardId}")]
+    public async Task<ActionResult<object>> KickoffDebug(string boardId)
+    {
+        var result = await _kickoffResetService.CheckAndResetAsync(boardId);
+        return Ok(result);
+    }
+
+    /// <summary>
     /// Get comprehensive Trello board statistics
     /// </summary>
     /// <param name="boardId">The Trello board ID to get stats for</param>
@@ -4659,8 +4674,15 @@ public partial class BoardsController : ControllerBase
             // legacy boards created before this feature — the frontend falls back to MeetingStrip.
             if (projectBoard.KickoffState.HasValue)
             {
-                responseNode["kickoffState"] = JsonValue.Create(projectBoard.KickoffState.Value);
-                responseNode["isStale"] = JsonValue.Create(projectBoard.IsStale);
+                // Page-load/poll trigger: every GetBoardStats call for a board still in the kickoff
+                // flow re-checks (and, if the deadline just passed, performs) the reset — not just
+                // login. Cheap no-op when the board isn't due yet (see KickoffResetService).
+                var kickoffCheck = await _kickoffResetService.CheckAndResetAsync(boardId);
+                var effectiveKickoffState = kickoffCheck.BoardFound ? kickoffCheck.KickoffState : projectBoard.KickoffState;
+                var effectiveIsStale = kickoffCheck.BoardFound ? kickoffCheck.IsStale : projectBoard.IsStale;
+
+                responseNode["kickoffState"] = JsonValue.Create(effectiveKickoffState ?? projectBoard.KickoffState!.Value);
+                responseNode["isStale"] = JsonValue.Create(effectiveIsStale);
                 responseNode["boardCreatedAt"] = JsonValue.Create(
                     projectBoard.CreatedAt.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss.fffZ"));
                 // Mirrors StudentTeamBuilderService's KickoffConfig2:BoardTimeout so the FE countdown

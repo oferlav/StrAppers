@@ -202,6 +202,9 @@ builder.Services.AddScoped<ICodeReviewAgent, CodeReviewAgent>();
 // Add Kickoff service
 builder.Services.AddScoped<IKickoffService, KickoffService>();
 
+// Add Kickoff-meeting-dispute reset service (login trigger + GetBoardStats/page-load trigger)
+builder.Services.AddScoped<IKickoffResetService, KickoffResetService>();
+
 // Add Password Hasher service
 builder.Services.AddScoped<IPasswordHasherService, PasswordHasherService>();
 
