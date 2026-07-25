@@ -4682,6 +4682,7 @@ public partial class BoardsController : ControllerBase
             if (projectBoard.KickoffState.HasValue)
             {
                 responseNode["kickoffState"] = JsonValue.Create(projectBoard.KickoffState.Value);
+                responseNode["isStale"] = JsonValue.Create(projectBoard.IsStale);
                 responseNode["boardCreatedAt"] = JsonValue.Create(
                     projectBoard.CreatedAt.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss.fffZ"));
                 // Mirrors StudentTeamBuilderService's KickoffConfig2:BoardTimeout so the FE countdown
