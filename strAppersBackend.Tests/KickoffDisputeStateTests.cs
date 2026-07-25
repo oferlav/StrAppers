@@ -316,4 +316,52 @@ public class KickoffDisputeStateTests
         var student = Student(99, "someboard");
         Assert.False(student.ApprovedKickoff);
     }
+
+    // ── Replicates StudentsController.ResetBoardIfKickoffExpiredAsync's early-return guards ──
+    // (the login-triggered check, added as a faster complement to Worker's periodic sweep).
+    // Same eligibility predicate as IsStaleKickoffCandidate, expressed as ResetBoardIfKickoffExpiredAsync
+    // actually structures it (a sequence of "nothing to do" guards) rather than one combined condition.
+
+    private static bool ShouldResetOnLogin(ProjectBoard board, DateTime nowUtc, int timeoutMinutes)
+    {
+        if (timeoutMinutes <= 0) return false;
+        if (board.KickoffState == null || board.KickoffState >= 2 || board.IsStale) return false;
+        if (nowUtc < board.CreatedAt.AddMinutes(timeoutMinutes)) return false;
+        return true;
+    }
+
+    [Fact]
+    public void LoginTrigger_MatchesWorkerJobEligibility_ForAPastDeadlineBoard()
+    {
+        var now = DateTime.UtcNow;
+        var board = Board("logintrigger1", kickoffState: 1, createdAt: now.AddDays(-4));
+        Assert.True(ShouldResetOnLogin(board, now, DefaultBoardTimeoutMinutes));
+        Assert.Equal(IsStaleKickoffCandidate(board, now), ShouldResetOnLogin(board, now, DefaultBoardTimeoutMinutes));
+    }
+
+    [Fact]
+    public void LoginTrigger_DoesNothing_WhenStillWithinWindow()
+    {
+        var now = DateTime.UtcNow;
+        var board = Board("logintrigger2", kickoffState: 0, createdAt: now.AddHours(-1));
+        Assert.False(ShouldResetOnLogin(board, now, DefaultBoardTimeoutMinutes));
+    }
+
+    [Fact]
+    public void LoginTrigger_DoesNothing_ForAlreadyResolvedOrAlreadyStaleOrLegacyBoards()
+    {
+        var now = DateTime.UtcNow;
+        Assert.False(ShouldResetOnLogin(Board("b1", kickoffState: 2, createdAt: now.AddDays(-10)), now, DefaultBoardTimeoutMinutes));
+        Assert.False(ShouldResetOnLogin(Board("b2", kickoffState: 1, createdAt: now.AddDays(-10), isStale: true), now, DefaultBoardTimeoutMinutes));
+        Assert.False(ShouldResetOnLogin(Board("b3", kickoffState: null, createdAt: now.AddYears(-1)), now, DefaultBoardTimeoutMinutes));
+    }
+
+    [Fact]
+    public void LoginTrigger_Disabled_WhenTimeoutIsZeroOrNegative()
+    {
+        var now = DateTime.UtcNow;
+        var board = Board("logintrigger3", kickoffState: 0, createdAt: now.AddYears(-1));
+        Assert.False(ShouldResetOnLogin(board, now, timeoutMinutes: 0));
+        Assert.False(ShouldResetOnLogin(board, now, timeoutMinutes: -5));
+    }
 }

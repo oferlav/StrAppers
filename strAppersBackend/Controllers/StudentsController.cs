@@ -18,14 +18,89 @@ public class StudentsController : ControllerBase
     private readonly IGitHubService _githubService;
     private readonly IKickoffService _kickoffService;
     private readonly IPasswordHasherService _passwordHasher;
+    private readonly IConfiguration _configuration;
+    private readonly ISmtpEmailService _smtpEmailService;
 
-    public StudentsController(ApplicationDbContext context, ILogger<StudentsController> logger, IGitHubService githubService, IKickoffService kickoffService, IPasswordHasherService passwordHasher)
+    public StudentsController(ApplicationDbContext context, ILogger<StudentsController> logger, IGitHubService githubService, IKickoffService kickoffService, IPasswordHasherService passwordHasher, IConfiguration configuration, ISmtpEmailService smtpEmailService)
     {
         _context = context;
         _logger = logger;
         _githubService = githubService;
         _kickoffService = kickoffService;
         _passwordHasher = passwordHasher;
+        _configuration = configuration;
+        _smtpEmailService = smtpEmailService;
+    }
+
+    /// <summary>
+    /// Squads have KickoffConfig2:BoardTimeout minutes (default 4320 = 3 days) from board creation
+    /// to unanimously agree on a kickoff meeting time (KickoffState reaches 2). Rather than relying
+    /// solely on StudentTeamBuilderService's periodic sweep (every Worker:IntervalMinutes), any
+    /// squad member logging in also triggers this check for their own board — so the reset happens
+    /// the moment someone actually needs it, not up to Worker:IntervalMinutes late. The periodic
+    /// sweep stays in place too, as a backstop for boards nobody ever logs back in to.
+    /// </summary>
+    private async Task ResetBoardIfKickoffExpiredAsync(string boardId)
+    {
+        var timeoutMinutes = _configuration.GetValue<int>("KickoffConfig2:BoardTimeout", 4320);
+        if (timeoutMinutes <= 0) return;
+
+        using var transaction = await _context.Database.BeginTransactionAsync();
+
+        var lockedBoard = await _context.ProjectBoards
+            .FromSqlInterpolated($"SELECT * FROM \"ProjectBoards\" WHERE \"BoardId\" = {boardId} FOR UPDATE")
+            .FirstOrDefaultAsync();
+
+        if (lockedBoard == null || lockedBoard.KickoffState == null || lockedBoard.KickoffState >= 2 || lockedBoard.IsStale)
+        {
+            await transaction.CommitAsync();
+            return;
+        }
+
+        if (DateTime.UtcNow < lockedBoard.CreatedAt.AddMinutes(timeoutMinutes))
+        {
+            await transaction.CommitAsync();
+            return;
+        }
+
+        lockedBoard.IsStale = true;
+        lockedBoard.UpdatedAt = DateTime.UtcNow;
+
+        var squad = await _context.Students.Where(s => s.BoardId == boardId).ToListAsync();
+        var resetEmails = new List<string>();
+        foreach (var s in squad)
+        {
+            s.Status = 0;
+            s.ProjectId = null;
+            s.BoardId = null;
+            s.InstitutePriority1 = null;
+            s.InstitutePriority2 = null;
+            s.InstitutePriority3 = null;
+            s.InstitutePriority4 = null;
+            s.ApprovedKickoff = false;
+            s.UpdatedAt = DateTime.UtcNow;
+            if (!string.IsNullOrWhiteSpace(s.Email)) resetEmails.Add(s.Email);
+        }
+
+        await _context.SaveChangesAsync();
+        await transaction.CommitAsync();
+
+        _logger.LogInformation("[KICKOFF-RESET] Board {BoardId} reset via login trigger ({Count} students)", boardId, squad.Count);
+
+        foreach (var email in resetEmails)
+        {
+            try
+            {
+                await _smtpEmailService.SendPlainEmailAsync(
+                    email,
+                    "Your squad needs to restart project selection",
+                    "Your squad wasn't able to agree on a kickoff meeting time within the deadline, so it's been reset. Log back in to Skill-in and choose your projects again.");
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "[KICKOFF-RESET] Failed to send reset-notice email to {Email}", email);
+            }
+        }
     }
 
     /// <summary>
@@ -2074,6 +2149,21 @@ public class StudentsController : ControllerBase
             }
 
             _logger.LogInformation("Login successful for student with email {Email}", request.Email);
+
+            if (!string.IsNullOrEmpty(student.BoardId))
+            {
+                try
+                {
+                    await ResetBoardIfKickoffExpiredAsync(student.BoardId);
+                    // Re-fetch in case this login just triggered the reset (BoardId/Status/ProjectId
+                    // would otherwise be stale in the response below).
+                    student = await _context.Students.FirstOrDefaultAsync(s => s.Id == student.Id) ?? student;
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "[KICKOFF-RESET] Login-triggered kickoff check failed for board {BoardId}", student.BoardId);
+                }
+            }
 
             return Ok(new
             {
