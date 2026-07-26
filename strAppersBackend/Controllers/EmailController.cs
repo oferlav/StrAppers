@@ -86,6 +86,42 @@ public class EmailController : ControllerBase
         return Ok(new { message = "Email sent successfully.", to = request.StudentEmail });
     }
 
+    /// <summary>
+    /// Sends the standard kickoff-reset notice email (polite/professional/encouraging, same
+    /// styling as the kickoff-suggest emails — see KickoffEmailTemplates). Used by
+    /// StudentTeamBuilderService's periodic reset sweep, which has no direct SMTP access;
+    /// StudentsController's login-triggered reset check builds this template in-process instead.
+    /// </summary>
+    [HttpPost("kickoff-reset-notice")]
+    public async Task<ActionResult<object>> SendKickoffResetNotice([FromBody] KickoffResetNoticeRequest request)
+    {
+        if (request == null || string.IsNullOrWhiteSpace(request.StudentEmail))
+            return BadRequest("studentEmail is required.");
+
+        var firstName = request.FirstName?.Trim();
+        if (string.IsNullOrWhiteSpace(firstName))
+        {
+            firstName = await _context.Students
+                .AsNoTracking()
+                .Where(s => s.Email == request.StudentEmail.Trim())
+                .Select(s => s.FirstName)
+                .FirstOrDefaultAsync();
+        }
+
+        var sent = await _smtpEmailService.SendPlainEmailAsync(
+            request.StudentEmail.Trim(),
+            "Your squad needs to restart project selection",
+            strAppersBackend.Services.KickoffEmailTemplates.BuildResetNoticeEmailHtml(firstName ?? "there"));
+
+        if (!sent)
+        {
+            _logger.LogWarning("Failed to send kickoff-reset-notice email to {Email}", request.StudentEmail);
+            return StatusCode(500, new { message = "Failed to send email." });
+        }
+
+        return Ok(new { message = "Email sent successfully.", to = request.StudentEmail });
+    }
+
     /// <summary>Sends a plain-text debug email to ofer@skill-in.com. Used by internal services (e.g. StudentTeamBuilderService) that have no direct SMTP access.</summary>
     [HttpPost("send-debug")]
     public async Task<IActionResult> SendDebug([FromBody] SendDebugEmailRequest request)
@@ -195,4 +231,10 @@ public class SendDebugEmailRequest
 {
     public string Subject { get; set; } = string.Empty;
     public string Body { get; set; } = string.Empty;
+}
+
+public class KickoffResetNoticeRequest
+{
+    public string StudentEmail { get; set; } = string.Empty;
+    public string? FirstName { get; set; }
 }

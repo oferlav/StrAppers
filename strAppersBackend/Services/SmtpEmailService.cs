@@ -30,17 +30,6 @@ public class SmtpEmailService : ISmtpEmailService
         _configuration = configuration;
     }
 
-    /// <summary>Parse Trello:LocalTime (e.g. GMT+2) to offset minutes from UTC for display in emails.</summary>
-    private static int GetLocalTimeOffsetMinutes(string? localTime)
-    {
-        if (string.IsNullOrWhiteSpace(localTime)) return 0;
-        if (localTime.Equals("UTC", StringComparison.OrdinalIgnoreCase)) return 0;
-        var m = System.Text.RegularExpressions.Regex.Match(localTime.Trim(), @"^GMT([+-])(\d+)$", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
-        if (m.Success && int.TryParse(m.Groups[2].Value, out var hours))
-            return (m.Groups[1].Value == "-" ? -1 : 1) * (hours * 60);
-        return 0;
-    }
-
     public async Task<bool> SendMeetingEmailAsync(string recipientEmail, string meetingTitle, DateTime startTime, DateTime endTime, string meetingLink, string meetingDescription = "")
     {
         try
@@ -234,13 +223,15 @@ END:VCALENDAR";
     private string CreateEmailBody(string meetingTitle, DateTime startTime, DateTime endTime, string meetingLink, string meetingDescription)
     {
         // Display in local time (Trello:LocalTime) when configured
-        var offsetMin = _configuration != null ? GetLocalTimeOffsetMinutes(_configuration["Trello:LocalTime"]) : 0;
-        var startLocal = startTime.Kind == DateTimeKind.Utc ? startTime.AddMinutes(offsetMin) : startTime;
-        var endLocal = endTime.Kind == DateTimeKind.Utc ? endTime.AddMinutes(offsetMin) : endTime;
+        // DST-aware local conversion (Israel: UTC+2 winter / UTC+3 summer) — see
+        // TrelloBoardScheduleHelper.ConvertUtcToLocal for why this replaced a fixed offset.
+        var timeZoneId = _configuration?["Trello:TimeZoneId"];
+        var startLocal = startTime.Kind == DateTimeKind.Utc ? TrelloBoardScheduleHelper.ConvertUtcToLocal(startTime, timeZoneId) : startTime;
+        var endLocal = endTime.Kind == DateTimeKind.Utc ? TrelloBoardScheduleHelper.ConvertUtcToLocal(endTime, timeZoneId) : endTime;
         var startTimeFormatted = startLocal.ToString("MMMM dd, yyyy 'at' h:mm tt");
         var endTimeFormatted = endLocal.ToString("MMMM dd, yyyy 'at' h:mm tt");
         var duration = (endTime - startTime).TotalMinutes;
-        
+
         // Generate Google Calendar link from UTC times so it matches the .ics (avoids double calendar entry with wrong offset)
         var googleCalendarLink = BuildGoogleCalendarLink(
             title: meetingTitle,
@@ -492,13 +483,15 @@ END:VCALENDAR";
 
     private string CreateEmailBodyWithSender(string meetingTitle, DateTime startTime, DateTime endTime, string meetingLink, string senderName, string? customMessage, string? organizationName)
     {
-        var offsetMin = _configuration != null ? GetLocalTimeOffsetMinutes(_configuration["Trello:LocalTime"]) : 0;
-        var startLocal = startTime.Kind == DateTimeKind.Utc ? startTime.AddMinutes(offsetMin) : startTime;
-        var endLocal = endTime.Kind == DateTimeKind.Utc ? endTime.AddMinutes(offsetMin) : endTime;
+        // DST-aware local conversion (Israel: UTC+2 winter / UTC+3 summer) — see
+        // TrelloBoardScheduleHelper.ConvertUtcToLocal for why this replaced a fixed offset.
+        var timeZoneId = _configuration?["Trello:TimeZoneId"];
+        var startLocal = startTime.Kind == DateTimeKind.Utc ? TrelloBoardScheduleHelper.ConvertUtcToLocal(startTime, timeZoneId) : startTime;
+        var endLocal = endTime.Kind == DateTimeKind.Utc ? TrelloBoardScheduleHelper.ConvertUtcToLocal(endTime, timeZoneId) : endTime;
         var startTimeFormatted = startLocal.ToString("MMMM dd, yyyy 'at' h:mm tt");
         var endTimeFormatted = endLocal.ToString("MMMM dd, yyyy 'at' h:mm tt");
         var duration = (endTime - startTime).TotalMinutes;
-        
+
         // Generate Google Calendar link from UTC times so it matches the .ics (avoids double calendar entry with wrong offset)
         var googleCalendarLink = BuildGoogleCalendarLink(
             title: meetingTitle,

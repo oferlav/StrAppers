@@ -63,6 +63,7 @@ public class Program
         builder.Services.AddHttpClient();
 
         builder.Services.Configure<KickoffConfig>(builder.Configuration.GetSection("KickoffConfig"));
+        builder.Services.Configure<KickoffConfig2>(builder.Configuration.GetSection("KickoffConfig2"));
         builder.Services.Configure<ProjectCriteriaConfig>(builder.Configuration.GetSection("ProjectCriteriaConfig"));
 
         // Enable Windows Service
@@ -92,6 +93,12 @@ public class KickoffConfig
     public bool RequireProductManager { get; set; } = false;
     public bool RequireDeveloperRule { get; set; } = false;
     public int MaxPendingTime { get; set; } = 96;
+}
+
+public class KickoffConfig2
+{
+    /// <summary>Minutes a squad has to unanimously agree on a kickoff meeting time before it's auto-reset. Default: 3 days.</summary>
+    public int BoardTimeout { get; set; } = 4320;
 }
 
 public class ProjectCriteriaConfig

@@ -335,7 +335,8 @@ public class ApplicationDbContext : DbContext
             entity.Property(e => e.ProgrammingLanguageId).HasColumnName("ProgrammingLanguageId");
             entity.Property(e => e.CreatedAt).HasDefaultValueSql("CURRENT_TIMESTAMP");
             entity.Property(e => e.SuperUser).HasDefaultValue(false);
-            
+            entity.Property(e => e.ApprovedKickoff).HasDefaultValue(false);
+
             entity.HasIndex(e => e.Email).IsUnique();
             entity.HasIndex(e => e.StudentId).IsUnique();
 
@@ -824,6 +825,10 @@ public class ApplicationDbContext : DbContext
             entity.Property(e => e.NextMeetingUrl).HasColumnName("NextMeetingUrl").HasMaxLength(1000);
             entity.Property(e => e.NextMeetingTitle).HasColumnName("NextMeetingTitle").HasMaxLength(500);
             entity.Property(e => e.NextMeetingTeacherAttendance).HasColumnName("NextMeetingTeacherAttendance").HasDefaultValue(false);
+            entity.Property(e => e.KickoffState).HasColumnName("KickoffState");
+            entity.Property(e => e.LastDateStudentId).HasColumnName("LastDateStudentId");
+            entity.Property(e => e.SuggestedKickoffDate).HasColumnName("SuggestedKickoffDate").HasColumnType("timestamp with time zone");
+            entity.Property(e => e.IsStale).HasColumnName("IsStale").HasDefaultValue(false);
             entity.Property(e => e.GithubBackendUrl).HasColumnName("GithubBackendUrl").HasMaxLength(1000);
             entity.Property(e => e.GithubFrontendUrl).HasColumnName("GithubFrontendUrl").HasMaxLength(1000);
             entity.Property(e => e.WebApiUrl).HasColumnName("WebApiUrl").HasMaxLength(1000);

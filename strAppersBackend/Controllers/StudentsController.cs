@@ -18,14 +18,20 @@ public class StudentsController : ControllerBase
     private readonly IGitHubService _githubService;
     private readonly IKickoffService _kickoffService;
     private readonly IPasswordHasherService _passwordHasher;
+    private readonly IConfiguration _configuration;
+    private readonly ISmtpEmailService _smtpEmailService;
+    private readonly IKickoffResetService _kickoffResetService;
 
-    public StudentsController(ApplicationDbContext context, ILogger<StudentsController> logger, IGitHubService githubService, IKickoffService kickoffService, IPasswordHasherService passwordHasher)
+    public StudentsController(ApplicationDbContext context, ILogger<StudentsController> logger, IGitHubService githubService, IKickoffService kickoffService, IPasswordHasherService passwordHasher, IConfiguration configuration, ISmtpEmailService smtpEmailService, IKickoffResetService kickoffResetService)
     {
         _context = context;
         _logger = logger;
         _githubService = githubService;
         _kickoffService = kickoffService;
         _passwordHasher = passwordHasher;
+        _configuration = configuration;
+        _smtpEmailService = smtpEmailService;
+        _kickoffResetService = kickoffResetService;
     }
 
     /// <summary>
@@ -2074,6 +2080,21 @@ public class StudentsController : ControllerBase
             }
 
             _logger.LogInformation("Login successful for student with email {Email}", request.Email);
+
+            if (!string.IsNullOrEmpty(student.BoardId))
+            {
+                try
+                {
+                    await _kickoffResetService.CheckAndResetAsync(student.BoardId);
+                    // Re-fetch in case this login just triggered the reset (BoardId/Status/ProjectId
+                    // would otherwise be stale in the response below).
+                    student = await _context.Students.FirstOrDefaultAsync(s => s.Id == student.Id) ?? student;
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "[KICKOFF-RESET] Login-triggered kickoff check failed for board {BoardId}", student.BoardId);
+                }
+            }
 
             return Ok(new
             {
