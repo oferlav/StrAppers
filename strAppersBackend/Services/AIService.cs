@@ -9,6 +9,16 @@ using strAppersBackend.Models;
 
 namespace strAppersBackend.Services;
 
+/// <summary>
+/// Outcome of a text generation call. Carries the provider's own error text on
+/// failure so callers can report *why* generation failed instead of a bare null.
+/// </summary>
+public record AiTextResult(bool Success, string Content, string? ErrorMessage)
+{
+    public static AiTextResult Ok(string content) => new(true, content, null);
+    public static AiTextResult Fail(string error) => new(false, string.Empty, error);
+}
+
 public interface IAIService
 {
     Task<SystemDesignResponse> GenerateSystemDesignAsync(SystemDesignRequest request);
@@ -24,6 +34,12 @@ public interface IAIService
     Task<ParsedBuildOutput?> ParseBuildOutputAsync(string buildOutput);
     /// <param name="modelName">OpenAI model id (e.g. gpt-4o-mini), or null to use <c>AIConfig:Model</c>. Not a logical scenario name.</param>
     Task<string?> GenerateTextResponseAsync(string prompt, string? modelName = null);
+
+    /// <summary>
+    /// Same as <see cref="GenerateTextResponseAsync"/> but returns the provider's
+    /// error text on failure. Prefer this when the failure is surfaced to a user.
+    /// </summary>
+    Task<AiTextResult> GenerateTextDetailedAsync(string prompt, string? modelName = null);
 
     /// <summary>
     /// Generates a course board using a system + user message pair (single AI call).
@@ -770,6 +786,35 @@ REMEMBER:
         return fixedJson;
     }
 
+    /// <summary>
+    /// Pulls the human-readable reason out of an OpenAI/Anthropic error body
+    /// (both use {"error":{"message":...,"code":...}}). Falls back to the raw
+    /// body, truncated, when the payload isn't in that shape.
+    /// </summary>
+    private static string ExtractProviderError(string? responseBody)
+    {
+        if (string.IsNullOrWhiteSpace(responseBody))
+            return "no response body";
+
+        try
+        {
+            using var doc = JsonDocument.Parse(responseBody);
+            if (doc.RootElement.TryGetProperty("error", out var error))
+            {
+                var message = error.TryGetProperty("message", out var m) ? m.GetString() : null;
+                var code = error.TryGetProperty("code", out var c) ? c.GetString() : null;
+                if (!string.IsNullOrWhiteSpace(message))
+                    return string.IsNullOrWhiteSpace(code) ? message! : $"{message} (code: {code})";
+            }
+        }
+        catch (JsonException)
+        {
+            // Not JSON (e.g. an HTML gateway page) — fall through to the raw body.
+        }
+
+        return responseBody.Length > 500 ? responseBody[..500] + "…" : responseBody;
+    }
+
     private async Task<(bool Success, string Content, string? ErrorMessage)> CallOpenAIAsync(string prompt, string model)
     {
         try
@@ -798,7 +843,7 @@ REMEMBER:
             if (!response.IsSuccessStatusCode)
             {
                 _logger.LogError("OpenAI API error: {StatusCode} - {Content}", response.StatusCode, responseContent);
-                return (false, string.Empty, $"OpenAI API error: {response.StatusCode}");
+                return (false, string.Empty, $"OpenAI API error ({(int)response.StatusCode} {response.StatusCode}): {ExtractProviderError(responseContent)}");
             }
 
             var openAIResponse = JsonSerializer.Deserialize<OpenAIResponse>(responseContent, new JsonSerializerOptions
@@ -2563,6 +2608,12 @@ Return the JSON response now:";
     /// </summary>
     public async Task<string?> GenerateTextResponseAsync(string prompt, string? modelName = null)
     {
+        var result = await GenerateTextDetailedAsync(prompt, modelName);
+        return result.Success ? result.Content : null;
+    }
+
+    public async Task<AiTextResult> GenerateTextDetailedAsync(string prompt, string? modelName = null)
+    {
         try
         {
             var model = !string.IsNullOrWhiteSpace(modelName) ? modelName : _aiConfig.Model;
@@ -2574,19 +2625,19 @@ Return the JSON response now:";
 
             var result = await CallOpenAIAsync(prompt, model);
             if (result.Success)
-                return result.Content;
+                return AiTextResult.Ok(result.Content);
 
             _logger.LogError("Failed to generate text response: {Error}", result.ErrorMessage);
-            return null;
+            return AiTextResult.Fail(result.ErrorMessage ?? "AI text generation failed.");
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error generating text response");
-            return null;
+            return AiTextResult.Fail(ex.Message);
         }
     }
 
-    private async Task<string?> CallAnthropicTextAsync(string prompt, string model)
+    private async Task<AiTextResult> CallAnthropicTextAsync(string prompt, string model)
     {
         try
         {
@@ -2618,7 +2669,7 @@ Return the JSON response now:";
             if (!response.IsSuccessStatusCode)
             {
                 _logger.LogError("Anthropic API error: {StatusCode} - {Content}", response.StatusCode, responseContent);
-                return null;
+                return AiTextResult.Fail($"Anthropic API error ({(int)response.StatusCode} {response.StatusCode}): {ExtractProviderError(responseContent)}");
             }
 
             var claudeResponse = JsonSerializer.Deserialize<ClaudeResponse>(responseContent, new JsonSerializerOptions
@@ -2626,12 +2677,19 @@ Return the JSON response now:";
                 PropertyNameCaseInsensitive = true
             });
 
-            return claudeResponse?.Content?.FirstOrDefault(c => c.Type == "text")?.Text;
+            var text = claudeResponse?.Content?.FirstOrDefault(c => c.Type == "text")?.Text;
+            if (string.IsNullOrEmpty(text))
+            {
+                _logger.LogError("Empty text content in Anthropic response: {Content}", responseContent);
+                return AiTextResult.Fail("Anthropic returned no text content.");
+            }
+
+            return AiTextResult.Ok(text);
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error calling Anthropic API for text generation with model {Model}", model);
-            return null;
+            return AiTextResult.Fail($"Error calling Anthropic API: {ex.Message}");
         }
     }
 
