@@ -305,15 +305,28 @@ public partial class MetricsController
         IReadOnlyList<CacheMetrics> rows,
         bool includeSquadInStudentName = false)
     {
+        // Course-level hard skills live in their own row (MetricId=-1) at the same sentinel sprint;
+        // merge it into the student's course summary so the report has one entry per student.
+        var hardByStudent = rows
+            .Where(r => r.SprintNumber == CourseSummarySprintNumber && r.MetricId == HardSkillsMetricId)
+            .GroupBy(r => r.StudentId)
+            .ToDictionary(g => g.Key, g => g.First());
+
         return rows
             .Where(r => r.SprintNumber == CourseSummarySprintNumber && r.MetricId == SummaryMetricId)
             .OrderBy(r => StudentSortKey(r, includeSquadInStudentName))
-            .Select(r => new AssessmentReportCourseSummaryDto
+            .Select(r =>
             {
-                StudentId = r.StudentId,
-                StudentName = FormatStudentName(r, includeSquadInStudentName),
-                ReviewContent = r.ReviewContent ?? "",
-                Graph = string.IsNullOrWhiteSpace(r.Graph) ? null : r.Graph.Trim()
+                hardByStudent.TryGetValue(r.StudentId, out var hard);
+                return new AssessmentReportCourseSummaryDto
+                {
+                    StudentId = r.StudentId,
+                    StudentName = FormatStudentName(r, includeSquadInStudentName),
+                    ReviewContent = r.ReviewContent ?? "",
+                    Graph = string.IsNullOrWhiteSpace(r.Graph) ? null : r.Graph.Trim(),
+                    HardSkillsReviewContent = string.IsNullOrWhiteSpace(hard?.ReviewContent) ? null : hard!.ReviewContent.Trim(),
+                    HardSkillsGraph = string.IsNullOrWhiteSpace(hard?.Graph) ? null : hard!.Graph!.Trim(),
+                };
             })
             .ToList();
     }
@@ -620,6 +633,13 @@ public partial class MetricsController
 
         [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
         public string? Graph { get; set; }
+
+        /// <summary>Course-level hard skills (MetricId=-1, SprintNumber=-1). Null until one is generated.</summary>
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public string? HardSkillsReviewContent { get; set; }
+
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public string? HardSkillsGraph { get; set; }
     }
 
     public sealed class AssessmentReportSprintDto
