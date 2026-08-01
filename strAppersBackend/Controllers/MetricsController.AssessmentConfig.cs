@@ -53,7 +53,10 @@ public partial class MetricsController
 
             var metrics = await _context.Metrics
                 .AsNoTracking()
-                .Where(m => m.InstituteId == instituteId)
+                // Id > 0 keeps the sentinel rows (SprintSummary=0, HardSkills=-1) out no matter how
+                // they are scoped in the database — they are not configurable metrics. Hard Skills
+                // is appended below as a dedicated entry instead.
+                .Where(m => m.InstituteId == instituteId && m.Id > 0)
                 .OrderBy(m => m.Id)
                 .ToListAsync(cancellationToken);
 
