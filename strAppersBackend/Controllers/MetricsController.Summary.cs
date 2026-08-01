@@ -65,7 +65,10 @@ public partial class MetricsController
         var metricRows = await _context.CacheMetrics.AsNoTracking()
             .Include(c => c.Metric)
             .Where(c => c.BoardId == boardId && c.StudentId == request.StudentId &&
-                        c.SprintNumber == request.SprintNumber && c.MetricId != SummaryMetricId)
+                        // MetricId > 0 excludes both sentinels: the summary itself (0), and hard
+                        // skills (-1), which is reported in its own section and rolled up
+                        // separately — feeding it in here made it appear as a soft-skill category.
+                        c.SprintNumber == request.SprintNumber && c.MetricId > 0)
             .OrderBy(c => c.MetricId)
             .ToListAsync(cancellationToken);
 
