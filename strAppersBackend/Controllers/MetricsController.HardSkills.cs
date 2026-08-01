@@ -17,6 +17,26 @@ public partial class MetricsController
     /// <summary>Metrics.Id sentinel for hard-skills rows in CacheMetrics (seeded row named "HardSkills").</summary>
     internal const int HardSkillsMetricId = -1;
 
+    /// <summary>Name of the in-memory stand-in, and the slug the batch loop dispatches on.</summary>
+    internal const string HardSkillsMetricName = "HardSkills";
+    internal const string HardSkillsMetricSlug = "hardskills";
+
+    /// <summary>Label shown in the staff dashboard's metric combo.</summary>
+    internal const string HardSkillsDisplayName = "Hard Skills";
+
+    /// <summary>
+    /// In-memory stand-in for the hard-skills sentinel, appended to the batch loop's metric list and
+    /// to the assessment-config response. Never persisted: the seeded Metrics row exists only to
+    /// satisfy the CacheMetrics FK, and none of its columns are read — dispatch keys off this Name,
+    /// so renaming the database row cannot break it.
+    /// </summary>
+    internal static Metric HardSkillsBatchMetric() => new()
+    {
+        Id = HardSkillsMetricId,
+        Name = HardSkillsMetricName,
+        Required = true,
+    };
+
     public record HardSkillsAssessmentRequest(
         string BoardId,
         int StudentId,

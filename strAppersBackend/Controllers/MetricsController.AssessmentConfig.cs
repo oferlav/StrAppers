@@ -77,6 +77,28 @@ public partial class MetricsController
                     m.UseMeetingTranscripts, m.UseGroupChat, m.UsePrivateChat,
                     m.UseTrelloTasks, m.UseTrelloUserStory, m.UseFigmaDesign))).ToList();
 
+            // Hard skills is a sentinel (Id=-1, InstituteId=null), so the query above never returns
+            // it. Append it so the staff dashboard's metric combo can select it like any other
+            // metric. It is NOT configurable here — its rubric is each role's Hard Skills text and
+            // its sensors come from the role's Main Tool — so the Soft Skills definition screen
+            // filters it out by id. Sensor flags are all false: nothing reads them, and leaving them
+            // true would imply a configuration that does not exist.
+            dtos.Add(new MetricAssessmentConfigDto(
+                HardSkillsMetricId,
+                HardSkillsMetricSlug,
+                HardSkillsDisplayName,
+                "Hard Skills",
+                "Scored against each role's Hard Skills definition, using the role's Main Tool as the evidence source.",
+                null,
+                true,
+                3,
+                null,
+                null,
+                null,
+                false,
+                "sentinel",
+                new MetricSensorFlagsDto(false, false, false, false, false, false, false, false, false, false, false, false)));
+
             return Ok(dtos);
         }
         catch (Exception ex)

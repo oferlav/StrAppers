@@ -486,6 +486,11 @@ public partial class MetricsController
         if (!metrics.Any())
             return Ok(new { success = false, message = "No active metrics configured for this institute." });
 
+        // Hard skills is a sentinel, not an institute-owned metric row, so the query above can never
+        // return it. Append it so it runs like any other metric — the switch below dispatches it by
+        // name to RunHardSkillsAssessment, which takes its rubric from the student's role.
+        metrics.Add(HardSkillsBatchMetric());
+
         if (request.MetricId.HasValue)
         {
             metrics = metrics.Where(m => m.Id == request.MetricId.Value).ToList();
@@ -532,6 +537,11 @@ public partial class MetricsController
                         break;
                     case "communication":
                         result = (await MeetingsCommunication(new MeetingsCommunicationRequest { BoardId = boardId, StudentId = request.StudentId, SprintNumber = request.SprintNumber, MetricIdOverride = metric.Id }, cancellationToken)).Result;
+                        break;
+                    case HardSkillsMetricSlug:
+                        result = await RunHardSkillsAssessment(
+                            new HardSkillsAssessmentRequest(boardId, request.StudentId, request.SprintNumber),
+                            cancellationToken);
                         break;
                     default:
                         result = await RunAssessmentEngine(new AssessmentEngineRequest(
