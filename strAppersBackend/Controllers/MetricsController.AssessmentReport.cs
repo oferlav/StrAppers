@@ -159,7 +159,8 @@ public partial class MetricsController
             .ThenBy(c => c.MetricId)
             .ToListAsync(cancellationToken);
 
-        var sprints = BuildAssessmentSprints(rows, includeSquadInStudentName: false);
+        var sprints = BuildAssessmentSprints(rows, includeSquadInStudentName: false,
+            await BuildMainToolLookupAsync(rows, cancellationToken));
 
         return Ok(new AssessmentReportDto
         {
@@ -229,7 +230,8 @@ public partial class MetricsController
             .ThenBy(c => c.MetricId)
             .ToListAsync(cancellationToken);
 
-        var sprints = BuildAssessmentSprints(rows, includeSquadInStudentName: true);
+        var sprints = BuildAssessmentSprints(rows, includeSquadInStudentName: true,
+            await BuildMainToolLookupAsync(rows, cancellationToken));
 
         return Ok(new AssessmentReportDto
         {
@@ -243,7 +245,8 @@ public partial class MetricsController
 
     internal static IReadOnlyList<AssessmentReportSprintDto> BuildAssessmentSprints(
         IReadOnlyList<CacheMetrics> rows,
-        bool includeSquadInStudentName = false)
+        bool includeSquadInStudentName = false,
+        IReadOnlyDictionary<int, string?>? mainToolByStudent = null)
     {
         // Course summaries (SprintNumber = CourseSummarySprintNumber) are not a real sprint — they are
         // reported separately via BuildCourseSummaries, never as a sprint section.
@@ -262,7 +265,10 @@ public partial class MetricsController
                 {
                     StudentId = first.StudentId,
                     StudentName = FormatStudentName(first, includeSquadInStudentName),
-                    Metrics = studentGroup.OrderBy(r => r.MetricId).Select(MapMetricDto).ToList()
+                    Metrics = studentGroup
+                        .OrderBy(r => r.MetricId)
+                        .Select(r => MapMetricDto(r, mainToolByStudent?.GetValueOrDefault(r.StudentId)))
+                        .ToList()
                 });
             }
 
@@ -337,13 +343,80 @@ public partial class MetricsController
         return labels;
     }
 
-    internal static AssessmentReportMetricDto MapMetricDto(CacheMetrics row)
+    /// <summary>
+    /// Sensors to list for a cached row.
+    ///
+    /// The two sentinel rows can't use their own Metrics row: both exist only to satisfy the FK on
+    /// CacheMetrics.MetricId and carry every sensor flag defaulted to true, which is meaningless.
+    /// Summary (0) reports none — it has no sensors of its own, and the metrics it summarizes list
+    /// theirs already. Hard skills (-1) reports whatever its role's Main Tool selects, matching what
+    /// BuildHardSkillsMetric actually collected.
+    /// </summary>
+    internal static IReadOnlyList<string> ResolveReportSensors(CacheMetrics row, string? mainTool)
     {
-        // The MetricId=0 sentinel row is named "SprintSummary" in the Metrics table (see the
-        // SeedSummaryMetricRow migration); the report shows the friendlier display name.
-        var name = row.MetricId == SummaryMetricId
-            ? "Sprint Summary"
-            : row.Metric?.Name?.Trim();
+        if (row.MetricId == SummaryMetricId) return Array.Empty<string>();
+        if (row.MetricId == HardSkillsMetricId) return DescribeSensors(BuildHardSkillsMetric(string.Empty, mainTool));
+        return DescribeSensors(row.Metric);
+    }
+
+    /// <summary>
+    /// Main Tool per student, used only for hard-skills rows' Data Sources. Mirrors
+    /// <see cref="ResolveHardSkillsRoleAsync"/>: the assigned role wins when it names a tool,
+    /// otherwise the institute's row of the same name does. Returns empty (no queries) when the
+    /// report contains no hard-skills rows.
+    /// </summary>
+    private async Task<Dictionary<int, string?>> BuildMainToolLookupAsync(
+        IReadOnlyList<CacheMetrics> rows, CancellationToken ct)
+    {
+        var studentIds = rows.Where(r => r.MetricId == HardSkillsMetricId)
+            .Select(r => r.StudentId).Distinct().ToList();
+        var lookup = new Dictionary<int, string?>();
+        if (studentIds.Count == 0) return lookup;
+
+        var students = await _context.Students
+            .AsNoTracking()
+            .Where(s => studentIds.Contains(s.Id))
+            .Include(s => s.StudentRoles)
+                .ThenInclude(sr => sr.Role)
+                    .ThenInclude(r => r!.Skill)
+            .ToListAsync(ct);
+
+        foreach (var s in students)
+        {
+            var assigned = s.StudentRoles?.FirstOrDefault(sr => sr.IsActive)?.Role
+                           ?? s.StudentRoles?.FirstOrDefault()?.Role;
+            var tool = assigned?.Skill?.Name?.Trim();
+
+            if (string.IsNullOrEmpty(tool) && assigned != null && s.InstituteId is > 0)
+            {
+                var name = (assigned.Name ?? string.Empty).Trim().ToLower();
+                tool = await _context.Roles
+                    .AsNoTracking()
+                    .Where(r => r.InstituteId == s.InstituteId && r.IsActive
+                                && r.Name.ToLower() == name && r.SkillId != null)
+                    .OrderBy(r => r.SquadId == null ? 0 : 1)
+                    .ThenBy(r => r.Id)
+                    .Select(r => r.Skill!.Name)
+                    .FirstOrDefaultAsync(ct);
+            }
+
+            lookup[s.Id] = string.IsNullOrWhiteSpace(tool) ? null : tool.Trim();
+        }
+
+        return lookup;
+    }
+
+    internal static AssessmentReportMetricDto MapMetricDto(CacheMetrics row, string? mainTool = null)
+    {
+        // The sentinel rows are named "SprintSummary" (Id=0) and "HardSkills" (Id=-1) in the Metrics
+        // table (see the SeedSummaryMetricRow / SeedHardSkillsMetricRow migrations); the report shows
+        // the friendlier display names.
+        var name = row.MetricId switch
+        {
+            SummaryMetricId    => "Sprint Summary",
+            HardSkillsMetricId => "Hard Skills",
+            _                  => row.Metric?.Name?.Trim(),
+        };
         if (string.IsNullOrEmpty(name))
             name = $"Metric {row.MetricId}";
 
@@ -354,7 +427,7 @@ public partial class MetricsController
             ReviewContent = row.ReviewContent ?? "",
             Graph = string.IsNullOrWhiteSpace(row.Graph) ? null : row.Graph.Trim(),
             Graph2 = string.IsNullOrWhiteSpace(row.Graph2) ? null : row.Graph2.Trim(),
-            Sensors = row.MetricId == SummaryMetricId ? Array.Empty<string>() : DescribeSensors(row.Metric)
+            Sensors = ResolveReportSensors(row, mainTool)
         };
     }
 

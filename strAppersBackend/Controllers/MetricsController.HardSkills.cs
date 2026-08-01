@@ -82,6 +82,45 @@ public partial class MetricsController
     }
 
     /// <summary>
+    /// Finds the role row that actually carries the Hard Skills text.
+    ///
+    /// A student's StudentRole often points at the global role (InstituteId=null), while
+    /// "Roles &amp; Hard Skills definition" saves Competencies onto a *separate* institute-scoped
+    /// row with the same name — see the comment in RolesController's save: "dto.Id may be a global
+    /// role Id (InstituteId=null) ... so a new institute-specific row is created instead". Reading
+    /// Competencies straight off the assigned row therefore finds nothing for most students.
+    ///
+    /// So when the assigned row has no Competencies, fall back to the institute's row of the same
+    /// name. Main Tool is read from whichever row wins, since that is the row the staff configured.
+    /// </summary>
+    internal async Task<Role> ResolveHardSkillsRoleAsync(Role assigned, int? instituteId, CancellationToken ct)
+    {
+        if (!string.IsNullOrWhiteSpace(assigned.Competencies))
+            return assigned;
+        if (instituteId is null or <= 0)
+            return assigned;
+
+        var name = (assigned.Name ?? string.Empty).Trim().ToLower();
+        if (name.Length == 0)
+            return assigned;
+
+        var candidate = await _context.Roles
+            .AsNoTracking()
+            .Include(r => r.Skill)
+            .Where(r => r.InstituteId == instituteId
+                        && r.IsActive
+                        && r.Name.ToLower() == name
+                        && r.Competencies != null
+                        && r.Competencies != "")
+            // Institute-level row first, then squad-scoped ones; oldest wins within each group.
+            .OrderBy(r => r.SquadId == null ? 0 : 1)
+            .ThenBy(r => r.Id)
+            .FirstOrDefaultAsync(ct);
+
+        return candidate ?? assigned;
+    }
+
+    /// <summary>
     /// Scores one student's hard skills for a sprint and caches it as MetricId=-1.
     /// Mirrors <see cref="RunAssessmentEngine"/>, but the rubric is the role's Hard Skills text
     /// rather than a Metric row.
@@ -114,25 +153,32 @@ public partial class MetricsController
         if (student == null)
             return NotFound(new { message = $"Student {request.StudentId} not found." });
 
-        var role = student.StudentRoles?.FirstOrDefault(sr => sr.IsActive)?.Role
-                   ?? student.StudentRoles?.FirstOrDefault()?.Role;
-        if (role == null)
+        var assignedRole = student.StudentRoles?.FirstOrDefault(sr => sr.IsActive)?.Role
+                           ?? student.StudentRoles?.FirstOrDefault()?.Role;
+        if (assignedRole == null)
             return UnprocessableEntity(new { message = $"Student {request.StudentId} has no role, so there are no hard skills to assess." });
+
+        var role = await ResolveHardSkillsRoleAsync(assignedRole, student.InstituteId, cancellationToken);
 
         var competencies = role.Competencies?.Trim() ?? string.Empty;
         if (competencies.Length == 0)
             return UnprocessableEntity(new
             {
-                message = $"Role \"{role.Name}\" has no Hard Skills defined. Add them in Roles & Hard Skills definition, then re-run.",
+                message = $"Role \"{assignedRole.Name}\" has no Hard Skills defined for institute {student.InstituteId?.ToString() ?? "(none)"}. "
+                          + "Add them in Roles & Hard Skills definition, then re-run.",
+                assignedRoleId = assignedRole.Id,
+                assignedRoleInstituteId = assignedRole.InstituteId,
             });
 
         var mainTool = role.Skill?.Name?.Trim();
 
+        // Board labels carry the student's assigned role name, not whichever scoped row the
+        // Hard Skills text was found on (the names match, but the assigned row is the authority here).
         var trelloRoleLabel = request.TrelloRoleLabel;
-        if (string.IsNullOrWhiteSpace(trelloRoleLabel) && !string.IsNullOrWhiteSpace(role.Name))
+        if (string.IsNullOrWhiteSpace(trelloRoleLabel) && !string.IsNullOrWhiteSpace(assignedRole.Name))
             trelloRoleLabel = board.IsSingleRole && student.RoleIndex > 0
-                ? $"{role.Name.Trim()} {student.RoleIndex}"
-                : role.Name.Trim();
+                ? $"{assignedRole.Name.Trim()} {student.RoleIndex}"
+                : assignedRole.Name.Trim();
 
         var sprintLengthWeeks = _configuration.GetValue("BusinessLogicConfig:SprintLengthInWeeks", 1);
         var sprintLengthDays = await SprintLengthResolver.ResolveForBoardAsync(_context, boardId, sprintLengthWeeks, cancellationToken);
@@ -203,6 +249,9 @@ public partial class MetricsController
                 test = true,
                 message = "Test mode: LLM not called; CacheMetrics not updated.",
                 role = role.Name,
+                roleId = role.Id,
+                roleInstituteId = role.InstituteId,
+                assignedRoleId = assignedRole.Id,
                 mainTool,
                 systemPrompt,
                 userPrompt,
