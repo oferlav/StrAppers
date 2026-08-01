@@ -312,6 +312,31 @@ public partial class MetricsController
             .ToList();
     }
 
+    /// <summary>
+    /// Enabled sensors for a metric, as the labels the staff UI uses (kept in step with
+    /// SENSOR_LABELS in MetricsAssessment.jsx). The MetricId=0 summary row has no metric of
+    /// its own — its sources are those of the metrics it summarizes — so it returns none.
+    /// </summary>
+    internal static IReadOnlyList<string> DescribeSensors(Metric? metric)
+    {
+        if (metric is null) return Array.Empty<string>();
+
+        var labels = new List<string>();
+        if (metric.UseCustomerChat)       labels.Add("AI Customer Chat");
+        if (metric.UseMentorChat)         labels.Add("AI Mentor Chat");
+        if (metric.UseCodebaseQuality)    labels.Add("Codebase & Github");
+        if (metric.UseResources)          labels.Add("Resources (Docs, Links, Images, etc.)");
+        if (metric.UseStakeholders)       labels.Add("CRM / Stakeholders");
+        if (metric.UseProjectModule)      labels.Add("Project Design");
+        if (metric.UseMeetingTranscripts) labels.Add("Meeting Transcripts");
+        if (metric.UseGroupChat)          labels.Add("Group Chat (Squad)");
+        if (metric.UsePrivateChat)        labels.Add("Private Chat (1-on-1)");
+        if (metric.UseTrelloTasks)        labels.Add("Sprint Tasks");
+        if (metric.UseTrelloUserStory)    labels.Add("User Stories");
+        if (metric.UseFigmaDesign)        labels.Add("Figma Design");
+        return labels;
+    }
+
     internal static AssessmentReportMetricDto MapMetricDto(CacheMetrics row)
     {
         // The MetricId=0 sentinel row is named "SprintSummary" in the Metrics table (see the
@@ -328,7 +353,8 @@ public partial class MetricsController
             MetricName = name,
             ReviewContent = row.ReviewContent ?? "",
             Graph = string.IsNullOrWhiteSpace(row.Graph) ? null : row.Graph.Trim(),
-            Graph2 = string.IsNullOrWhiteSpace(row.Graph2) ? null : row.Graph2.Trim()
+            Graph2 = string.IsNullOrWhiteSpace(row.Graph2) ? null : row.Graph2.Trim(),
+            Sensors = row.MetricId == SummaryMetricId ? Array.Empty<string>() : DescribeSensors(row.Metric)
         };
     }
 
@@ -547,5 +573,8 @@ public partial class MetricsController
 
         [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
         public string? Graph2 { get; set; }
+
+        /// <summary>Display names of the sensors enabled on this metric, for the report's Data Sources list.</summary>
+        public IReadOnlyList<string> Sensors { get; set; } = Array.Empty<string>();
     }
 }
