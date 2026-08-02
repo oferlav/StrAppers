@@ -3,6 +3,7 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Mvc.Infrastructure;
 using Microsoft.EntityFrameworkCore;
 using strAppersBackend.Models;
+using strAppersBackend.Utilities;
 
 namespace strAppersBackend.Controllers;
 
@@ -160,7 +161,8 @@ public partial class MetricsController
             .ToListAsync(cancellationToken);
 
         var sprints = BuildAssessmentSprints(rows, includeSquadInStudentName: false,
-            await BuildMainToolLookupAsync(rows, cancellationToken));
+            await BuildMainToolLookupAsync(rows, cancellationToken),
+            await BuildSprintDateLookupAsync(boardIdTrim, rows, cancellationToken));
 
         return Ok(new AssessmentReportDto
         {
@@ -243,10 +245,43 @@ public partial class MetricsController
         });
     }
 
+    /// <summary>
+    /// Start/due dates per sprint number for one board, resolved exactly the way the assessment
+    /// engine resolves its evidence window: the sprint merge row first, then the board's sprint
+    /// plan. Only meaningful for a single board — a sprint number means different dates on each.
+    /// </summary>
+    private async Task<Dictionary<int, (DateTime Start, DateTime End)>> BuildSprintDateLookupAsync(
+        string boardId, IReadOnlyList<CacheMetrics> rows, CancellationToken ct)
+    {
+        var lookup = new Dictionary<int, (DateTime, DateTime)>();
+        var board = await _context.ProjectBoards.AsNoTracking()
+            .FirstOrDefaultAsync(b => b.Id == boardId, ct);
+        if (board == null) return lookup;
+
+        var weeks = _configuration.GetValue("BusinessLogicConfig:SprintLengthInWeeks", 1);
+        var days = await SprintLengthResolver.ResolveForBoardAsync(_context, boardId, weeks, ct);
+        var merges = await _context.ProjectBoardSprintMerges.AsNoTracking()
+            .Where(m => m.ProjectBoardId == boardId)
+            .ToListAsync(ct);
+
+        foreach (var n in rows.Select(r => r.SprintNumber).Distinct())
+        {
+            if (n < 0) continue; // course-summary sentinel, not a real sprint
+            var merge = merges.FirstOrDefault(m => m.SprintNumber == n);
+            if (SprintPlanDateResolver.TryGetInclusiveUtcRangeFromSprintMerge(merge, n, days, out var s, out var e)
+                || SprintPlanDateResolver.TryGetSprintInclusiveUtcRange(board.SprintPlan, board.StartDate, n, out s, out e, days))
+            {
+                lookup[n] = (s, e);
+            }
+        }
+        return lookup;
+    }
+
     internal static IReadOnlyList<AssessmentReportSprintDto> BuildAssessmentSprints(
         IReadOnlyList<CacheMetrics> rows,
         bool includeSquadInStudentName = false,
-        IReadOnlyDictionary<int, string?>? mainToolByStudent = null)
+        IReadOnlyDictionary<int, string?>? mainToolByStudent = null,
+        IReadOnlyDictionary<int, (DateTime Start, DateTime End)>? sprintDates = null)
     {
         // Course summaries (SprintNumber = CourseSummarySprintNumber) are not a real sprint — they are
         // reported separately via BuildCourseSummaries, never as a sprint section.
@@ -272,9 +307,13 @@ public partial class MetricsController
                 });
             }
 
+            (DateTime Start, DateTime End) window = default;
+            var hasDates = sprintDates != null && sprintDates.TryGetValue(sprintGroup.Key, out window);
             sprints.Add(new AssessmentReportSprintDto
             {
                 SprintNumber = sprintGroup.Key,
+                StartDate = hasDates ? window.Start : null,
+                DueDate = hasDates ? window.End : null,
                 Students = students
             });
         }
@@ -655,6 +694,13 @@ public partial class MetricsController
     public sealed class AssessmentReportSprintDto
     {
         public int SprintNumber { get; set; }
+
+        /// <summary>Sprint window, when it resolves. Null for reports spanning several boards.</summary>
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public DateTime? StartDate { get; set; }
+
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public DateTime? DueDate { get; set; }
         public IReadOnlyList<AssessmentReportStudentDto> Students { get; set; } = Array.Empty<AssessmentReportStudentDto>();
     }
 
