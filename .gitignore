@@ -479,3 +479,7 @@ node_modules/
 
 # TernJS port file
 .tern-port
+
+# Local scratch/working files (not part of the product)
+temp_*
+temp-*

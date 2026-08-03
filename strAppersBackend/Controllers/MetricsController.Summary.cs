@@ -65,7 +65,10 @@ public partial class MetricsController
         var metricRows = await _context.CacheMetrics.AsNoTracking()
             .Include(c => c.Metric)
             .Where(c => c.BoardId == boardId && c.StudentId == request.StudentId &&
-                        c.SprintNumber == request.SprintNumber && c.MetricId != SummaryMetricId)
+                        // MetricId > 0 excludes both sentinels: the summary itself (0), and hard
+                        // skills (-1), which is reported in its own section and rolled up
+                        // separately — feeding it in here made it appear as a soft-skill category.
+                        c.SprintNumber == request.SprintNumber && c.MetricId > 0)
             .OrderBy(c => c.MetricId)
             .ToListAsync(cancellationToken);
 
@@ -208,6 +211,25 @@ public partial class MetricsController
                 boardId, request.StudentId, CourseSummarySprintNumber, SummaryMetricId,
                 reviewContent, graphBase64, cancellationToken);
 
+            // Course-level hard skills, from the per-sprint hard-skills rows. Only runs when the
+            // student actually has some, so boards that never ran a hard-skills assessment are
+            // unaffected and cost no extra LLM call.
+            var hardRows = await _context.CacheMetrics.AsNoTracking()
+                .Where(c => c.BoardId == boardId && c.StudentId == request.StudentId &&
+                            c.MetricId == HardSkillsMetricId && c.SprintNumber >= 0)
+                .OrderBy(c => c.SprintNumber)
+                .ToListAsync(cancellationToken);
+
+            string? hardSkillsReviewContent = null;
+            if (hardRows.Count > 0)
+            {
+                var hardSources = hardRows
+                    .Select(r => (r.SprintNumber, ReviewContent: r.ReviewContent ?? ""))
+                    .ToList();
+                hardSkillsReviewContent = await RunCourseHardSkillsRollupAsync(
+                    aiModel, boardId, request.StudentId, hardSources, cancellationToken);
+            }
+
             return Ok(new
             {
                 success = true,
@@ -216,6 +238,8 @@ public partial class MetricsController
                 sprintsSummarized = summaryRows.Select(r => r.SprintNumber).ToList(),
                 reviewContent,
                 graphBase64,
+                hardSkillsSprintsSummarized = hardRows.Select(r => r.SprintNumber).ToList(),
+                hardSkillsReviewContent,
                 model = aiModel.Name,
                 inputTokens,
                 outputTokens,
@@ -257,6 +281,58 @@ public partial class MetricsController
         }
         sb.AppendLine("Respond with JSON only as specified in your instructions.");
         return sb.ToString();
+    }
+
+    /// <summary>
+    /// Course-level rollup of the per-sprint hard-skills rows, cached as MetricId=-1 /
+    /// SprintNumber=-1. Returns null when the model didn't return usable JSON — the soft-skills
+    /// course summary has already been saved by then, so a hard-skills failure must not undo it.
+    /// </summary>
+    private async Task<string?> RunCourseHardSkillsRollupAsync(
+        AIModel aiModel,
+        string boardId,
+        int studentId,
+        IReadOnlyList<(int SprintNumber, string ReviewContent)> sources,
+        CancellationToken ct)
+    {
+        var userPrompt = BuildCourseSummaryUserPrompt(sources);
+        var (llmText, _, _) = await _chatCompletionService.GetChatCompletionAsync(
+            aiModel, BuildCourseHardSkillsSystemPrompt(), userPrompt, null);
+
+        if (!TryParseGapAnalysisJson(llmText, out var dto) || dto == null)
+        {
+            _logger.LogWarning(
+                "Course hard skills rollup returned unusable JSON for board {BoardId}, student {StudentId}; skipped.",
+                boardId, studentId);
+            return null;
+        }
+
+        dto.Categories = ApplyAssessmentCategoryPolicy(dto.Categories, new List<string>(), "Course Hard Skills");
+        var chartRows = dto.Categories.Select(c => (c.Name, Math.Clamp(c.Score, 0, 100))).ToList();
+        var graph = GapAnalysisBarChartRenderer.ToBase64Png(
+            GapAnalysisBarChartRenderer.RenderSingleChart(chartRows, "Course Hard Skills"));
+        var review = FormatAssessmentReviewContent("Course Hard Skills", dto);
+
+        await UpsertCacheMetricsAsync(
+            boardId, studentId, CourseSummarySprintNumber, HardSkillsMetricId, review, graph, ct);
+
+        return review;
+    }
+
+    internal static string BuildCourseHardSkillsSystemPrompt()
+    {
+        return """
+            You are an academic performance report writer for a project-based software course.
+
+            Your task: write one consolidated COURSE HARD SKILLS report for a single student across the whole course, based EXCLUSIVELY on the per-sprint hard-skills assessments provided in the user message. Those assessments are your only source of truth — do not use outside knowledge, do not invent activity, evidence, or scores they do not support.
+
+            Rules:
+            - Return one categories[] entry PER HARD SKILL that appears in the per-sprint Scores sections, named exactly after that skill, with a 0-100 course-level score for the student's command of it across ALL sprints. Derive it from that skill's per-sprint scores — weight a clear improving or declining trend rather than blindly averaging. Each rationale must note the skill's trajectory across the sprints.
+            - Assess technical capability only. Communication, teamwork and other soft skills are reported separately — ignore them here.
+            - narrative: a concise markdown report of the student's technical trajectory over the course — which skills strengthened, which stalled, and what to work on next.
+            - Output valid JSON only, no markdown fences:
+              {"categories":[{"name":"string","score":0,"rationale":"string"}],"narrative":"markdown"}
+            """;
     }
 
     internal static string BuildCourseSummarySystemPrompt()

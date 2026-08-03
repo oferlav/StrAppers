@@ -3,6 +3,7 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Mvc.Infrastructure;
 using Microsoft.EntityFrameworkCore;
 using strAppersBackend.Models;
+using strAppersBackend.Utilities;
 
 namespace strAppersBackend.Controllers;
 
@@ -159,7 +160,9 @@ public partial class MetricsController
             .ThenBy(c => c.MetricId)
             .ToListAsync(cancellationToken);
 
-        var sprints = BuildAssessmentSprints(rows, includeSquadInStudentName: false);
+        var sprints = BuildAssessmentSprints(rows, includeSquadInStudentName: false,
+            await BuildMainToolLookupAsync(rows, cancellationToken),
+            await BuildSprintDateLookupAsync(boardIdTrim, rows, cancellationToken));
 
         return Ok(new AssessmentReportDto
         {
@@ -229,7 +232,8 @@ public partial class MetricsController
             .ThenBy(c => c.MetricId)
             .ToListAsync(cancellationToken);
 
-        var sprints = BuildAssessmentSprints(rows, includeSquadInStudentName: true);
+        var sprints = BuildAssessmentSprints(rows, includeSquadInStudentName: true,
+            await BuildMainToolLookupAsync(rows, cancellationToken));
 
         return Ok(new AssessmentReportDto
         {
@@ -241,9 +245,43 @@ public partial class MetricsController
         });
     }
 
+    /// <summary>
+    /// Start/due dates per sprint number for one board, resolved exactly the way the assessment
+    /// engine resolves its evidence window: the sprint merge row first, then the board's sprint
+    /// plan. Only meaningful for a single board — a sprint number means different dates on each.
+    /// </summary>
+    private async Task<Dictionary<int, (DateTime Start, DateTime End)>> BuildSprintDateLookupAsync(
+        string boardId, IReadOnlyList<CacheMetrics> rows, CancellationToken ct)
+    {
+        var lookup = new Dictionary<int, (DateTime, DateTime)>();
+        var board = await _context.ProjectBoards.AsNoTracking()
+            .FirstOrDefaultAsync(b => b.Id == boardId, ct);
+        if (board == null) return lookup;
+
+        var weeks = _configuration.GetValue("BusinessLogicConfig:SprintLengthInWeeks", 1);
+        var days = await SprintLengthResolver.ResolveForBoardAsync(_context, boardId, weeks, ct);
+        var merges = await _context.ProjectBoardSprintMerges.AsNoTracking()
+            .Where(m => m.ProjectBoardId == boardId)
+            .ToListAsync(ct);
+
+        foreach (var n in rows.Select(r => r.SprintNumber).Distinct())
+        {
+            if (n < 0) continue; // course-summary sentinel, not a real sprint
+            var merge = merges.FirstOrDefault(m => m.SprintNumber == n);
+            if (SprintPlanDateResolver.TryGetInclusiveUtcRangeFromSprintMerge(merge, n, days, out var s, out var e)
+                || SprintPlanDateResolver.TryGetSprintInclusiveUtcRange(board.SprintPlan, board.StartDate, n, out s, out e, days))
+            {
+                lookup[n] = (s, e);
+            }
+        }
+        return lookup;
+    }
+
     internal static IReadOnlyList<AssessmentReportSprintDto> BuildAssessmentSprints(
         IReadOnlyList<CacheMetrics> rows,
-        bool includeSquadInStudentName = false)
+        bool includeSquadInStudentName = false,
+        IReadOnlyDictionary<int, string?>? mainToolByStudent = null,
+        IReadOnlyDictionary<int, (DateTime Start, DateTime End)>? sprintDates = null)
     {
         // Course summaries (SprintNumber = CourseSummarySprintNumber) are not a real sprint — they are
         // reported separately via BuildCourseSummaries, never as a sprint section.
@@ -262,13 +300,20 @@ public partial class MetricsController
                 {
                     StudentId = first.StudentId,
                     StudentName = FormatStudentName(first, includeSquadInStudentName),
-                    Metrics = studentGroup.OrderBy(r => r.MetricId).Select(MapMetricDto).ToList()
+                    Metrics = studentGroup
+                        .OrderBy(r => r.MetricId)
+                        .Select(r => MapMetricDto(r, mainToolByStudent?.GetValueOrDefault(r.StudentId)))
+                        .ToList()
                 });
             }
 
+            (DateTime Start, DateTime End) window = default;
+            var hasDates = sprintDates != null && sprintDates.TryGetValue(sprintGroup.Key, out window);
             sprints.Add(new AssessmentReportSprintDto
             {
                 SprintNumber = sprintGroup.Key,
+                StartDate = hasDates ? window.Start : null,
+                DueDate = hasDates ? window.End : null,
                 Students = students
             });
         }
@@ -299,26 +344,131 @@ public partial class MetricsController
         IReadOnlyList<CacheMetrics> rows,
         bool includeSquadInStudentName = false)
     {
+        // Course-level hard skills live in their own row (MetricId=-1) at the same sentinel sprint;
+        // merge it into the student's course summary so the report has one entry per student.
+        var hardByStudent = rows
+            .Where(r => r.SprintNumber == CourseSummarySprintNumber && r.MetricId == HardSkillsMetricId)
+            .GroupBy(r => r.StudentId)
+            .ToDictionary(g => g.Key, g => g.First());
+
         return rows
             .Where(r => r.SprintNumber == CourseSummarySprintNumber && r.MetricId == SummaryMetricId)
             .OrderBy(r => StudentSortKey(r, includeSquadInStudentName))
-            .Select(r => new AssessmentReportCourseSummaryDto
+            .Select(r =>
             {
-                StudentId = r.StudentId,
-                StudentName = FormatStudentName(r, includeSquadInStudentName),
-                ReviewContent = r.ReviewContent ?? "",
-                Graph = string.IsNullOrWhiteSpace(r.Graph) ? null : r.Graph.Trim()
+                hardByStudent.TryGetValue(r.StudentId, out var hard);
+                return new AssessmentReportCourseSummaryDto
+                {
+                    StudentId = r.StudentId,
+                    StudentName = FormatStudentName(r, includeSquadInStudentName),
+                    ReviewContent = r.ReviewContent ?? "",
+                    Graph = string.IsNullOrWhiteSpace(r.Graph) ? null : r.Graph.Trim(),
+                    HardSkillsReviewContent = string.IsNullOrWhiteSpace(hard?.ReviewContent) ? null : hard!.ReviewContent.Trim(),
+                    HardSkillsGraph = string.IsNullOrWhiteSpace(hard?.Graph) ? null : hard!.Graph!.Trim(),
+                };
             })
             .ToList();
     }
 
-    internal static AssessmentReportMetricDto MapMetricDto(CacheMetrics row)
+    /// <summary>
+    /// Enabled sensors for a metric, as the labels the staff UI uses (kept in step with
+    /// SENSOR_LABELS in MetricsAssessment.jsx). The MetricId=0 summary row has no metric of
+    /// its own — its sources are those of the metrics it summarizes — so it returns none.
+    /// </summary>
+    internal static IReadOnlyList<string> DescribeSensors(Metric? metric)
     {
-        // The MetricId=0 sentinel row is named "SprintSummary" in the Metrics table (see the
-        // SeedSummaryMetricRow migration); the report shows the friendlier display name.
-        var name = row.MetricId == SummaryMetricId
-            ? "Sprint Summary"
-            : row.Metric?.Name?.Trim();
+        if (metric is null) return Array.Empty<string>();
+
+        var labels = new List<string>();
+        if (metric.UseCustomerChat)       labels.Add("AI Customer Chat");
+        if (metric.UseMentorChat)         labels.Add("AI Mentor Chat");
+        if (metric.UseCodebaseQuality)    labels.Add("Codebase & Github");
+        if (metric.UseResources)          labels.Add("Resources (Docs, Links, Images, etc.)");
+        if (metric.UseStakeholders)       labels.Add("CRM / Stakeholders");
+        if (metric.UseProjectModule)      labels.Add("Project Design");
+        if (metric.UseMeetingTranscripts) labels.Add("Meeting Transcripts");
+        if (metric.UseGroupChat)          labels.Add("Group Chat (Squad)");
+        if (metric.UsePrivateChat)        labels.Add("Private Chat (1-on-1)");
+        if (metric.UseTrelloTasks)        labels.Add("Sprint Tasks");
+        if (metric.UseTrelloUserStory)    labels.Add("User Stories");
+        if (metric.UseFigmaDesign)        labels.Add("Figma Design");
+        return labels;
+    }
+
+    /// <summary>
+    /// Sensors to list for a cached row.
+    ///
+    /// The two sentinel rows can't use their own Metrics row: both exist only to satisfy the FK on
+    /// CacheMetrics.MetricId and carry every sensor flag defaulted to true, which is meaningless.
+    /// Summary (0) reports none — it has no sensors of its own, and the metrics it summarizes list
+    /// theirs already. Hard skills (-1) reports whatever its role's Main Tool selects, matching what
+    /// BuildHardSkillsMetric actually collected.
+    /// </summary>
+    internal static IReadOnlyList<string> ResolveReportSensors(CacheMetrics row, string? mainTool)
+    {
+        if (row.MetricId == SummaryMetricId) return Array.Empty<string>();
+        if (row.MetricId == HardSkillsMetricId) return DescribeSensors(BuildHardSkillsMetric(string.Empty, mainTool));
+        return DescribeSensors(row.Metric);
+    }
+
+    /// <summary>
+    /// Main Tool per student, used only for hard-skills rows' Data Sources. Mirrors
+    /// <see cref="ResolveHardSkillsRoleAsync"/>: the assigned role wins when it names a tool,
+    /// otherwise the institute's row of the same name does. Returns empty (no queries) when the
+    /// report contains no hard-skills rows.
+    /// </summary>
+    private async Task<Dictionary<int, string?>> BuildMainToolLookupAsync(
+        IReadOnlyList<CacheMetrics> rows, CancellationToken ct)
+    {
+        var studentIds = rows.Where(r => r.MetricId == HardSkillsMetricId)
+            .Select(r => r.StudentId).Distinct().ToList();
+        var lookup = new Dictionary<int, string?>();
+        if (studentIds.Count == 0) return lookup;
+
+        var students = await _context.Students
+            .AsNoTracking()
+            .Where(s => studentIds.Contains(s.Id))
+            .Include(s => s.StudentRoles)
+                .ThenInclude(sr => sr.Role)
+                    .ThenInclude(r => r!.Skill)
+            .ToListAsync(ct);
+
+        foreach (var s in students)
+        {
+            var assigned = s.StudentRoles?.FirstOrDefault(sr => sr.IsActive)?.Role
+                           ?? s.StudentRoles?.FirstOrDefault()?.Role;
+            var tool = assigned?.Skill?.Name?.Trim();
+
+            if (string.IsNullOrEmpty(tool) && assigned != null && s.InstituteId is > 0)
+            {
+                var name = (assigned.Name ?? string.Empty).Trim().ToLower();
+                tool = await _context.Roles
+                    .AsNoTracking()
+                    .Where(r => r.InstituteId == s.InstituteId && r.IsActive
+                                && r.Name.ToLower() == name && r.SkillId != null)
+                    .OrderBy(r => r.SquadId == null ? 0 : 1)
+                    .ThenBy(r => r.Id)
+                    .Select(r => r.Skill!.Name)
+                    .FirstOrDefaultAsync(ct);
+            }
+
+            lookup[s.Id] = string.IsNullOrWhiteSpace(tool) ? null : tool.Trim();
+        }
+
+        return lookup;
+    }
+
+    internal static AssessmentReportMetricDto MapMetricDto(CacheMetrics row, string? mainTool = null)
+    {
+        // The sentinel rows are named "SprintSummary" (Id=0) and "HardSkills" (Id=-1) in the Metrics
+        // table (see the SeedSummaryMetricRow / SeedHardSkillsMetricRow migrations); the report shows
+        // the friendlier display names.
+        var name = row.MetricId switch
+        {
+            SummaryMetricId    => "Sprint Summary",
+            HardSkillsMetricId => "Hard Skills",
+            _                  => row.Metric?.Name?.Trim(),
+        };
         if (string.IsNullOrEmpty(name))
             name = $"Metric {row.MetricId}";
 
@@ -328,7 +478,8 @@ public partial class MetricsController
             MetricName = name,
             ReviewContent = row.ReviewContent ?? "",
             Graph = string.IsNullOrWhiteSpace(row.Graph) ? null : row.Graph.Trim(),
-            Graph2 = string.IsNullOrWhiteSpace(row.Graph2) ? null : row.Graph2.Trim()
+            Graph2 = string.IsNullOrWhiteSpace(row.Graph2) ? null : row.Graph2.Trim(),
+            Sensors = ResolveReportSensors(row, mainTool)
         };
     }
 
@@ -373,6 +524,11 @@ public partial class MetricsController
 
         if (!metrics.Any())
             return Ok(new { success = false, message = "No active metrics configured for this institute." });
+
+        // Hard skills is a sentinel, not an institute-owned metric row, so the query above can never
+        // return it. Append it so it runs like any other metric — the switch below dispatches it by
+        // name to RunHardSkillsAssessment, which takes its rubric from the student's role.
+        metrics.Add(HardSkillsBatchMetric());
 
         if (request.MetricId.HasValue)
         {
@@ -420,6 +576,11 @@ public partial class MetricsController
                         break;
                     case "communication":
                         result = (await MeetingsCommunication(new MeetingsCommunicationRequest { BoardId = boardId, StudentId = request.StudentId, SprintNumber = request.SprintNumber, MetricIdOverride = metric.Id }, cancellationToken)).Result;
+                        break;
+                    case HardSkillsMetricSlug:
+                        result = await RunHardSkillsAssessment(
+                            new HardSkillsAssessmentRequest(boardId, request.StudentId, request.SprintNumber),
+                            cancellationToken);
                         break;
                     default:
                         result = await RunAssessmentEngine(new AssessmentEngineRequest(
@@ -521,11 +682,25 @@ public partial class MetricsController
 
         [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
         public string? Graph { get; set; }
+
+        /// <summary>Course-level hard skills (MetricId=-1, SprintNumber=-1). Null until one is generated.</summary>
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public string? HardSkillsReviewContent { get; set; }
+
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public string? HardSkillsGraph { get; set; }
     }
 
     public sealed class AssessmentReportSprintDto
     {
         public int SprintNumber { get; set; }
+
+        /// <summary>Sprint window, when it resolves. Null for reports spanning several boards.</summary>
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public DateTime? StartDate { get; set; }
+
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public DateTime? DueDate { get; set; }
         public IReadOnlyList<AssessmentReportStudentDto> Students { get; set; } = Array.Empty<AssessmentReportStudentDto>();
     }
 
@@ -547,5 +722,8 @@ public partial class MetricsController
 
         [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
         public string? Graph2 { get; set; }
+
+        /// <summary>Display names of the sensors enabled on this metric, for the report's Data Sources list.</summary>
+        public IReadOnlyList<string> Sensors { get; set; } = Array.Empty<string>();
     }
 }

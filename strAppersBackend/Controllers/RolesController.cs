@@ -563,13 +563,16 @@ Teacher draft:
 Return only the final competencies text.
 """;
 
-                var assisted = (await _aiService.GenerateTextResponseAsync(prompt))?.Trim() ?? string.Empty;
-                if (assisted.Length == 0)
+                var generated = await _aiService.GenerateTextDetailedAsync(prompt);
+                var assisted = generated.Content?.Trim() ?? string.Empty;
+                if (!generated.Success || assisted.Length == 0)
                 {
+                    var reason = generated.ErrorMessage ?? "AI service returned an empty response.";
+                    _logger.LogError("Competencies assistance failed for role {RoleName}: {Reason}", roleName, reason);
                     return StatusCode(502, new RoleCompetenciesAssistanceResponse
                     {
                         Success = false,
-                        Message = "AI service returned an empty response.",
+                        Message = $"AI assistance failed: {reason}",
                         Competencies = string.Empty,
                     });
                 }
