@@ -8,8 +8,8 @@ namespace strAppersBackend.Controllers;
 
 /// <summary>
 /// Hard Skills assessment. Where the generic engine scores a configured Metric (a soft skill),
-/// this scores the student against their role's own Hard Skills definition — Role.Competencies,
-/// authored in Roles &amp; Hard Skills definition — and narrows the evidence to the role's Main
+/// this scores the student against their role's own Professional Skills definition — Role.Competencies,
+/// authored in Roles &amp; Professional Skills definition — and narrows the evidence to the role's Main
 /// Tool (Role.Skill). Stored in CacheMetrics as MetricId=-1.
 /// </summary>
 public partial class MetricsController
@@ -22,7 +22,7 @@ public partial class MetricsController
     internal const string HardSkillsMetricSlug = "hardskills";
 
     /// <summary>Label shown in the staff dashboard's metric combo.</summary>
-    internal const string HardSkillsDisplayName = "Hard Skills";
+    internal const string HardSkillsDisplayName = "Professional Skills";
 
     /// <summary>
     /// In-memory stand-in for the hard-skills sentinel, appended to the batch loop's metric list and
@@ -57,7 +57,7 @@ public partial class MetricsController
         var metric = new Metric
         {
             Id = HardSkillsMetricId,
-            Name = "Hard Skills",
+            Name = "Professional Skills",
             Skill = competencies,
             Required = false,
         };
@@ -105,7 +105,7 @@ public partial class MetricsController
     /// Finds the role row that actually carries the Hard Skills text.
     ///
     /// A student's StudentRole often points at the global role (InstituteId=null), while
-    /// "Roles &amp; Hard Skills definition" saves Competencies onto a *separate* institute-scoped
+    /// "Roles &amp; Professional Skills definition" saves Competencies onto a *separate* institute-scoped
     /// row with the same name — see the comment in RolesController's save: "dto.Id may be a global
     /// role Id (InstituteId=null) ... so a new institute-specific row is created instead". Reading
     /// Competencies straight off the assigned row therefore finds nothing for most students.
@@ -142,7 +142,7 @@ public partial class MetricsController
 
     /// <summary>
     /// Scores one student's hard skills for a sprint and caches it as MetricId=-1.
-    /// Mirrors <see cref="RunAssessmentEngine"/>, but the rubric is the role's Hard Skills text
+    /// Mirrors <see cref="RunAssessmentEngine"/>, but the rubric is the role's Professional Skills text
     /// rather than a Metric row.
     /// </summary>
     [HttpPost("use/assess-hard-skills")]
@@ -184,8 +184,8 @@ public partial class MetricsController
         if (competencies.Length == 0)
             return UnprocessableEntity(new
             {
-                message = $"Role \"{assignedRole.Name}\" has no Hard Skills defined for institute {student.InstituteId?.ToString() ?? "(none)"}. "
-                          + "Add them in Roles & Hard Skills definition, then re-run.",
+                message = $"Role \"{assignedRole.Name}\" has no Professional Skills defined for institute {student.InstituteId?.ToString() ?? "(none)"}. "
+                          + "Add them in Roles & Professional Skills definition, then re-run.",
                 assignedRoleId = assignedRole.Id,
                 assignedRoleInstituteId = assignedRole.InstituteId,
             });
@@ -223,18 +223,18 @@ public partial class MetricsController
 
         var toolLine = string.IsNullOrWhiteSpace(mainTool)
             ? "The role has no single Main Tool, so all available sprint evidence is provided."
-            : $"The role's Main Tool is {mainTool}. The evidence below is drawn from it — judge the hard skills through that work.";
+            : $"The role's Main Tool is {mainTool}. The evidence below is drawn from it — judge the professional skills through that work.";
 
         var systemPrompt = $$"""
-            You are a hard-skills assessment expert for the role "{{role.Name}}".
+            You are a professional-skills assessment expert for the role "{{role.Name}}".
 
-            Your task: score how well the student demonstrated the HARD SKILLS below during this sprint.
-            The hard skills definition is your highest-priority instruction — follow it exactly, even when
+            Your task: score how well the student demonstrated the PROFESSIONAL SKILLS below during this sprint.
+            The professional skills definition is your highest-priority instruction — follow it exactly, even when
             the evidence is sparse or seems to point elsewhere.
 
-            === HARD SKILLS DEFINITION ===
+            === PROFESSIONAL SKILLS DEFINITION ===
             {{competencies}}
-            === END HARD SKILLS DEFINITION ===
+            === END PROFESSIONAL SKILLS DEFINITION ===
 
             {{toolLine}}
 
@@ -295,16 +295,16 @@ public partial class MetricsController
                 });
             }
 
-            dto.Categories = ApplyAssessmentCategoryPolicy(dto.Categories, parsedCategories, "Hard Skills");
+            dto.Categories = ApplyAssessmentCategoryPolicy(dto.Categories, parsedCategories, "Professional Skills");
 
             var rows = dto.Categories
                 .Select(c => (c.Name, Math.Clamp(c.Score, 0, 100)))
                 .ToList();
 
             var graphBase64 = GapAnalysisBarChartRenderer.ToBase64Png(
-                GapAnalysisBarChartRenderer.RenderSingleChart(rows, "Hard Skills"));
+                GapAnalysisBarChartRenderer.RenderSingleChart(rows, "Professional Skills"));
 
-            var reviewContent = FormatAssessmentReviewContent("Hard Skills", dto);
+            var reviewContent = FormatAssessmentReviewContent("Professional Skills", dto);
 
             await UpsertCacheMetricsAsync(
                 boardId, student.Id, request.SprintNumber, HardSkillsMetricId,

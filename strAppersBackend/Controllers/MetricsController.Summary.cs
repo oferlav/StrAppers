@@ -307,11 +307,11 @@ public partial class MetricsController
             return null;
         }
 
-        dto.Categories = ApplyAssessmentCategoryPolicy(dto.Categories, new List<string>(), "Course Hard Skills");
+        dto.Categories = ApplyAssessmentCategoryPolicy(dto.Categories, new List<string>(), "Course Professional Skills");
         var chartRows = dto.Categories.Select(c => (c.Name, Math.Clamp(c.Score, 0, 100))).ToList();
         var graph = GapAnalysisBarChartRenderer.ToBase64Png(
-            GapAnalysisBarChartRenderer.RenderSingleChart(chartRows, "Course Hard Skills"));
-        var review = FormatAssessmentReviewContent("Course Hard Skills", dto);
+            GapAnalysisBarChartRenderer.RenderSingleChart(chartRows, "Course Professional Skills"));
+        var review = FormatAssessmentReviewContent("Course Professional Skills", dto);
 
         await UpsertCacheMetricsAsync(
             boardId, studentId, CourseSummarySprintNumber, HardSkillsMetricId, review, graph, ct);
@@ -324,10 +324,10 @@ public partial class MetricsController
         return """
             You are an academic performance report writer for a project-based software course.
 
-            Your task: write one consolidated COURSE HARD SKILLS report for a single student across the whole course, based EXCLUSIVELY on the per-sprint hard-skills assessments provided in the user message. Those assessments are your only source of truth — do not use outside knowledge, do not invent activity, evidence, or scores they do not support.
+            Your task: write one consolidated COURSE PROFESSIONAL SKILLS report for a single student across the whole course, based EXCLUSIVELY on the per-sprint professional-skills assessments provided in the user message. Those assessments are your only source of truth — do not use outside knowledge, do not invent activity, evidence, or scores they do not support.
 
             Rules:
-            - Return one categories[] entry PER HARD SKILL that appears in the per-sprint Scores sections, named exactly after that skill, with a 0-100 course-level score for the student's command of it across ALL sprints. Derive it from that skill's per-sprint scores — weight a clear improving or declining trend rather than blindly averaging. Each rationale must note the skill's trajectory across the sprints.
+            - Return one categories[] entry PER PROFESSIONAL SKILL that appears in the per-sprint Scores sections, named exactly after that skill, with a 0-100 course-level score for the student's command of it across ALL sprints. Derive it from that skill's per-sprint scores — weight a clear improving or declining trend rather than blindly averaging. Each rationale must note the skill's trajectory across the sprints.
             - Assess technical capability only. Communication, teamwork and other soft skills are reported separately — ignore them here.
             - narrative: a concise markdown report of the student's technical trajectory over the course — which skills strengthened, which stalled, and what to work on next.
             - Output valid JSON only, no markdown fences:

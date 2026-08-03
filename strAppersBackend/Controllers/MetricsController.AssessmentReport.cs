@@ -466,7 +466,7 @@ public partial class MetricsController
         var name = row.MetricId switch
         {
             SummaryMetricId    => "Sprint Summary",
-            HardSkillsMetricId => "Hard Skills",
+            HardSkillsMetricId => "Professional Skills",
             _                  => row.Metric?.Name?.Trim(),
         };
         if (string.IsNullOrEmpty(name))
