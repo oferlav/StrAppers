@@ -221,6 +221,13 @@ public partial class MetricsController
         var parsedCategories = ParseRubricCategories(competencies);
         var categoryScoringInstruction = BuildCategoryScoringInstruction(parsedCategories);
 
+        // The Code & GitHub sensor emits states the model cannot interpret unaided — "could not
+        // observe" (a platform failure, not a student outcome) and the empty branch compare that a
+        // squash merge normally produces. This matters most here: when the role's Main Tool is
+        // GitHub, BuildHardSkillsMetric narrows the evidence to this sensor, so the whole score rests
+        // on reading those states correctly.
+        var gitHubScoringRules = hardSkillsMetric.UseCodebaseQuality ? BuildGitHubScoringRules() : string.Empty;
+
         var toolLine = string.IsNullOrWhiteSpace(mainTool)
             ? "The role has no single Main Tool, so all available sprint evidence is provided."
             : $"The role's Main Tool is {mainTool}. The evidence below is drawn from it — judge the professional skills through that work.";
@@ -250,7 +257,7 @@ public partial class MetricsController
             - Do not invent activity. Sections marked _(none for this sprint)_ have no data; do not speculate about them.
             - Output valid JSON only, no markdown fences:
               {"categories":[{"name":"string","score":0,"rationale":"string"}],"narrative":"markdown"}
-            - narrative: brief markdown summary of technical strengths, gaps, and 1–3 concrete follow-up suggestions.
+            - narrative: brief markdown summary of technical strengths, gaps, and 1–3 concrete follow-up suggestions.{{gitHubScoringRules}}
             """;
 
         var userPrompt = new StringBuilder()
