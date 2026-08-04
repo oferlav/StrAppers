@@ -98,6 +98,7 @@ public partial class MetricsController
 
         var explicitRulesBlock = BuildExplicitRulesBlock(metric.ExplicitRules);
         var categoryScoringInstruction = BuildCategoryScoringInstruction(parsedCategories);
+        var gitHubScoringRules = metric.UseCodebaseQuality ? BuildGitHubScoringRules() : string.Empty;
 
         // Layer 1 (rubric authority): the skill rubric lives in the system prompt, above the evidence.
         var systemPrompt = $$"""
@@ -122,7 +123,7 @@ public partial class MetricsController
             - When a resource under Resources & Figma shows "document content extracted on server", that text is the actual content of the uploaded document (e.g. a PRD, spec, or schema) — assess its substance directly rather than treating it as an unverified link. When extraction failed, that is a server-side limitation, not evidence of a missing or low-quality deliverable — do not lower the score solely because content could not be extracted.
             - Output valid JSON only, no markdown fences:
               {"categories":[{"name":"string","score":0,"rationale":"string"}],"narrative":"markdown"}
-            - narrative: brief markdown summary of strengths, gaps, and 1–3 concrete follow-up suggestions.
+            - narrative: brief markdown summary of strengths, gaps, and 1–3 concrete follow-up suggestions.{{gitHubScoringRules}}
             """;
 
         var userPrompt = new StringBuilder()
@@ -255,7 +256,9 @@ public partial class MetricsController
         if (metric.UseMentorChat)
             await AppendAssessmentMentorChatAsync(sb, student.Id, sprintNumber, ct);
         if (metric.UseCodebaseQuality)
-            await AppendAssessmentBoardStateAsync(sb, boardId, sprintNumber, trelloRoleLabel, ct);
+            await AppendAssessmentCodeAndGitHubAsync(
+                sb, boardId, board, student, sprintNumber, trelloRoleLabel,
+                sprintWindowOpen: haveWindow && DateTime.UtcNow <= windowEnd, ct);
         if (metric.UseResources)
             await AppendAssessmentResourcesAsync(sb, boardId, student.Id, sprintNumber, ct);
         if (metric.UseStakeholders)
@@ -332,39 +335,6 @@ public partial class MetricsController
         {
             var role = r.Role?.Trim().ToLowerInvariant() == "assistant" ? "Assistant" : "User";
             sb.AppendLine($"- **[{role}]** ({r.CreatedAt:u}): {Truncate(r.Message?.Trim() ?? "", 3000)}");
-        }
-        sb.AppendLine();
-    }
-
-    private async Task AppendAssessmentBoardStateAsync(StringBuilder sb, string boardId, int sprintNumber, string? trelloRoleLabel, CancellationToken ct)
-    {
-        var all = await _context.BoardStates.AsNoTracking()
-            .Where(s => s.BoardId == boardId && s.SprintNumber == sprintNumber)
-            .OrderByDescending(s => s.UpdatedAt)
-            .ToListAsync(ct);
-
-        // Filter to this student's dev role when possible; fall back to all if no match.
-        var states = all;
-        if (!string.IsNullOrWhiteSpace(trelloRoleLabel))
-        {
-            var filtered = all.Where(s =>
-                !string.IsNullOrWhiteSpace(s.DevRole) &&
-                (s.DevRole.Contains(trelloRoleLabel, StringComparison.OrdinalIgnoreCase) ||
-                 trelloRoleLabel.Contains(s.DevRole, StringComparison.OrdinalIgnoreCase))).ToList();
-            if (filtered.Count > 0) states = filtered;
-        }
-
-        sb.AppendLine("### Codebase Quality (GitHub / CI)");
-        if (states.Count == 0) { sb.AppendLine("_(none for this sprint)_"); sb.AppendLine(); return; }
-        foreach (var s in states)
-        {
-            sb.AppendLine($"- Source: {s.Source} | DevRole: {s.DevRole ?? "—"} | Branch: {s.BranchName ?? "—"} | PR: {s.PRStatus ?? "—"} | BranchStatus: {s.BranchStatus ?? "—"}");
-            if (!string.IsNullOrWhiteSpace(s.LatestCommitDescription))
-                sb.AppendLine($"  Latest commit: {Truncate(s.LatestCommitDescription.Trim(), 500)}");
-            if (!string.IsNullOrWhiteSpace(s.LastBuildStatus))
-                sb.AppendLine($"  Build: {s.LastBuildStatus}");
-            if (!string.IsNullOrWhiteSpace(s.LastTestStatus))
-                sb.AppendLine($"  Tests: {s.LastTestStatus}");
         }
         sb.AppendLine();
     }

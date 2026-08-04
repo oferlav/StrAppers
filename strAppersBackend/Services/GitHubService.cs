@@ -9,6 +9,7 @@ using Microsoft.Extensions.Options;
 using Microsoft.VisualBasic;
 using System;
 using System.Diagnostics.Metrics;
+using System.Globalization;
 using System.Net.NetworkInformation;
 using System.Runtime.Intrinsics.X86;
 using System.Text.Json;
@@ -78,6 +79,13 @@ public interface IGitHubService
     Task<GitHubPullRequest?> GetPullRequestForGapAnalysisAsync(string owner, string repo, string branchName, string? accessToken = null);
     /// <summary>Files changed by a PR (with patches). After a squash merge the branch compare is empty, so this is the gap-analysis evidence of what a merged PR delivered.</summary>
     Task<GitHubCommitDiff?> GetPullRequestFilesAsync(string owner, string repo, int pullRequestNumber, string? accessToken = null);
+
+    /// <summary>
+    /// Commits belonging to a pull request, oldest first. Survives a squash merge and branch deletion,
+    /// unlike listing commits on the branch, so it is the authoritative commit history for a delivered
+    /// sprint. Returns an empty list on any failure.
+    /// </summary>
+    Task<List<GitHubCommit>> GetPullRequestCommitsAsync(string owner, string repo, int pullRequestNumber, string? accessToken = null);
     Task<List<GitHubPullRequest>> GetOpenPullRequestsAsync(string owner, string repo, string? accessToken = null);
     /// <summary>Count commits on a branch (paginated, capped).</summary>
     Task<int> CountCommitsOnBranchPagedAsync(string owner, string repo, string branch, int maxPages = 15, string? accessToken = null);
@@ -2629,8 +2637,13 @@ public class GitHubService : IGitHubService
             string author = "";
             string commitSha = "";
 
+            var rangeCommits = new List<GitHubCommit>();
             if (compareData.TryGetProperty("commits", out var commitsProp) && commitsProp.ValueKind == JsonValueKind.Array && commitsProp.GetArrayLength() > 0)
             {
+                // Full commit list for the range (oldest first, as GitHub returns it).
+                foreach (var c in commitsProp.EnumerateArray())
+                    rangeCommits.Add(ParseCommitElement(c));
+
                 // Get the most recent commit (last in array)
                 var lastCommit = commitsProp.EnumerateArray().Last();
                 commitSha = lastCommit.TryGetProperty("sha", out var shaProp) ? shaProp.GetString() ?? "" : "";
@@ -2678,6 +2691,7 @@ public class GitHubService : IGitHubService
                 TotalDeletions = totalDeletions,
                 TotalFilesChanged = fileChanges.Count,
                 CommitsCount = commitsCount,
+                Commits = rangeCommits,
                 CompareStatus = compareStatus,
                 AheadBy = aheadBy,
                 BehindBy = behindBy
@@ -2959,6 +2973,80 @@ public class GitHubService : IGitHubService
         {
             _logger.LogError(ex, "GetPullRequestForGapAnalysisAsync failed for {Branch} in {Owner}/{Repo}", branchName, owner, repo);
             return null;
+        }
+    }
+
+    /// <summary>
+    /// Maps a GitHub commit JSON element (as returned by the compare, commits and pull-request-commits
+    /// endpoints, which share a shape) onto <see cref="GitHubCommit"/>.
+    /// </summary>
+    private static GitHubCommit ParseCommitElement(JsonElement element)
+    {
+        var result = new GitHubCommit
+        {
+            Sha = element.TryGetProperty("sha", out var shaProp) ? shaProp.GetString() ?? "" : "",
+            Url = element.TryGetProperty("html_url", out var urlProp) ? urlProp.GetString() ?? "" : "",
+        };
+
+        if (element.TryGetProperty("commit", out var commitProp))
+        {
+            result.Message = commitProp.TryGetProperty("message", out var msgProp) ? msgProp.GetString() ?? "" : "";
+            if (commitProp.TryGetProperty("author", out var authorProp))
+            {
+                result.Author = authorProp.TryGetProperty("name", out var nameProp) ? nameProp.GetString() ?? "" : "";
+                if (authorProp.TryGetProperty("date", out var dateProp)
+                    && DateTime.TryParse(dateProp.GetString(), CultureInfo.InvariantCulture,
+                        DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out var parsed))
+                {
+                    result.CommitDate = parsed;
+                }
+            }
+        }
+
+        return result;
+    }
+
+    /// <inheritdoc />
+    public async Task<List<GitHubCommit>> GetPullRequestCommitsAsync(string owner, string repo, int pullRequestNumber, string? accessToken = null)
+    {
+        if (string.IsNullOrWhiteSpace(owner) || string.IsNullOrWhiteSpace(repo) || pullRequestNumber <= 0)
+        {
+            _logger.LogWarning("GetPullRequestCommitsAsync: Invalid parameters");
+            return new List<GitHubCommit>();
+        }
+
+        try
+        {
+            var token = accessToken ?? _configuration["GitHub:AccessToken"];
+            var url = $"{GitHubApiBaseUrl}/repos/{owner}/{repo}/pulls/{pullRequestNumber}/commits?per_page=100";
+            var request = new HttpRequestMessage(HttpMethod.Get, url);
+            if (!string.IsNullOrEmpty(token))
+                request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", token);
+
+            var response = await _httpClient.SendAsync(request);
+            if (!response.IsSuccessStatusCode)
+            {
+                var errorContent = await response.Content.ReadAsStringAsync();
+                _logger.LogWarning(
+                    "GetPullRequestCommitsAsync failed for PR #{Num} in {Owner}/{Repo}: {Status} {Body}",
+                    pullRequestNumber, owner, repo, response.StatusCode, TruncateForLog(errorContent));
+                return new List<GitHubCommit>();
+            }
+
+            var content = await response.Content.ReadAsStringAsync();
+            var commitsArray = JsonSerializer.Deserialize<JsonElement>(content, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+            if (commitsArray.ValueKind != JsonValueKind.Array)
+                return new List<GitHubCommit>();
+
+            var commits = commitsArray.EnumerateArray().Select(ParseCommitElement).ToList();
+            _logger.LogInformation("✅ [GITHUB PR] PR #{Num} has {Count} commit(s) in {Owner}/{Repo}",
+                pullRequestNumber, commits.Count, owner, repo);
+            return commits;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "GetPullRequestCommitsAsync failed for PR #{Num} in {Owner}/{Repo}", pullRequestNumber, owner, repo);
+            return new List<GitHubCommit>();
         }
     }
 
@@ -13332,6 +13420,12 @@ public class GitHubCommitDiff
     public int TotalFilesChanged { get; set; }
     /// <summary>Commits in the compare range (GitHub <c>commits</c> array length).</summary>
     public int CommitsCount { get; set; }
+    /// <summary>
+    /// The commits in the compare range, oldest first. Populated by compare and pull-request-commit
+    /// lookups; empty for callers that only need file changes. Unlike listing commits on the branch,
+    /// this excludes the base branch's history, so it is exactly the work done on this branch.
+    /// </summary>
+    public List<GitHubCommit> Commits { get; set; } = new();
     /// <summary>GitHub compare <c>status</c>: e.g. identical, ahead, behind, diverged.</summary>
     public string CompareStatus { get; set; } = "";
     public int AheadBy { get; set; }

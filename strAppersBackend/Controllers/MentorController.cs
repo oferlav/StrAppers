@@ -7954,31 +7954,33 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                     var webhook = false;
                     var errorMessage = overallValid ? null : string.Join("; ", issues);
                     var devRole = DetermineDevRole(source, branchName);
+                    var sprintNumber = ParseSprintNumber(branchName);
 
                     FormattableString sql = $@"
                         INSERT INTO ""BoardStates"" (
                             ""BoardId"", ""Source"", ""Webhook"", ""GithubBranch"",
-                            ""LastBuildStatus"", ""LastBuildOutput"", ""ErrorMessage"", ""Timestamp"", 
-                            ""DevRole"",
+                            ""LastBuildStatus"", ""LastBuildOutput"", ""ErrorMessage"", ""Timestamp"",
+                            ""SprintNumber"", ""DevRole"",
                             ""CreatedAt"", ""UpdatedAt""
                         ) VALUES (
                             {boardId}, {source}, {webhook}, {branchName},
                             {status}, {output}, {errorMessage}, {timestamp},
-                            {devRole},
+                            {sprintNumber}, {devRole},
                             {createdAt}, {updatedAt}
                         )
-                        ON CONFLICT (""BoardId"", ""Source"", ""Webhook"", ""GithubBranch"") 
+                        ON CONFLICT (""BoardId"", ""Source"", ""Webhook"", ""GithubBranch"")
                         DO UPDATE SET
                             ""LastBuildStatus"" = EXCLUDED.""LastBuildStatus"",
                             ""LastBuildOutput"" = EXCLUDED.""LastBuildOutput"",
                             ""ErrorMessage"" = EXCLUDED.""ErrorMessage"",
                             ""Timestamp"" = EXCLUDED.""Timestamp"",
+                            ""SprintNumber"" = EXCLUDED.""SprintNumber"",
                             ""DevRole"" = EXCLUDED.""DevRole"",
                             ""UpdatedAt"" = EXCLUDED.""UpdatedAt""
                     ";
 
                     await _context.Database.ExecuteSqlInterpolatedAsync(sql);
-                    _logger.LogInformation("✅ [VALIDATION] Recorded backend validation {Status} for BoardId: {BoardId}, Branch: {Branch}, Source: {Source}", status, boardId, branchName, source);
+                    _logger.LogInformation("✅ [VALIDATION] Recorded backend validation {Status} for BoardId: {BoardId}, Branch: {Branch}, Source: {Source}, Sprint: {Sprint}", status, boardId, branchName, source, sprintNumber?.ToString() ?? "null");
                 }
                 catch (Exception ex)
                 {
@@ -8101,31 +8103,33 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                     var webhook = false;
                     var errorMessage = overallValid ? null : string.Join("; ", issues);
                     var devRole = DetermineDevRole(source, branchName);
+                    var sprintNumber = ParseSprintNumber(branchName);
 
                     FormattableString sql = $@"
                         INSERT INTO ""BoardStates"" (
                             ""BoardId"", ""Source"", ""Webhook"", ""GithubBranch"",
-                            ""LastBuildStatus"", ""LastBuildOutput"", ""ErrorMessage"", ""Timestamp"", 
-                            ""DevRole"",
+                            ""LastBuildStatus"", ""LastBuildOutput"", ""ErrorMessage"", ""Timestamp"",
+                            ""SprintNumber"", ""DevRole"",
                             ""CreatedAt"", ""UpdatedAt""
                         ) VALUES (
                             {boardId}, {source}, {webhook}, {branchName},
                             {status}, {output}, {errorMessage}, {timestamp},
-                            {devRole},
+                            {sprintNumber}, {devRole},
                             {createdAt}, {updatedAt}
                         )
-                        ON CONFLICT (""BoardId"", ""Source"", ""Webhook"", ""GithubBranch"") 
+                        ON CONFLICT (""BoardId"", ""Source"", ""Webhook"", ""GithubBranch"")
                         DO UPDATE SET
                             ""LastBuildStatus"" = EXCLUDED.""LastBuildStatus"",
                             ""LastBuildOutput"" = EXCLUDED.""LastBuildOutput"",
                             ""ErrorMessage"" = EXCLUDED.""ErrorMessage"",
                             ""Timestamp"" = EXCLUDED.""Timestamp"",
+                            ""SprintNumber"" = EXCLUDED.""SprintNumber"",
                             ""DevRole"" = EXCLUDED.""DevRole"",
                             ""UpdatedAt"" = EXCLUDED.""UpdatedAt""
                     ";
 
                     await _context.Database.ExecuteSqlInterpolatedAsync(sql);
-                    _logger.LogInformation("✅ [VALIDATION] Recorded frontend validation {Status} for BoardId: {BoardId}, Branch: {Branch}", status, boardId, branchName);
+                    _logger.LogInformation("✅ [VALIDATION] Recorded frontend validation {Status} for BoardId: {BoardId}, Branch: {Branch}, Sprint: {Sprint}", status, boardId, branchName, sprintNumber?.ToString() ?? "null");
                 }
                 catch (Exception ex)
                 {
@@ -10459,6 +10463,7 @@ APPROVAL: no    (request changes before merge)";
                                 PRStatus = baseSource == "GitHub-Success-PR" ? (approval ? "Approved" : "ChangesRequested") : null,
                                 BranchStatus = null,
                                 LastBuildStatus = lastBuildStatusForRecord,
+                                SprintNumber = ParseSprintNumber(request.GithubBranch),
                                 DevRole = DetermineDevRole(recordBaseForRole, request.GithubBranch),
                                 CreatedAt = DateTime.UtcNow,
                                 UpdatedAt = DateTime.UtcNow
@@ -10829,20 +10834,22 @@ APPROVAL: no    (request changes before merge)";
                                 {
                                     await _context.Database.ExecuteSqlInterpolatedAsync($@"UPDATE ""BoardStates"" SET ""GithubBranch"" = {pushGithubBranch} WHERE ""BoardId"" = {boardId} AND ""Source"" = {pushSource} AND ""Webhook"" = {true} AND (""GithubBranch"" = '' OR ""GithubBranch"" IS NULL)");
                                 }
+                                var pushSprintNumber = ParseSprintNumber(pushGithubBranch);
                                 FormattableString pushSql = $@"
                                     INSERT INTO ""BoardStates"" (
                                         ""BoardId"", ""Source"", ""Webhook"", ""ServiceName"", ""GithubBranch"",
-                                        ""LatestCommitId"", ""LatestCommitDescription"", ""DevRole"", ""LatestEvent"",
+                                        ""LatestCommitId"", ""LatestCommitDescription"", ""SprintNumber"", ""DevRole"", ""LatestEvent"",
                                         ""CreatedAt"", ""UpdatedAt""
                                     ) VALUES (
                                         {boardId}, {pushSource}, {true}, {"push"}, {pushGithubBranch},
-                                        {commitIdVal}, {commitMessageVal}, {pushDevRole}, {latestEvent},
+                                        {commitIdVal}, {commitMessageVal}, {pushSprintNumber}, {pushDevRole}, {latestEvent},
                                         {timestamp}, {timestamp}
                                     )
                                     ON CONFLICT (""BoardId"", ""Source"", ""Webhook"", ""GithubBranch"")
                                     DO UPDATE SET
                                         ""LatestCommitId"" = EXCLUDED.""LatestCommitId"",
                                         ""LatestCommitDescription"" = EXCLUDED.""LatestCommitDescription"",
+                                        ""SprintNumber"" = EXCLUDED.""SprintNumber"",
                                         ""DevRole"" = EXCLUDED.""DevRole"",
                                         ""LatestEvent"" = EXCLUDED.""LatestEvent"",
                                         ""UpdatedAt"" = EXCLUDED.""UpdatedAt""";
@@ -10882,6 +10889,7 @@ APPROVAL: no    (request changes before merge)";
                                     {
                                         headRef = refProp.GetString();
                                         boardState.GithubBranch = headRef;
+                                        boardState.SprintNumber = ParseSprintNumber(headRef);
                                         boardState.DevRole = DetermineDevRole("GitHub", headRef);
                                     }
                                     if (headProp.TryGetProperty("sha", out var shaProp))
@@ -11179,6 +11187,7 @@ APPROVAL: no    (request changes before merge)";
                                                     existingMergeRecord.LastBuildStatus = "Completed-Merged";
                                                     existingMergeRecord.LastMergeDate = mergedAt;
                                                     existingMergeRecord.Webhook = true; // Mark as webhook-initiated
+                                                    existingMergeRecord.SprintNumber ??= ParseSprintNumber(branchName);
                                                     existingMergeRecord.UpdatedAt = DateTime.UtcNow;
                                                     
                                                     await _context.SaveChangesAsync();
@@ -11198,6 +11207,7 @@ APPROVAL: no    (request changes before merge)";
                                                         LastBuildStatus = "Completed-Merged",
                                                         GithubBranch = branchName,
                                                         LastMergeDate = mergedAt,
+                                                        SprintNumber = ParseSprintNumber(branchName),
                                                         DevRole = DetermineDevRole("GitHub-Merge", branchName),
                                                         CreatedAt = DateTime.UtcNow,
                                                         UpdatedAt = DateTime.UtcNow
@@ -11467,6 +11477,7 @@ APPROVAL: no    (request changes before merge)";
                             ServiceName = "BranchNamingValidation",
                             ErrorMessage = $"Invalid branch name naming convention. Branch: '{branchName}', Expected pattern: '{pattern}'",
                             GithubBranch = branchName,
+                            SprintNumber = ParseSprintNumber(branchName),
                             DevRole = DetermineDevRole(type == "be" ? "PR-BackendValidation" : "PR-FrontendValidation", branchName),
                             CreatedAt = DateTime.UtcNow,
                             UpdatedAt = DateTime.UtcNow
@@ -11939,6 +11950,7 @@ APPROVAL: no    (request changes before merge)";
                             ServiceName = "BranchNamingValidation",
                             ErrorMessage = $"Invalid branch name naming convention. Branch: '{branchName}', Expected pattern: '{pattern}'",
                             GithubBranch = branchName,
+                            SprintNumber = ParseSprintNumber(branchName),
                             DevRole = DetermineDevRole(type == "be" ? "PR-BackendValidation" : "PR-FrontendValidation", branchName),
                             CreatedAt = DateTime.UtcNow,
                             UpdatedAt = DateTime.UtcNow
@@ -12917,6 +12929,7 @@ APPROVAL: no    (request changes before merge)";
                         existingMergeRecord.LastBuildStatus = "Completed-Merged";
                         existingMergeRecord.LastMergeDate = mergedAt;
                         existingMergeRecord.Webhook = false; // Platform-triggered, not webhook
+                        existingMergeRecord.SprintNumber ??= ParseSprintNumber(request.BranchName);
                         existingMergeRecord.UpdatedAt = DateTime.UtcNow;
                         
                         await _context.SaveChangesAsync();
@@ -12936,6 +12949,7 @@ APPROVAL: no    (request changes before merge)";
                             LastBuildStatus = "Completed-Merged",
                             GithubBranch = request.BranchName,
                             LastMergeDate = mergedAt,
+                            SprintNumber = ParseSprintNumber(request.BranchName),
                             DevRole = DetermineDevRole("GitHub-Merge", request.BranchName),
                             CreatedAt = DateTime.UtcNow,
                             UpdatedAt = DateTime.UtcNow
