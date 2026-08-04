@@ -4,14 +4,23 @@ namespace strAppersBackend.Tests;
 
 public class MockHttpMessageHandler : HttpMessageHandler
 {
-    private readonly HttpResponseMessage _response;
+    private readonly Func<HttpRequestMessage, HttpResponseMessage> _responder;
 
     public HttpRequestMessage? LastRequest { get; private set; }
     public int CallCount { get; private set; }
 
     public MockHttpMessageHandler(HttpResponseMessage response)
     {
-        _response = response;
+        _responder = _ => response;
+    }
+
+    /// <summary>
+    /// Responds per request. Needed when a single call under test issues several HTTP requests: one
+    /// shared HttpResponseMessage cannot be read more than once.
+    /// </summary>
+    public MockHttpMessageHandler(Func<HttpRequestMessage, HttpResponseMessage> responder)
+    {
+        _responder = responder;
     }
 
     public static MockHttpMessageHandler ReturnOk(string json) =>
@@ -24,6 +33,6 @@ public class MockHttpMessageHandler : HttpMessageHandler
     {
         LastRequest = request;
         CallCount++;
-        return Task.FromResult(_response);
+        return Task.FromResult(_responder(request));
     }
 }

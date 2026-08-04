@@ -86,6 +86,16 @@ public interface IGitHubService
     /// sprint. Returns an empty list on any failure.
     /// </summary>
     Task<List<GitHubCommit>> GetPullRequestCommitsAsync(string owner, string repo, int pullRequestNumber, string? accessToken = null);
+
+    /// <summary>
+    /// Diagnostic probe: reports the raw HTTP status of every endpoint the assessment GitHub sensor
+    /// depends on, plus the head refs of recent closed PRs and the remaining rate-limit budget.
+    ///
+    /// Exists because the normal lookups swallow HTTP failures and return null, which makes a 401, a
+    /// 403, a rate-limit and a genuinely missing branch indistinguishable — so an observation failure
+    /// renders as "the student delivered nothing". Never throws; returns human-readable lines.
+    /// </summary>
+    Task<List<string>> DiagnoseBranchAccessAsync(string owner, string repo, string branch, string? accessToken = null);
     Task<List<GitHubPullRequest>> GetOpenPullRequestsAsync(string owner, string repo, string? accessToken = null);
     /// <summary>Count commits on a branch (paginated, capped).</summary>
     Task<int> CountCommitsOnBranchPagedAsync(string owner, string repo, string branch, int maxPages = 15, string? accessToken = null);
@@ -3004,6 +3014,89 @@ public class GitHubService : IGitHubService
         }
 
         return result;
+    }
+
+    /// <inheritdoc />
+    public async Task<List<string>> DiagnoseBranchAccessAsync(string owner, string repo, string branch, string? accessToken = null)
+    {
+        var lines = new List<string>();
+        var token = accessToken ?? _configuration["GitHub:AccessToken"];
+
+        lines.Add($"Repo:   {owner}/{repo}");
+        lines.Add($"Branch: {branch}");
+        lines.Add(string.IsNullOrEmpty(token)
+            ? "Token:  MISSING — GitHub:AccessToken is not configured."
+            : $"Token:  present ({token.Length} chars, prefix '{token[..Math.Min(4, token.Length)]}…')");
+        lines.Add("");
+
+        async Task<(int Status, string Body)> ProbeAsync(string label, string url)
+        {
+            try
+            {
+                var request = new HttpRequestMessage(HttpMethod.Get, url);
+                if (!string.IsNullOrEmpty(token))
+                    request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", token);
+
+                var response = await _httpClient.SendAsync(request);
+                var body = await response.Content.ReadAsStringAsync();
+                var status = (int)response.StatusCode;
+
+                var note = status is >= 200 and < 300 ? "OK" : TruncateForLog(body);
+                lines.Add($"{label,-28} -> {status} {response.StatusCode}  {note}");
+
+                if (response.Headers.TryGetValues("x-ratelimit-remaining", out var remaining))
+                    lines.Add($"{"",-28}    rate-limit remaining: {string.Join(",", remaining)}");
+
+                return (status, body);
+            }
+            catch (Exception ex)
+            {
+                lines.Add($"{label,-28} -> EXCEPTION {ex.GetType().Name}: {ex.Message}");
+                return (0, "");
+            }
+        }
+
+        var baseUrl = $"{GitHubApiBaseUrl}/repos/{owner}/{repo}";
+
+        await ProbeAsync("GET repo", baseUrl);
+        await ProbeAsync("GET branch", $"{baseUrl}/branches/{Uri.EscapeDataString(branch)}");
+        await ProbeAsync("GET compare main...branch", $"{baseUrl}/compare/main...{Uri.EscapeDataString(branch)}");
+
+        var headQuery = Uri.EscapeDataString($"{owner}:{branch}");
+        var (headStatus, headBody) = await ProbeAsync("GET pulls?head=owner:branch", $"{baseUrl}/pulls?state=all&head={headQuery}&per_page=10");
+        if (headStatus is >= 200 and < 300)
+            lines.Add($"{"",-28}    PRs matched by head filter: {DescribePullRequestArray(headBody)}");
+
+        var (closedStatus, closedBody) = await ProbeAsync("GET pulls?state=closed", $"{baseUrl}/pulls?state=closed&sort=updated&direction=desc&per_page=30");
+        if (closedStatus is >= 200 and < 300)
+            lines.Add($"{"",-28}    recent closed PRs: {DescribePullRequestArray(closedBody)}");
+
+        return lines;
+    }
+
+    /// <summary>Renders a PR list response as "#num head.ref merged=yes/no" entries for the diagnostic probe.</summary>
+    private static string DescribePullRequestArray(string json)
+    {
+        try
+        {
+            var array = JsonSerializer.Deserialize<JsonElement>(json, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+            if (array.ValueKind != JsonValueKind.Array || array.GetArrayLength() == 0)
+                return "(none)";
+
+            var entries = array.EnumerateArray().Select(pr =>
+            {
+                var num = pr.TryGetProperty("number", out var n) ? n.GetInt32() : 0;
+                var headRef = pr.TryGetProperty("head", out var h) && h.TryGetProperty("ref", out var r) ? r.GetString() : "?";
+                var merged = pr.TryGetProperty("merged_at", out var m) && m.ValueKind != JsonValueKind.Null;
+                return $"#{num} head='{headRef}' merged={(merged ? "yes" : "no")}";
+            });
+
+            return string.Join(" | ", entries);
+        }
+        catch (Exception ex)
+        {
+            return $"(could not parse: {ex.Message})";
+        }
     }
 
     /// <inheritdoc />

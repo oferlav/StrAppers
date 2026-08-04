@@ -611,12 +611,84 @@ public partial class MetricsController
             tracks.Add(evidence);
         }
 
+        var sectionStart = sb.Length;
+
         AppendGitHubSummaryLine(sb, tracks);
         foreach (var track in tracks)
             AppendGitHubTrackBlock(sb, track, sprintWindowOpen, options);
 
         await AppendGitHubCiStatusAsync(sb, boardId, sprintNumber,
             tracks.Select(t => t.Branch).Where(b => !string.IsNullOrWhiteSpace(b)).ToList(), ct);
+
+        if (DebugAiContext)
+            await SendGitHubSensorDebugEmailAsync(
+                boardId, student, sprintNumber, tracks, sb.ToString()[sectionStart..], ct);
+    }
+
+    /// <summary>
+    /// Emails the sensor's raw GitHub diagnostics when Debug:AiContext is on, using the same pipeline
+    /// as the assessment engine's prompt debug mail.
+    ///
+    /// This exists because the GitHub lookups swallow HTTP failures into null, so a 401, a 403, a
+    /// rate-limit and a genuinely missing branch all render identically as "Nothing delivered". The
+    /// probe reports the raw status of every endpoint the sensor depends on, plus the head refs of
+    /// recent closed PRs — which is what identifies a merged PR the head filter failed to match.
+    /// Never interrupts the assessment.
+    /// </summary>
+    private async Task SendGitHubSensorDebugEmailAsync(
+        string boardId,
+        Student student,
+        int sprintNumber,
+        IReadOnlyCollection<GitHubTrackEvidence> tracks,
+        string renderedSection,
+        CancellationToken ct)
+    {
+        try
+        {
+            var token = _configuration["GitHub:AccessToken"];
+            var body = new StringBuilder();
+
+            body.AppendLine("=== GitHub Sensor Debug ===");
+            body.AppendLine($"Board:   {boardId}");
+            body.AppendLine($"Student: {student.Id} ({student.FirstName} {student.LastName})");
+            body.AppendLine($"Sprint:  {sprintNumber}");
+            body.AppendLine($"Tracks:  {tracks.Count}");
+            body.AppendLine();
+
+            foreach (var track in tracks)
+            {
+                body.AppendLine($"--- {track.TrackName} track ---------------------------------------------");
+                body.AppendLine($"Resolved status: {track.Status}");
+                body.AppendLine($"Branch:          {track.Branch} (from {track.BranchOrigin})");
+                body.AppendLine($"Sensor result:   commits={track.CommitCount} prs={track.PullRequestCount} " +
+                                $"merged={track.AnyMerged} files={track.Files.Count} diffOrigin={track.DiffOrigin ?? "(none)"}");
+                body.AppendLine();
+
+                if (track.Owner != null && track.Repo != null)
+                {
+                    body.AppendLine("HTTP probe:");
+                    var probe = await _githubService.DiagnoseBranchAccessAsync(track.Owner, track.Repo, track.Branch, token);
+                    foreach (var line in probe) body.AppendLine("  " + line);
+                }
+                else
+                {
+                    body.AppendLine("HTTP probe skipped — no owner/repo resolved for this track.");
+                }
+                body.AppendLine();
+            }
+
+            body.AppendLine("--- Rendered section -------------------------------------------------");
+            body.AppendLine(renderedSection);
+
+            await _smtpEmailService.SendPlainEmailAsync(
+                "ofer@skill-in.com",
+                $"[GitHub Sensor Debug] Board {boardId} | Student {student.Id} | Sprint {sprintNumber}",
+                body.ToString());
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "GitHub sensor debug email failed (non-critical)");
+        }
     }
 
     /// <summary>
