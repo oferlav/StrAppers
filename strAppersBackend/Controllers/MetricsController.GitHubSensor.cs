@@ -278,6 +278,13 @@ public partial class MetricsController
         public int ExcludedDeletions { get; set; }
 
         public bool HasAnyDelivery => CommitCount > 0 || PullRequests.Count > 0 || Files.Count > 0;
+
+        /// <summary>
+        /// Pull request heads found elsewhere in the repository when nothing was found on this
+        /// sprint's branch. Reported so an empty result is never mistaken for an empty repository —
+        /// a real board showed merged PRs on "Bugs-F" while the sensor said "nothing delivered".
+        /// </summary>
+        public List<GitHubPullRequestHead> OtherBranchHeads { get; } = new();
     }
 
     // ---------------------------------------------------------------------------------------------
@@ -404,6 +411,24 @@ public partial class MetricsController
 
             // The representative PR above is one row; the paged count is the real total.
             evidence.PullRequestCount = Math.Max(totalPrCount, evidence.PullRequests.Count);
+
+            // Nothing on the expected branch: find out whether the repository is genuinely empty or
+            // the work simply lives on a differently-named branch. One extra call, only on this path.
+            if (!evidence.HasAnyDelivery)
+            {
+                var heads = await _githubService.GetRecentPullRequestHeadsAsync(owner, repo, accessToken: token);
+                ct.ThrowIfCancellationRequested();
+
+                foreach (var group in heads
+                             .Where(h => !string.Equals(h.HeadRef, branch, StringComparison.OrdinalIgnoreCase))
+                             .GroupBy(h => h.HeadRef, StringComparer.OrdinalIgnoreCase)
+                             .Take(options.MaxPullRequestsListed))
+                {
+                    // Prefer a merged PR as the representative for each branch.
+                    evidence.OtherBranchHeads.Add(
+                        group.FirstOrDefault(h => h.Merged) ?? group.First());
+                }
+            }
 
             _logger.LogInformation(
                 "GitHub sensor: {Owner}/{Repo} branch={Branch} prs={Prs} merged={Merged} commits={Commits} files={Files}",
@@ -773,6 +798,29 @@ public partial class MetricsController
         return "**Nothing delivered** — the sprint branch exists but has no commits ahead of the base branch and no pull request.";
     }
 
+    /// <summary>
+    /// When nothing was found on the sprint branch, states what the repository does contain.
+    ///
+    /// Without this the sensor asserts "nothing delivered" about repositories that visibly hold
+    /// merged work — a real board had every sprint-1 PR on "Bugs-F" while both tracks reported an
+    /// empty result. The line is deliberately explicit that this work is not the sprint deliverable,
+    /// so reporting it cannot inflate a score.
+    /// </summary>
+    internal static void AppendGitHubOtherBranchesLine(StringBuilder sb, GitHubTrackEvidence e)
+    {
+        if (e.HasAnyDelivery || e.OtherBranchHeads.Count == 0) return;
+
+        var described = e.OtherBranchHeads
+            .Select(h => $"`{h.HeadRef}` (PR #{h.Number}, {(h.Merged ? "merged" : "not merged")})");
+
+        sb.AppendLine($"- The repository is NOT empty: it has pull requests on other branches — {string.Join(", ", described)}. "
+                      + "None of these is this sprint's branch, so none of it is this student's sprint deliverable — do not score it as sprint work. "
+                      + "It is listed only so the empty result above is not read as an empty or missing repository.");
+
+        if (e.OtherBranchHeads.Any(h => h.HeadRef.StartsWith("Bugs", StringComparison.OrdinalIgnoreCase)))
+            sb.AppendLine("  Note: branches named `Bugs-*` are the bug-fix track, which is deliberately excluded from numbered-sprint assessment by platform policy. Their absence from this sprint's score is correct and expected.");
+    }
+
     /// <summary>Renders one repository track: delivery state, metadata, commit messages, then the diff.</summary>
     private static void AppendGitHubTrackBlock(
         StringBuilder sb, GitHubTrackEvidence e, bool sprintWindowOpen, GitHubSensorOptions options)
@@ -801,6 +849,8 @@ public partial class MetricsController
 
         sb.AppendLine($"- Files changed: {e.Files.Count}, +{e.TotalAdditions}/-{e.TotalDeletions}"
             + (e.DiffOrigin != null ? $" (diff source: {e.DiffOrigin})" : ""));
+
+        AppendGitHubOtherBranchesLine(sb, e);
 
         if (e.ExcludedFileCount > 0)
             sb.AppendLine($"- {e.ExcludedFileCount} generated file(s) excluded from the diff below (+{e.ExcludedAdditions}/-{e.ExcludedDeletions}) — lock files, build output and binary assets. These are not the student's authored work.");

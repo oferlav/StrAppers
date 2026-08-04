@@ -88,6 +88,16 @@ public interface IGitHubService
     Task<List<GitHubCommit>> GetPullRequestCommitsAsync(string owner, string repo, int pullRequestNumber, string? accessToken = null);
 
     /// <summary>
+    /// Head branch names of the repository's most recently updated pull requests (open and closed).
+    ///
+    /// Used when the sensor finds nothing on the expected sprint branch: it distinguishes an empty
+    /// repository from one where the work simply lives on a differently-named branch, so the prompt
+    /// never claims "nothing delivered" about a repository that visibly contains merged work.
+    /// Returns an empty list on any failure.
+    /// </summary>
+    Task<List<GitHubPullRequestHead>> GetRecentPullRequestHeadsAsync(string owner, string repo, int maxCount = 30, string? accessToken = null);
+
+    /// <summary>
     /// Diagnostic probe: reports the raw HTTP status of every endpoint the assessment GitHub sensor
     /// depends on, plus the head refs of recent closed PRs and the remaining rate-limit budget.
     ///
@@ -3014,6 +3024,68 @@ public class GitHubService : IGitHubService
         }
 
         return result;
+    }
+
+    /// <inheritdoc />
+    public async Task<List<GitHubPullRequestHead>> GetRecentPullRequestHeadsAsync(
+        string owner, string repo, int maxCount = 30, string? accessToken = null)
+    {
+        if (string.IsNullOrWhiteSpace(owner) || string.IsNullOrWhiteSpace(repo))
+            return new List<GitHubPullRequestHead>();
+
+        try
+        {
+            var token = accessToken ?? _configuration["GitHub:AccessToken"];
+            var perPage = Math.Clamp(maxCount, 1, 100);
+            var url = $"{GitHubApiBaseUrl}/repos/{owner}/{repo}/pulls?state=all&sort=updated&direction=desc&per_page={perPage}";
+
+            var request = new HttpRequestMessage(HttpMethod.Get, url);
+            if (!string.IsNullOrEmpty(token))
+                request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", token);
+
+            var response = await _httpClient.SendAsync(request);
+            if (!response.IsSuccessStatusCode)
+            {
+                var errorContent = await response.Content.ReadAsStringAsync();
+                _logger.LogWarning("GetRecentPullRequestHeadsAsync failed for {Owner}/{Repo}: {Status} {Body}",
+                    owner, repo, response.StatusCode, TruncateForLog(errorContent));
+                return new List<GitHubPullRequestHead>();
+            }
+
+            var content = await response.Content.ReadAsStringAsync();
+            var array = JsonSerializer.Deserialize<JsonElement>(content, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+            if (array.ValueKind != JsonValueKind.Array)
+                return new List<GitHubPullRequestHead>();
+
+            var heads = new List<GitHubPullRequestHead>();
+            foreach (var pr in array.EnumerateArray())
+            {
+                var headRef = pr.TryGetProperty("head", out var h) && h.TryGetProperty("ref", out var r)
+                    ? r.GetString() : null;
+                if (string.IsNullOrWhiteSpace(headRef)) continue;
+
+                DateTime? mergedAt = null;
+                var merged = pr.TryGetProperty("merged_at", out var m) && m.ValueKind != JsonValueKind.Null;
+                if (merged && DateTime.TryParse(m.GetString(), CultureInfo.InvariantCulture,
+                        DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out var parsed))
+                    mergedAt = parsed;
+
+                heads.Add(new GitHubPullRequestHead
+                {
+                    Number = pr.TryGetProperty("number", out var n) ? n.GetInt32() : 0,
+                    HeadRef = headRef!,
+                    Merged = merged,
+                    MergedAt = mergedAt,
+                });
+            }
+
+            return heads;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "GetRecentPullRequestHeadsAsync failed for {Owner}/{Repo}", owner, repo);
+            return new List<GitHubPullRequestHead>();
+        }
     }
 
     /// <inheritdoc />
@@ -13523,6 +13595,18 @@ public class GitHubCommitDiff
     public string CompareStatus { get; set; } = "";
     public int AheadBy { get; set; }
     public int BehindBy { get; set; }
+}
+
+/// <summary>
+/// Minimal head-branch view of a pull request, used to report what a repository actually contains
+/// when the sensor found nothing on the expected sprint branch.
+/// </summary>
+public class GitHubPullRequestHead
+{
+    public int Number { get; set; }
+    public string HeadRef { get; set; } = string.Empty;
+    public bool Merged { get; set; }
+    public DateTime? MergedAt { get; set; }
 }
 
 public class GitHubPullRequest
