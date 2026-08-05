@@ -281,19 +281,27 @@ public partial class MetricsController
             sb.AppendLine();
         }
 
+        // Group and private chats are not sprint-scoped storage: filtering them to the sprint window
+        // discarded the whole conversation whenever the window could not be resolved, and hid context
+        // that spans sprints. The full history is included and each line carries its own timestamp,
+        // with the window stated below so the model can attribute activity itself.
+        var windowNote = BuildChatWindowNote(haveWindow, windowStart, windowEnd);
+
         if (metric.UseGroupChat)
-            AppendChatBlobSection(sb, "### Group chat (squad) _(squad-level — all team members)_",
-                haveWindow ? FilterChatBlobByWindow(board.GroupChat, windowStart, windowEnd) : null,
-                haveWindow);
+        {
+            AppendChatBlobSection(sb,
+                $"### Group chat (squad) _(squad-level — all team members; full history, NOT filtered to this sprint. {windowNote})_",
+                AllChatBlobLines(board.GroupChat), haveWindow: true);
+        }
 
         if (metric.UsePrivateChat)
         {
-            if (hasEmail && haveWindow)
-                await AppendAssessmentPrivateChatAsync(sb, boardId, email!, windowStart, windowEnd, ct);
+            if (hasEmail)
+                await AppendAssessmentPrivateChatAsync(sb, boardId, email!, windowNote, ct);
             else
             {
                 sb.AppendLine("### Private chats (1-on-1)");
-                sb.AppendLine("_(none for this sprint)_");
+                sb.AppendLine("_(student has no email — cannot look up private chats)_");
                 sb.AppendLine();
             }
         }
@@ -979,6 +987,29 @@ public partial class MetricsController
         return result;
     }
 
+    /// <summary>
+    /// Every non-empty line of a chat blob, unfiltered. Unlike <see cref="FilterChatBlobByWindow"/>
+    /// this keeps continuation lines of multi-line messages and lines whose timestamp cannot be
+    /// parsed, because dropping them silently truncated conversations mid-message.
+    /// </summary>
+    internal static List<string> AllChatBlobLines(string? blob)
+    {
+        if (string.IsNullOrEmpty(blob)) return [];
+        return blob.Split('\n')
+            .Select(l => l.Trim())
+            .Where(l => l.Length > 0)
+            .ToList();
+    }
+
+    /// <summary>
+    /// Tells the model which dates belong to this sprint, so it can attribute unscoped chat history
+    /// itself instead of the sensor discarding everything outside the window.
+    /// </summary>
+    internal static string BuildChatWindowNote(bool haveWindow, DateTime windowStart, DateTime windowEnd) =>
+        haveWindow
+            ? $"This sprint runs {windowStart:yyyy-MM-dd} to {windowEnd:yyyy-MM-dd} UTC — each line is timestamped, so judge this sprint on the lines inside that range and treat the rest as background context only"
+            : "This sprint's date range could not be resolved, so the lines cannot be attributed to a specific sprint — treat them as background context and do not conclude anything was or was not done in this sprint from them";
+
     internal static void AppendChatBlobSection(StringBuilder sb, string header, List<string>? lines, bool haveWindow)
     {
         sb.AppendLine(header);
@@ -998,8 +1029,7 @@ public partial class MetricsController
         StringBuilder sb,
         string boardId,
         string studentEmail,
-        DateTime windowStart,
-        DateTime windowEnd,
+        string windowNote,
         CancellationToken ct)
     {
         var emailLower = studentEmail.Trim().ToLowerInvariant();
@@ -1008,10 +1038,10 @@ public partial class MetricsController
                 && (c.Email1 == emailLower || c.Email2 == emailLower))
             .ToListAsync(ct);
 
-        sb.AppendLine("### Private chats (1-on-1)");
+        sb.AppendLine($"### Private chats (1-on-1) _(full history, NOT filtered to this sprint. {windowNote})_");
         if (chats.Count == 0)
         {
-            sb.AppendLine("_(none for this sprint)_");
+            sb.AppendLine("_(no private chats on this board)_");
             sb.AppendLine();
             return;
         }
@@ -1019,7 +1049,7 @@ public partial class MetricsController
         var anyLines = false;
         foreach (var chat in chats)
         {
-            var lines = FilterChatBlobByWindow(chat.ChatHistory, windowStart, windowEnd);
+            var lines = AllChatBlobLines(chat.ChatHistory);
             if (lines.Count == 0) continue;
             anyLines = true;
             var peer = string.Equals(chat.Email1, emailLower, StringComparison.Ordinal) ? chat.Email2 : chat.Email1;
@@ -1028,7 +1058,7 @@ public partial class MetricsController
                 sb.AppendLine($"- {line}");
         }
         if (!anyLines)
-            sb.AppendLine("_(none for this sprint)_");
+            sb.AppendLine("_(no private chats on this board)_");
         sb.AppendLine();
     }
 }
