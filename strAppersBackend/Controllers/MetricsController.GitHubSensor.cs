@@ -267,7 +267,19 @@ public partial class MetricsController
         public DateTime? LastCommitDate { get; set; }
         public List<GitHubCommit> Commits { get; } = new();
 
+        /// <summary>The files whose patches are shown — a subset of <see cref="ChangedFileCount"/> once budgets bite.</summary>
         public List<GitHubFileChange> Files { get; } = new();
+
+        /// <summary>
+        /// How many authored files the student actually changed (generated files already removed).
+        /// Reported separately from <see cref="Files"/> because the rendered diff is budget-limited:
+        /// printing the shown count under a "Files changed" label understated real deliveries.
+        /// </summary>
+        public int ChangedFileCount { get; set; }
+
+        /// <summary>Authored files that changed but whose patch did not fit the budget, so the model is at least told they exist.</summary>
+        public List<string> OmittedFileNames { get; } = new();
+
         public int TotalAdditions { get; set; }
         public int TotalDeletions { get; set; }
         /// <summary>Where the diff came from — the merged PR's file list, or a branch compare.</summary>
@@ -277,7 +289,9 @@ public partial class MetricsController
         public int ExcludedAdditions { get; set; }
         public int ExcludedDeletions { get; set; }
 
-        public bool HasAnyDelivery => CommitCount > 0 || PullRequests.Count > 0 || Files.Count > 0;
+        // Counts files actually changed, not files shown — a delivery whose patches were all squeezed
+        // out by the budget is still a delivery.
+        public bool HasAnyDelivery => CommitCount > 0 || PullRequests.Count > 0 || ChangedFileCount > 0;
 
         /// <summary>
         /// Pull request heads found elsewhere in the repository when nothing was found on this
@@ -451,7 +465,7 @@ public partial class MetricsController
     /// Applies a file list to the evidence: drops generated paths (recording their totals separately),
     /// then keeps the largest remaining changes until the file count or character budget is reached.
     /// </summary>
-    private static void ApplyDiff(
+    internal static void ApplyDiff(
         GitHubTrackEvidence evidence,
         IEnumerable<GitHubFileChange> files,
         string origin,
@@ -473,29 +487,72 @@ public partial class MetricsController
         }
 
         // Totals reflect everything the student authored, not just what fits in the budget.
+        evidence.ChangedFileCount = kept.Count;
         evidence.TotalAdditions = kept.Sum(f => f.Additions);
         evidence.TotalDeletions = kept.Sum(f => f.Deletions);
 
+        // Biggest changes first, capped by the file limit; anything past the cap is named, not silently dropped.
+        var selected = kept
+            .OrderByDescending(f => f.Additions + f.Deletions)
+            .ThenBy(f => f.FilePath, StringComparer.Ordinal)
+            .Take(options.MaxFilesPerTrack)
+            .ToList();
+
+        foreach (var beyondFileLimit in kept.Where(f => !selected.Contains(f)))
+            evidence.OmittedFileNames.Add(beyondFileLimit.FilePath);
+
+        // Share the character budget instead of first-come-first-served: one large file used to consume
+        // the whole budget, so the rest of a delivery vanished with no trace (a real run hid an entire
+        // test project this way). Allocating smallest-first rolls what the small files leave over
+        // forward to the large ones, so the main file still gets the lion's share.
         var budget = options.DiffCharBudgetPerTrack;
-        foreach (var file in kept.OrderByDescending(f => f.Additions + f.Deletions).ThenBy(f => f.FilePath))
+        var unallocated = selected.Count;
+        var starved = new List<GitHubFileChange>();
+
+        foreach (var file in selected.OrderBy(f => f.Patch?.Length ?? 0).ThenBy(f => f.FilePath, StringComparer.Ordinal))
         {
-            if (evidence.Files.Count >= options.MaxFilesPerTrack) break;
-            if (budget <= 0) break;
+            var length = file.Patch?.Length ?? 0;
+            var share = unallocated > 0 ? budget / unallocated : budget;
+            unallocated--;
 
-            var patchLength = file.Patch?.Length ?? 0;
-            if (patchLength > budget)
+            // Too little room left to show anything useful: name the file rather than print a stub.
+            if (length > share && share < MinimumPatchChars)
             {
-                file.Patch = Truncate(file.Patch ?? "", budget);
-                budget = 0;
-            }
-            else
-            {
-                budget -= patchLength;
+                if (budget < MinimumPatchChars)
+                {
+                    starved.Add(file);
+                    continue;
+                }
+                share = MinimumPatchChars;
             }
 
-            evidence.Files.Add(file);
+            if (length > share)
+            {
+                // Truncate appends its marker past the limit, so leave room for it and then deduct
+                // what was actually produced — otherwise the budget is not a real bound.
+                file.Patch = Truncate(file.Patch ?? "", Math.Max(0, share - TruncationMarkerChars));
+            }
+
+            budget -= file.Patch?.Length ?? 0;
         }
+
+        foreach (var file in starved)
+        {
+            selected.Remove(file);
+            evidence.OmittedFileNames.Add(file.FilePath);
+        }
+
+        evidence.Files.AddRange(selected);
     }
+
+    /// <summary>Below this a patch shows nothing useful, so the file is named as omitted instead.</summary>
+    private const int MinimumPatchChars = 200;
+
+    /// <summary>
+    /// Length of the marker <see cref="Truncate"/> appends past its limit. Measured rather than
+    /// hardcoded so the budget stays a hard bound if that marker ever changes.
+    /// </summary>
+    private static readonly int TruncationMarkerChars = Truncate("xx", 1).Length - 1;
 
     private static void AddCommits(GitHubTrackEvidence evidence, IReadOnlyList<GitHubCommit> commits, GitHubSensorOptions options)
     {
@@ -747,7 +804,7 @@ public partial class MetricsController
 
         var commits = observed.Sum(t => t.CommitCount);
         var prs = observed.Sum(t => t.PullRequestCount);
-        var files = observed.Sum(t => t.Files.Count);
+        var files = observed.Sum(t => t.ChangedFileCount);
         var adds = observed.Sum(t => t.TotalAdditions);
         var dels = observed.Sum(t => t.TotalDeletions);
         var merged = observed.Any(t => t.AnyMerged);
@@ -847,8 +904,13 @@ public partial class MetricsController
         foreach (var pr in e.PullRequests.Take(options.MaxPullRequestsListed))
             sb.AppendLine($"  - PR #{pr.Number}: state={pr.State}, merged={(pr.Merged ? "yes" : "no")}, title={pr.Title}");
 
-        sb.AppendLine($"- Files changed: {e.Files.Count}, +{e.TotalAdditions}/-{e.TotalDeletions}"
+        sb.AppendLine($"- Files changed: {e.ChangedFileCount}, +{e.TotalAdditions}/-{e.TotalDeletions}"
             + (e.DiffOrigin != null ? $" (diff source: {e.DiffOrigin})" : ""));
+
+        if (e.OmittedFileNames.Count > 0)
+            sb.AppendLine($"- {e.Files.Count} of those file(s) are shown in the diff below; {e.OmittedFileNames.Count} did not fit the size limit and are listed by name only — "
+                          + $"{string.Join(", ", e.OmittedFileNames.Select(f => $"`{f}`"))}. "
+                          + "These were still delivered by the student: count them as work done, and judge only their names and the commit messages, not their absence.");
 
         AppendGitHubOtherBranchesLine(sb, e);
 
