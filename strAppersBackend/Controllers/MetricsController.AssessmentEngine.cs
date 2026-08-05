@@ -695,6 +695,12 @@ public partial class MetricsController
         return sb.ToString().Trim();
     }
 
+    /// <summary>Counts occurrences of a checklist state marker in a rendered checklist dump.</summary>
+    private static int CountChecklistState(string? checklistsText, string marker) =>
+        string.IsNullOrEmpty(checklistsText)
+            ? 0
+            : checklistsText.Split(marker).Length - 1;
+
     internal async Task AppendAssessmentTrelloTasksAsync(
         StringBuilder sb, string boardId, string? studentEmail, string? roleLabel, int sprintNumber, CancellationToken ct)
     {
@@ -714,6 +720,17 @@ public partial class MetricsController
                     var snap = await _trelloService.GetSprintRoleCardSnapshotAsync(boardId, sprintNumber, lbl);
                     if (snap == null) continue;
                     found = true;
+
+                    // Identify the exact card the checklist state came from. Checklist ticks reported
+                    // as unticked have no other way to be traced back to a wrong card — a duplicate
+                    // "Sprint N" list or an archived card both resolve silently to the wrong one.
+                    _logger.LogInformation(
+                        "Assessment sprint role card: board={BoardId} sprint={Sprint} label={Label} cardId={CardId} name={CardName} url=https://trello.com/c/{CardId} checklistItems={Total} complete={Complete} incomplete={Incomplete}",
+                        boardId, sprintNumber, lbl, snap.TrelloCardId, snap.CardName, snap.TrelloCardId,
+                        CountChecklistState(snap.ChecklistsText, "["),
+                        CountChecklistState(snap.ChecklistsText, "[complete]"),
+                        CountChecklistState(snap.ChecklistsText, "[incomplete]"));
+
                     sb.AppendLine($"#### {snap.CardName}");
                     if (!string.IsNullOrWhiteSpace(snap.Description))
                         sb.AppendLine(Truncate(snap.Description.Trim(), 2000));
