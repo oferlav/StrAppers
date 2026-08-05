@@ -687,9 +687,11 @@ public partial class MetricsController
         return sb.ToString().Trim();
     }
 
-    private async Task AppendAssessmentTrelloTasksAsync(
+    internal async Task AppendAssessmentTrelloTasksAsync(
         StringBuilder sb, string boardId, string? studentEmail, string? roleLabel, int sprintNumber, CancellationToken ct)
     {
+        var sprintCardFound = false;
+
         // Sprint role card first: it carries the sprint's task requests and is matched by role
         // label, not member assignment — so it is invisible to the member-cards lookup below.
         if (!string.IsNullOrWhiteSpace(roleLabel))
@@ -711,6 +713,13 @@ public partial class MetricsController
                         sb.AppendLine(snap.ChecklistsText);
                 }
                 if (!found) sb.AppendLine("_(no sprint task card found for this role)_");
+                sprintCardFound = found;
+
+                // A checkbox records only whether the student ticked it. Read as delivery evidence it
+                // silently converts poor Trello hygiene into "the work was never done" — and does so
+                // most confidently for items whose verifying source this metric never examined.
+                if (found)
+                    sb.AppendLine("_Checklist state above is only whether the box was ticked in Trello. An unticked item means the student did not tick it — it is NOT evidence the underlying work was not done, and must not be reported as such where the source that would show that work is listed as NOT examined in the Evidence scope. Treat unticked items as a tracking/administrative signal, not as proof of missing delivery._");
             }
             catch (Exception ex)
             {
@@ -730,7 +739,18 @@ public partial class MetricsController
         try
         {
             var cards = await _trelloService.GetMemberBoardCardsAsync(boardId, studentEmail);
-            if (cards.Count == 0) { sb.AppendLine("_(none)_"); sb.AppendLine(); return; }
+            if (cards.Count == 0)
+            {
+                // This lookup finds cards where the student is a card MEMBER. Work is allocated by the
+                // sprint role card above, matched by role label, so an empty result here is normal and
+                // says nothing about whether the student was given or tracked work. Rendered as a bare
+                // "(none)" it was read as "no Trello tasks were assigned or tracked".
+                sb.AppendLine(sprintCardFound
+                    ? "_(no card lists this student as a member — on this board work is allocated through the sprint role card shown above, which is matched by role label rather than card membership. This is the normal setup: do NOT conclude that no tasks were assigned or tracked.)_"
+                    : "_(no card lists this student as a member. Cards are matched by membership only, so this does not by itself mean no work was assigned.)_");
+                sb.AppendLine();
+                return;
+            }
             foreach (var card in cards)
             {
                 sb.AppendLine($"#### {card.CardName}");
