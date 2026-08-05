@@ -120,6 +120,9 @@ public partial class MetricsController
             - Use the Sprint Context in the user message as your evidence — ground every score in verbatim evidence from it, unless the rubric instructs otherwise.
             - Sections marked _(squad-level)_ cover the whole team; only attribute activity to this student if they are explicitly named or identifiable.
             - Do not invent activity. Sections marked _(none for this sprint)_ have no data; do not speculate about them.
+            - "Evidence scope for this metric" lists what was and was not examined. An activity type that
+              was not examined is simply out of scope: never report it as missing, incomplete or not done,
+              and never lower a score for it. Absence of evidence here is not evidence of absence.
             - When a resource under Resources & Figma shows "document content extracted on server", that text is the actual content of the uploaded document (e.g. a PRD, spec, or schema) — assess its substance directly rather than treating it as an unverified link. When extraction failed, that is a server-side limitation, not evidence of a missing or low-quality deliverable — do not lower the score solely because content could not be extracted.
             - Output valid JSON only, no markdown fences:
               {"categories":[{"name":"string","score":0,"rationale":"string"}],"narrative":"markdown"}
@@ -251,6 +254,8 @@ public partial class MetricsController
         var email = student.Email;
         var hasEmail = !string.IsNullOrWhiteSpace(email);
 
+        AppendEvidenceScopeHeader(sb, metric);
+
         if (metric.UseCustomerChat)
             await AppendAssessmentCustomerChatAsync(sb, student.Id, sprintNumber, ct);
         if (metric.UseMentorChat)
@@ -303,6 +308,36 @@ public partial class MetricsController
             await AppendAssessmentFigmaDesignAsync(sb, boardId, windowStart, windowEnd, ct);
 
         return sb.Length == 0 ? "(No context blocks available for this sprint.)" : sb.ToString();
+    }
+
+    /// <summary>
+    /// States which evidence sources this metric consults and, crucially, which it does not.
+    ///
+    /// A disabled sensor emits no section at all, so the model has no way to tell "not examined" from
+    /// "did not happen" — and it reliably assumes the latter. A live assessment with User Stories,
+    /// Meeting Transcripts and Group Chat switched off reported that the user story was not filled
+    /// out, no meetings were held and no summary was published, and scored a substantial delivery
+    /// shortfall against the student, on no evidence whatsoever.
+    /// </summary>
+    internal static void AppendEvidenceScopeHeader(StringBuilder sb, Metric metric)
+    {
+        var enabled = DescribeSensors(metric);
+        var disabled = DescribeDisabledSensors(metric);
+
+        sb.AppendLine("### Evidence scope for this metric");
+        sb.AppendLine($"Sources examined: {(enabled.Count > 0 ? string.Join(", ", enabled) : "(none)")}.");
+
+        if (disabled.Count > 0)
+        {
+            sb.AppendLine($"Sources NOT examined for this metric: {string.Join(", ", disabled)}.");
+            sb.AppendLine("Nothing was collected from those sources — they are deliberately outside this metric's scope. "
+                          + "Their absence is NOT evidence that the related work was skipped, missed or done badly. "
+                          + "Do not state or imply that any such artefact is missing, incomplete or was not done, "
+                          + "do not create a score category for it, and do not lower any score because of it. "
+                          + "Judge this student only on the sources listed as examined.");
+        }
+
+        sb.AppendLine();
     }
 
     private async Task AppendAssessmentCustomerChatAsync(StringBuilder sb, int studentId, int sprintNumber, CancellationToken ct)

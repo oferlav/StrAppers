@@ -255,6 +255,9 @@ public partial class MetricsController
             - Use the Sprint Context in the user message as your evidence — ground every score in verbatim evidence from it.
             - Sections marked _(squad-level)_ cover the whole team; only attribute activity to this student if they are explicitly named or identifiable.
             - Do not invent activity. Sections marked _(none for this sprint)_ have no data; do not speculate about them.
+            - "Evidence scope for this metric" lists what was and was not examined. An activity type that
+              was not examined is simply out of scope: never report it as missing, incomplete or not done,
+              and never lower a score for it. Absence of evidence here is not evidence of absence.
             - Output valid JSON only, no markdown fences:
               {"categories":[{"name":"string","score":0,"rationale":"string"}],"narrative":"markdown"}
             - narrative: brief markdown summary of technical strengths, gaps, and 1–3 concrete follow-up suggestions.{{gitHubScoringRules}}

@@ -371,29 +371,46 @@ public partial class MetricsController
     }
 
     /// <summary>
-    /// Enabled sensors for a metric, as the labels the staff UI uses (kept in step with
-    /// SENSOR_LABELS in MetricsAssessment.jsx). The MetricId=0 summary row has no metric of
-    /// its own — its sources are those of the metrics it summarizes — so it returns none.
+    /// Every sensor with the label the staff UI uses (kept in step with SENSOR_LABELS in
+    /// MetricsAssessment.jsx) and the flag that switches it on.
     /// </summary>
-    internal static IReadOnlyList<string> DescribeSensors(Metric? metric)
+    private static readonly (Func<Metric, bool> IsEnabled, string Label)[] SensorCatalog =
     {
-        if (metric is null) return Array.Empty<string>();
+        (m => m.UseCustomerChat,       "AI Customer Chat"),
+        (m => m.UseMentorChat,         "AI Mentor Chat"),
+        (m => m.UseCodebaseQuality,    "Codebase & Github"),
+        (m => m.UseResources,          "Resources (Docs, Links, Images, etc.)"),
+        (m => m.UseStakeholders,       "CRM / Stakeholders"),
+        (m => m.UseProjectModule,      "Project Design"),
+        (m => m.UseMeetingTranscripts, "Meeting Transcripts"),
+        (m => m.UseGroupChat,          "Group Chat (Squad)"),
+        (m => m.UsePrivateChat,        "Private Chat (1-on-1)"),
+        (m => m.UseTrelloTasks,        "Sprint Tasks"),
+        (m => m.UseTrelloUserStory,    "User Stories"),
+        (m => m.UseFigmaDesign,        "Figma Design"),
+    };
 
-        var labels = new List<string>();
-        if (metric.UseCustomerChat)       labels.Add("AI Customer Chat");
-        if (metric.UseMentorChat)         labels.Add("AI Mentor Chat");
-        if (metric.UseCodebaseQuality)    labels.Add("Codebase & Github");
-        if (metric.UseResources)          labels.Add("Resources (Docs, Links, Images, etc.)");
-        if (metric.UseStakeholders)       labels.Add("CRM / Stakeholders");
-        if (metric.UseProjectModule)      labels.Add("Project Design");
-        if (metric.UseMeetingTranscripts) labels.Add("Meeting Transcripts");
-        if (metric.UseGroupChat)          labels.Add("Group Chat (Squad)");
-        if (metric.UsePrivateChat)        labels.Add("Private Chat (1-on-1)");
-        if (metric.UseTrelloTasks)        labels.Add("Sprint Tasks");
-        if (metric.UseTrelloUserStory)    labels.Add("User Stories");
-        if (metric.UseFigmaDesign)        labels.Add("Figma Design");
-        return labels;
-    }
+    /// <summary>
+    /// Enabled sensors for a metric. The MetricId=0 summary row has no metric of its own — its
+    /// sources are those of the metrics it summarizes — so it returns none.
+    /// </summary>
+    internal static IReadOnlyList<string> DescribeSensors(Metric? metric) =>
+        metric is null
+            ? Array.Empty<string>()
+            : SensorCatalog.Where(s => s.IsEnabled(metric)).Select(s => s.Label).ToList();
+
+    /// <summary>
+    /// Sensors switched OFF for a metric — evidence the model was never shown.
+    ///
+    /// A disabled sensor emits nothing at all, so the model cannot tell "this was not examined" from
+    /// "this did not happen". A live assessment failed exactly this way: with User Stories, Meeting
+    /// Transcripts and Group Chat disabled, it reported that the user story was not filled out, no
+    /// meetings were held and no summary was published — none of which it had any evidence for.
+    /// </summary>
+    internal static IReadOnlyList<string> DescribeDisabledSensors(Metric? metric) =>
+        metric is null
+            ? Array.Empty<string>()
+            : SensorCatalog.Where(s => !s.IsEnabled(metric)).Select(s => s.Label).ToList();
 
     /// <summary>
     /// Sensors to list for a cached row.
