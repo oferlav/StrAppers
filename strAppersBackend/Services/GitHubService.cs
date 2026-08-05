@@ -88,6 +88,15 @@ public interface IGitHubService
     Task<List<GitHubCommit>> GetPullRequestCommitsAsync(string owner, string repo, int pullRequestNumber, string? accessToken = null);
 
     /// <summary>
+    /// Raw HTTP status of a plain repository lookup, or 0 if the request could not be made at all.
+    ///
+    /// Lets a caller tell "this repository holds no work" apart from "we were not allowed to look" —
+    /// the richer lookups collapse 401, 403, rate-limit and a genuinely missing branch into the same
+    /// null, which makes an observation failure read as a verdict about the student.
+    /// </summary>
+    Task<int> GetRepositoryHttpStatusAsync(string owner, string repo, string? accessToken = null);
+
+    /// <summary>
     /// Head branch names of the repository's most recently updated pull requests (open and closed).
     ///
     /// Used when the sensor finds nothing on the expected sprint branch: it distinguishes an empty
@@ -3024,6 +3033,29 @@ public class GitHubService : IGitHubService
         }
 
         return result;
+    }
+
+    /// <inheritdoc />
+    public async Task<int> GetRepositoryHttpStatusAsync(string owner, string repo, string? accessToken = null)
+    {
+        if (string.IsNullOrWhiteSpace(owner) || string.IsNullOrWhiteSpace(repo))
+            return 0;
+
+        try
+        {
+            var token = accessToken ?? _configuration["GitHub:AccessToken"];
+            var request = new HttpRequestMessage(HttpMethod.Get, $"{GitHubApiBaseUrl}/repos/{owner}/{repo}");
+            if (!string.IsNullOrEmpty(token))
+                request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", token);
+
+            var response = await _httpClient.SendAsync(request);
+            return (int)response.StatusCode;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "GetRepositoryHttpStatusAsync failed for {Owner}/{Repo}", owner, repo);
+            return 0;
+        }
     }
 
     /// <inheritdoc />

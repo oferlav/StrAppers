@@ -310,7 +310,7 @@ public partial class MetricsController
     /// Never throws: any failure is recorded on the evidence object so the renderer can distinguish
     /// "nothing delivered" from "the platform could not observe".
     /// </summary>
-    private async Task<GitHubTrackEvidence> FetchGitHubTrackEvidenceAsync(
+    internal async Task<GitHubTrackEvidence> FetchGitHubTrackEvidenceAsync(
         string? repoUrl,
         string branch,
         string branchOrigin,
@@ -427,9 +427,27 @@ public partial class MetricsController
             evidence.PullRequestCount = Math.Max(totalPrCount, evidence.PullRequests.Count);
 
             // Nothing on the expected branch: find out whether the repository is genuinely empty or
-            // the work simply lives on a differently-named branch. One extra call, only on this path.
+            // the work simply lives on a differently-named branch. Two extra calls, only on this path.
             if (!evidence.HasAnyDelivery)
             {
+                // Before concluding anything about the student, confirm we were actually able to read
+                // the repository. Every lookup above returns null on failure, so a 401, a 403 or a
+                // rate-limit is indistinguishable from an empty branch — and "nothing delivered" is a
+                // damning verdict to reach because the platform could not authenticate.
+                var repoStatus = await _githubService.GetRepositoryHttpStatusAsync(owner, repo, token);
+                ct.ThrowIfCancellationRequested();
+
+                if (repoStatus is < 200 or >= 300)
+                {
+                    evidence.Status = repoStatus == 404
+                        ? GitHubEvidenceStatus.InvalidRepositoryUrl
+                        : GitHubEvidenceStatus.ApiError;
+                    _logger.LogWarning(
+                        "GitHub sensor: {Owner}/{Repo} unreadable (HTTP {Status}) — reporting as unobserved rather than empty",
+                        owner, repo, repoStatus);
+                    return evidence;
+                }
+
                 var heads = await _githubService.GetRecentPullRequestHeadsAsync(owner, repo, accessToken: token);
                 ct.ThrowIfCancellationRequested();
 
@@ -636,14 +654,22 @@ public partial class MetricsController
         var roleIndex = board.IsSingleRole && student.RoleIndex > 0 ? student.RoleIndex : 0;
         var token = _configuration["GitHub:AccessToken"];
 
-        // QuestMode: board-level URLs are null; per-student URLs live on QuestBoards.
+        // QuestMode: board-level URLs are null; per-student URLs live on QuestBoards. Resolved per
+        // track, not all-or-nothing — a board can have one URL configured and not the other, and
+        // requiring both to be empty left the configured-elsewhere track reporting "no repository".
         var backendUrl = board.GithubBackendUrl;
         var frontendUrl = board.GithubFrontendUrl;
-        if (string.IsNullOrEmpty(backendUrl) && string.IsNullOrEmpty(frontendUrl) && student.Id > 0)
+        var needsQuestBoardLookup =
+            (selection.Backend && string.IsNullOrEmpty(backendUrl)) ||
+            (selection.Frontend && string.IsNullOrEmpty(frontendUrl));
+
+        if (needsQuestBoardLookup && student.Id > 0)
         {
             var qb = await _context.QuestBoards.AsNoTracking()
                 .FirstOrDefaultAsync(q => q.BoardId == boardId && q.StudentId == student.Id, ct);
-            if (qb != null) { backendUrl = qb.GithubBackendUrl; frontendUrl = qb.GithubFrontendUrl; }
+            if (qb != null)
+                (backendUrl, frontendUrl) = MergeQuestBoardUrls(
+                    backendUrl, frontendUrl, qb.GithubBackendUrl, qb.GithubFrontendUrl);
         }
 
         // A BranchContext custom field on the sprint card overrides the naming convention.
@@ -790,6 +816,15 @@ public partial class MetricsController
             - Commit counts and dates are facts, not productivity measures — force-push and rebase rewrite them.
             - Generated files excluded from the diff are not the student's authored work; never score them.
             """;
+
+    /// <summary>
+    /// Fills in each repository URL the board does not carry from the student's QuestBoards row,
+    /// independently per track. A board-level URL always wins where it exists.
+    /// </summary>
+    internal static (string? Backend, string? Frontend) MergeQuestBoardUrls(
+        string? boardBackend, string? boardFrontend, string? questBackend, string? questFrontend) =>
+        (string.IsNullOrEmpty(boardBackend) ? questBackend : boardBackend,
+         string.IsNullOrEmpty(boardFrontend) ? questFrontend : boardFrontend);
 
     /// <summary>Combined one-line summary across all tracks, so the model sees the shape before the detail.</summary>
     internal static void AppendGitHubSummaryLine(StringBuilder sb, IReadOnlyCollection<GitHubTrackEvidence> tracks)
