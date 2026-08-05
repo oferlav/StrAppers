@@ -815,6 +815,9 @@ public partial class MetricsController
             - Where the sprint window is still open, do not treat an unmerged branch as a failure to deliver.
             - Commit counts and dates are facts, not productivity measures — force-push and rebase rewrite them.
             - Generated files excluded from the diff are not the student's authored work; never score them.
+            - In "CI Status", only the project's own test runner reports on the student's code. Every other
+              line is a platform check of hosting, environment or database provisioning — a failure there
+              is a platform setup problem and must never be scored as the student's code failing to build.
             """;
 
     /// <summary>
@@ -984,6 +987,45 @@ public partial class MetricsController
     }
 
     /// <summary>
+    /// What a board-state Source actually checks, and whether its result says anything about the
+    /// student's source code.
+    ///
+    /// Without this the sensor emitted bare rows like "PR-BackendValidation | Build: FAILED", and a
+    /// live assessment read that as "the code may not compile", made it the headline gap and marked
+    /// two categories down — when the row actually meant the board's hosting service and database
+    /// were not provisioned. Only the project's own test runner is evidence about the code.
+    /// </summary>
+    internal static (string Meaning, bool IsCodeEvidence) DescribeCiSource(string? source)
+    {
+        var s = source?.Trim() ?? string.Empty;
+
+        bool Is(string prefix) => s.StartsWith(prefix, StringComparison.OrdinalIgnoreCase);
+
+        if (Is("TestRunner"))
+            return ("the project's own automated tests, run by its CI workflow", true);
+
+        if (Is("PR-BackendValidation") || Is("PR-FrontendValidation"))
+            return ("platform pre-merge validation of the project's deployment setup — hosting service, environment variables and database provisioning", false);
+
+        if (Is("BuildValidation"))
+            return ("platform validation of the deployment build on the hosting provider", false);
+
+        if (Is("GithubPages"))
+            return ("GitHub Pages deployment status", false);
+
+        if (Is("Railway"))
+            return ("hosting deployment status", false);
+
+        if (Is("GitHub-Merge"))
+            return ("a merge marker, not a build result", false);
+
+        if (Is("GitHub-Success-PR") || Is("GitHub-Failed-PR") || Is("Junior"))
+            return ("the outcome of an AI code review, not a build", false);
+
+        return ("platform check", false);
+    }
+
+    /// <summary>
     /// CI status for this sprint, from the board-state table. Scoped by the resolved branch names
     /// rather than the derived Backend/Frontend field, whose value comes from testing whether the
     /// branch name contains the letter "b" and so misclassifies any descriptive branch name.
@@ -1018,14 +1060,32 @@ public partial class MetricsController
             return;
         }
 
+        var anyPlatformFailure = false;
+        var anyCodeEvidence = false;
+
         foreach (var s in withStatus)
         {
             var branch = !string.IsNullOrWhiteSpace(s.GithubBranch) ? s.GithubBranch : s.BranchName;
-            sb.Append($"- Source: {s.Source} | Branch: {branch ?? "—"}");
+            var (meaning, isCodeEvidence) = DescribeCiSource(s.Source);
+            anyCodeEvidence |= isCodeEvidence;
+
+            var failed =
+                string.Equals(s.LastBuildStatus, "FAILED", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(s.LastTestStatus, "FAIL", StringComparison.OrdinalIgnoreCase);
+            if (failed && !isCodeEvidence) anyPlatformFailure = true;
+
+            sb.Append($"- {s.Source} — {meaning} | Branch: {branch ?? "—"}");
             if (!string.IsNullOrWhiteSpace(s.LastBuildStatus)) sb.Append($" | Build: {s.LastBuildStatus}");
             if (!string.IsNullOrWhiteSpace(s.LastTestStatus)) sb.Append($" | Tests: {s.LastTestStatus}");
             if (s.LastTestRunDate.HasValue) sb.Append($" | Last run: {s.LastTestRunDate:yyyy-MM-dd HH:mm} UTC");
             sb.AppendLine();
+        }
+
+        if (anyPlatformFailure)
+        {
+            sb.AppendLine("- **Read the failures above carefully:** every line except the project's own test runner reports a *platform* check — whether the board's hosting service, environment variables and database were provisioned correctly. Those belong to the platform's setup of the project, not to the student's source code. A failure there is NOT evidence that the code fails to build or that its tests fail, and must not be scored as a code-quality or delivery problem.");
+            if (!anyCodeEvidence)
+                sb.AppendLine("- No test-runner result was recorded for this sprint, so there is no evidence either way about whether the student's code builds or its tests pass. Do not infer either.");
         }
 
         sb.AppendLine();
