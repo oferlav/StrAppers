@@ -110,13 +110,18 @@ public partial class MetricsController
     /// role Id (InstituteId=null) ... so a new institute-specific row is created instead". Reading
     /// Competencies straight off the assigned row therefore finds nothing for most students.
     ///
-    /// So when the assigned row has no Competencies, fall back to the institute's row of the same
-    /// name. Main Tool is read from whichever row wins, since that is the row the staff configured.
+    /// So the institute's row of the same name takes precedence whenever one carries Competencies.
+    /// Preferring the assigned row simply because it had *some* text meant a stale or default global
+    /// definition silently outranked what staff had just saved, and the report showed criteria that
+    /// appear nowhere in the definition screen.
+    ///
+    /// The assigned row still wins when it is itself one of the institute's rows, so a student on a
+    /// squad-scoped role is not graded against the institute-level text.
+    ///
+    /// Main Tool is read from whichever row wins, since that is the row the staff configured.
     /// </summary>
     internal async Task<Role> ResolveHardSkillsRoleAsync(Role assigned, int? instituteId, CancellationToken ct)
     {
-        if (!string.IsNullOrWhiteSpace(assigned.Competencies))
-            return assigned;
         if (instituteId is null or <= 0)
             return assigned;
 
@@ -124,7 +129,7 @@ public partial class MetricsController
         if (name.Length == 0)
             return assigned;
 
-        var candidate = await _context.Roles
+        var candidates = await _context.Roles
             .AsNoTracking()
             .Include(r => r.Skill)
             .Where(r => r.InstituteId == instituteId
@@ -135,9 +140,22 @@ public partial class MetricsController
             // Institute-level row first, then squad-scoped ones; oldest wins within each group.
             .OrderBy(r => r.SquadId == null ? 0 : 1)
             .ThenBy(r => r.Id)
-            .FirstOrDefaultAsync(ct);
+            .ToListAsync(ct);
 
-        return candidate ?? assigned;
+        if (candidates.Count == 0)
+            return assigned;
+
+        // The assigned row itself wins when it is one of the institute's rows — otherwise a student
+        // assigned to a squad-scoped role would be graded against the institute-level text.
+        var exact = candidates.FirstOrDefault(r => r.Id == assigned.Id);
+        if (exact != null)
+            return exact;
+
+        _logger.LogInformation(
+            "Hard skills competencies resolved from institute role {RoleId} (institute {InstituteId}) instead of assigned role {AssignedRoleId} (institute {AssignedInstituteId})",
+            candidates[0].Id, instituteId, assigned.Id, assigned.InstituteId?.ToString() ?? "null");
+
+        return candidates[0];
     }
 
     /// <summary>
@@ -288,12 +306,49 @@ public partial class MetricsController
             });
         }
 
+        // Debug:AiContext=true → email the exact prompts, same pipeline as the generic engine. This
+        // path narrows sensors hardest and resolves its rubric across role rows, so it is the one
+        // most in need of showing what it actually sent.
+        if (DebugAiContext)
+        {
+            try
+            {
+                var dbg = $"=== Professional Skills Debug ===\n" +
+                          $"Student:   {request.StudentId} ({student.FirstName} {student.LastName})\n" +
+                          $"Board:     {boardId} | Sprint: {request.SprintNumber} | RoleLabel: {trelloRoleLabel ?? "(none)"}\n" +
+                          $"Role used: {role.Id} \"{role.Name}\" (institute {role.InstituteId?.ToString() ?? "null"})\n" +
+                          $"Assigned:  {assignedRole.Id} \"{assignedRole.Name}\" (institute {assignedRole.InstituteId?.ToString() ?? "null"})\n" +
+                          $"MainTool:  {mainTool ?? "(none)"}\n" +
+                          $"Window:    {(haveWindow ? $"{windowStart:u} .. {windowEnd:u}" : "(not resolved)")}\n\n" +
+                          $"--- SYSTEM PROMPT ---\n{systemPrompt}\n\n--- USER PROMPT ---\n{userPrompt}";
+                await _smtpEmailService.SendPlainEmailAsync(
+                    "ofer@skill-in.com",
+                    $"[Professional Skills Debug] Student {request.StudentId} | Sprint {request.SprintNumber}",
+                    dbg);
+            }
+            catch { /* never interrupt the AI flow */ }
+        }
+
         try
         {
             var aiModel = await ResolveAssessmentEngineModelAsync(student.InstituteId, cancellationToken);
 
             var (llmText, inputTokens, outputTokens) = await _chatCompletionService.GetChatCompletionAsync(
                 aiModel, systemPrompt, userPrompt, null);
+
+            if (DebugAiContext)
+            {
+                try
+                {
+                    var responseDbg = $"Student={request.StudentId} | Sprint={request.SprintNumber} | Role={role.Id} \"{role.Name}\" | " +
+                                      $"Model={aiModel.Name} ({aiModel.Provider}) | InputTokens={inputTokens} | OutputTokens={outputTokens}\n\n{llmText}";
+                    await _smtpEmailService.SendPlainEmailAsync(
+                        "ofer@skill-in.com",
+                        $"[Professional Skills Debug] LLM-RESPONSE Student {request.StudentId} | Sprint {request.SprintNumber}",
+                        responseDbg);
+                }
+                catch { /* never interrupt the AI flow */ }
+            }
 
             if (!TryParseGapAnalysisJson(llmText, out var dto) || dto == null)
             {
