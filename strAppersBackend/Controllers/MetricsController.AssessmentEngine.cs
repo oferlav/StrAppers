@@ -281,23 +281,19 @@ public partial class MetricsController
             sb.AppendLine();
         }
 
-        // Group and private chats are not sprint-scoped storage: filtering them to the sprint window
-        // discarded the whole conversation whenever the window could not be resolved, and hid context
-        // that spans sprints. The full history is included and each line carries its own timestamp,
-        // with the window stated below so the model can attribute activity itself.
-        var windowNote = BuildChatWindowNote(haveWindow, windowStart, windowEnd);
-
+        // Group and private chats are not sprint-scoped storage, so the full history goes in and
+        // relevance is judged by content — see ChatScopeNote.
         if (metric.UseGroupChat)
         {
             AppendChatBlobSection(sb,
-                $"### Group chat (squad) _(squad-level — all team members; full history, NOT filtered to this sprint. {windowNote})_",
+                $"### Group chat (squad) _(squad-level — all team members; full conversation history — {ChatScopeNote})_",
                 AllChatBlobLines(board.GroupChat), haveWindow: true);
         }
 
         if (metric.UsePrivateChat)
         {
             if (hasEmail)
-                await AppendAssessmentPrivateChatAsync(sb, boardId, email!, windowNote, ct);
+                await AppendAssessmentPrivateChatAsync(sb, boardId, email!, ct);
             else
             {
                 sb.AppendLine("### Private chats (1-on-1)");
@@ -1019,13 +1015,15 @@ public partial class MetricsController
     }
 
     /// <summary>
-    /// Tells the model which dates belong to this sprint, so it can attribute unscoped chat history
-    /// itself instead of the sensor discarding everything outside the window.
+    /// How the model should read chat history. These conversations are not organised by sprint and a
+    /// single thread routinely spans several, so relevance is judged by content rather than by date —
+    /// scoping them to the sprint window discarded discussion that belonged to this sprint's work.
     /// </summary>
-    internal static string BuildChatWindowNote(bool haveWindow, DateTime windowStart, DateTime windowEnd) =>
-        haveWindow
-            ? $"This sprint runs {windowStart:yyyy-MM-dd} to {windowEnd:yyyy-MM-dd} UTC — each line is timestamped, so judge this sprint on the lines inside that range and treat the rest as background context only"
-            : "This sprint's date range could not be resolved, so the lines cannot be attributed to a specific sprint — treat them as background context and do not conclude anything was or was not done in this sprint from them";
+    internal const string ChatScopeNote =
+        "these conversations are not organised by sprint and a single thread often spans several, "
+        + "so judge relevance by what is being discussed, not by when it was said — use anything that "
+        + "bears on this sprint's work regardless of its date, and do not dismiss a message as "
+        + "irrelevant merely because it falls outside this sprint";
 
     internal static void AppendChatBlobSection(StringBuilder sb, string header, List<string>? lines, bool haveWindow)
     {
@@ -1046,7 +1044,6 @@ public partial class MetricsController
         StringBuilder sb,
         string boardId,
         string studentEmail,
-        string windowNote,
         CancellationToken ct)
     {
         var emailLower = studentEmail.Trim().ToLowerInvariant();
@@ -1055,7 +1052,7 @@ public partial class MetricsController
                 && (c.Email1 == emailLower || c.Email2 == emailLower))
             .ToListAsync(ct);
 
-        sb.AppendLine($"### Private chats (1-on-1) _(full history, NOT filtered to this sprint. {windowNote})_");
+        sb.AppendLine($"### Private chats (1-on-1) _(full conversation history — {ChatScopeNote})_");
         if (chats.Count == 0)
         {
             sb.AppendLine("_(no private chats on this board)_");

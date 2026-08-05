@@ -52,32 +52,27 @@ public class AssessmentChatScopeTests
         Assert.Empty(MetricsController.AllChatBlobLines(blob));
     }
 
-    // ------------------------------------------------------------------ window note
-
-    [Fact]
-    public void WithAResolvedWindow_TheDateRangeIsStatedSoTheModelCanAttribute()
-    {
-        var note = MetricsController.BuildChatWindowNote(
-            haveWindow: true,
-            new DateTime(2026, 4, 10, 0, 0, 0, DateTimeKind.Utc),
-            new DateTime(2026, 4, 16, 0, 0, 0, DateTimeKind.Utc));
-
-        Assert.Contains("2026-04-10", note, StringComparison.Ordinal);
-        Assert.Contains("2026-04-16", note, StringComparison.Ordinal);
-        Assert.Contains("background context", note, StringComparison.OrdinalIgnoreCase);
-    }
+    // ------------------------------------------------------------------ scope note
 
     /// <summary>
-    /// Without a window the lines cannot be attributed at all, so the note must block inference in
-    /// both directions rather than letting the model read undated chatter as this sprint's activity.
+    /// Relevance is judged by content, not by date: a thread routinely spans sprints, so the note
+    /// must not push the model back towards filtering by when something was said.
     /// </summary>
     [Fact]
-    public void WithoutAWindow_TheNoteForbidsAttributingActivityToThisSprint()
+    public void TheNoteDirectsJudgementByContentRatherThanDate()
     {
-        var note = MetricsController.BuildChatWindowNote(haveWindow: false, default, default);
+        var note = MetricsController.ChatScopeNote;
 
-        Assert.Contains("could not be resolved", note, StringComparison.OrdinalIgnoreCase);
-        Assert.Contains("do not conclude anything was or was not done", note, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("judge relevance by what is being discussed, not by when it was said", note, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("regardless of its date", note, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("do not dismiss a message as irrelevant merely because it falls outside this sprint", note, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void TheNoteCarriesNoSprintDateRange()
+    {
+        // A date range here would reintroduce exactly the filtering this replaced.
+        Assert.DoesNotMatch(@"\d{4}-\d{2}-\d{2}", MetricsController.ChatScopeNote);
     }
 
     [Fact]
