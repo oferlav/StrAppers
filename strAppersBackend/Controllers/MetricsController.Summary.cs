@@ -44,6 +44,17 @@ public partial class MetricsController
     /// Sprint Summary: one report per student+sprint, built only from that sprint's collected
     /// CacheMetrics.ReviewContent. Chart = one bar per source metric. Stored as MetricId=0.
     /// </summary>
+    /// <summary>
+    /// Keeps only cached rows whose metric is currently enabled for the institute.
+    ///
+    /// The summary is a scored roll-up, so a metric the institute has switched off must not keep
+    /// contributing to it through rows cached while it was still on. The sentinels (summary 0, hard
+    /// skills -1) are already excluded by the caller's MetricId &gt; 0 filter.
+    /// </summary>
+    internal static List<CacheMetrics> FilterToEnabledMetrics(
+        List<CacheMetrics> rows, IReadOnlyCollection<int> enabledMetricIds) =>
+        rows.Where(r => enabledMetricIds.Contains(r.MetricId)).ToList();
+
     [HttpPost("use/sprint-summary")]
     public async Task<ActionResult<object>> SprintSummary([FromBody] SprintSummaryRequest? request, CancellationToken cancellationToken)
     {
@@ -72,13 +83,36 @@ public partial class MetricsController
             .OrderBy(c => c.MetricId)
             .ToListAsync(cancellationToken);
 
+        var collectedCount = metricRows.Count;
+
+        // Cached rows outlive configuration changes: a metric assessed while it was enabled keeps its
+        // CacheMetrics row after the institute switches it off. Feeding those into the summary let a
+        // disabled metric keep influencing the score, so restrict to what the institute currently has
+        // enabled — the same rule the batch runner applies when deciding what to assess.
+        if (student.InstituteId is int instituteId && instituteId > 0)
+        {
+            var enabledMetricIds = await _context.Metrics.AsNoTracking()
+                .Where(m => m.InstituteId == instituteId && m.Required)
+                .Select(m => m.Id)
+                .ToListAsync(cancellationToken);
+
+            metricRows = FilterToEnabledMetrics(metricRows, enabledMetricIds);
+
+            if (metricRows.Count != collectedCount)
+                _logger.LogInformation(
+                    "Sprint Summary: dropped {Dropped} of {Total} cached metric row(s) for student {StudentId} sprint {Sprint} — not enabled for institute {InstituteId}",
+                    collectedCount - metricRows.Count, collectedCount, request.StudentId, request.SprintNumber, instituteId);
+        }
+
         if (metricRows.Count == 0)
         {
             return Ok(new
             {
                 success = false,
                 skippedLlm = true,
-                message = "No collected metric data exists for this student and sprint yet. Run the assessment metrics first, then generate the Sprint Summary.",
+                message = collectedCount > 0
+                    ? $"All {collectedCount} cached metric row(s) for this student and sprint belong to metrics that are not enabled for this institute, so there is nothing to summarize. Enable the metrics you want assessed, re-run them, then generate the Sprint Summary."
+                    : "No collected metric data exists for this student and sprint yet. Run the assessment metrics first, then generate the Sprint Summary.",
             });
         }
 
