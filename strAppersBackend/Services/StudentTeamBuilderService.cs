@@ -119,7 +119,7 @@ namespace strAppersBackend.Services
             var processedStudentIds = new HashSet<int>();
 
             // All institute students not yet on a board, with at least one priority set
-            var eligibleStudents = await _context.Students
+            var candidateQuery = _context.Students
                 .Include(s => s.StudentRoles).ThenInclude(sr => sr.Role)
                 .Include(s => s.ProgrammingLanguage)
                 .Where(s =>
@@ -127,16 +127,36 @@ namespace strAppersBackend.Services
                     s.BoardId == null &&
                     (s.Status == null || s.Status < 3) &&
                     (s.InstitutePriority1 != null || s.InstitutePriority2 != null ||
-                     s.InstitutePriority3 != null || s.InstitutePriority4 != null))
-                .ToListAsync();
+                     s.InstitutePriority3 != null || s.InstitutePriority4 != null));
+
+            // IsAvailable mirrors what POST /api/boards/use/create enforces — it rejects the whole
+            // request with 400 "One or more students not found or not available" if any student in
+            // the team is unavailable. Selecting them here would fail every run forever: the pick
+            // order is deterministic and a failed CreateBoard marks nothing, so the same
+            // unavailable student would be chosen again instead of falling back to an available one.
+            var unavailableCount = await candidateQuery.CountAsync(s => !s.IsAvailable);
+            var eligibleStudents = await candidateQuery.Where(s => s.IsAvailable).ToListAsync();
+
+            if (unavailableCount > 0)
+            {
+                _logger.LogInformation(
+                    "[INSTITUTE-TEAM-BUILDER] Excluded {Count} student(s) because Students.IsAvailable=false — they meet every other rule (no board, Status<3, at least one priority) but cannot be placed on a board.",
+                    unavailableCount);
+            }
 
             if (!eligibleStudents.Any())
             {
-                _logger.LogInformation("[INSTITUTE-TEAM-BUILDER] No eligible institute students found.");
+                var noneMsg = unavailableCount > 0
+                    ? $"No available institute students found — every candidate has Students.IsAvailable=false ({unavailableCount} student(s)). Set IsAvailable=true for the students who should be teamed."
+                    : "No eligible institute students found (none without a board, with Status<3 and at least one project priority).";
+                _logger.LogInformation("[INSTITUTE-TEAM-BUILDER] {Message}", noneMsg);
+                messages.Add(noneMsg);
                 return (0, 0, messages);
             }
 
-            _logger.LogInformation("[INSTITUTE-TEAM-BUILDER] Found {Count} eligible institute students.", eligibleStudents.Count);
+            _logger.LogInformation(
+                "[INSTITUTE-TEAM-BUILDER] Found {Count} eligible institute students (IsAvailable=true); {Unavailable} excluded by IsAvailable=false.",
+                eligibleStudents.Count, unavailableCount);
 
             var byInstitute = eligibleStudents.GroupBy(s => s.InstituteId!.Value);
 
