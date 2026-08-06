@@ -3760,7 +3760,30 @@ public partial class BoardsController : ControllerBase
             if (proposer == null)
                 return BadRequest(new KickoffActionResponse { Success = false, Message = "Student is not a member of this board's squad." });
 
-            board.SuggestedKickoffDate = request.SuggestedDateTimeUtc;
+            var suggestedUtc = KickoffDeadline.AsUtc(request.SuggestedDateTimeUtc);
+            if (suggestedUtc <= DateTime.UtcNow)
+                return BadRequest(new KickoffActionResponse { Success = false, Message = "The kickoff meeting time cannot be in the past." });
+
+            if (suggestedUtc > DateTime.UtcNow.AddDays(KickoffDeadline.MaxProposalDays))
+                return BadRequest(new KickoffActionResponse { Success = false, Message = $"The kickoff meeting cannot be more than {KickoffDeadline.MaxProposalDays} days from now." });
+
+            // A squad may legitimately want to meet after the default agree-by deadline. Rather than
+            // forbid it, push the deadline out to the proposed time plus a grace period, so the board
+            // can't be reset out from under a meeting the squad is still arranging. Extend-only —
+            // proposing an earlier time (or the squad rejecting this one) never shortens the window
+            // again, so nobody can pull the rug on the rest of the squad.
+            var timeoutMinutes = _configuration.GetValue<int>("KickoffConfig2:BoardTimeout", 4320);
+            var currentDeadlineUtc = KickoffDeadline.Resolve(board.CreatedAt, board.KickoffTimeoutDateTime, timeoutMinutes);
+            var extendedDeadlineUtc = KickoffDeadline.ExtensionFor(suggestedUtc, currentDeadlineUtc);
+            if (extendedDeadlineUtc.HasValue)
+            {
+                _logger.LogInformation(
+                    "[KICKOFF-SUGGEST] BoardId={BoardId}: proposal {SuggestedUtc:O} is past the current deadline {CurrentDeadlineUtc:O}; extending to {ExtendedDeadlineUtc:O} (+{GraceHours}h grace).",
+                    request.BoardId, suggestedUtc, currentDeadlineUtc, extendedDeadlineUtc.Value, KickoffDeadline.GraceHours);
+                board.KickoffTimeoutDateTime = extendedDeadlineUtc.Value;
+            }
+
+            board.SuggestedKickoffDate = suggestedUtc;
             board.LastDateStudentId = request.StudentId;
             board.KickoffState = 1;
             board.UpdatedAt = DateTime.UtcNow;
@@ -3775,7 +3798,7 @@ public partial class BoardsController : ControllerBase
             var proposerName = $"{proposer.FirstName} {proposer.LastName}".Trim();
             // DST-aware local conversion (Israel: UTC+2 winter / UTC+3 summer), matching the
             // conversion already used for the real meeting invite (SmtpEmailService.CreateEmailBody).
-            var localSuggestedDate = TrelloBoardScheduleHelper.ConvertUtcToLocal(request.SuggestedDateTimeUtc, _configuration["Trello:TimeZoneId"]);
+            var localSuggestedDate = TrelloBoardScheduleHelper.ConvertUtcToLocal(suggestedUtc, _configuration["Trello:TimeZoneId"]);
             var formattedDate = localSuggestedDate.ToString("MMMM d, h:mm tt");
 
             foreach (var s in squad.Where(s => s.Id != request.StudentId && !string.IsNullOrWhiteSpace(s.Email)))
@@ -4729,7 +4752,14 @@ public partial class BoardsController : ControllerBase
                 // Mirrors StudentTeamBuilderService's KickoffConfig2:BoardTimeout so the FE countdown
                 // can never drift from the actual enforced reset deadline. Configure the same value
                 // in both services' appsettings; defaults to 4320 (3 days) if unset here too.
-                responseNode["kickoffTimeoutMinutes"] = JsonValue.Create(_configuration.GetValue<int>("KickoffConfig2:BoardTimeout", 4320));
+                var kickoffTimeoutMinutes = _configuration.GetValue<int>("KickoffConfig2:BoardTimeout", 4320);
+                responseNode["kickoffTimeoutMinutes"] = JsonValue.Create(kickoffTimeoutMinutes);
+                // The deadline the reset job actually enforces — CreatedAt + timeout, unless a squad
+                // proposed a later meeting and pushed KickoffTimeoutDateTime out. The FE counts down
+                // to this, not to CreatedAt + timeout, which is wrong once the board has been extended.
+                responseNode["kickoffDeadline"] = JsonValue.Create(
+                    KickoffDeadline.Resolve(projectBoard.CreatedAt, projectBoard.KickoffTimeoutDateTime, kickoffTimeoutMinutes)
+                        .ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss.fffZ"));
 
                 if (projectBoard.SuggestedKickoffDate.HasValue)
                 {

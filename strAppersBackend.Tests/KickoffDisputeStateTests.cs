@@ -1,6 +1,7 @@
 using Microsoft.EntityFrameworkCore;
 using strAppersBackend.Data;
 using strAppersBackend.Models;
+using strAppersBackend.Services;
 
 namespace strAppersBackend.Tests;
 
@@ -36,7 +37,7 @@ public class KickoffDisputeStateTests
     };
 
     private static ProjectBoard Board(string id, int? kickoffState, DateTime createdAt, bool isStale = false,
-        DateTime? suggestedKickoffDate = null, int? lastDateStudentId = null) => new()
+        DateTime? suggestedKickoffDate = null, int? lastDateStudentId = null, DateTime? kickoffTimeoutDateTime = null) => new()
     {
         Id = id,
         ProjectId = 1,
@@ -44,7 +45,8 @@ public class KickoffDisputeStateTests
         CreatedAt = createdAt,
         IsStale = isStale,
         SuggestedKickoffDate = suggestedKickoffDate,
-        LastDateStudentId = lastDateStudentId
+        LastDateStudentId = lastDateStudentId,
+        KickoffTimeoutDateTime = kickoffTimeoutDateTime
     };
 
     // ── Replicates BoardsController.SuggestKickoffDate (kickoff-suggest) ──────────────
@@ -193,11 +195,13 @@ public class KickoffDisputeStateTests
 
     private const int DefaultBoardTimeoutMinutes = 4320;
 
+    // KickoffDeadline.Resolve is the C# twin of the query's
+    // COALESCE("KickoffTimeoutDateTime", "CreatedAt" + make_interval(mins => @TimeoutMinutes)).
     private static bool IsStaleKickoffCandidate(ProjectBoard board, DateTime nowUtc, int timeoutMinutes = DefaultBoardTimeoutMinutes) =>
         board.KickoffState != null
         && board.KickoffState < 2
         && !board.IsStale
-        && board.CreatedAt < nowUtc.AddMinutes(-timeoutMinutes);
+        && KickoffDeadline.Resolve(board.CreatedAt, board.KickoffTimeoutDateTime, timeoutMinutes) < nowUtc;
 
     [Fact]
     public void ResetCandidate_MatchesBoard_PastDeadlineStillUnresolved()

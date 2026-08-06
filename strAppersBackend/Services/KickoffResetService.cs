@@ -3,6 +3,52 @@ using strAppersBackend.Data;
 
 namespace strAppersBackend.Services;
 
+/// <summary>
+/// Single source of truth for "when does this board's kickoff window close". The same answer has to
+/// come out here, in <see cref="KickoffResetService"/>, in the BoardRoom stats payload and in
+/// StudentTeamBuilderService's reset job, otherwise the countdown the squad sees drifts from the
+/// deadline actually enforced.
+/// </summary>
+public static class KickoffDeadline
+{
+    /// <summary>
+    /// How far past a proposed meeting time the board stays alive. Without this the board could be
+    /// reset at the very minute the kickoff meeting starts.
+    /// </summary>
+    public const int GraceHours = 12;
+
+    /// <summary>How far ahead a kickoff meeting may be proposed. Mirrors the frontend's 7-day picker cap.</summary>
+    public const int MaxProposalDays = 7;
+
+    /// <summary>
+    /// The board's effective deadline: the extended one if a proposal ever pushed it out, otherwise
+    /// creation time plus the configured KickoffConfig2:BoardTimeout.
+    /// </summary>
+    public static DateTime Resolve(DateTime createdAtUtc, DateTime? kickoffTimeoutDateTimeUtc, int timeoutMinutes)
+        => kickoffTimeoutDateTimeUtc ?? createdAtUtc.AddMinutes(timeoutMinutes);
+
+    /// <summary>
+    /// The new KickoffTimeoutDateTime a proposal requires, or null when the current deadline already
+    /// covers it. Extend-only by construction: never returns a value earlier than <paramref name="currentDeadlineUtc"/>.
+    /// </summary>
+    public static DateTime? ExtensionFor(DateTime suggestedUtc, DateTime currentDeadlineUtc)
+    {
+        var required = suggestedUtc.AddHours(GraceHours);
+        return required > currentDeadlineUtc ? required : null;
+    }
+
+    /// <summary>
+    /// Normalizes an inbound "...Utc" DateTime so comparisons against DateTime.UtcNow are meaningful
+    /// regardless of how the JSON was serialized (Unspecified is taken at its word: already UTC).
+    /// </summary>
+    public static DateTime AsUtc(DateTime value) => value.Kind switch
+    {
+        DateTimeKind.Utc => value,
+        DateTimeKind.Local => value.ToUniversalTime(),
+        _ => DateTime.SpecifyKind(value, DateTimeKind.Utc),
+    };
+}
+
 public record KickoffResetCheckResult
 {
     public string BoardId { get; init; } = string.Empty;
@@ -10,6 +56,7 @@ public record KickoffResetCheckResult
     public int? KickoffState { get; init; }
     public bool IsStale { get; init; }
     public DateTime? CreatedAtUtc { get; init; }
+    public DateTime? KickoffTimeoutDateTimeUtc { get; init; }
     public int ConfiguredTimeoutMinutes { get; init; }
     public DateTime? DeadlineUtc { get; init; }
     public DateTime NowUtc { get; init; }
@@ -61,7 +108,7 @@ public class KickoffResetService : IKickoffResetService
         // stats poll (not just login), so avoid opening a transaction for the common "not due yet" case.
         var quick = await _context.ProjectBoards.AsNoTracking()
             .Where(b => b.Id == boardId)
-            .Select(b => new { b.KickoffState, b.IsStale, b.CreatedAt })
+            .Select(b => new { b.KickoffState, b.IsStale, b.CreatedAt, b.KickoffTimeoutDateTime })
             .FirstOrDefaultAsync();
 
         if (quick == null)
@@ -70,12 +117,13 @@ public class KickoffResetService : IKickoffResetService
             return new KickoffResetCheckResult { BoardId = boardId, BoardFound = false, ConfiguredTimeoutMinutes = timeoutMinutes, NowUtc = nowUtc, Reason = "Board not found" };
         }
 
-        var deadlineUtc = quick.CreatedAt.AddMinutes(timeoutMinutes);
+        var deadlineUtc = KickoffDeadline.Resolve(quick.CreatedAt, quick.KickoffTimeoutDateTime, timeoutMinutes);
         var minutesUntilDeadline = (deadlineUtc - nowUtc).TotalMinutes;
 
         _logger.LogInformation(
-            "[KICKOFF-RESET] BoardId={BoardId}: KickoffState={KickoffState}, IsStale={IsStale}, CreatedAtUtc={CreatedAtUtc:O}, NowUtc={NowUtc:O}, TimeoutMinutes={TimeoutMinutes}, DeadlineUtc={DeadlineUtc:O}, MinutesUntilDeadline={MinutesUntilDeadline}",
-            boardId, quick.KickoffState?.ToString() ?? "null", quick.IsStale, quick.CreatedAt, nowUtc, timeoutMinutes, deadlineUtc, minutesUntilDeadline);
+            "[KICKOFF-RESET] BoardId={BoardId}: KickoffState={KickoffState}, IsStale={IsStale}, CreatedAtUtc={CreatedAtUtc:O}, NowUtc={NowUtc:O}, TimeoutMinutes={TimeoutMinutes}, KickoffTimeoutDateTimeUtc={KickoffTimeoutDateTimeUtc}, DeadlineUtc={DeadlineUtc:O}, MinutesUntilDeadline={MinutesUntilDeadline}",
+            boardId, quick.KickoffState?.ToString() ?? "null", quick.IsStale, quick.CreatedAt, nowUtc, timeoutMinutes,
+            quick.KickoffTimeoutDateTime?.ToString("O") ?? "null", deadlineUtc, minutesUntilDeadline);
 
         var baseResult = new KickoffResetCheckResult
         {
@@ -84,6 +132,7 @@ public class KickoffResetService : IKickoffResetService
             KickoffState = quick.KickoffState,
             IsStale = quick.IsStale,
             CreatedAtUtc = quick.CreatedAt,
+            KickoffTimeoutDateTimeUtc = quick.KickoffTimeoutDateTime,
             ConfiguredTimeoutMinutes = timeoutMinutes,
             DeadlineUtc = deadlineUtc,
             NowUtc = nowUtc,
@@ -107,7 +156,7 @@ public class KickoffResetService : IKickoffResetService
             .FirstOrDefaultAsync();
 
         if (lockedBoard == null || lockedBoard.KickoffState == null || lockedBoard.KickoffState >= 2 || lockedBoard.IsStale
-            || DateTime.UtcNow < lockedBoard.CreatedAt.AddMinutes(timeoutMinutes))
+            || DateTime.UtcNow < KickoffDeadline.Resolve(lockedBoard.CreatedAt, lockedBoard.KickoffTimeoutDateTime, timeoutMinutes))
         {
             await transaction.CommitAsync();
             _logger.LogInformation("[KICKOFF-RESET] BoardId={BoardId}: no longer eligible after acquiring lock (raced with another trigger).", boardId);

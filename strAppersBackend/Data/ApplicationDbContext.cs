@@ -828,6 +828,7 @@ public class ApplicationDbContext : DbContext
             entity.Property(e => e.KickoffState).HasColumnName("KickoffState");
             entity.Property(e => e.LastDateStudentId).HasColumnName("LastDateStudentId");
             entity.Property(e => e.SuggestedKickoffDate).HasColumnName("SuggestedKickoffDate").HasColumnType("timestamp with time zone");
+            entity.Property(e => e.KickoffTimeoutDateTime).HasColumnName("KickoffTimeoutDateTime").HasColumnType("timestamp with time zone");
             entity.Property(e => e.IsStale).HasColumnName("IsStale").HasDefaultValue(false);
             entity.Property(e => e.GithubBackendUrl).HasColumnName("GithubBackendUrl").HasMaxLength(1000);
             entity.Property(e => e.GithubFrontendUrl).HasColumnName("GithubFrontendUrl").HasMaxLength(1000);

@@ -148,6 +148,15 @@ namespace strAppersBackend.Models
         public DateTime? SuggestedKickoffDate { get; set; }
 
         /// <summary>
+        /// Absolute UTC deadline for reaching unanimous kickoff agreement, once it has been pushed out
+        /// past the default (CreatedAt + KickoffConfig2:BoardTimeout) because the squad proposed a
+        /// meeting later than that. NULL = never extended, so the configured timeout still applies.
+        /// Extend-only: a later proposal moves this out, an earlier one never pulls it back in.
+        /// </summary>
+        [Column("KickoffTimeoutDateTime")]
+        public DateTime? KickoffTimeoutDateTime { get; set; }
+
+        /// <summary>
         /// True once the squad was auto-reset for failing to agree on a kickoff time within the deadline.
         /// </summary>
         [Required]
