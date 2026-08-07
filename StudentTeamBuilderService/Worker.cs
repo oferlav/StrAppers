@@ -379,8 +379,10 @@ public class Worker : BackgroundService
 
     /// <summary>
     /// Squads have KickoffConfig2:BoardTimeout minutes (default 4320 = 3 days) from board creation
-    /// to unanimously agree on a kickoff meeting time (KickoffState reaches 2). Boards still stuck
-    /// below that after the timeout get reset: marked IsStale, and every student on the board sent
+    /// to unanimously agree on a kickoff meeting time (KickoffState reaches 2) — or until
+    /// KickoffTimeoutDateTime, when proposing a meeting later than that pushed the deadline out
+    /// (see KickoffDeadline in the backend). Boards still stuck below 2 after the deadline they're
+    /// actually held to get reset: marked IsStale, and every student on the board sent
     /// back to "available" (Status=0) so they can pick new projects. Legacy boards (KickoffState IS
     /// NULL, predating this feature) are never touched. See MeetingDispute_Kickoff_Plan.md section 5.4.
     /// </summary>
@@ -400,7 +402,7 @@ public class Worker : BackgroundService
                       WHERE ""KickoffState"" IS NOT NULL
                         AND ""KickoffState"" < 2
                         AND ""IsStale"" = false
-                        AND ""CreatedAt"" < NOW() - make_interval(mins => @TimeoutMinutes)
+                        AND COALESCE(""KickoffTimeoutDateTime"", ""CreatedAt"" + make_interval(mins => @TimeoutMinutes)) < NOW()
                       RETURNING ""BoardId""
                     )
                     UPDATE ""Students"" s
@@ -420,7 +422,7 @@ public class Worker : BackgroundService
         var resetStudents = (await conn.QueryAsync<StaleKickoffStudentRow>(new CommandDefinition(sql, new { TimeoutMinutes = timeoutMinutes }, cancellationToken: ct))).ToList();
         if (resetStudents.Count == 0) return;
 
-        _logger.LogInformation("[KICKOFF-RESET] Reset {Count} student(s) from stale kickoff board(s) (>3 days without unanimous kickoff agreement)", resetStudents.Count);
+        _logger.LogInformation("[KICKOFF-RESET] Reset {Count} student(s) from stale kickoff board(s) (past their kickoff-agreement deadline)", resetStudents.Count);
 
         var client = _httpClientFactory.CreateClient();
         client.Timeout = TimeSpan.FromSeconds(15);
