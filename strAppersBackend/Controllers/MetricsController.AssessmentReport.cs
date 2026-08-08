@@ -160,8 +160,9 @@ public partial class MetricsController
             .ThenBy(c => c.MetricId)
             .ToListAsync(cancellationToken);
 
-        rows = await ApplyEnabledMetricFilterAsync(rows, cancellationToken);
-
+        // Deliberately unfiltered by Metrics.Required: the report shows what was actually assessed.
+        // Enablement decides what gets collected, not what a past collection is allowed to say, so
+        // switching a metric off stops new data without erasing the record of the sprints it covered.
         var sprints = BuildAssessmentSprints(rows, includeSquadInStudentName: false,
             await BuildMainToolLookupAsync(rows, cancellationToken),
             await BuildSprintDateLookupAsync(boardIdTrim, rows, cancellationToken));
@@ -234,8 +235,7 @@ public partial class MetricsController
             .ThenBy(c => c.MetricId)
             .ToListAsync(cancellationToken);
 
-        rows = await ApplyEnabledMetricFilterAsync(rows, cancellationToken);
-
+        // Unfiltered by Metrics.Required, same as the board-scoped path above.
         var sprints = BuildAssessmentSprints(rows, includeSquadInStudentName: true,
             await BuildMainToolLookupAsync(rows, cancellationToken));
 
@@ -372,62 +372,6 @@ public partial class MetricsController
                 };
             })
             .ToList();
-    }
-
-    /// <summary>
-    /// Drops cached rows whose metric is no longer enabled for the owning student's institute.
-    ///
-    /// CacheMetrics rows outlive configuration changes, so a metric assessed while it was switched on
-    /// keeps its row afterwards and kept appearing in the staff report. Nothing is deleted — the rows
-    /// return as soon as the metric is enabled again.
-    ///
-    /// Sentinel rows (Sprint Summary 0, Professional Skills -1) are never filtered: they are not
-    /// institute-owned Metrics rows and have no enabled flag of their own. Rows whose student has no
-    /// institute are kept too, since enablement cannot be determined for them.
-    /// </summary>
-    internal static List<CacheMetrics> FilterReportRowsToEnabledMetrics(
-        List<CacheMetrics> rows, IReadOnlyDictionary<int, HashSet<int>> enabledMetricIdsByInstitute) =>
-        rows.Where(r =>
-        {
-            if (r.MetricId <= 0) return true;
-            var instituteId = r.Student?.InstituteId ?? 0;
-            if (instituteId <= 0) return true;
-            return enabledMetricIdsByInstitute.TryGetValue(instituteId, out var enabled)
-                   && enabled.Contains(r.MetricId);
-        }).ToList();
-
-    /// <summary>
-    /// Loads the enabled metric ids for every institute represented in <paramref name="rows"/> and
-    /// applies <see cref="FilterReportRowsToEnabledMetrics"/>.
-    /// </summary>
-    private async Task<List<CacheMetrics>> ApplyEnabledMetricFilterAsync(
-        List<CacheMetrics> rows, CancellationToken ct)
-    {
-        var instituteIds = rows
-            .Select(r => r.Student?.InstituteId ?? 0)
-            .Where(id => id > 0)
-            .Distinct()
-            .ToList();
-
-        if (instituteIds.Count == 0) return rows;
-
-        var enabled = await _context.Metrics.AsNoTracking()
-            .Where(m => m.InstituteId != null && instituteIds.Contains(m.InstituteId.Value) && m.Required)
-            .Select(m => new { m.Id, InstituteId = m.InstituteId!.Value })
-            .ToListAsync(ct);
-
-        var byInstitute = enabled
-            .GroupBy(e => e.InstituteId)
-            .ToDictionary(g => g.Key, g => g.Select(x => x.Id).ToHashSet());
-
-        var filtered = FilterReportRowsToEnabledMetrics(rows, byInstitute);
-
-        if (filtered.Count != rows.Count)
-            _logger.LogInformation(
-                "Assessment report: hid {Hidden} of {Total} cached row(s) for metrics not enabled for their institute",
-                rows.Count - filtered.Count, rows.Count);
-
-        return filtered;
     }
 
     /// <summary>
