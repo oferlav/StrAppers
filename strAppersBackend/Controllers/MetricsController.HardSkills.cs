@@ -303,6 +303,9 @@ public partial class MetricsController
                 mainTool,
                 systemPrompt,
                 userPrompt,
+                // Same estimate GapAnalysis reports in test mode: no LLM call is made here, so a
+                // real input-token count from the provider is not available.
+                estimatedInputTokens = EstimateTokens(systemPrompt) + EstimateTokens(userPrompt),
             });
         }
 
