@@ -134,14 +134,19 @@ namespace strAppersBackend.Services
             // the team is unavailable. Selecting them here would fail every run forever: the pick
             // order is deterministic and a failed CreateBoard marks nothing, so the same
             // unavailable student would be chosen again instead of falling back to an available one.
-            var unavailableCount = await candidateQuery.CountAsync(s => !s.IsAvailable);
+            var unavailableIds = await candidateQuery.Where(s => !s.IsAvailable).Select(s => s.Id).ToListAsync();
+            var unavailableCount = unavailableIds.Count;
             var eligibleStudents = await candidateQuery.Where(s => s.IsAvailable).ToListAsync();
 
             if (unavailableCount > 0)
             {
-                _logger.LogInformation(
-                    "[INSTITUTE-TEAM-BUILDER] Excluded {Count} student(s) because Students.IsAvailable=false — they meet every other rule (no board, Status<3, at least one priority) but cannot be placed on a board.",
-                    unavailableCount);
+                // Also reported as a message (not just a log line): the ids are what tells you whether
+                // the students you are waiting on are the ones being dropped here.
+                var excludedMsg =
+                    $"Excluded {unavailableCount} student(s) by Students.IsAvailable=false: [{string.Join(",", unavailableIds)}] — " +
+                    "they meet every other rule (no board, Status<3, at least one priority) but cannot be placed on a board.";
+                messages.Add(excludedMsg);
+                _logger.LogInformation("[INSTITUTE-TEAM-BUILDER] {Message}", excludedMsg);
             }
 
             if (!eligibleStudents.Any())
@@ -233,13 +238,17 @@ namespace strAppersBackend.Services
                     var ip = await _context.InstituteProjects.FirstOrDefaultAsync(p => p.Id == ipId);
                     if (ip == null)
                     {
-                        _logger.LogWarning("[INSTITUTE-TEAM-BUILDER] Institute {InstituteId}, IpId {IpId}: InstituteProject not found, skipping.", instituteId, ipId);
+                        var msg = $"Institute {instituteId}, IpId {ipId}: no board — InstituteProject row not found; Pool=[{string.Join(",", candidates.Select(s => s.Id))}].";
+                        messages.Add(msg);
+                        _logger.LogWarning("[INSTITUTE-TEAM-BUILDER] {Message}", msg);
                         skipped++;
                         continue;
                     }
                     if (!ip.BaseProjectId.HasValue)
                     {
-                        _logger.LogWarning("[INSTITUTE-TEAM-BUILDER] Institute {InstituteId}, IpId {IpId}: no BaseProjectId, skipping.", instituteId, ipId);
+                        var msg = $"Institute {instituteId}, IpId {ipId}: no board — {DescribeGates(ip, template, candidates, "InstituteProjects.BaseProjectId is NULL")}";
+                        messages.Add(msg);
+                        _logger.LogWarning("[INSTITUTE-TEAM-BUILDER] {Message}", msg);
                         skipped++;
                         continue;
                     }
@@ -331,13 +340,20 @@ namespace strAppersBackend.Services
                             // No active template — handle as built-in project using institute base roles
                             if (!ip.IsAvailable)
                             {
-                                _logger.LogInformation("[INSTITUTE-TEAM-BUILDER] Institute {InstituteId}, IpId {IpId}: no template and project not available, skipping.", instituteId, ipId);
+                                var msg = $"Institute {instituteId}, IpId {ipId}, Coupon={couponLabel}: no board — {DescribeGates(ip, template, couponCandidates, "no active template and InstituteProjects.IsAvailable=false")}";
+                                messages.Add(msg);
+                                _logger.LogInformation("[INSTITUTE-TEAM-BUILDER] {Message}", msg);
                                 continue;
                             }
                             _logger.LogInformation("[INSTITUTE-TEAM-BUILDER] Institute {InstituteId}, IpId {IpId}, Coupon={Coupon}: no active template, attempting built-in team build.", instituteId, ipId, couponLabel);
                             var builtInTeam = TryBuildBuiltInTeam(couponCandidates, baseRoles, instituteId, ipId, ref skipped);
                             if (builtInTeam == null || builtInTeam.Count == 0)
+                            {
+                                var msg = $"Institute {instituteId}, IpId {ipId}, Coupon={couponLabel}: no board — {DescribeGates(ip, template, couponCandidates, $"TryBuildBuiltInTeam produced no team from {baseRoles.Count} base role(s); MinimumStudents={_kickoffConfig.MinimumStudents}")}";
+                                messages.Add(msg);
+                                _logger.LogInformation("[INSTITUTE-TEAM-BUILDER] {Message}", msg);
                                 continue;
+                            }
 
                             var builtInBoard = await CallCreateBoardAsync(ip.BaseProjectId.Value, ip.Id, builtInTeam, false, ip.Title);
                             if (builtInBoard.Success)
@@ -360,7 +376,9 @@ namespace strAppersBackend.Services
 
                         if (string.IsNullOrWhiteSpace(ip.TrelloBoardJson))
                         {
-                            _logger.LogWarning("[INSTITUTE-TEAM-BUILDER] Institute {InstituteId}, IpId {IpId}: TrelloBoardJson is empty, skipping.", instituteId, ipId);
+                            var msg = $"Institute {instituteId}, IpId {ipId}, Coupon={couponLabel}: no board — {DescribeGates(ip, template, couponCandidates, "InstituteProjects.TrelloBoardJson is empty")}";
+                            messages.Add(msg);
+                            _logger.LogWarning("[INSTITUTE-TEAM-BUILDER] {Message}", msg);
                             skipped++;
                             continue;
                         }
@@ -368,7 +386,8 @@ namespace strAppersBackend.Services
                         List<Student>? team = null;
                         var isSingleRole = false;
 
-                        if (string.Equals(template.CourseType, "Role", StringComparison.OrdinalIgnoreCase))
+                        var isRoleCourse = string.Equals(template.CourseType, "Role", StringComparison.OrdinalIgnoreCase);
+                        if (isRoleCourse)
                         {
                             (team, isSingleRole) = TryBuildRoleTeam(couponCandidates, template, instituteId, ipId, ref skipped);
                         }
@@ -378,7 +397,12 @@ namespace strAppersBackend.Services
                         }
 
                         if (team == null || team.Count == 0)
+                        {
+                            var msg = $"Institute {instituteId}, IpId {ipId}, Coupon={couponLabel}: no board — {DescribeGates(ip, template, couponCandidates, isRoleCourse ? "TryBuildRoleTeam returned no team" : "TryBuildSquadTeam returned no team")}";
+                            messages.Add(msg);
+                            _logger.LogInformation("[INSTITUTE-TEAM-BUILDER] {Message}", msg);
                             continue;
+                        }
 
                         // Assign RoleIndex for role-based courses before calling CreateBoard
                         if (isSingleRole)
@@ -429,6 +453,43 @@ namespace strAppersBackend.Services
         // ──────────────────────────────────────────────────────────────────
         // Private helpers
         // ──────────────────────────────────────────────────────────────────
+
+        /// <summary>
+        /// One-line snapshot of every gate a team-build decision turns on, for the run's message list.
+        /// Each no-board exit used to be a bare <c>continue</c>, so the run reported "skipped: N" with
+        /// no way to tell which condition tripped — and the per-gate detail that did exist went only to
+        /// the backend's own log, which the worker never sees. Reporting the full state (not just the
+        /// first failing gate) means one run tells you which value is wrong instead of one per attempt.
+        /// </summary>
+        private static string DescribeGates(
+            InstituteProject ip,
+            InstituteTemplate? template,
+            List<Student> pool,
+            string reason)
+        {
+            var roleBreakdown = pool
+                .Where(s => s.StudentRoles.Any(sr => sr.IsActive))
+                .GroupBy(s => s.StudentRoles.First(sr => sr.IsActive).RoleId)
+                .Select(g => $"RoleId={g.Key}: {g.Count()} student(s), {g.Count(s => s.ProgrammingLanguageId != null)} with ProgrammingLanguageId")
+                .ToList();
+
+            var noActiveRole = pool.Count(s => !s.StudentRoles.Any(sr => sr.IsActive));
+            if (noActiveRole > 0)
+                roleBreakdown.Add($"{noActiveRole} student(s) with NO active StudentRole (excluded from role grouping)");
+
+            var templateState = template == null
+                ? $"NONE (no active InstituteTemplates row with InstituteProjectId={ip.Id})"
+                : $"Id={template.Id}, CourseType={template.CourseType ?? "NULL"}, RoleCount={template.RoleCount?.ToString() ?? "NULL"}, " +
+                  $"SquadId={template.SquadId?.ToString() ?? "NULL"}, ActiveSquadRoles={template.Squad?.Roles.Count(r => r.IsActive).ToString() ?? "n/a"}";
+
+            return $"REASON={reason}; " +
+                   $"Pool=[{string.Join(",", pool.Select(s => s.Id))}]; " +
+                   $"BaseProjectId={ip.BaseProjectId?.ToString() ?? "NULL"}; " +
+                   $"IsAvailable={ip.IsAvailable}; " +
+                   $"TrelloBoardJson={(string.IsNullOrWhiteSpace(ip.TrelloBoardJson) ? "EMPTY" : $"{ip.TrelloBoardJson!.Length} chars")}; " +
+                   $"Template={{{templateState}}}; " +
+                   $"Roles={{{string.Join(" | ", roleBreakdown)}}}";
+        }
 
         private (List<Student>? Team, bool IsSingleRole) TryBuildRoleTeam(
             List<Student> candidates,
