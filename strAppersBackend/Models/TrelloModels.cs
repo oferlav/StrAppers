@@ -170,6 +170,11 @@ namespace strAppersBackend.Models
         public string RoleName { get; set; } = string.Empty;
         public string Status { get; set; } = "To Do";
         public string Risk { get; set; } = "Medium";
+        // Stored TrelloBoardJson holds ModuleId as a JSON number in some rows and a string in others —
+        // the module-id remap and sanitiser both accept either shape, but deserialisation did not, so a
+        // numeric value threw on Cards[0] and the whole course template was discarded in favour of the
+        // AI/fallback plan (an all-but-empty board). Read either shape; always write a string.
+        [System.Text.Json.Serialization.JsonConverter(typeof(FlexibleStringConverter))]
         public string ModuleId { get; set; } = string.Empty;
         public string CardId { get; set; } = string.Empty;
         public List<string> Dependencies { get; set; } = new List<string>();
