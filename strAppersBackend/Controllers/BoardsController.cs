@@ -82,6 +82,32 @@ public partial class BoardsController : ControllerBase
     private static string Truncate(string? s, int max)
         => string.IsNullOrEmpty(s) ? "" : s.Length <= max ? s : s[..max] + "…";
 
+    /// <summary>
+    /// Title / brief / logo to display for a board, preferring the InstituteProject it was built from.
+    ///
+    /// A board's <c>ProjectId</c> points at the base <c>Projects</c> row. For a custom institute project
+    /// that row is a placeholder created by CreateEmptyProjectDesign with only a title ("New Project
+    /// Design") and no description, logo or organization — so reading it directly showed students the
+    /// default name, an empty Project Brief and no logo, while the real values sat on the InstituteProject.
+    ///
+    /// Scoped to InstituteId &gt; 1 (institute 1 is the default B2C institute, whose behaviour is
+    /// unchanged), and resolved from the InstituteProject itself rather than the denormalised
+    /// ProjectBoard.InstituteId, which is only populated when the board was created through the
+    /// institute path. Each field falls back to the base project independently, mirroring
+    /// CreateBoard's own effectiveTitle/effectiveDescription pattern — so this can only add a value,
+    /// never blank one that used to show.
+    /// </summary>
+    internal static (string? Title, string? Brief, string? Logo) ResolveBoardProjectIdentity(
+        Project? project,
+        InstituteProject? instituteProject)
+    {
+        var useInstitute = instituteProject != null && instituteProject.InstituteId > 1;
+        return (
+            (useInstitute ? instituteProject!.Title : null) ?? project?.Title,
+            (useInstitute ? instituteProject!.Description : null) ?? project?.Description,
+            (useInstitute ? instituteProject!.Logo : null) ?? project?.Logo);
+    }
+
     private async Task FlushDebugLog(System.Text.StringBuilder? debugLog, string boardId, string subjectPrefix = "BoardCreation Debug")
     {
         if (debugLog == null) return;
@@ -4637,6 +4663,7 @@ public partial class BoardsController : ControllerBase
             // Get ProjectBoard record from database
             var projectBoard = await _context.ProjectBoards
                 .Include(pb => pb.Project)
+                .Include(pb => pb.InstituteProject)
                 .FirstOrDefaultAsync(pb => pb.Id == boardId);
 
             if (projectBoard == null)
@@ -4648,6 +4675,8 @@ public partial class BoardsController : ControllerBase
                     Message = $"Board with ID {boardId} not found"
                 });
             }
+
+            var boardIdentity = ResolveBoardProjectIdentity(projectBoard.Project, projectBoard.InstituteProject);
 
             // Get Trello stats using the Trello board ID
             var stats = await _trelloService.GetProjectStatsAsync(boardId);
@@ -4733,8 +4762,11 @@ public partial class BoardsController : ControllerBase
             {
                 ["success"] = true,
                 ["boardId"] = boardId,
+                // projectId stays the base Projects id — it is a Projects FK other callers resolve against.
                 ["projectId"] = projectBoard.ProjectId,
-                ["projectName"] = projectBoard.Project?.Title ?? "",
+                ["projectName"] = boardIdentity.Title ?? "",
+                ["projectBrief"] = boardIdentity.Brief ?? "",
+                ["projectLogo"] = boardIdentity.Logo ?? "",
                 ["boardUrl"] = projectBoard.BoardUrl ?? "",
                 ["userStoryBoardUrl"] = projectBoard.UserStoryBoardUrl ?? "",
                 ["publishUrl"] = projectBoard.PublishUrl ?? "",
@@ -5158,6 +5190,7 @@ public partial class BoardsController : ControllerBase
             // Get ProjectBoard record from database
             var projectBoard = await _context.ProjectBoards
                 .Include(pb => pb.Project)
+                .Include(pb => pb.InstituteProject)
                 .FirstOrDefaultAsync(pb => pb.Id == boardId);
 
             if (projectBoard == null)
@@ -5249,7 +5282,7 @@ public partial class BoardsController : ControllerBase
                 ["success"] = true,
                 ["boardId"] = boardId,
                 ["projectId"] = projectBoard.ProjectId,
-                ["projectName"] = projectBoard.Project?.Title ?? "",
+                ["projectName"] = ResolveBoardProjectIdentity(projectBoard.Project, projectBoard.InstituteProject).Title ?? "",
                 ["boardUrl"] = projectBoard.BoardUrl ?? "",
                 ["userStoryBoardUrl"] = projectBoard.UserStoryBoardUrl ?? "",
                 ["members"] = ToCamelCaseKeys(membersResultNode) ?? membersResultNode
@@ -5451,6 +5484,9 @@ The actual prompt generation would require access to project details and student
                 .Include(s => s.ProjectBoard)
                     .ThenInclude(pb => pb.Project)
                         .ThenInclude(p => p.Organization)
+                .Include(s => s.ProjectBoard)
+                    .ThenInclude(pb => pb.InstituteProject)
+                        .ThenInclude(ip => ip!.Organization)
                 .Include(s => s.StudentRoles)
                     .ThenInclude(sr => sr.Role)
                 .FirstOrDefaultAsync(s => s.Id == studentId);
@@ -5496,6 +5532,8 @@ The actual prompt generation would require access to project details and student
                     Message = $"Project not found for board {board.Id}"
                 });
             }
+
+            var studentBoardIdentity = ResolveBoardProjectIdentity(project, board.InstituteProject);
 
             // Get project dates
             var startDate = board.StartDate ?? board.CreatedAt;
@@ -6434,7 +6472,9 @@ The actual prompt generation would require access to project details and student
             {
                 Success = true,
                 BoardId = board.Id,
-                ProjectName = project.Title,
+                ProjectName = studentBoardIdentity.Title,
+                ProjectBrief = studentBoardIdentity.Brief,
+                ProjectLogo = studentBoardIdentity.Logo,
                 OrganizationName = project.Organization?.Name ?? "N/A",
                 OrganizationWebsite = project.Organization?.Website,
                 OrgLogo = project.Organization?.Logo,
