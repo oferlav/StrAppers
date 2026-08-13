@@ -425,6 +425,9 @@ public partial class BoardsController : ControllerBase
                 useDBProjectBoard,
                 !string.IsNullOrWhiteSpace(effectiveTrelloBoardJson),
                 effectiveTrelloBoardJson?.Length ?? 0);
+            // Both must hold to build the board from the course template; either one false sends it to
+            // the AI/fallback plan, which is the difference between a real board and a near-empty one.
+            DbgLog(debugLog, $"[PLAN-SOURCE] Trello:UseDBProjectBoard={useDBProjectBoard} TrelloBoardJsonPresent={!string.IsNullOrWhiteSpace(effectiveTrelloBoardJson)} Len={effectiveTrelloBoardJson?.Length ?? 0} JsonFrom={(instituteProject?.TrelloBoardJson != null ? $"InstituteProject {instituteProject.Id}" : "Project " + project.Id)}");
             if (useDBProjectBoard && !string.IsNullOrWhiteSpace(effectiveTrelloBoardJson))
             {
                 try
@@ -432,6 +435,13 @@ public partial class BoardsController : ControllerBase
                     var saved = System.Text.Json.JsonSerializer.Deserialize<TrelloProjectCreationRequest>(effectiveTrelloBoardJson);
                     _logger.LogInformation("[BOARD-CREATE] Deserialized TrelloBoardJson: saved={Saved}, SprintPlan={HasPlan}, CardCount={CardCount}",
                         saved != null, saved?.SprintPlan != null, saved?.SprintPlan?.Cards?.Count ?? 0);
+                    DbgLog(debugLog, $"[PLAN-SOURCE] Deserialized TrelloBoardJson: saved={saved != null} SprintPlanPresent={saved?.SprintPlan != null} CardCount={saved?.SprintPlan?.Cards?.Count ?? 0} SprintLengthDays={saved?.SprintLengthDays?.ToString() ?? "(null)"}");
+                    if (saved == null || saved.SprintPlan == null)
+                    {
+                        // Deserialize succeeded but produced nothing usable — the board will be built from
+                        // the AI/fallback plan instead, which is what makes a board come out near-empty.
+                        DbgLog(debugLog, $"[PLAN-SOURCE] NOT using saved JSON: {(saved == null ? "deserialized to null" : "SprintPlan is null")}. Falling through to AI/fallback. JsonHead={Truncate(effectiveTrelloBoardJson, 400)}");
+                    }
                     if (saved != null && saved.SprintPlan != null)
                     {
                         useSavedTrelloJson = true;
@@ -485,13 +495,24 @@ public partial class BoardsController : ControllerBase
                                     teamRoleNames.Add($"{sRoleName} {s.RoleIndex}");
                             }
                         }
+                        // RoleIndex drives the "{RoleName} {RoleIndex}" labels above. It is assigned by the
+                        // team builder; a board created any other way leaves it 0, no indexed variant is
+                        // added, and the filter below then drops every card for that role.
+                        DbgLog(debugLog, $"[CARD-FILTER] IsSingleRole={request.IsSingleRole} StudentRoleIndexes=[{string.Join(", ", students.Select(s => $"{s.Id}:{s.RoleIndex}"))}] TeamRoleNames=[{string.Join(" | ", teamRoleNames)}]");
                         if (trelloRequest.SprintPlan?.Cards != null && teamRoleNames.Count > 0)
                         {
                             var before = trelloRequest.SprintPlan.Cards.Count;
+                            var templateRoleNames = trelloRequest.SprintPlan.Cards
+                                .Select(c => string.IsNullOrEmpty(c.RoleName) ? "(none)" : c.RoleName)
+                                .Distinct(StringComparer.OrdinalIgnoreCase)
+                                .ToList();
                             trelloRequest.SprintPlan.Cards = trelloRequest.SprintPlan.Cards
                                 .Where(c => string.Equals(c.ListName, "User Stories", StringComparison.OrdinalIgnoreCase) || (!string.IsNullOrEmpty(c.RoleName) && teamRoleNames.Contains(c.RoleName)))
                                 .ToList();
                             var removed = before - trelloRequest.SprintPlan.Cards.Count;
+                            DbgLog(debugLog, $"[CARD-FILTER] cards before={before} after={trelloRequest.SprintPlan.Cards.Count} removed={removed}; card RoleNames in template=[{string.Join(" | ", templateRoleNames)}]");
+                            if (trelloRequest.SprintPlan.Cards.Count == 0 && before > 0)
+                                DbgLog(debugLog, "[CARD-FILTER] WARNING: every card was filtered out — no template card RoleName matched the team's role names. The board will be created empty.");
                             if (removed > 0)
                                 _logger.LogInformation("Filtered {Removed} cards for roles not in team (template had all roles). User Stories list cards are always kept. Sending {Count} cards to Trello.", removed, trelloRequest.SprintPlan.Cards.Count);
                         }
@@ -522,9 +543,11 @@ public partial class BoardsController : ControllerBase
                 catch (Exception ex)
                 {
                     _logger.LogWarning(ex, "Failed to deserialize Project.TrelloBoardJson, falling back to AI");
+                    DbgLog(debugLog, $"[PLAN-SOURCE] EXCEPTION deserializing TrelloBoardJson — falling back to AI. {ex.GetType().Name}: {ex.Message}. JsonHead={Truncate(effectiveTrelloBoardJson, 400)}");
                 }
             }
 
+            DbgLog(debugLog, $"[PLAN-SOURCE] useSavedTrelloJson={useSavedTrelloJson} → board will be built from {(useSavedTrelloJson ? "the saved course template" : "the AI/fallback sprint plan")}.");
             if (!useSavedTrelloJson)
             {
             // Generate sprint plan using AI
@@ -630,6 +653,7 @@ public partial class BoardsController : ControllerBase
             if (_testingConfig.Value.SkipAIService)
             {
                 _logger.LogInformation("Testing mode: Skipping AI service, using fallback sprint plan");
+                DbgLog(debugLog, "[PLAN-SOURCE] FALLBACK plan used because TestingConfig:SkipAIService=true. Cards will read \"<Role> Task N - Sprint M\" / \"Basic development task for <Role> in sprint M\".");
                 var fallbackSprintPlan = CreateFallbackSprintPlan(project, students, roleGroups, projectLengthWeeks, sprintLengthWeeks);
                 sprintPlanResponse = new SprintPlanningResponse
                 {
@@ -652,7 +676,8 @@ public partial class BoardsController : ControllerBase
                 if (sprintPlanResponse.SprintPlan == null)
                 {
                     _logger.LogWarning("AI service returned null SprintPlan: {ErrorMessage}. Proceeding with basic sprint plan.", sprintPlanResponse.Message);
-                    
+                    DbgLog(debugLog, $"[PLAN-SOURCE] FALLBACK plan used because the AI service returned a null SprintPlan. AI message: {sprintPlanResponse.Message ?? "(none)"}. Cards will read \"<Role> Task N - Sprint M\" / \"Basic development task for <Role> in sprint M\".");
+
                     // Create a basic fallback sprint plan
                     var fallbackSprintPlan = CreateFallbackSprintPlan(project, students, roleGroups, projectLengthWeeks, sprintLengthWeeks);
                     sprintPlanResponse = new SprintPlanningResponse
