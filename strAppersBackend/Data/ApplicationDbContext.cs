@@ -98,6 +98,8 @@ public class ApplicationDbContext : DbContext
         {
             entity.ToTable("Institutes");
             entity.HasKey(e => e.Id);
+            entity.Property(e => e.PrimaryHeadline).HasColumnName("PrimaryHeadline").HasMaxLength(200);
+            entity.Property(e => e.SecondaryHeadline).HasColumnName("SecondaryHeadline").HasMaxLength(400);
             entity.Property(e => e.Name).IsRequired().HasMaxLength(200);
             entity.Property(e => e.Description).HasMaxLength(500);
             entity.Property(e => e.Website).HasMaxLength(100);
