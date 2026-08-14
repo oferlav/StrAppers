@@ -82,6 +82,32 @@ public partial class BoardsController : ControllerBase
     private static string Truncate(string? s, int max)
         => string.IsNullOrEmpty(s) ? "" : s.Length <= max ? s : s[..max] + "…";
 
+    /// <summary>
+    /// Title / brief / logo to display for a board, preferring the InstituteProject it was built from.
+    ///
+    /// A board's <c>ProjectId</c> points at the base <c>Projects</c> row. For a custom institute project
+    /// that row is a placeholder created by CreateEmptyProjectDesign with only a title ("New Project
+    /// Design") and no description, logo or organization — so reading it directly showed students the
+    /// default name, an empty Project Brief and no logo, while the real values sat on the InstituteProject.
+    ///
+    /// Scoped to InstituteId &gt; 1 (institute 1 is the default B2C institute, whose behaviour is
+    /// unchanged), and resolved from the InstituteProject itself rather than the denormalised
+    /// ProjectBoard.InstituteId, which is only populated when the board was created through the
+    /// institute path. Each field falls back to the base project independently, mirroring
+    /// CreateBoard's own effectiveTitle/effectiveDescription pattern — so this can only add a value,
+    /// never blank one that used to show.
+    /// </summary>
+    internal static (string? Title, string? Brief, string? Logo) ResolveBoardProjectIdentity(
+        Project? project,
+        InstituteProject? instituteProject)
+    {
+        var useInstitute = instituteProject != null && instituteProject.InstituteId > 1;
+        return (
+            (useInstitute ? instituteProject!.Title : null) ?? project?.Title,
+            (useInstitute ? instituteProject!.Description : null) ?? project?.Description,
+            (useInstitute ? instituteProject!.Logo : null) ?? project?.Logo);
+    }
+
     private async Task FlushDebugLog(System.Text.StringBuilder? debugLog, string boardId, string subjectPrefix = "BoardCreation Debug")
     {
         if (debugLog == null) return;
@@ -425,6 +451,9 @@ public partial class BoardsController : ControllerBase
                 useDBProjectBoard,
                 !string.IsNullOrWhiteSpace(effectiveTrelloBoardJson),
                 effectiveTrelloBoardJson?.Length ?? 0);
+            // Both must hold to build the board from the course template; either one false sends it to
+            // the AI/fallback plan, which is the difference between a real board and a near-empty one.
+            DbgLog(debugLog, $"[PLAN-SOURCE] Trello:UseDBProjectBoard={useDBProjectBoard} TrelloBoardJsonPresent={!string.IsNullOrWhiteSpace(effectiveTrelloBoardJson)} Len={effectiveTrelloBoardJson?.Length ?? 0} JsonFrom={(instituteProject?.TrelloBoardJson != null ? $"InstituteProject {instituteProject.Id}" : "Project " + project.Id)}");
             if (useDBProjectBoard && !string.IsNullOrWhiteSpace(effectiveTrelloBoardJson))
             {
                 try
@@ -432,6 +461,13 @@ public partial class BoardsController : ControllerBase
                     var saved = System.Text.Json.JsonSerializer.Deserialize<TrelloProjectCreationRequest>(effectiveTrelloBoardJson);
                     _logger.LogInformation("[BOARD-CREATE] Deserialized TrelloBoardJson: saved={Saved}, SprintPlan={HasPlan}, CardCount={CardCount}",
                         saved != null, saved?.SprintPlan != null, saved?.SprintPlan?.Cards?.Count ?? 0);
+                    DbgLog(debugLog, $"[PLAN-SOURCE] Deserialized TrelloBoardJson: saved={saved != null} SprintPlanPresent={saved?.SprintPlan != null} CardCount={saved?.SprintPlan?.Cards?.Count ?? 0} SprintLengthDays={saved?.SprintLengthDays?.ToString() ?? "(null)"}");
+                    if (saved == null || saved.SprintPlan == null)
+                    {
+                        // Deserialize succeeded but produced nothing usable — the board will be built from
+                        // the AI/fallback plan instead, which is what makes a board come out near-empty.
+                        DbgLog(debugLog, $"[PLAN-SOURCE] NOT using saved JSON: {(saved == null ? "deserialized to null" : "SprintPlan is null")}. Falling through to AI/fallback. JsonHead={Truncate(effectiveTrelloBoardJson, 400)}");
+                    }
                     if (saved != null && saved.SprintPlan != null)
                     {
                         useSavedTrelloJson = true;
@@ -485,13 +521,24 @@ public partial class BoardsController : ControllerBase
                                     teamRoleNames.Add($"{sRoleName} {s.RoleIndex}");
                             }
                         }
+                        // RoleIndex drives the "{RoleName} {RoleIndex}" labels above. It is assigned by the
+                        // team builder; a board created any other way leaves it 0, no indexed variant is
+                        // added, and the filter below then drops every card for that role.
+                        DbgLog(debugLog, $"[CARD-FILTER] IsSingleRole={request.IsSingleRole} StudentRoleIndexes=[{string.Join(", ", students.Select(s => $"{s.Id}:{s.RoleIndex}"))}] TeamRoleNames=[{string.Join(" | ", teamRoleNames)}]");
                         if (trelloRequest.SprintPlan?.Cards != null && teamRoleNames.Count > 0)
                         {
                             var before = trelloRequest.SprintPlan.Cards.Count;
+                            var templateRoleNames = trelloRequest.SprintPlan.Cards
+                                .Select(c => string.IsNullOrEmpty(c.RoleName) ? "(none)" : c.RoleName)
+                                .Distinct(StringComparer.OrdinalIgnoreCase)
+                                .ToList();
                             trelloRequest.SprintPlan.Cards = trelloRequest.SprintPlan.Cards
                                 .Where(c => string.Equals(c.ListName, "User Stories", StringComparison.OrdinalIgnoreCase) || (!string.IsNullOrEmpty(c.RoleName) && teamRoleNames.Contains(c.RoleName)))
                                 .ToList();
                             var removed = before - trelloRequest.SprintPlan.Cards.Count;
+                            DbgLog(debugLog, $"[CARD-FILTER] cards before={before} after={trelloRequest.SprintPlan.Cards.Count} removed={removed}; card RoleNames in template=[{string.Join(" | ", templateRoleNames)}]");
+                            if (trelloRequest.SprintPlan.Cards.Count == 0 && before > 0)
+                                DbgLog(debugLog, "[CARD-FILTER] WARNING: every card was filtered out — no template card RoleName matched the team's role names. The board will be created empty.");
                             if (removed > 0)
                                 _logger.LogInformation("Filtered {Removed} cards for roles not in team (template had all roles). User Stories list cards are always kept. Sending {Count} cards to Trello.", removed, trelloRequest.SprintPlan.Cards.Count);
                         }
@@ -522,9 +569,11 @@ public partial class BoardsController : ControllerBase
                 catch (Exception ex)
                 {
                     _logger.LogWarning(ex, "Failed to deserialize Project.TrelloBoardJson, falling back to AI");
+                    DbgLog(debugLog, $"[PLAN-SOURCE] EXCEPTION deserializing TrelloBoardJson — falling back to AI. {ex.GetType().Name}: {ex.Message}. JsonHead={Truncate(effectiveTrelloBoardJson, 400)}");
                 }
             }
 
+            DbgLog(debugLog, $"[PLAN-SOURCE] useSavedTrelloJson={useSavedTrelloJson} → board will be built from {(useSavedTrelloJson ? "the saved course template" : "the AI/fallback sprint plan")}.");
             if (!useSavedTrelloJson)
             {
             // Generate sprint plan using AI
@@ -630,6 +679,7 @@ public partial class BoardsController : ControllerBase
             if (_testingConfig.Value.SkipAIService)
             {
                 _logger.LogInformation("Testing mode: Skipping AI service, using fallback sprint plan");
+                DbgLog(debugLog, "[PLAN-SOURCE] FALLBACK plan used because TestingConfig:SkipAIService=true. Cards will read \"<Role> Task N - Sprint M\" / \"Basic development task for <Role> in sprint M\".");
                 var fallbackSprintPlan = CreateFallbackSprintPlan(project, students, roleGroups, projectLengthWeeks, sprintLengthWeeks);
                 sprintPlanResponse = new SprintPlanningResponse
                 {
@@ -652,7 +702,8 @@ public partial class BoardsController : ControllerBase
                 if (sprintPlanResponse.SprintPlan == null)
                 {
                     _logger.LogWarning("AI service returned null SprintPlan: {ErrorMessage}. Proceeding with basic sprint plan.", sprintPlanResponse.Message);
-                    
+                    DbgLog(debugLog, $"[PLAN-SOURCE] FALLBACK plan used because the AI service returned a null SprintPlan. AI message: {sprintPlanResponse.Message ?? "(none)"}. Cards will read \"<Role> Task N - Sprint M\" / \"Basic development task for <Role> in sprint M\".");
+
                     // Create a basic fallback sprint plan
                     var fallbackSprintPlan = CreateFallbackSprintPlan(project, students, roleGroups, projectLengthWeeks, sprintLengthWeeks);
                     sprintPlanResponse = new SprintPlanningResponse
@@ -4612,6 +4663,7 @@ public partial class BoardsController : ControllerBase
             // Get ProjectBoard record from database
             var projectBoard = await _context.ProjectBoards
                 .Include(pb => pb.Project)
+                .Include(pb => pb.InstituteProject)
                 .FirstOrDefaultAsync(pb => pb.Id == boardId);
 
             if (projectBoard == null)
@@ -4623,6 +4675,8 @@ public partial class BoardsController : ControllerBase
                     Message = $"Board with ID {boardId} not found"
                 });
             }
+
+            var boardIdentity = ResolveBoardProjectIdentity(projectBoard.Project, projectBoard.InstituteProject);
 
             // Get Trello stats using the Trello board ID
             var stats = await _trelloService.GetProjectStatsAsync(boardId);
@@ -4708,8 +4762,11 @@ public partial class BoardsController : ControllerBase
             {
                 ["success"] = true,
                 ["boardId"] = boardId,
+                // projectId stays the base Projects id — it is a Projects FK other callers resolve against.
                 ["projectId"] = projectBoard.ProjectId,
-                ["projectName"] = projectBoard.Project?.Title ?? "",
+                ["projectName"] = boardIdentity.Title ?? "",
+                ["projectBrief"] = boardIdentity.Brief ?? "",
+                ["projectLogo"] = boardIdentity.Logo ?? "",
                 ["boardUrl"] = projectBoard.BoardUrl ?? "",
                 ["userStoryBoardUrl"] = projectBoard.UserStoryBoardUrl ?? "",
                 ["publishUrl"] = projectBoard.PublishUrl ?? "",
@@ -5133,6 +5190,7 @@ public partial class BoardsController : ControllerBase
             // Get ProjectBoard record from database
             var projectBoard = await _context.ProjectBoards
                 .Include(pb => pb.Project)
+                .Include(pb => pb.InstituteProject)
                 .FirstOrDefaultAsync(pb => pb.Id == boardId);
 
             if (projectBoard == null)
@@ -5224,7 +5282,7 @@ public partial class BoardsController : ControllerBase
                 ["success"] = true,
                 ["boardId"] = boardId,
                 ["projectId"] = projectBoard.ProjectId,
-                ["projectName"] = projectBoard.Project?.Title ?? "",
+                ["projectName"] = ResolveBoardProjectIdentity(projectBoard.Project, projectBoard.InstituteProject).Title ?? "",
                 ["boardUrl"] = projectBoard.BoardUrl ?? "",
                 ["userStoryBoardUrl"] = projectBoard.UserStoryBoardUrl ?? "",
                 ["members"] = ToCamelCaseKeys(membersResultNode) ?? membersResultNode
@@ -5426,6 +5484,9 @@ The actual prompt generation would require access to project details and student
                 .Include(s => s.ProjectBoard)
                     .ThenInclude(pb => pb.Project)
                         .ThenInclude(p => p.Organization)
+                .Include(s => s.ProjectBoard)
+                    .ThenInclude(pb => pb.InstituteProject)
+                        .ThenInclude(ip => ip!.Organization)
                 .Include(s => s.StudentRoles)
                     .ThenInclude(sr => sr.Role)
                 .FirstOrDefaultAsync(s => s.Id == studentId);
@@ -5471,6 +5532,8 @@ The actual prompt generation would require access to project details and student
                     Message = $"Project not found for board {board.Id}"
                 });
             }
+
+            var studentBoardIdentity = ResolveBoardProjectIdentity(project, board.InstituteProject);
 
             // Get project dates
             var startDate = board.StartDate ?? board.CreatedAt;
@@ -6409,7 +6472,9 @@ The actual prompt generation would require access to project details and student
             {
                 Success = true,
                 BoardId = board.Id,
-                ProjectName = project.Title,
+                ProjectName = studentBoardIdentity.Title,
+                ProjectBrief = studentBoardIdentity.Brief,
+                ProjectLogo = studentBoardIdentity.Logo,
                 OrganizationName = project.Organization?.Name ?? "N/A",
                 OrganizationWebsite = project.Organization?.Website,
                 OrgLogo = project.Organization?.Logo,

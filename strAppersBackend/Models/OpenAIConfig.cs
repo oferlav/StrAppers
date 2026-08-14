@@ -125,6 +125,9 @@ public class ProjectTask
     public int Priority { get; set; }
     public string Status { get; set; } = "To Do";
     public string Risk { get; set; } = "Medium";
+    // Same tolerance as TrelloCard.ModuleId: the AI returns this as a number as readily as a string,
+    // and a parse failure here costs the whole sprint plan.
+    [JsonConverter(typeof(FlexibleStringConverter))]
     public string ModuleId { get; set; } = string.Empty;
     public string CardId { get; set; } = string.Empty;
     public List<string> Dependencies { get; set; } = new List<string>();
