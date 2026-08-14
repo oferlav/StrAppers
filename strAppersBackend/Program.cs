@@ -143,6 +143,8 @@ builder.Services.AddSingleton<IAzureBlobStorageService, AzureBlobStorageService>
 // Project design (Institute) header field word limits — see ProjectsInstitute:MaxLengthFields in appsettings
 builder.Services.Configure<ProjectsInstituteMaxLengthFieldsOptions>(
     builder.Configuration.GetSection(ProjectsInstituteMaxLengthFieldsOptions.SectionName));
+builder.Services.Configure<InstituteHeadlineFieldsOptions>(
+    builder.Configuration.GetSection(InstituteHeadlineFieldsOptions.SectionName));
 
 // Shared SSL callback: accept all certificate errors for GitHub (UntrustedRoot, corporate proxy, VM restart)
 // so GitHub API calls work reliably in restricted networks

@@ -4,6 +4,8 @@ using strAppersBackend.Data;
 using strAppersBackend.Models;
 using strAppersBackend.Services;
 using System.ComponentModel.DataAnnotations;
+using Microsoft.Extensions.Options;
+using strAppersBackend.Utilities;
 
 namespace strAppersBackend.Controllers;
 
@@ -18,19 +20,22 @@ public class InstitutesController : ControllerBase
     private readonly IPasswordHasherService _passwordHasher;
     private readonly ISmtpEmailService _smtpEmailService;
     private readonly IConfiguration _configuration;
+    private readonly IOptions<InstituteHeadlineFieldsOptions> _headlineOptions;
 
     public InstitutesController(
         ApplicationDbContext context,
         ILogger<InstitutesController> logger,
         IPasswordHasherService passwordHasher,
         ISmtpEmailService smtpEmailService,
-        IConfiguration configuration)
+        IConfiguration configuration,
+        IOptions<InstituteHeadlineFieldsOptions> headlineOptions)
     {
         _context = context;
         _logger = logger;
         _passwordHasher = passwordHasher;
         _smtpEmailService = smtpEmailService;
         _configuration = configuration;
+        _headlineOptions = headlineOptions;
     }
 
     /// <summary>
@@ -490,6 +495,12 @@ public class InstitutesController : ControllerBase
                 InstituteName = institute.Name,
                 QuestMode = institute.QuestMode,
                 AssessmentEngineAIModelId = institute.AssessmentEngineAIModelId,
+                // The settings page loads its whole form from this call, so the headlines ride along
+                // with the other institute settings rather than needing a second request.
+                PrimaryHeadline = institute.PrimaryHeadline,
+                SecondaryHeadline = institute.SecondaryHeadline,
+                PrimaryHeadlineWords = _headlineOptions.Value.PrimaryWords,
+                SecondaryHeadlineWords = _headlineOptions.Value.SecondaryWords,
                 Teachers = teachers,
             });
         }
@@ -563,10 +574,18 @@ public class InstitutesController : ControllerBase
     {
         var row = await _context.Institutes
             .Where(i => i.Id == id)
-            .Select(i => new { i.Logo, i.Website })
+            .Select(i => new { i.Logo, i.Website, i.PrimaryHeadline, i.SecondaryHeadline })
             .FirstOrDefaultAsync();
 
-        return Ok(new { logo = row?.Logo, website = row?.Website });
+        // Also carries the hero headlines: Choose Your Squad already calls this for institutes above 1,
+        // so the branding it needs arrives in one request rather than two.
+        return Ok(new
+        {
+            logo = row?.Logo,
+            website = row?.Website,
+            primaryHeadline = row?.PrimaryHeadline,
+            secondaryHeadline = row?.SecondaryHeadline,
+        });
     }
 
     /// <summary>
@@ -621,17 +640,27 @@ public class InstitutesController : ControllerBase
 
             institute.QuestMode = request.QuestMode;
             institute.AssessmentEngineAIModelId = request.AssessmentEngineAIModelId;
+            // Clamped server-side as well as in the editor: the limit is what the hero layout is built
+            // for, and the frontend counter must not be the only thing enforcing it.
+            institute.PrimaryHeadline =
+                HeadlineWordLimit.ClampToMaxWords(request.PrimaryHeadline, _headlineOptions.Value.PrimaryWords);
+            institute.SecondaryHeadline =
+                HeadlineWordLimit.ClampToMaxWords(request.SecondaryHeadline, _headlineOptions.Value.SecondaryWords);
             institute.UpdatedAt = DateTime.UtcNow;
             await _context.SaveChangesAsync();
 
             _logger.LogInformation(
-                "Settings updated for institute {InstituteId}: QuestMode={QuestMode} AssessmentEngineAIModelId={AssessmentEngineAIModelId}",
-                id, institute.QuestMode, institute.AssessmentEngineAIModelId);
+                "Settings updated for institute {InstituteId}: QuestMode={QuestMode} AssessmentEngineAIModelId={AssessmentEngineAIModelId} PrimaryHeadlineWords={PrimaryWords} SecondaryHeadlineWords={SecondaryWords}",
+                id, institute.QuestMode, institute.AssessmentEngineAIModelId,
+                HeadlineWordLimit.CountWords(institute.PrimaryHeadline),
+                HeadlineWordLimit.CountWords(institute.SecondaryHeadline));
             return Ok(new
             {
                 Success = true,
                 QuestMode = institute.QuestMode,
                 AssessmentEngineAIModelId = institute.AssessmentEngineAIModelId,
+                PrimaryHeadline = institute.PrimaryHeadline,
+                SecondaryHeadline = institute.SecondaryHeadline,
             });
         }
         catch (Exception ex)
@@ -704,6 +733,12 @@ public class UpdateInstituteLogoRequest
 public class UpdateInstituteSettingsRequest
 {
     public bool QuestMode { get; set; }
+
+    /// <summary>Hero headline for Choose Your Squad. Clamped server-side; null/blank clears it.</summary>
+    public string? PrimaryHeadline { get; set; }
+
+    /// <summary>Hero sub-headline for Choose Your Squad. Clamped server-side; null/blank clears it.</summary>
+    public string? SecondaryHeadline { get; set; }
 
     /// <summary>AIModels.Id for the generic Data Assessment Engine. Null clears the override (falls back to config default).</summary>
     public int? AssessmentEngineAIModelId { get; set; }

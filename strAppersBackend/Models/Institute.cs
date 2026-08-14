@@ -41,6 +41,23 @@ public class Institute
     [Column("Logo")]
     public string? Logo { get; set; }
 
+    /// <summary>
+    /// Hero headline shown to this institute's students on Choose Your Squad, replacing the default
+    /// marketing copy. Applies to InstituteId &gt; 1 only; null falls back to the default copy.
+    /// Word limit enforced server-side (Institutes:HeadlineFields:PrimaryWords).
+    /// </summary>
+    [Column("PrimaryHeadline")]
+    [MaxLength(200)]
+    public string? PrimaryHeadline { get; set; }
+
+    /// <summary>
+    /// Sub-headline shown under <see cref="PrimaryHeadline"/>. Same scoping and fallback rules.
+    /// Word limit enforced server-side (Institutes:HeadlineFields:SecondaryWords).
+    /// </summary>
+    [Column("SecondaryHeadline")]
+    [MaxLength(400)]
+    public string? SecondaryHeadline { get; set; }
+
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
     public DateTime? UpdatedAt { get; set; }
 
