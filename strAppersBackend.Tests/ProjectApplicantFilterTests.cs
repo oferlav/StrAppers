@@ -132,4 +132,60 @@ public class ProjectApplicantFilterTests
 
         Assert.Contains(1, survivors);
     }
+
+    // ── Role-type courses: every team member shares one role ─────────────────
+    // get-students passes candidateRoleName: null (no same-role exclusion) and
+    // perRoleLimit: RoleCount instead of the Squad-mode dedupe-to-one.
+
+    [Fact]
+    public void RoleCourse_KeepsUpToRoleCountApplicantsOnTheSameRole()
+    {
+        var students = new List<ProjectsController.ApplicantRoleView>
+        {
+            Applicant(1, "Data Analyst", new DateTime(2026, 7, 1)),
+            Applicant(2, "Data Analyst", new DateTime(2026, 7, 2)),
+            Applicant(3, "Data Analyst", new DateTime(2026, 7, 3)),
+            Applicant(4, "Data Analyst", new DateTime(2026, 7, 4)),
+        };
+
+        var survivors = ProjectsController.FilterApplicantsForCandidate(
+            students, candidateRoleName: null, currentStudentId: 3, perRoleLimit: 3);
+
+        Assert.Equal(3, survivors.Count);
+        Assert.Contains(3, survivors);            // self always kept
+        Assert.Contains(1, survivors);            // then earliest UpdatedAt
+        Assert.Contains(2, survivors);
+        Assert.DoesNotContain(4, survivors);      // beyond RoleCount
+    }
+
+    [Fact]
+    public void RoleCourse_RosterSmallerThanRoleCount_KeepsEveryone()
+    {
+        var students = new List<ProjectsController.ApplicantRoleView>
+        {
+            Applicant(1, "Data Analyst", new DateTime(2026, 7, 1)),
+            Applicant(2, "Data Analyst", new DateTime(2026, 7, 2)),
+        };
+
+        var survivors = ProjectsController.FilterApplicantsForCandidate(
+            students, candidateRoleName: null, currentStudentId: 1, perRoleLimit: 4);
+
+        Assert.Equal(2, survivors.Count);
+    }
+
+    [Fact]
+    public void PerRoleLimitDefaultsToOne_SquadBehaviourUnchanged()
+    {
+        var students = new List<ProjectsController.ApplicantRoleView>
+        {
+            Applicant(1, "Data Analyst", new DateTime(2026, 7, 1)),
+            Applicant(2, "Data Analyst", new DateTime(2026, 7, 2)),
+        };
+
+        var survivors = ProjectsController.FilterApplicantsForCandidate(
+            students, candidateRoleName: null, currentStudentId: null);
+
+        Assert.Single(survivors);
+        Assert.Contains(1, survivors);
+    }
 }
