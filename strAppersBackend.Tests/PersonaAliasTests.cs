@@ -1,3 +1,4 @@
+using strAppersBackend.Controllers;
 using strAppersBackend.Utilities;
 
 namespace strAppersBackend.Tests;
@@ -126,4 +127,61 @@ public class PersonaAliasTests
 
     private static int CountOccurrences(string haystack, string needle) =>
         haystack.Split(needle).Length - 1;
+}
+
+/// <summary>
+/// The assessment report's Data Sources list. It is built server-side from SensorCatalog, so it
+/// needs its own rename to agree with the Data sensors form the staff sees next to it.
+///
+/// The catalog itself is deliberately left alone — those same labels feed the LLM prompt through
+/// AppendEvidenceScopeHeader, where PersonaAlias already renames them.
+/// </summary>
+public class ReportSensorLabelTests
+{
+    private static readonly string[] Sensors =
+    {
+        "AI Customer Chat", "AI Mentor Chat", "Codebase & Github", "Figma Design",
+    };
+
+    [Fact]
+    public void NamedPersona_RenamesOnlyTheAiChatSensor()
+    {
+        var result = MetricsController.ApplyPersonaToSensorLabels(Sensors, "Professor");
+
+        Assert.Equal(
+            new[] { "AI Professor Chat", "AI Mentor Chat", "Codebase & Github", "Figma Design" },
+            result);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("   ")]
+    [InlineData("Customer")]
+    [InlineData("customer")]
+    public void NoPersonaOrCustomer_LeavesEveryLabelUntouched(string? personaName)
+    {
+        var result = MetricsController.ApplyPersonaToSensorLabels(Sensors, personaName);
+
+        Assert.Equal(Sensors, result);
+        // Untouched means the same list instance — no rebuild, so no ordering or casing can drift.
+        Assert.Same(Sensors, result);
+    }
+
+    [Fact]
+    public void MentorChatSensor_IsNeverRenamed()
+    {
+        // "AI Mentor Chat" is a different platform entity and must survive verbatim.
+        var result = MetricsController.ApplyPersonaToSensorLabels(Sensors, "Customer Success Lead");
+
+        Assert.Contains("AI Mentor Chat", result);
+        Assert.Contains("AI Customer Success Lead Chat", result);
+    }
+
+    [Fact]
+    public void EmptySensorList_StaysEmpty()
+    {
+        // Summary rows report no sensors at all.
+        Assert.Empty(MetricsController.ApplyPersonaToSensorLabels(Array.Empty<string>(), "Professor"));
+    }
 }

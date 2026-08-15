@@ -165,7 +165,8 @@ public partial class MetricsController
         // switching a metric off stops new data without erasing the record of the sprints it covered.
         var sprints = BuildAssessmentSprints(rows, includeSquadInStudentName: false,
             await BuildMainToolLookupAsync(rows, cancellationToken),
-            await BuildSprintDateLookupAsync(boardIdTrim, rows, cancellationToken));
+            await BuildSprintDateLookupAsync(boardIdTrim, rows, cancellationToken),
+            await ResolveReportPersonaNameAsync(rows, cancellationToken));
 
         return Ok(new AssessmentReportDto
         {
@@ -237,7 +238,9 @@ public partial class MetricsController
 
         // Unfiltered by Metrics.Required, same as the board-scoped path above.
         var sprints = BuildAssessmentSprints(rows, includeSquadInStudentName: true,
-            await BuildMainToolLookupAsync(rows, cancellationToken));
+            await BuildMainToolLookupAsync(rows, cancellationToken),
+            sprintDates: null,
+            personaName: await ResolveReportPersonaNameAsync(rows, cancellationToken));
 
         return Ok(new AssessmentReportDto
         {
@@ -285,7 +288,8 @@ public partial class MetricsController
         IReadOnlyList<CacheMetrics> rows,
         bool includeSquadInStudentName = false,
         IReadOnlyDictionary<int, string?>? mainToolByStudent = null,
-        IReadOnlyDictionary<int, (DateTime Start, DateTime End)>? sprintDates = null)
+        IReadOnlyDictionary<int, (DateTime Start, DateTime End)>? sprintDates = null,
+        string? personaName = null)
     {
         // Course summaries (SprintNumber = CourseSummarySprintNumber) are not a real sprint — they are
         // reported separately via BuildCourseSummaries, never as a sprint section.
@@ -306,7 +310,7 @@ public partial class MetricsController
                     StudentName = FormatStudentName(first, includeSquadInStudentName),
                     Metrics = studentGroup
                         .OrderBy(r => r.MetricId)
-                        .Select(r => MapMetricDto(r, mainToolByStudent?.GetValueOrDefault(r.StudentId)))
+                        .Select(r => MapMetricDto(r, mainToolByStudent?.GetValueOrDefault(r.StudentId), personaName))
                         .ToList()
                 });
             }
@@ -425,11 +429,53 @@ public partial class MetricsController
     /// theirs already. Hard skills (-1) reports whatever its role's Main Tool selects, matching what
     /// BuildHardSkillsMetric actually collected.
     /// </summary>
-    internal static IReadOnlyList<string> ResolveReportSensors(CacheMetrics row, string? mainTool)
+    internal static IReadOnlyList<string> ResolveReportSensors(CacheMetrics row, string? mainTool, string? personaName = null)
     {
         if (row.MetricId == SummaryMetricId) return Array.Empty<string>();
-        if (row.MetricId == HardSkillsMetricId) return DescribeSensors(BuildHardSkillsMetric(string.Empty, mainTool));
-        return DescribeSensors(row.Metric);
+        if (row.MetricId == HardSkillsMetricId)
+            return ApplyPersonaToSensorLabels(DescribeSensors(BuildHardSkillsMetric(string.Empty, mainTool)), personaName);
+        return ApplyPersonaToSensorLabels(DescribeSensors(row.Metric), personaName);
+    }
+
+    /// <summary>The AI-chat sensor's label in <see cref="SensorCatalog"/> — the platform default wording.</summary>
+    internal const string CustomerChatSensorLabel = "AI Customer Chat";
+
+    /// <summary>
+    /// Renames the AI-chat sensor in the report's Data Sources to the institute's persona, so the
+    /// report agrees with the Data sensors form next to it.
+    ///
+    /// Only the report display is rewritten. <see cref="SensorCatalog"/> keeps the default wording
+    /// because <see cref="AppendEvidenceScopeHeader"/> feeds those same labels into the LLM prompt,
+    /// where PersonaAlias already handles the renaming — doing it in both places would be redundant.
+    ///
+    /// A null, blank or "Customer" persona returns the list untouched, so institutes without a
+    /// persona see exactly what they saw before.
+    /// </summary>
+    internal static IReadOnlyList<string> ApplyPersonaToSensorLabels(
+        IReadOnlyList<string> sensors, string? personaName)
+    {
+        var name = PersonasController.ResolvePersonaLabel(personaName);
+        if (string.Equals(name, PersonasController.DefaultPersonaName, StringComparison.OrdinalIgnoreCase))
+            return sensors;
+
+        return sensors
+            .Select(s => string.Equals(s, CustomerChatSensorLabel, StringComparison.Ordinal) ? $"AI {name} Chat" : s)
+            .ToList();
+    }
+
+    /// <summary>
+    /// Persona for a report. Reports are scoped to one board or one institute, so every row shares a
+    /// persona — resolved once from the first row's student rather than per row.
+    /// </summary>
+    private async Task<string?> ResolveReportPersonaNameAsync(IReadOnlyList<CacheMetrics> rows, CancellationToken ct)
+    {
+        var studentId = rows.Select(r => r.StudentId).FirstOrDefault(id => id > 0);
+        if (studentId <= 0) return null;
+
+        return await _context.Students.AsNoTracking()
+            .Where(s => s.Id == studentId && s.Institute != null && s.Institute.MainAIPersonaId != null)
+            .Select(s => s.Institute!.MainAIPersona!.Name)
+            .FirstOrDefaultAsync(ct);
     }
 
     /// <summary>
@@ -479,7 +525,7 @@ public partial class MetricsController
         return lookup;
     }
 
-    internal static AssessmentReportMetricDto MapMetricDto(CacheMetrics row, string? mainTool = null)
+    internal static AssessmentReportMetricDto MapMetricDto(CacheMetrics row, string? mainTool = null, string? personaName = null)
     {
         // The sentinel rows are named "SprintSummary" (Id=0) and "HardSkills" (Id=-1) in the Metrics
         // table (see the SeedSummaryMetricRow / SeedHardSkillsMetricRow migrations); the report shows
@@ -500,7 +546,7 @@ public partial class MetricsController
             ReviewContent = row.ReviewContent ?? "",
             Graph = string.IsNullOrWhiteSpace(row.Graph) ? null : row.Graph.Trim(),
             Graph2 = string.IsNullOrWhiteSpace(row.Graph2) ? null : row.Graph2.Trim(),
-            Sensors = ResolveReportSensors(row, mainTool)
+            Sensors = ResolveReportSensors(row, mainTool, personaName)
         };
     }
 
