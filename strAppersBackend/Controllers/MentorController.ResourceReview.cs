@@ -296,7 +296,12 @@ public partial class MentorController
             if (!string.IsNullOrEmpty(fullStackBlock))
                 baseSystem += fullStackBlock;
 
-            var systemPrompt = $"{GetPlatformInterfaceAndRolePermissions()}\n\n{baseSystem}\n\n{reviewInstructions}".Trim();
+            // Persona alias first, so it frames every instruction after it. Empty — and therefore a
+            // no-op — for institutes with no persona. See Utilities/PersonaAlias.
+            var personaAlias = await Utilities.PersonaAlias.ResolveForStudentAsync(_context, request.StudentId, cancellationToken);
+            var systemPrompt = Utilities.PersonaAlias.Prepend(
+                personaAlias,
+                $"{GetPlatformInterfaceAndRolePermissions()}\n\n{baseSystem}\n\n{reviewInstructions}".Trim());
 
             var userMessage = new StringBuilder();
             userMessage.AppendLine("=== STRUCTURED CONTEXT (module + user story) ===");

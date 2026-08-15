@@ -6577,6 +6577,13 @@ Your intelligence is strictly tethered to the Current Project Context and the us
                     _logger.LogInformation("DebugSystemPrompt: full prompt (system + user) with source markers:\n--- SYSTEM ---\n{SystemPrompt}\n--- USER ---\n{UserPrompt}", enhancedSystemPrompt, fullUserPrompt);
                 }
                 var systemPromptForApi = _promptConfig.Mentor.DebugSystemPrompt ? StripDebugMarkers(enhancedSystemPrompt) : enhancedSystemPrompt;
+                // Persona alias last in assembly but first in the prompt. This is also what covers
+                // PromptConfig:Mentor:NonDeveloperInstructions, which tells non-devs to "interview the
+                // AI Customer" — a single global string with no per-institute override of its own.
+                // Empty, and therefore a no-op, for institutes with no persona.
+                systemPromptForApi = Utilities.PersonaAlias.Prepend(
+                    await Utilities.PersonaAlias.ResolveForStudentAsync(_context, student?.Id ?? 0),
+                    systemPromptForApi);
                 string aiResponse;
                 int inputTokens = 0;
                 int outputTokens = 0;

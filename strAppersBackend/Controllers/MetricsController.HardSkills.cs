@@ -250,6 +250,10 @@ public partial class MetricsController
             ? "The role has no single Main Tool, so all available sprint evidence is provided."
             : $"The role's Main Tool is {mainTool}. The evidence below is drawn from it — judge the professional skills through that work.";
 
+        // Renames the simulated stakeholder for this institute's persona. Empty — and therefore a
+        // no-op — when no persona is selected. See Utilities/PersonaAlias.
+        var personaAlias = await PersonaAlias.ResolveForStudentAsync(_context, student.Id, cancellationToken);
+
         var systemPrompt = $$"""
             You are a professional-skills assessment expert for the role "{{role.Name}}".
 
@@ -280,6 +284,7 @@ public partial class MetricsController
               {"categories":[{"name":"string","score":0,"rationale":"string"}],"narrative":"markdown"}
             - narrative: brief markdown summary of technical strengths, gaps, and 1–3 concrete follow-up suggestions.{{gitHubScoringRules}}
             """;
+        systemPrompt = PersonaAlias.Prepend(personaAlias, systemPrompt);
 
         var userPrompt = new StringBuilder()
             .AppendLine($"## Sprint Context — Sprint {request.SprintNumber} | Student: {student.FirstName} {student.LastName} | Board: {boardId}")
