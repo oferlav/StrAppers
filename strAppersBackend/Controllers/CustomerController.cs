@@ -45,6 +45,46 @@ namespace strAppersBackend.Controllers
         }
 
         /// <summary>
+        /// Last-resort system prompt: used only when neither the institute's persona nor
+        /// <c>PromptConfig:Customer:SystemPrompt</c> carries any text.
+        /// </summary>
+        internal const string DefaultCustomerSystemPrompt =
+            "You are a helpful assistant. Use the context provided to answer questions. Be concise and professional.";
+
+        /// <summary>
+        /// System prompt precedence for the student-facing AI chat:
+        /// 1. the institute's <see cref="Persona.Prompt"/> (Institutes.MainAIPersonaId),
+        /// 2. the configured <c>PromptConfig:Customer:SystemPrompt</c>,
+        /// 3. <see cref="DefaultCustomerSystemPrompt"/>.
+        ///
+        /// Blank is treated as "not set" at every level, so a persona row created with an empty
+        /// Prompt falls through to config rather than sending the model an empty system message.
+        /// </summary>
+        internal static string ResolveCustomerSystemPrompt(string? personaPrompt, string? configuredPrompt)
+        {
+            if (!string.IsNullOrWhiteSpace(personaPrompt))
+                return personaPrompt.Trim();
+            if (!string.IsNullOrWhiteSpace(configuredPrompt))
+                return configuredPrompt;
+            return DefaultCustomerSystemPrompt;
+        }
+
+        /// <summary>
+        /// The prompt of the persona the student's institute selected, or null when the student has no
+        /// institute (B2C), the institute selected no persona, or the persona row is gone.
+        /// </summary>
+        private async Task<string?> ResolvePersonaPromptAsync(int? instituteId)
+        {
+            if (instituteId is null or <= 0)
+                return null;
+
+            return await _context.Institutes.AsNoTracking()
+                .Where(i => i.Id == instituteId.Value && i.MainAIPersonaId != null)
+                .Select(i => i.MainAIPersona!.Prompt)
+                .FirstOrDefaultAsync();
+        }
+
+        /// <summary>
         /// Get the last X chat history messages for a student/sprint (X = ChatHistoryLength from appSettings). For frontend refresh of chat.
         /// Filters by StudentId and SprintNumber (CustomerChatHistory.StudentId stores the actual student Id).
         /// </summary>
@@ -137,10 +177,11 @@ namespace strAppersBackend.Controllers
                     ? "(No module context for this project/sprint.)"
                     : string.Join("\n\n", modules.Select(m => $"Module: {m.Title ?? "Untitled"}\nDescription: {m.Description ?? ""}"));
 
-                // PromptType: Customer — Keep (config; single block with placeholders [INSERT PROJECT DESCRIPTION HERE], etc.)
-                var systemPrompt = string.IsNullOrWhiteSpace(_promptConfig.Customer.SystemPrompt)
-                    ? "You are a helpful assistant. Use the context provided to answer questions. Be concise and professional."
-                    : _promptConfig.Customer.SystemPrompt;
+                // The persona selected by the student's institute owns the system prompt; the configured
+                // PromptConfig:Customer:SystemPrompt is the fallback for institutes that selected none
+                // and for B2C students, who have no institute at all.
+                var personaPrompt = await ResolvePersonaPromptAsync(student.InstituteId);
+                var systemPrompt = ResolveCustomerSystemPrompt(personaPrompt, _promptConfig.Customer.SystemPrompt);
                 // Inject Projects.Description into placeholder [INSERT PROJECT DESCRIPTION HERE]
                 const string projectDescriptionPlaceholder = "[INSERT PROJECT DESCRIPTION HERE]";
                 var promptWithDescription = systemPrompt.Contains(projectDescriptionPlaceholder, StringComparison.OrdinalIgnoreCase)

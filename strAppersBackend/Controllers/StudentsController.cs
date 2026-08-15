@@ -1452,6 +1452,7 @@ public class StudentsController : ControllerBase
                     .ThenInclude(sr => sr.Role)
                 .Include(s => s.ProjectBoard)
                 .Include(s => s.Institute)
+                    .ThenInclude(i => i!.MainAIPersona)
                 .FirstOrDefaultAsync(s => s.Email == email);
 
             if (student == null)
@@ -1517,6 +1518,9 @@ public class StudentsController : ControllerBase
                 InstituteId = student.InstituteId,
                 QuestMode = student.Institute?.QuestMode ?? false,
                 SingleQuest = student.Institute?.SingleQuest ?? true,
+                // Label for the student-facing AI chat tab. Rides along here rather than needing its
+                // own request: the board room already loads this student before rendering the sidebar.
+                MainAIPersonaName = PersonasController.ResolvePersonaLabel(student.Institute?.MainAIPersona?.Name),
                 Coupon = student.Coupon
             });
         }

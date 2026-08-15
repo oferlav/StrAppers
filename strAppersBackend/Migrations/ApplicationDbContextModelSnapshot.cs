@@ -913,6 +913,9 @@ namespace strAppersBackend.Migrations
                         .HasColumnType("text")
                         .HasColumnName("Logo");
 
+                    b.Property<int?>("MainAIPersonaId")
+                        .HasColumnType("integer");
+
                     b.Property<string>("Name")
                         .IsRequired()
                         .HasMaxLength(200)
@@ -965,6 +968,8 @@ namespace strAppersBackend.Migrations
                     b.HasKey("Id");
 
                     b.HasIndex("AssessmentEngineAIModelId");
+
+                    b.HasIndex("MainAIPersonaId");
 
                     b.ToTable("Institutes", (string)null);
 
@@ -1998,6 +2003,27 @@ namespace strAppersBackend.Migrations
                             Type = "Non-profit",
                             Website = "https://codeforgood.org"
                         });
+                });
+
+            modelBuilder.Entity("strAppersBackend.Models.Persona", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)");
+
+                    b.Property<string>("Prompt")
+                        .HasColumnType("text");
+
+                    b.HasKey("Id");
+
+                    b.ToTable("Personas", (string)null);
                 });
 
             modelBuilder.Entity("strAppersBackend.Models.PrivateChat", b =>
@@ -4766,7 +4792,14 @@ namespace strAppersBackend.Migrations
                         .HasForeignKey("AssessmentEngineAIModelId")
                         .OnDelete(DeleteBehavior.SetNull);
 
+                    b.HasOne("strAppersBackend.Models.Persona", "MainAIPersona")
+                        .WithMany()
+                        .HasForeignKey("MainAIPersonaId")
+                        .OnDelete(DeleteBehavior.SetNull);
+
                     b.Navigation("AssessmentEngineAIModel");
+
+                    b.Navigation("MainAIPersona");
 
                     b.Navigation("InstituteProjects");
 

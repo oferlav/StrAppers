@@ -495,6 +495,7 @@ public class InstitutesController : ControllerBase
                 InstituteName = institute.Name,
                 QuestMode = institute.QuestMode,
                 AssessmentEngineAIModelId = institute.AssessmentEngineAIModelId,
+                MainAIPersonaId = institute.MainAIPersonaId,
                 // The settings page loads its whole form from this call, so the headlines ride along
                 // with the other institute settings rather than needing a second request.
                 PrimaryHeadline = institute.PrimaryHeadline,
@@ -638,8 +639,16 @@ public class InstitutesController : ControllerBase
                     return BadRequest(new { Success = false, Message = $"AI model {request.AssessmentEngineAIModelId.Value} not found or inactive." });
             }
 
+            if (request.MainAIPersonaId.HasValue)
+            {
+                var personaExists = await _context.Personas.AnyAsync(p => p.Id == request.MainAIPersonaId.Value);
+                if (!personaExists)
+                    return BadRequest(new { Success = false, Message = $"Persona {request.MainAIPersonaId.Value} not found." });
+            }
+
             institute.QuestMode = request.QuestMode;
             institute.AssessmentEngineAIModelId = request.AssessmentEngineAIModelId;
+            institute.MainAIPersonaId = request.MainAIPersonaId;
             // Clamped server-side as well as in the editor: the limit is what the hero layout is built
             // for, and the frontend counter must not be the only thing enforcing it.
             institute.PrimaryHeadline =
@@ -659,6 +668,7 @@ public class InstitutesController : ControllerBase
                 Success = true,
                 QuestMode = institute.QuestMode,
                 AssessmentEngineAIModelId = institute.AssessmentEngineAIModelId,
+                MainAIPersonaId = institute.MainAIPersonaId,
                 PrimaryHeadline = institute.PrimaryHeadline,
                 SecondaryHeadline = institute.SecondaryHeadline,
             });
@@ -742,4 +752,7 @@ public class UpdateInstituteSettingsRequest
 
     /// <summary>AIModels.Id for the generic Data Assessment Engine. Null clears the override (falls back to config default).</summary>
     public int? AssessmentEngineAIModelId { get; set; }
+
+    /// <summary>Personas.Id driving the student-facing AI chat's prompt and labels. Null clears it (falls back to the configured customer prompt and the "Customer" label).</summary>
+    public int? MainAIPersonaId { get; set; }
 }

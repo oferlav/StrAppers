@@ -83,6 +83,16 @@ public class Institute
     public int? AssessmentEngineAIModelId { get; set; }
     public AIModel? AssessmentEngineAIModel { get; set; }
 
+    /// <summary>
+    /// Institute-selected <see cref="Persona"/> for the student-facing AI chat. Its
+    /// <see cref="Persona.Prompt"/> becomes the chatbot's system prompt and its
+    /// <see cref="Persona.Name"/> labels the chat everywhere in the UI. Null keeps the configured
+    /// <c>PromptConfig:Customer:SystemPrompt</c> and the default "Customer" wording.
+    /// See CustomerController.ResolveCustomerSystemPrompt.
+    /// </summary>
+    public int? MainAIPersonaId { get; set; }
+    public Persona? MainAIPersona { get; set; }
+
     public ICollection<Student> Students { get; set; } = new List<Student>();
 
     public ICollection<Teacher> Teachers { get; set; } = new List<Teacher>();
