@@ -55,70 +55,6 @@ public class PersonasController : ControllerBase
     }
 
     /// <summary>
-    /// One persona including its full prompt, for the settings editor.
-    /// GET /api/Personas/{id}
-    /// </summary>
-    [HttpGet("{id:int}")]
-    public async Task<ActionResult<object>> GetPersona(int id)
-    {
-        try
-        {
-            var persona = await _context.Personas.AsNoTracking()
-                .Where(p => p.Id == id)
-                .Select(p => new { p.Id, p.Name, p.Prompt })
-                .FirstOrDefaultAsync();
-
-            if (persona == null)
-                return NotFound(new { Success = false, Message = $"Persona {id} not found." });
-
-            return Ok(new { Success = true, persona.Id, persona.Name, persona.Prompt });
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Error loading persona {PersonaId}", id);
-            return StatusCode(500, new { Success = false, Message = "An error occurred while loading the persona" });
-        }
-    }
-
-    /// <summary>
-    /// Replace a persona's prompt from the institute settings editor.
-    ///
-    /// Personas are a shared catalog: a persona used by more than one institute is edited for all of
-    /// them, so the response reports how many institutes currently select it and the settings screen
-    /// warns before saving.
-    /// PATCH /api/Personas/{id}/prompt
-    /// </summary>
-    [HttpPatch("{id:int}/prompt")]
-    public async Task<ActionResult<object>> UpdatePersonaPrompt(int id, [FromBody] UpdatePersonaPromptRequest request)
-    {
-        try
-        {
-            var persona = await _context.Personas.FirstOrDefaultAsync(p => p.Id == id);
-            if (persona == null)
-                return NotFound(new { Success = false, Message = $"Persona {id} not found." });
-
-            // Blank clears the prompt, which drops the chat back to the configured customer prompt
-            // (see CustomerController.ResolveCustomerSystemPrompt) rather than sending an empty
-            // system message — so it is allowed, not rejected.
-            persona.Prompt = string.IsNullOrWhiteSpace(request.Prompt) ? null : request.Prompt.Trim();
-            await _context.SaveChangesAsync();
-
-            var institutesUsing = await _context.Institutes.CountAsync(i => i.MainAIPersonaId == id);
-
-            _logger.LogInformation(
-                "Persona {PersonaId} ({PersonaName}) prompt updated ({Length} chars); {Count} institute(s) use it",
-                id, persona.Name, persona.Prompt?.Length ?? 0, institutesUsing);
-
-            return Ok(new { Success = true, persona.Id, persona.Name, persona.Prompt, InstitutesUsing = institutesUsing });
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Error updating prompt for persona {PersonaId}", id);
-            return StatusCode(500, new { Success = false, Message = "An error occurred while saving the persona prompt" });
-        }
-    }
-
-    /// <summary>
     /// The persona name an institute's screens should label the AI chat with.
     /// Always 200 with a usable name — a missing institute or unset persona yields
     /// <see cref="DefaultPersonaName"/>, because a label lookup must never break the page that
@@ -149,10 +85,4 @@ public class PersonasController : ControllerBase
     /// <summary>Blank or missing persona names fall back to <see cref="DefaultPersonaName"/>.</summary>
     internal static string ResolvePersonaLabel(string? personaName) =>
         string.IsNullOrWhiteSpace(personaName) ? DefaultPersonaName : personaName.Trim();
-}
-
-public class UpdatePersonaPromptRequest
-{
-    /// <summary>Full system prompt for this persona. Blank clears it (chat falls back to the configured customer prompt).</summary>
-    public string? Prompt { get; set; }
 }
