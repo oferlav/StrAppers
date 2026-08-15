@@ -18,7 +18,7 @@ namespace strAppersBackend.Migrations
         protected override void Up(MigrationBuilder migrationBuilder)
         {
             migrationBuilder.CreateTable(
-                name: "Personas",
+                name: "AIPersonas",
                 columns: table => new
                 {
                     Id = table.Column<int>(type: "integer", nullable: false)
@@ -28,7 +28,7 @@ namespace strAppersBackend.Migrations
                 },
                 constraints: table =>
                 {
-                    table.PrimaryKey("PK_Personas", x => x.Id);
+                    table.PrimaryKey("PK_AIPersonas", x => x.Id);
                 });
 
             migrationBuilder.AddColumn<int>(
@@ -43,10 +43,10 @@ namespace strAppersBackend.Migrations
                 column: "MainAIPersonaId");
 
             migrationBuilder.AddForeignKey(
-                name: "FK_Institutes_Personas_MainAIPersonaId",
+                name: "FK_Institutes_AIPersonas_MainAIPersonaId",
                 table: "Institutes",
                 column: "MainAIPersonaId",
-                principalTable: "Personas",
+                principalTable: "AIPersonas",
                 principalColumn: "Id",
                 onDelete: ReferentialAction.SetNull);
         }
@@ -55,7 +55,7 @@ namespace strAppersBackend.Migrations
         protected override void Down(MigrationBuilder migrationBuilder)
         {
             migrationBuilder.DropForeignKey(
-                name: "FK_Institutes_Personas_MainAIPersonaId",
+                name: "FK_Institutes_AIPersonas_MainAIPersonaId",
                 table: "Institutes");
 
             migrationBuilder.DropIndex(
@@ -64,7 +64,7 @@ namespace strAppersBackend.Migrations
 
             migrationBuilder.DropColumn(name: "MainAIPersonaId", table: "Institutes");
 
-            migrationBuilder.DropTable(name: "Personas");
+            migrationBuilder.DropTable(name: "AIPersonas");
         }
     }
 }

@@ -2023,7 +2023,7 @@ namespace strAppersBackend.Migrations
 
                     b.HasKey("Id");
 
-                    b.ToTable("Personas", (string)null);
+                    b.ToTable("AIPersonas", (string)null);
                 });
 
             modelBuilder.Entity("strAppersBackend.Models.PrivateChat", b =>

@@ -1509,7 +1509,7 @@ public class ApplicationDbContext : DbContext
         modelBuilder.Entity<Persona>(entity =>
         {
             entity.HasKey(e => e.Id);
-            entity.ToTable("Personas");
+            entity.ToTable("AIPersonas");
 
             entity.Property(e => e.Name).IsRequired().HasMaxLength(100);
             entity.Property(e => e.Prompt).HasColumnType("text");
