@@ -4541,7 +4541,7 @@ Staff request:
     /// Get all students who have this project in their priority fields (ProjectPriority1-4) and Status < 2
     /// </summary>
     /// <param name="id">The project ID</param>
-    /// <param name="candidateRoleId">When MultiRolesPerProject is false, students with this active role are excluded, developer/full-stack pairing rules apply (see <see cref="ShouldExcludePeerByDeveloperRule"/>), then the list is de-duplicated to one student per role.</param>
+    /// <param name="candidateRoleId">When MultiRolesPerProject is false, students with this active role are excluded, developer/full-stack pairing rules apply (see <see cref="ShouldExcludePeerByDeveloperRule"/>), then the list is de-duplicated to one student per role. Role-type courses opt out of the first two rules and keep up to RoleCount students per role — see the CourseType check below.</param>
     /// <param name="currentStudentId">Optional logged-in student id that should always be returned when present in this project's candidate list (used to keep the applicant visible after Apply).</param>
     [HttpGet("use/get-students/{id}")]
     public async Task<ActionResult<IEnumerable<object>>> GetStudentsForProject(
@@ -4620,10 +4620,28 @@ Staff request:
                 })
                 .ToListAsync();
 
+            // Role-type courses put RoleCount students on the SAME role, so the Squad-mode rules
+            // below — hide same-role peers (they are competitors, never team-mates) then keep one
+            // student per role — would leave the caller seeing nobody but themselves. Read the
+            // template row GetAvailableInstituteProjectsForStudent projects CourseType/RoleCount
+            // from, so this roster and the sidebar's slot layout are driven by the same values.
+            var courseMeta = await _context.InstituteTemplates
+                .Where(t => t.InstituteProjectId == id && t.IsActive)
+                .Select(t => new { t.CourseType, t.RoleCount })
+                .FirstOrDefaultAsync();
+            var isRoleCourse = string.Equals(courseMeta?.CourseType, "Role", StringComparison.OrdinalIgnoreCase);
+
             if (!_kickoffConfig.MultiRolesPerProject)
             {
                 string? candidateRoleName = null;
-                if (candidateRoleId.HasValue)
+                if (isRoleCourse)
+                {
+                    _logger.LogInformation(
+                        "get-students project {ProjectId}: Role-type course (RoleCount={RoleCount}); same-role exclusion and " +
+                        "developer/full-stack pairing skipped, keeping up to RoleCount students per role.",
+                        id, courseMeta?.RoleCount);
+                }
+                else if (candidateRoleId.HasValue)
                 {
                     candidateRoleName = await _context.Roles
                         .Where(r => r.Id == candidateRoleId.Value)
@@ -4649,11 +4667,26 @@ Staff request:
                 // Role identity by NAME, not row id: the catalog holds duplicate rows per conceptual
                 // role (global, institute-1 copy, per-squad copies), so id comparisons over/under-exclude
                 // depending on which duplicate each student happens to hold.
+                // candidateRoleName stays null for Role courses, which switches off both same-role
+                // exclusion and the developer rule inside the filter.
                 var survivorIds = FilterApplicantsForCandidate(
                     students.Select(s => new ApplicantRoleView(s.Id, s.RoleName, s.UpdatedAt)).ToList(),
                     candidateRoleName,
-                    currentStudentId);
+                    currentStudentId,
+                    perRoleLimit: isRoleCourse ? (courseMeta?.RoleCount ?? 1) : 1);
                 students = students.Where(s => survivorIds.Contains(s.Id)).ToList();
+            }
+
+            if (isRoleCourse)
+            {
+                // The applicants sidebar fills Role-course slots POSITIONALLY (Nth same-role member
+                // into the Nth slot), so the roster order has to be stable across reloads — the query
+                // above has no ORDER BY of its own. Same ranking the per-role filter uses.
+                students = students
+                    .OrderByDescending(s => currentStudentId.HasValue && s.Id == currentStudentId.Value)
+                    .ThenBy(s => s.UpdatedAt ?? DateTime.MaxValue)
+                    .ThenBy(s => s.Id)
+                    .ToList();
             }
 
             _logger.LogInformation("Found {Count} students for project {ProjectId} with Status < 2", students.Count, id);
@@ -6262,10 +6295,15 @@ Staff request:
     ///    UpdatedAt, then lowest Id.
     /// Returns the surviving student ids.
     /// </summary>
+    /// <param name="perRoleLimit">
+    /// How many applicants to keep per conceptual role. 1 (Squad courses) is the dedupe in step 3;
+    /// Role-type courses pass the template's RoleCount, since every team member shares one role.
+    /// </param>
     internal static HashSet<int> FilterApplicantsForCandidate(
         List<ApplicantRoleView> students,
         string? candidateRoleName,
-        int? currentStudentId)
+        int? currentStudentId,
+        int perRoleLimit = 1)
     {
         var candidateNorm = NormalizeRoleName(candidateRoleName);
         bool IsSelf(ApplicantRoleView s) => currentStudentId.HasValue && s.Id == currentStudentId.Value;
@@ -6277,11 +6315,12 @@ Staff request:
 
         return filtered
             .GroupBy(s => NormalizeRoleName(s.RoleName))
-            .Select(g => g
+            .SelectMany(g => g
                 .OrderByDescending(IsSelf)
                 .ThenBy(s => s.UpdatedAt ?? DateTime.MaxValue)
                 .ThenBy(s => s.Id)
-                .First().Id)
+                .Take(Math.Max(1, perRoleLimit))
+                .Select(s => s.Id))
             .ToHashSet();
     }
 
