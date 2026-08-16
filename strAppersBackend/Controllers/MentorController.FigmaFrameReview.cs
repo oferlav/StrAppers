@@ -55,7 +55,12 @@ public partial class MentorController
                 request.SprintNumber,
                 board.InstituteProjectId);
 
-            var systemPrompt = template.Replace("{{SPRINT_CONTEXT}}", sprintContext.Markdown.Trim(), StringComparison.Ordinal);
+            // Persona alias first, so it frames every instruction after it. Empty — and therefore a
+            // no-op — for institutes with no persona. See Utilities/PersonaAlias.
+            var personaAlias = await Utilities.PersonaAlias.ResolveForStudentAsync(_context, request.StudentId);
+            var systemPrompt = Utilities.PersonaAlias.Prepend(
+                personaAlias,
+                template.Replace("{{SPRINT_CONTEXT}}", sprintContext.Markdown.Trim(), StringComparison.Ordinal));
 
             if (request.Test)
             {

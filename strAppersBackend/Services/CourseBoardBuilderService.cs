@@ -435,6 +435,14 @@ public class CourseBoardBuilderService : ICourseBoardBuilderService
         if (string.IsNullOrWhiteSpace(systemPrompt))
             return Fail("Course builder system prompt could not be loaded.");
 
+        // Renames the simulated stakeholder for this institute's persona. This prompt writes literal
+        // Trello checklist text ("Interview the AI Customer to confirm requirements…"), so the alias
+        // is what keeps generated boards using the institute's own wording. Empty — and therefore a
+        // no-op — when no persona is selected. See Utilities/PersonaAlias.
+        systemPrompt = Utilities.PersonaAlias.Prepend(
+            await Utilities.PersonaAlias.ResolveForInstituteAsync(_context, instituteTemplate.InstituteId),
+            systemPrompt);
+
         // ── 6. Generate cards for all roles in parallel ───────────────────────
         _logger.LogInformation(
             "Generating course for {RoleCount} role(s) on project {ProjectId} — " +

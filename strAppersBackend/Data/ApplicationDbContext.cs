@@ -46,6 +46,7 @@ public class ApplicationDbContext : DbContext
         public DbSet<AtsJobPosting> AtsJobPostings { get; set; }
         public DbSet<AtsAssessmentInstance> AtsAssessmentInstances { get; set; }
     public DbSet<AIModel> AIModels { get; set; }
+    public DbSet<Persona> Personas { get; set; }
     public DbSet<MentorChatHistory> MentorChatHistory { get; set; }
     public DbSet<BoardState> BoardStates { get; set; }
     public DbSet<MarketingImages> MarketingImages { get; set; }
@@ -122,6 +123,12 @@ public class ApplicationDbContext : DbContext
             entity.HasOne(e => e.AssessmentEngineAIModel)
                 .WithMany()
                 .HasForeignKey(e => e.AssessmentEngineAIModelId)
+                .OnDelete(DeleteBehavior.SetNull);
+
+            entity.HasIndex(e => e.MainAIPersonaId);
+            entity.HasOne(e => e.MainAIPersona)
+                .WithMany()
+                .HasForeignKey(e => e.MainAIPersonaId)
                 .OnDelete(DeleteBehavior.SetNull);
 
             entity.HasData(
@@ -1496,6 +1503,16 @@ public class ApplicationDbContext : DbContext
             
             entity.HasIndex(e => e.SubscriptionTypeId);
             entity.HasIndex(e => e.InstituteId);
+        });
+
+        // Configure Persona entity (student-facing AI chat personas — see Institute.MainAIPersonaId)
+        modelBuilder.Entity<Persona>(entity =>
+        {
+            entity.HasKey(e => e.Id);
+            entity.ToTable("AIPersonas");
+
+            entity.Property(e => e.Name).IsRequired().HasMaxLength(100);
+            entity.Property(e => e.Prompt).HasColumnType("text");
         });
 
         // Configure AIModel entity
