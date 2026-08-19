@@ -181,6 +181,7 @@ public partial class MetricsController
 
             var (llmText, inputTokens, outputTokens) = await _chatCompletionService.GetChatCompletionAsync(
                 aiModel, systemPrompt, userPrompt, null);
+            var attempts = 1;
 
             // Debug:AiContext=true → email the raw response too (same pipeline as GapAnalysis's
             // LLM-RESPONSE debug email) — previously only the prompt was captured here, so a metric
@@ -199,14 +200,60 @@ public partial class MetricsController
                 catch { /* never interrupt the AI flow */ }
             }
 
+            // A malformed payload here is a sampling flaw, not a prompt defect: the model has been
+            // observed returning a complete, correct assessment with a single structural character
+            // missing (e.g. the closing brace of the last category), which discards the whole call.
+            // Resample once with the identical prompts. Deliberately not a loop, and deliberately not
+            // a repair — guessing where a brace belongs would cache a plausible but wrong assessment,
+            // and failing loudly is better than saving quietly-wrong data.
             if (!TryParseGapAnalysisJson(llmText, out var dto) || dto == null)
             {
-                return UnprocessableEntity(new
+                _logger.LogWarning(
+                    "Assessment engine: metric {MetricId} ({MetricName}) returned unparseable JSON for student {StudentId} sprint {Sprint} on attempt 1; retrying once. Preview: {Preview}",
+                    metric.Id, metric.Name, request.StudentId, request.SprintNumber, Truncate(llmText.Trim(), 500));
+
+                var (retryText, retryInputTokens, retryOutputTokens) = await _chatCompletionService.GetChatCompletionAsync(
+                    aiModel, systemPrompt, userPrompt, null);
+
+                attempts = 2;
+                // Both calls were paid for, so report the sum rather than pretending the first
+                // attempt did not happen.
+                inputTokens += retryInputTokens;
+                outputTokens += retryOutputTokens;
+
+                if (DebugAiContext)
                 {
-                    success = false,
-                    message = $"Metric '{metric.Name}' assessment did not return valid JSON. Nothing was saved to CacheMetrics.",
-                    preview = Truncate(llmText.Trim(), 4000),
-                });
+                    try
+                    {
+                        var retryDbg = $"RETRY (attempt 2 of 2) | Metric={metric.Id} ({metric.Name}) | Student={request.StudentId} | Sprint={request.SprintNumber} | " +
+                                       $"Model={aiModel.Name} ({aiModel.Provider}) | InputTokens={retryInputTokens} | OutputTokens={retryOutputTokens}\n\n{retryText}";
+                        await _smtpEmailService.SendPlainEmailAsync(
+                            "ofer@skill-in.com",
+                            $"[AssessmentEngine Debug] LLM-RESPONSE RETRY {metric.Name} | Student {request.StudentId} | Sprint {request.SprintNumber}",
+                            retryDbg);
+                    }
+                    catch { /* never interrupt the AI flow */ }
+                }
+
+                if (!TryParseGapAnalysisJson(retryText, out dto) || dto == null)
+                {
+                    _logger.LogWarning(
+                        "Assessment engine: metric {MetricId} ({MetricName}) returned unparseable JSON on both attempts for student {StudentId} sprint {Sprint}. Nothing saved.",
+                        metric.Id, metric.Name, request.StudentId, request.SprintNumber);
+
+                    return UnprocessableEntity(new
+                    {
+                        success = false,
+                        message = $"Metric '{metric.Name}' assessment did not return valid JSON after 2 attempts. Nothing was saved to CacheMetrics.",
+                        // The retry's output is the more useful one to show: it is what failed last.
+                        preview = Truncate(retryText.Trim(), 4000),
+                        firstAttemptPreview = Truncate(llmText.Trim(), 1000),
+                    });
+                }
+
+                _logger.LogInformation(
+                    "Assessment engine: metric {MetricId} ({MetricName}) parsed successfully on retry for student {StudentId} sprint {Sprint}.",
+                    metric.Id, metric.Name, request.StudentId, request.SprintNumber);
             }
 
             // Layer 3 (code enforcement) — only forced to a fixed category list when the rubric
@@ -235,6 +282,9 @@ public partial class MetricsController
                 model      = aiModel.Name,
                 inputTokens,
                 outputTokens,
+                // 2 means the first response was unparseable and the resample succeeded. Token
+                // counts above cover both calls.
+                attempts,
             });
         }
         catch (Exception ex)
