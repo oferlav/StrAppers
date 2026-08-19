@@ -91,6 +91,27 @@ public partial class BoardsController
     };
 
     /// <summary>
+    /// Whether the staff dashboard should still require the catalog <see cref="Project.IsAvailable"/>
+    /// for this institute's boards.
+    ///
+    /// A board created through an institute carries both an InstituteProjectId (the real project)
+    /// and a ProjectId inherited from the catalog row it was built from. The dashboard filtered on
+    /// the CATALOG row's IsAvailable, so deactivating that catalog project made every institute
+    /// squad built from it vanish from staff view - with no error, since the endpoints return an
+    /// empty list rather than failing.
+    ///
+    /// Institute 1 is the base/B2C institute and keeps the original check; real institutes
+    /// (Id &gt; 1) no longer depend on a catalog flag they do not control. Scoped this way
+    /// deliberately: for institutes &gt; 1 the change can only ADD boards that are currently
+    /// invisible, never hide one that works today.
+    ///
+    /// All three staff-dashboard queries must use this together - the squad list, the assist poll
+    /// and the squad-roles lookup. If they disagree, the list shows squads whose assist badges
+    /// never poll.
+    /// </summary>
+    private static bool RequiresCatalogProjectAvailable(int instituteId) => instituteId <= 1;
+
+    /// <summary>
     /// Live project boards (non-system) with org/project links, sprint window hint, and onboard students for the staff dashboard.
     /// Route: GET /api/Boards/use/staff-squads?instituteId={id}
     /// </summary>
@@ -111,12 +132,15 @@ public partial class BoardsController
             var sprintLengthWeeks = _configuration.GetValue<int>("BusinessLogicConfig:SprintLengthInWeeks", 1);
             var nowUtc = DateTime.UtcNow;
 
+            var requireCatalogAvailable = RequiresCatalogProjectAvailable(instituteId.Value);
+
             var boards = await _context.ProjectBoards
                 .AsNoTracking()
                 .Include(pb => pb.Project)
                 .ThenInclude(p => p.Organization)
                 .Include(pb => pb.SprintMerges)
-                .Where(pb => !pb.IsSystemBoard && pb.Project.IsAvailable && pb.InstituteId == instituteId.Value)
+                .Where(pb => !pb.IsSystemBoard && pb.InstituteId == instituteId.Value
+                             && (!requireCatalogAvailable || pb.Project.IsAvailable))
                 .OrderBy(pb => pb.Project.Title)
                 .ThenBy(pb => pb.SquadName)
                 .ThenBy(pb => pb.Id)
@@ -269,10 +293,13 @@ public partial class BoardsController
             if (!instituteId.HasValue)
                 return Ok(new StaffSquadsAssistResponseDto { Squads = new List<StaffSquadAssistRowDto>() });
 
+            var requireCatalogAvailable = RequiresCatalogProjectAvailable(instituteId.Value);
+
             var boards = await _context.ProjectBoards
                 .AsNoTracking()
                 .Include(pb => pb.Project)
-                .Where(pb => !pb.IsSystemBoard && pb.Project.IsAvailable && pb.InstituteId == instituteId.Value)
+                .Where(pb => !pb.IsSystemBoard && pb.InstituteId == instituteId.Value
+                             && (!requireCatalogAvailable || pb.Project.IsAvailable))
                 .OrderBy(pb => pb.Project!.Title)
                 .ThenBy(pb => pb.SquadName)
                 .ThenBy(pb => pb.Id)
@@ -350,9 +377,12 @@ public partial class BoardsController
             if (!instituteId.HasValue || instituteId.Value <= 0)
                 return Ok(Array.Empty<object>());
 
+            var requireCatalogAvailable = RequiresCatalogProjectAvailable(instituteId.Value);
+
             var boardIds = await _context.ProjectBoards
                 .AsNoTracking()
-                .Where(pb => !pb.IsSystemBoard && pb.InstituteId == instituteId.Value && pb.Project.IsAvailable)
+                .Where(pb => !pb.IsSystemBoard && pb.InstituteId == instituteId.Value
+                             && (!requireCatalogAvailable || pb.Project.IsAvailable))
                 .Select(pb => pb.Id)
                 .ToListAsync(cancellationToken);
 
