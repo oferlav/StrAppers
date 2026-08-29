@@ -4343,6 +4343,271 @@ Items: {input}";
             return StatusCode(500, new { Success = false, Message = ex.Message });
         }
     }
+
+    /// <summary>
+    /// Rebuilds the contents of an EXISTING Trello board from an InstituteProject's TrelloBoardJson,
+    /// keeping the same board id.
+    ///
+    /// Why in place rather than creating a new board: ProjectBoards.BoardId IS the Trello board id
+    /// and it is the primary key, referenced by Students, PrivateChats, Resources, CacheMetrics,
+    /// CacheReview, BoardMeetings, BoardStates and ProjectBoardSprintMerges. Swapping it would mean
+    /// migrating every one of those. Rebuilding in place leaves the database completely untouched.
+    ///
+    /// READ-ONLY against the database — nothing is written here at all. The only mutations are to
+    /// Trello itself.
+    ///
+    /// Scope note: this creates lists, cards, descriptions, checklists and labels, which is what the
+    /// TrelloTasks sensor reads and what students see. It does NOT create Trello custom fields
+    /// (notably ModuleId), which TrelloService sets on a fully-built board and which the user-story
+    /// sensor reads. A board rebuilt here is therefore correct for task-based assessment but is not
+    /// byte-identical to one produced by the normal board-creation path.
+    ///
+    /// Route: POST /api/Utilities/use/rebuild-board-in-place
+    /// </summary>
+    [HttpPost("use/rebuild-board-in-place")]
+    public async Task<ActionResult<object>> RebuildBoardInPlace([FromBody] RebuildBoardInPlaceRequest request)
+    {
+        if (request == null || string.IsNullOrWhiteSpace(request.TrelloBoardId))
+            return BadRequest(new { Success = false, Message = "TrelloBoardId is required." });
+        if (request.InstituteProjectId <= 0)
+            return BadRequest(new { Success = false, Message = "InstituteProjectId must be a positive number." });
+
+        var key = _configuration["Trello:ApiKey"];
+        var token = _configuration["Trello:ApiToken"];
+        if (string.IsNullOrWhiteSpace(key) || string.IsNullOrWhiteSpace(token))
+            return StatusCode(500, new { Success = false, Message = "Trello:ApiKey / Trello:ApiToken are not configured." });
+
+        var auth = $"key={key}&token={token}";
+        var http = _httpClientFactory.CreateClient();
+        var errors = new List<string>();
+
+        try
+        {
+            // ── 1. load and parse the template ─────────────────────────────────────────
+            var ip = await _context.InstituteProjects.AsNoTracking()
+                .FirstOrDefaultAsync(p => p.Id == request.InstituteProjectId);
+            if (ip == null)
+                return NotFound(new { Success = false, Message = $"InstituteProject {request.InstituteProjectId} not found." });
+            if (string.IsNullOrWhiteSpace(ip.TrelloBoardJson))
+                return BadRequest(new { Success = false, Message = $"InstituteProject {ip.Id} has no TrelloBoardJson." });
+
+            TrelloProjectCreationRequest? tpl;
+            try
+            {
+                tpl = JsonSerializer.Deserialize<TrelloProjectCreationRequest>(ip.TrelloBoardJson);
+            }
+            catch (JsonException ex)
+            {
+                return UnprocessableEntity(new
+                {
+                    Success = false,
+                    Message = $"TrelloBoardJson for InstituteProject {ip.Id} could not be parsed: {ex.Message}",
+                    Path = ex.Path,
+                });
+            }
+
+            if (tpl?.SprintPlan?.Cards == null || tpl.SprintPlan.Cards.Count == 0)
+                return UnprocessableEntity(new { Success = false, Message = "Template parsed but contains no cards. Nothing was changed." });
+
+            // ── 2. inject the shared spec (in-memory only) ─────────────────────────────
+            var injected = new List<string>();
+            if (!string.IsNullOrWhiteSpace(request.SharedSpec))
+            {
+                var spec = request.SharedSpec!.Trim();
+                var specList = string.IsNullOrWhiteSpace(request.SpecListName) ? "Sprint 1" : request.SpecListName!.Trim();
+                foreach (var c in tpl.SprintPlan.Cards)
+                {
+                    if (!string.Equals(c.ListName?.Trim(), specList, StringComparison.OrdinalIgnoreCase)) continue;
+                    if (c.Description.Contains(spec, StringComparison.Ordinal)) continue;
+                    c.Description = string.IsNullOrWhiteSpace(c.Description) ? spec : c.Description.TrimEnd() + "\n\n" + spec;
+                    injected.Add(c.Name);
+                }
+                if (injected.Count == 0)
+                    return UnprocessableEntity(new
+                    {
+                        Success = false,
+                        Message = $"SharedSpec supplied but no cards found in list '{specList}'. Nothing was changed.",
+                        AvailableLists = tpl.SprintPlan.Cards.Select(c => c.ListName)
+                            .Where(n => !string.IsNullOrWhiteSpace(n))
+                            .Distinct(StringComparer.OrdinalIgnoreCase).ToList(),
+                    });
+            }
+
+            // ── 3. verify the board exists BEFORE archiving anything ───────────────────
+            var boardResp = await http.GetAsync($"https://api.trello.com/1/boards/{request.TrelloBoardId}?{auth}");
+            if (!boardResp.IsSuccessStatusCode)
+                return NotFound(new
+                {
+                    Success = false,
+                    Message = $"Trello board '{request.TrelloBoardId}' not found or not accessible ({(int)boardResp.StatusCode}). Nothing was changed.",
+                });
+
+            // ── 4. archive existing lists (opt-in) ─────────────────────────────────────
+            var archived = new List<string>();
+            if (request.ArchiveExisting)
+            {
+                var listsRaw = await http.GetStringAsync($"https://api.trello.com/1/boards/{request.TrelloBoardId}/lists?{auth}");
+                using var listsDoc = JsonDocument.Parse(listsRaw);
+                foreach (var l in listsDoc.RootElement.EnumerateArray())
+                {
+                    var lid = l.GetProperty("id").GetString();
+                    var lname = l.TryGetProperty("name", out var n) ? n.GetString() : lid;
+                    if (string.IsNullOrEmpty(lid)) continue;
+                    var r = await http.PutAsync($"https://api.trello.com/1/lists/{lid}/closed?value=true&{auth}", null);
+                    if (r.IsSuccessStatusCode) archived.Add(lname ?? lid);
+                    else errors.Add($"Failed to archive list '{lname}': HTTP {(int)r.StatusCode}");
+                }
+                _logger.LogInformation("[BOARD-REBUILD] Archived {Count} list(s) on board {BoardId}", archived.Count, request.TrelloBoardId);
+            }
+
+            // ── 5. create the lists ────────────────────────────────────────────────────
+            // Fall back to the distinct ListNames on the cards when the template carries no Lists
+            // collection, so a board is never built with cards that have nowhere to go.
+            var listNames = (tpl.SprintPlan.Lists != null && tpl.SprintPlan.Lists.Count > 0)
+                ? tpl.SprintPlan.Lists.OrderBy(l => l.Position).Select(l => l.Name).ToList()
+                : tpl.SprintPlan.Cards.Select(c => c.ListName)
+                    .Where(n => !string.IsNullOrWhiteSpace(n))
+                    .Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+
+            var listIds = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            var pos = 1;
+            foreach (var name in listNames)
+            {
+                var url = $"https://api.trello.com/1/boards/{request.TrelloBoardId}/lists?name={Uri.EscapeDataString(name)}&pos={pos * 65536}&{auth}";
+                var r = await http.PostAsync(url, null);
+                if (!r.IsSuccessStatusCode)
+                {
+                    errors.Add($"Failed to create list '{name}': HTTP {(int)r.StatusCode}");
+                    continue;
+                }
+                using var d = JsonDocument.Parse(await r.Content.ReadAsStringAsync());
+                var id = d.RootElement.GetProperty("id").GetString();
+                if (!string.IsNullOrEmpty(id)) listIds[name] = id;
+                pos++;
+            }
+
+            // ── 6. labels, created once and reused across cards ────────────────────────
+            var labelIds = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            var palette = new[] { "green", "yellow", "orange", "red", "purple", "blue", "sky", "lime", "pink", "black" };
+            var wanted = tpl.SprintPlan.Cards.SelectMany(c => c.Labels ?? new List<string>())
+                .Where(l => !string.IsNullOrWhiteSpace(l))
+                .Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+            for (var i = 0; i < wanted.Count; i++)
+            {
+                var url = $"https://api.trello.com/1/labels?name={Uri.EscapeDataString(wanted[i])}&color={palette[i % palette.Length]}&idBoard={request.TrelloBoardId}&{auth}";
+                var r = await http.PostAsync(url, null);
+                if (!r.IsSuccessStatusCode) { errors.Add($"Failed to create label '{wanted[i]}': HTTP {(int)r.StatusCode}"); continue; }
+                using var d = JsonDocument.Parse(await r.Content.ReadAsStringAsync());
+                var id = d.RootElement.GetProperty("id").GetString();
+                if (!string.IsNullOrEmpty(id)) labelIds[wanted[i]] = id;
+            }
+
+            // ── 7. cards, with descriptions and checklists ─────────────────────────────
+            var cardsCreated = 0;
+            var checklistItems = 0;
+            foreach (var card in tpl.SprintPlan.Cards)
+            {
+                if (string.IsNullOrWhiteSpace(card.ListName) || !listIds.TryGetValue(card.ListName.Trim(), out var idList))
+                {
+                    errors.Add($"Card '{card.Name}' skipped: no list '{card.ListName}'.");
+                    continue;
+                }
+
+                var cardUrl = $"https://api.trello.com/1/cards?idList={idList}&name={Uri.EscapeDataString(card.Name ?? "")}" +
+                              $"&desc={Uri.EscapeDataString(card.Description ?? "")}&{auth}";
+                var ids = (card.Labels ?? new List<string>())
+                    .Where(l => labelIds.ContainsKey(l)).Select(l => labelIds[l]).ToList();
+                if (ids.Count > 0) cardUrl += $"&idLabels={string.Join(",", ids)}";
+                if (card.DueDate.HasValue) cardUrl += $"&due={card.DueDate.Value:yyyy-MM-ddTHH:mm:ssZ}";
+
+                var cr = await http.PostAsync(cardUrl, null);
+                if (!cr.IsSuccessStatusCode)
+                {
+                    errors.Add($"Failed to create card '{card.Name}': HTTP {(int)cr.StatusCode}");
+                    continue;
+                }
+                cardsCreated++;
+
+                if (card.ChecklistItems == null || card.ChecklistItems.Count == 0) continue;
+
+                using var cd = JsonDocument.Parse(await cr.Content.ReadAsStringAsync());
+                var cardId = cd.RootElement.GetProperty("id").GetString();
+                if (string.IsNullOrEmpty(cardId)) continue;
+
+                var clName = string.IsNullOrWhiteSpace(card.ChecklistName) ? "Checklist" : card.ChecklistName!;
+                var clr = await http.PostAsync(
+                    $"https://api.trello.com/1/checklists?idCard={cardId}&name={Uri.EscapeDataString(clName)}&{auth}", null);
+                if (!clr.IsSuccessStatusCode) { errors.Add($"Failed to create checklist on '{card.Name}'."); continue; }
+
+                using var cld = JsonDocument.Parse(await clr.Content.ReadAsStringAsync());
+                var clId = cld.RootElement.GetProperty("id").GetString();
+                if (string.IsNullOrEmpty(clId)) continue;
+
+                foreach (var item in card.ChecklistItems.Where(i => !string.IsNullOrWhiteSpace(i)))
+                {
+                    var ir = await http.PostAsync(
+                        $"https://api.trello.com/1/checklists/{clId}/checkItems?name={Uri.EscapeDataString(item)}&{auth}", null);
+                    if (ir.IsSuccessStatusCode) checklistItems++;
+                }
+            }
+
+            var boardUrl = $"https://trello.com/b/{request.TrelloBoardId}";
+            _logger.LogInformation(
+                "[BOARD-REBUILD] Board {BoardId} rebuilt from InstituteProject {IpId}: archived={Archived} lists={Lists} cards={Cards} checkItems={Items} errors={Errors}",
+                request.TrelloBoardId, ip.Id, archived.Count, listIds.Count, cardsCreated, checklistItems, errors.Count);
+
+            return Ok(new
+            {
+                Success = errors.Count == 0,
+                Message = request.ArchiveExisting
+                    ? "Board rebuilt in place. The database was not modified — BoardId is unchanged, so nothing needs repointing."
+                    : "New content added ALONGSIDE the existing lists (ArchiveExisting was false). Re-run with archiveExisting=true to remove the old ones.",
+                TrelloBoardId = request.TrelloBoardId,
+                BoardUrl = boardUrl,
+                InstituteProjectId = ip.Id,
+                InstituteProjectTitle = ip.Title,
+                ArchivedLists = archived,
+                ListsCreated = listIds.Keys.ToList(),
+                CardsCreated = cardsCreated,
+                ChecklistItemsCreated = checklistItems,
+                LabelsCreated = labelIds.Keys.ToList(),
+                SpecInjectedIntoCards = injected,
+                Errors = errors,
+            });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "[BOARD-REBUILD] Failed rebuilding board {BoardId}", request.TrelloBoardId);
+            return StatusCode(500, new { Success = false, Message = ex.Message, Errors = errors });
+        }
+    }
+}
+
+/// <summary>Body for POST /api/Utilities/use/rebuild-board-in-place.</summary>
+public class RebuildBoardInPlaceRequest
+{
+    /// <summary>Existing Trello board id to rebuild. This is ProjectBoards.BoardId — it is the
+    /// primary key and is referenced by ~10 tables, which is exactly why the board is rebuilt in
+    /// place rather than replaced.</summary>
+    public string TrelloBoardId { get; set; } = string.Empty;
+
+    /// <summary>InstituteProjects.Id whose TrelloBoardJson supplies the new content.</summary>
+    public int InstituteProjectId { get; set; }
+
+    /// <summary>
+    /// Archive every existing list on the board before creating the new ones. Defaults to false:
+    /// the first run appends alongside the current lists so the result can be inspected. Trello has
+    /// no undo for archiving, so this is opt-in.
+    /// </summary>
+    public bool ArchiveExisting { get; set; } = false;
+
+    /// <summary>Optional shared design data appended to the card descriptions in
+    /// <see cref="SpecListName"/>. Card descriptions are the only Trello text the assessment engine
+    /// reads, and Trello lists have no description field.</summary>
+    public string? SharedSpec { get; set; }
+
+    /// <summary>List to inject <see cref="SharedSpec"/> into. Defaults to "Sprint 1".</summary>
+    public string? SpecListName { get; set; }
 }
 
 /// <summary>Body for POST /api/Utilities/use/generate-board-from-institute-project.</summary>
