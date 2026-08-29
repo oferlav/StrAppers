@@ -4195,6 +4195,175 @@ Items: {input}";
 
         return Ok(new { Config = configStatus, Steps = steps });
     }
+
+    /// <summary>
+    /// Builds a NEW Trello board from an InstituteProject's stored TrelloBoardJson, optionally
+    /// injecting a shared-spec block into the Sprint 1 card descriptions, and returns the new
+    /// board id and URL.
+    ///
+    /// READ-ONLY against the database. Nothing is written: not ProjectBoards, not the
+    /// InstituteProject, not the stored TrelloBoardJson. The caller updates
+    /// ProjectBoards.BoardUrl by hand once they are satisfied with the generated board.
+    ///
+    /// Note on placement of the shared spec: Trello lists have NO description field (the API
+    /// accepts only name and pos), so a per-sprint description is not possible. The spec goes
+    /// into the Sprint 1 CARD descriptions, which is also the only place the assessment engine
+    /// reads it from — the TrelloTasks sensor emits the card's Description and checklists, never
+    /// the board's or list's.
+    ///
+    /// Route: POST /api/Utilities/use/generate-board-from-institute-project
+    /// </summary>
+    [HttpPost("use/generate-board-from-institute-project")]
+    public async Task<ActionResult<object>> GenerateBoardFromInstituteProject(
+        [FromBody] GenerateBoardFromInstituteProjectRequest request)
+    {
+        if (request == null || request.InstituteProjectId <= 0)
+            return BadRequest(new { Success = false, Message = "InstituteProjectId must be a positive number." });
+
+        try
+        {
+            var ip = await _context.InstituteProjects
+                .AsNoTracking()
+                .FirstOrDefaultAsync(p => p.Id == request.InstituteProjectId);
+
+            if (ip == null)
+                return NotFound(new { Success = false, Message = $"InstituteProject {request.InstituteProjectId} not found." });
+
+            if (string.IsNullOrWhiteSpace(ip.TrelloBoardJson))
+                return BadRequest(new
+                {
+                    Success = false,
+                    Message = $"InstituteProject {ip.Id} ('{ip.Title}') has no TrelloBoardJson. Assign a course to it first.",
+                });
+
+            TrelloProjectCreationRequest? trelloRequest;
+            try
+            {
+                trelloRequest = JsonSerializer.Deserialize<TrelloProjectCreationRequest>(ip.TrelloBoardJson);
+            }
+            catch (JsonException ex)
+            {
+                // Same failure mode that silently produced an empty board in CreateBoard: report it
+                // loudly here rather than generating a board from a half-read template.
+                return UnprocessableEntity(new
+                {
+                    Success = false,
+                    Message = $"TrelloBoardJson for InstituteProject {ip.Id} could not be parsed: {ex.Message}",
+                    Path = ex.Path,
+                });
+            }
+
+            if (trelloRequest?.SprintPlan?.Cards == null || trelloRequest.SprintPlan.Cards.Count == 0)
+                return UnprocessableEntity(new
+                {
+                    Success = false,
+                    Message = $"TrelloBoardJson for InstituteProject {ip.Id} parsed but contains no sprint cards.",
+                });
+
+            var title = string.IsNullOrWhiteSpace(request.BoardTitle) ? ip.Title : request.BoardTitle!.Trim();
+            trelloRequest.ProjectTitle = title ?? $"InstituteProject {ip.Id}";
+            if (!string.IsNullOrWhiteSpace(ip.Description))
+                trelloRequest.ProjectDescription = ip.Description;
+
+            // ── inject the shared spec into the Sprint 1 card descriptions ──────────────
+            // Applied to the in-memory copy only; the stored TrelloBoardJson is untouched.
+            var injectedInto = new List<string>();
+            if (!string.IsNullOrWhiteSpace(request.SharedSpec))
+            {
+                var spec = request.SharedSpec!.Trim();
+                var listName = string.IsNullOrWhiteSpace(request.SpecListName)
+                    ? "Sprint 1"
+                    : request.SpecListName!.Trim();
+
+                foreach (var card in trelloRequest.SprintPlan.Cards)
+                {
+                    if (!string.Equals(card.ListName?.Trim(), listName, StringComparison.OrdinalIgnoreCase))
+                        continue;
+                    if (card.Description.Contains(spec, StringComparison.Ordinal))
+                        continue; // already carries it — do not duplicate on a re-run
+
+                    card.Description = string.IsNullOrWhiteSpace(card.Description)
+                        ? spec
+                        : card.Description.TrimEnd() + "\n\n" + spec;
+                    injectedInto.Add(card.Name);
+                }
+
+                if (injectedInto.Count == 0)
+                    return UnprocessableEntity(new
+                    {
+                        Success = false,
+                        Message = $"SharedSpec was supplied but no cards were found in list '{listName}'. " +
+                                  "Nothing was created. Check SpecListName against the list names in the template.",
+                        AvailableLists = trelloRequest.SprintPlan.Cards
+                            .Select(c => c.ListName)
+                            .Where(n => !string.IsNullOrWhiteSpace(n))
+                            .Distinct(StringComparer.OrdinalIgnoreCase)
+                            .ToList(),
+                    });
+            }
+
+            _logger.LogInformation(
+                "[BOARD-GEN] Creating Trello board from InstituteProject {IpId} ('{Title}'): {CardCount} card(s), spec injected into {InjectCount} Sprint 1 card(s).",
+                ip.Id, title, trelloRequest.SprintPlan.Cards.Count, injectedInto.Count);
+
+            var result = await _trelloService.CreateProjectWithSprintsAsync(trelloRequest, title ?? $"InstituteProject {ip.Id}");
+
+            if (result == null || !result.Success || string.IsNullOrWhiteSpace(result.BoardId))
+                return StatusCode(502, new
+                {
+                    Success = false,
+                    Message = "Trello board creation failed.",
+                    TrelloMessage = result?.Message,
+                    Errors = result?.Errors,
+                });
+
+            _logger.LogInformation("[BOARD-GEN] Board created: {BoardId} {BoardUrl}", result.BoardId, result.BoardUrl);
+
+            return Ok(new
+            {
+                Success = true,
+                Message = "Board created. Nothing was written to the database — update ProjectBoards.BoardUrl manually.",
+                InstituteProjectId = ip.Id,
+                InstituteProjectTitle = ip.Title,
+                BoardId = result.BoardId,
+                BoardUrl = result.BoardUrl,
+                BoardName = result.BoardName,
+                SystemBoardId = result.SystemBoardId,
+                SystemBoardUrl = result.SystemBoardUrl,
+                UserStoryBoardId = result.UserStoryBoardId,
+                UserStoryBoardUrl = result.UserStoryBoardUrl,
+                CardsCreated = result.CreatedCards?.Count ?? 0,
+                SpecInjectedIntoCards = injectedInto,
+                Errors = result.Errors,
+            });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "[BOARD-GEN] Failed generating board for InstituteProject {IpId}", request.InstituteProjectId);
+            return StatusCode(500, new { Success = false, Message = ex.Message });
+        }
+    }
+}
+
+/// <summary>Body for POST /api/Utilities/use/generate-board-from-institute-project.</summary>
+public class GenerateBoardFromInstituteProjectRequest
+{
+    /// <summary>InstituteProjects.Id whose TrelloBoardJson is rendered into a new board.</summary>
+    public int InstituteProjectId { get; set; }
+
+    /// <summary>
+    /// Optional shared design data appended to every card in <see cref="SpecListName"/>.
+    /// Trello lists cannot hold a description, so this is how a per-sprint brief is delivered —
+    /// and card descriptions are what the assessment engine reads. Omit to render the template
+    /// exactly as stored.
+    /// </summary>
+    public string? SharedSpec { get; set; }
+
+    /// <summary>List to inject <see cref="SharedSpec"/> into. Defaults to "Sprint 1".</summary>
+    public string? SpecListName { get; set; }
+
+    /// <summary>Board title. Defaults to the InstituteProject's title.</summary>
+    public string? BoardTitle { get; set; }
 }
 
 public class SetPasswordForAllRequest
