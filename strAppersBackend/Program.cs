@@ -234,6 +234,14 @@ builder.Services.AddHttpClient("GoogleOAuth", client =>
     client.Timeout = TimeSpan.FromSeconds(45);
 });
 
+// Google API proxy for student backends (GoogleProxyController). Off unless GoogleProxy:Enabled and GoogleProxy:TokenSecret are set.
+builder.Services.Configure<GoogleProxyConfig>(builder.Configuration.GetSection("GoogleProxy"));
+builder.Services.AddSingleton<strAppersBackend.Services.GoogleProxy.GoogleProxyRunStore>();
+builder.Services.AddHttpClient("GoogleProxy", client =>
+{
+    client.Timeout = TimeSpan.FromSeconds(60);
+});
+
 // Configure Trello settings
 builder.Services.Configure<TrelloConfig>(builder.Configuration.GetSection("Trello"));
 
