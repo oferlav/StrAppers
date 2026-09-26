@@ -171,6 +171,7 @@
         "request": "Ethiopian food within a 5 minute walk of Times Square, open now",
         "position": null,
         "expectStatus": "ok",
+        "minResults": 1,
         "expectTop1In": ["ChIJFxBlueNile"],
         "expectRelaxed": ["distance"]
       },

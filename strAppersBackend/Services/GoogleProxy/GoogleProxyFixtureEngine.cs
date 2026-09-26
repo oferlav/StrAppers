@@ -13,7 +13,8 @@ namespace strAppersBackend.Services.GoogleProxy
         public string? Description { get; set; }
         public List<FixtureGeocode> Geocode { get; set; } = new();
         public List<FixturePlace> Places { get; set; } = new();
-        // "grading" (expected answers per scenario) is read by the grader only; the proxy never returns it.
+        /// <summary>Expected answers per scenario, read by AgentGrader only. The proxy never returns it.</summary>
+        public FixtureGrading? Grading { get; set; }
     }
 
     public class FixtureGeocode

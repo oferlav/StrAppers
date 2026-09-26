@@ -29,6 +29,9 @@ namespace strAppersBackend.Models
         /// <summary>Request and response bodies longer than this are truncated in the log (forwarding is never truncated).</summary>
         public int MaxLoggedBodyChars { get; set; } = 200_000;
 
+        /// <summary>Secret sent as X-Grader-Key to /api/agent-grading. Grading is disabled while empty.</summary>
+        public string GraderKey { get; set; } = "";
+
         /// <summary>How long a signed fixture run id (grading run) stays valid after the grader creates it.</summary>
         public int FixtureRunTtlMinutes { get; set; } = 60;
 

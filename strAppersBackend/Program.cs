@@ -242,6 +242,13 @@ builder.Services.AddHttpClient("GoogleProxy", client =>
 {
     client.Timeout = TimeSpan.FromSeconds(60);
 });
+// API-level grader for student AI agents (AgentGradingController). Off unless GoogleProxy:GraderKey is also set.
+builder.Services.AddSingleton<strAppersBackend.Services.GoogleProxy.AgentGrader>();
+builder.Services.AddHttpClient("AgentGrader", client =>
+{
+    // The Integration Sheet allows 20 s; a little headroom so slow answers are graded as slow, not as unreachable.
+    client.Timeout = TimeSpan.FromSeconds(35);
+});
 
 // Configure Trello settings
 builder.Services.Configure<TrelloConfig>(builder.Configuration.GetSection("Trello"));
