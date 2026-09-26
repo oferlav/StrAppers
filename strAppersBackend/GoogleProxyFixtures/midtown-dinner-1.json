@@ -152,19 +152,52 @@
         "request": "Cheap vegetarian place near Times Square, open now, quiet enough for a date",
         "position": null,
         "expectStatus": "ok",
-        "expectTop1In": ["ChIJFxGreenTable", "ChIJFxLeafLantern"],
-        "mustNotInclude": ["ChIJFxPrimeCut", "ChIJFxMoonflower", "ChIJFxNoodleRush"],
-        "mustNotBeInTop3": ["ChIJFxPulseGarden", "ChIJFxSproutBowl", "ChIJFxHarvestHall", "ChIJFxFarFields"],
-        "expectGeocodeCall": true
+        "expectTop1In": [
+          "ChIJFxGreenTable",
+          "ChIJFxLeafLantern"
+        ],
+        "mustNotInclude": [
+          "ChIJFxPrimeCut",
+          "ChIJFxMoonflower",
+          "ChIJFxNoodleRush"
+        ],
+        "mustNotBeInTop3": [
+          "ChIJFxPulseGarden",
+          "ChIJFxSproutBowl",
+          "ChIJFxHarvestHall",
+          "ChIJFxFarFields"
+        ],
+        "requirements": {
+          "expectStatus": "R13",
+          "expectTop1In": "R3",
+          "mustNotInclude": "R7, R8",
+          "mustNotBeInTop3": "R3, R4, R5"
+        }
       },
       {
         "id": "vegetarian-quiet-date-with-position",
         "request": "Cheap vegetarian place near me, open now, quiet enough for a date",
-        "position": { "lat": 40.7580, "lng": -73.9855 },
+        "position": {
+          "lat": 40.758,
+          "lng": -73.9855
+        },
         "expectStatus": "ok",
-        "expectTop1In": ["ChIJFxGreenTable", "ChIJFxLeafLantern"],
-        "mustNotInclude": ["ChIJFxPrimeCut", "ChIJFxMoonflower", "ChIJFxNoodleRush"],
-        "expectGeocodeCall": false
+        "expectTop1In": [
+          "ChIJFxGreenTable",
+          "ChIJFxLeafLantern"
+        ],
+        "mustNotInclude": [
+          "ChIJFxPrimeCut",
+          "ChIJFxMoonflower",
+          "ChIJFxNoodleRush"
+        ],
+        "expectGeocodeCall": false,
+        "requirements": {
+          "expectStatus": "R13",
+          "expectTop1In": "R3",
+          "mustNotInclude": "R7, R8",
+          "expectGeocodeCall": "R11"
+        }
       },
       {
         "id": "ethiopian-relax-distance",
@@ -172,15 +205,29 @@
         "position": null,
         "expectStatus": "ok",
         "minResults": 1,
-        "expectTop1In": ["ChIJFxBlueNile"],
-        "expectRelaxed": ["distance"]
+        "expectTop1In": [
+          "ChIJFxBlueNile"
+        ],
+        "expectRelaxed": [
+          "distance"
+        ],
+        "requirements": {
+          "expectStatus": "R13",
+          "minResults": "R1",
+          "expectTop1In": "R3",
+          "expectRelaxed": "R9"
+        }
       },
       {
         "id": "ambiguous-location",
         "request": "Somewhere quiet for dinner near my office",
         "position": null,
         "expectStatus": "needs_clarification",
-        "expectNoMapsCalls": true
+        "expectNoMapsCalls": true,
+        "requirements": {
+          "expectStatus": "R10",
+          "expectNoMapsCalls": "R10"
+        }
       }
     ]
   }

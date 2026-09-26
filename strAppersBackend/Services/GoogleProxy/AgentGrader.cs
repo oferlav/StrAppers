@@ -4,16 +4,17 @@ using System.Globalization;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
+using strAppersBackend.Data;
 using strAppersBackend.Models;
 
 namespace strAppersBackend.Services.GoogleProxy
 {
-    public class FixtureGrading
-    {
-        public List<GradingScenario> Scenarios { get; set; } = new();
-    }
-
+    /// <summary>
+    /// One scenario as the grader uses it: AgentScenarios.Key/Request/Position plus the parsed ExpectationsJson.
+    /// <see cref="Requirements"/> maps an expectation name (e.g. "mustNotInclude") to the requirement code it enforces.
+    /// </summary>
     public class GradingScenario
     {
         public string Id { get; set; } = "";
@@ -28,6 +29,35 @@ namespace strAppersBackend.Services.GoogleProxy
         public List<string> ExpectRelaxed { get; set; } = new();
         public bool? ExpectGeocodeCall { get; set; }
         public bool? ExpectNoMapsCalls { get; set; }
+        public Dictionary<string, string> Requirements { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+    }
+
+    /// <summary>AgentExercises.LimitsJson. Defaults are the Dinner Scout Integration Sheet values.</summary>
+    public class ExerciseLimits
+    {
+        public int MaxLatencyMs { get; set; } = 20_000;
+        public int MaxDetailsCalls { get; set; } = 5;
+        public int MinGeminiCallsWhenOk { get; set; } = 2;
+        public int MaxWhyChars { get; set; } = 200;
+        public int MaxResults { get; set; } = 5;
+        /// <summary>Check-id prefix (e.g. "grounding", "behavior.agentLoop") to requirement code, for checks every scenario runs.</summary>
+        public Dictionary<string, string> CheckRequirements { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+    }
+
+    /// <summary>Everything one grading needs, resolved from the DB: board, project, scenario set, exercise, world, scenarios.</summary>
+    public class GradingPlan
+    {
+        public string BoardId { get; set; } = "";
+        public int InstituteProjectId { get; set; }
+        public string Purpose { get; set; } = "";
+        public int ScenarioSetId { get; set; }
+        public string ScenarioSetName { get; set; } = "";
+        public int ScenarioSetVersion { get; set; }
+        public string ExerciseKey { get; set; } = "";
+        public string EndpointPath { get; set; } = "";
+        public ExerciseLimits Limits { get; set; } = new();
+        public FixtureWorld World { get; set; } = new();
+        public List<GradingScenario> Scenarios { get; set; } = new();
     }
 
     public class GradingPosition
@@ -44,6 +74,8 @@ namespace strAppersBackend.Services.GoogleProxy
         public bool Critical { get; set; }
         public bool Passed { get; set; }
         public string Detail { get; set; } = "";
+        /// <summary>The requirement code this check enforces, so a failure traces back to what a persona said.</summary>
+        public string? Requirement { get; set; }
     }
 
     public class GradingRunResult
@@ -71,7 +103,13 @@ namespace strAppersBackend.Services.GoogleProxy
     {
         public string GradingId { get; set; } = "";
         public string BoardId { get; set; } = "";
-        public string WorldId { get; set; } = "";
+        public int InstituteProjectId { get; set; }
+        public string Purpose { get; set; } = "";
+        public int ScenarioSetId { get; set; }
+        public string ScenarioSetName { get; set; } = "";
+        public int ScenarioSetVersion { get; set; }
+        public string ExerciseKey { get; set; } = "";
+        public string WorldKey { get; set; } = "";
         public string BackendUrl { get; set; } = "";
         /// <summary>running | completed | failed</summary>
         public string Status { get; set; } = "running";
@@ -86,17 +124,25 @@ namespace strAppersBackend.Services.GoogleProxy
     }
 
     /// <summary>
-    /// Grades a student's Dinner Scout backend at the API level: runs each scenario of a fixture world's "grading" block
-    /// against POST {backend}/api/agent/dinner with a fresh signed fixture run id, then checks the response against the
-    /// Integration Sheet and against the proxy's log of that same run. Implementation-independent: only the HTTP contract
-    /// and the Google calls the proxy saw are graded. Runs in the background; reports are kept in memory.
+    /// Grades a student's agent backend at the API level. The board's project resolves to its graded (or practice)
+    /// scenario set in the DB; each scenario runs against POST {backend}{AgentExercises.EndpointPath} with a fresh signed
+    /// fixture run id, then the response is checked against the exercise contract and against the proxy's log of that
+    /// same run. Implementation-independent: only the HTTP contract and the Google calls the proxy saw are graded.
+    /// Runs in the background; running reports live in memory and every report is saved to AgentGradingReports.
     /// </summary>
     public class AgentGrader
     {
-        private const int MaxLatencyMs = 20_000;
-        private const int MaxDetailsCalls = 5;
-        private const int MinGeminiCallsWhenOk = 2;
-        private const int MaxWhyChars = 200;
+        public static readonly JsonSerializerOptions ReportJsonOptions = new(JsonSerializerDefaults.Web);
+        private static readonly JsonSerializerOptions ReadOptions = new(JsonSerializerDefaults.Web);
+
+        // Scenario expectations and the checks that enforce them (for requirement tagging).
+        private static readonly (string CheckPrefix, string Expectation)[] ExpectationChecks =
+        {
+            ("hardRule.mustNotInclude", "mustNotInclude"), ("behavior.status", "expectStatus"), ("behavior.geocode", "expectGeocodeCall"),
+            ("behavior.noMapsCalls", "expectNoMapsCalls"), ("behavior.relaxed", "expectRelaxed"), ("ranking.top1", "expectTop1In"),
+            ("ranking.trapsOutOfTop3", "mustNotBeInTop3"), ("contract.resultCount", "minResults")
+        };
+
         private const int MaxStoredResponseChars = 20_000;
         private static readonly TimeSpan ReportRetention = TimeSpan.FromHours(24);
         private static readonly HashSet<string> Statuses = new() { "ok", "needs_clarification", "no_results" };
@@ -105,53 +151,138 @@ namespace strAppersBackend.Services.GoogleProxy
 
         private readonly GoogleProxyConfig _config;
         private readonly GoogleProxyRunStore _runStore;
-        private readonly GoogleProxyFixtureEngine _fixtures;
+        private readonly IServiceScopeFactory _scopeFactory;
         private readonly IHttpClientFactory _httpClientFactory;
         private readonly ILogger<AgentGrader> _logger;
         private readonly ConcurrentDictionary<string, GradingReport> _reports = new();
 
-        public AgentGrader(IOptions<GoogleProxyConfig> config, GoogleProxyRunStore runStore, GoogleProxyFixtureEngine fixtures,
+        public AgentGrader(IOptions<GoogleProxyConfig> config, GoogleProxyRunStore runStore, IServiceScopeFactory scopeFactory,
             IHttpClientFactory httpClientFactory, ILogger<AgentGrader> logger)
         {
             _config = config.Value;
             _runStore = runStore;
-            _fixtures = fixtures;
+            _scopeFactory = scopeFactory;
             _httpClientFactory = httpClientFactory;
             _logger = logger;
         }
 
-        /// <summary>The report serialized under its lock, since the background run keeps updating it.</summary>
-        public string? GetReportJson(string gradingId, JsonSerializerOptions options)
+        /// <summary>
+        /// Resolves board → institute project → its scenario set for <paramref name="purpose"/> → exercise, world and scenarios.
+        /// Only published sets are graded. Throws ArgumentException with a readable reason when anything is missing.
+        /// </summary>
+        public static async Task<GradingPlan> ResolvePlanAsync(ApplicationDbContext db, string boardId, string purpose,
+            IReadOnlyCollection<string>? scenarioKeys, CancellationToken ct = default)
         {
-            if (!_reports.TryGetValue(gradingId, out var report)) return null;
-            lock (report) return JsonSerializer.Serialize(report, options);
-        }
+            var board = await db.ProjectBoards.AsNoTracking().Where(b => b.Id == boardId)
+                .Select(b => new { b.InstituteProjectId }).FirstOrDefaultAsync(ct)
+                ?? throw new ArgumentException($"Board '{boardId}' not found.");
+            if (board.InstituteProjectId == null)
+                throw new ArgumentException($"Board '{boardId}' has no institute project.");
 
-        /// <summary>Validates the inputs, then grades in the background. Throws ArgumentException for bad input.</summary>
-        public GradingReport Start(string boardId, string backendUrl, string worldId, int repetitions, IReadOnlyCollection<string>? scenarioIds)
-        {
-            var world = _fixtures.GetWorld(worldId) ?? throw new ArgumentException($"Fixture world '{worldId}' not found.");
-            var scenarios = (world.Grading?.Scenarios ?? new List<GradingScenario>())
-                .Where(s => scenarioIds == null || scenarioIds.Count == 0 || scenarioIds.Contains(s.Id)).ToList();
+            var link = await db.ProjectAgentScenarioSets.AsNoTracking()
+                .Include(l => l.ScenarioSet).ThenInclude(s => s.Exercise)
+                .Include(l => l.ScenarioSet).ThenInclude(s => s.World)
+                .Include(l => l.ScenarioSet).ThenInclude(s => s.Scenarios)
+                .FirstOrDefaultAsync(l => l.InstituteProjectId == board.InstituteProjectId && l.Purpose == purpose, ct)
+                ?? throw new ArgumentException($"Institute project {board.InstituteProjectId} has no {purpose} scenario set.");
+            var set = link.ScenarioSet;
+            if (set.Status != AgentScenarioSet.StatusPublished)
+                throw new ArgumentException($"Scenario set '{set.Name}' v{set.Version} is '{set.Status}'; only published sets can be graded.");
+
+            var world = GoogleProxyFixtureEngine.ParseWorld(set.World.Key, set.World.DataJson)
+                ?? throw new ArgumentException($"World '{set.World.Key}' has invalid DataJson.");
+            var limits = string.IsNullOrWhiteSpace(set.Exercise.LimitsJson)
+                ? new ExerciseLimits()
+                : JsonSerializer.Deserialize<ExerciseLimits>(set.Exercise.LimitsJson, ReadOptions) ?? new ExerciseLimits();
+            limits.CheckRequirements = new Dictionary<string, string>(limits.CheckRequirements, StringComparer.OrdinalIgnoreCase);
+
+            var scenarios = set.Scenarios
+                .Where(s => scenarioKeys == null || scenarioKeys.Count == 0 || scenarioKeys.Contains(s.Key))
+                .OrderBy(s => s.SortOrder).ThenBy(s => s.Id)
+                .Select(ToGradingScenario)
+                .ToList();
             if (scenarios.Count == 0) throw new ArgumentException("No grading scenarios selected.");
 
+            return new GradingPlan
+            {
+                BoardId = boardId,
+                InstituteProjectId = board.InstituteProjectId.Value,
+                Purpose = purpose,
+                ScenarioSetId = set.Id,
+                ScenarioSetName = set.Name,
+                ScenarioSetVersion = set.Version,
+                ExerciseKey = set.Exercise.Key,
+                EndpointPath = "/" + set.Exercise.EndpointPath.TrimStart('/'),
+                Limits = limits,
+                World = world,
+                Scenarios = scenarios
+            };
+        }
+
+        private static GradingScenario ToGradingScenario(AgentScenario row)
+        {
+            GradingScenario scenario;
+            try { scenario = JsonSerializer.Deserialize<GradingScenario>(row.ExpectationsJson, ReadOptions) ?? new GradingScenario(); }
+            catch (JsonException ex) { throw new ArgumentException($"Scenario '{row.Key}' has invalid ExpectationsJson: {ex.Message}"); }
+            scenario.Id = row.Key;
+            scenario.Request = row.Request;
+            scenario.Position = row.PositionLat != null && row.PositionLng != null
+                ? new GradingPosition { Lat = row.PositionLat.Value, Lng = row.PositionLng.Value }
+                : null;
+            scenario.Requirements = new Dictionary<string, string>(scenario.Requirements, StringComparer.OrdinalIgnoreCase);
+            return scenario;
+        }
+
+        /// <summary>The report as JSON: from memory while it exists there (serialized under its lock), else from AgentGradingReports.</summary>
+        public async Task<string?> GetReportJsonAsync(string gradingId, CancellationToken ct = default)
+        {
+            if (_reports.TryGetValue(gradingId, out var report))
+                lock (report) return JsonSerializer.Serialize(report, ReportJsonOptions);
+
+            using var scope = _scopeFactory.CreateScope();
+            var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            var row = await db.AgentGradingReports.AsNoTracking().FirstOrDefaultAsync(r => r.GradingId == gradingId, ct);
+            if (row == null) return null;
+            return row.ReportJson ?? JsonSerializer.Serialize(new { gradingId = row.GradingId, boardId = row.BoardId, status = row.Status }, ReportJsonOptions);
+        }
+
+        /// <summary>Saves a "running" report row, then grades in the background.</summary>
+        public async Task<GradingReport> StartAsync(GradingPlan plan, string backendUrl, int repetitions, CancellationToken ct = default)
+        {
             foreach (var old in _reports.Where(r => r.Value.StartedAt < DateTime.UtcNow - ReportRetention).Select(r => r.Key).ToList())
                 _reports.TryRemove(old, out _);
 
             var report = new GradingReport
             {
                 GradingId = Guid.NewGuid().ToString("N"),
-                BoardId = boardId,
-                WorldId = worldId,
+                BoardId = plan.BoardId,
+                InstituteProjectId = plan.InstituteProjectId,
+                Purpose = plan.Purpose,
+                ScenarioSetId = plan.ScenarioSetId,
+                ScenarioSetName = plan.ScenarioSetName,
+                ScenarioSetVersion = plan.ScenarioSetVersion,
+                ExerciseKey = plan.ExerciseKey,
+                WorldKey = plan.World.WorldId,
                 BackendUrl = backendUrl,
                 StartedAt = DateTime.UtcNow,
-                TotalScenarios = scenarios.Count
+                TotalScenarios = plan.Scenarios.Count
             };
+
+            using (var scope = _scopeFactory.CreateScope())
+            {
+                var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+                db.AgentGradingReports.Add(new AgentGradingReport
+                {
+                    GradingId = report.GradingId, BoardId = report.BoardId, ScenarioSetId = report.ScenarioSetId,
+                    Status = report.Status, StartedAt = report.StartedAt
+                });
+                await db.SaveChangesAsync(ct);
+            }
             _reports[report.GradingId] = report;
 
             _ = Task.Run(async () =>
             {
-                try { await RunAsync(report, world, scenarios, Math.Clamp(repetitions, 1, 5)); }
+                try { await RunAsync(report, plan, Math.Clamp(repetitions, 1, 5)); }
                 catch (Exception ex)
                 {
                     _logger.LogError(ex, "[AgentGrader] Grading {GradingId} crashed", report.GradingId);
@@ -162,11 +293,36 @@ namespace strAppersBackend.Services.GoogleProxy
                         report.FinishedAt = DateTime.UtcNow;
                     }
                 }
+                await SaveReportAsync(report);
             });
             return report;
         }
 
-        private async Task RunAsync(GradingReport report, FixtureWorld world, List<GradingScenario> scenarios, int repetitions)
+        /// <summary>Writes the finished (or failed) report to its AgentGradingReports row. Never throws: the in-memory copy stays readable.</summary>
+        private async Task SaveReportAsync(GradingReport report)
+        {
+            try
+            {
+                string json;
+                lock (report) json = JsonSerializer.Serialize(report, ReportJsonOptions);
+                using var scope = _scopeFactory.CreateScope();
+                var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+                var row = await db.AgentGradingReports.FirstOrDefaultAsync(r => r.GradingId == report.GradingId);
+                if (row == null) return;
+                row.Status = report.Status;
+                row.Score = report.Status == "completed" ? report.Score : null;
+                row.CriticalFailure = report.Status == "completed" ? report.CriticalFailure : null;
+                row.ReportJson = json;
+                row.FinishedAt = report.FinishedAt;
+                await db.SaveChangesAsync();
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "[AgentGrader] Could not save report {GradingId}", report.GradingId);
+            }
+        }
+
+        private async Task RunAsync(GradingReport report, GradingPlan plan, int repetitions)
         {
             var client = _httpClientFactory.CreateClient("AgentGrader");
 
@@ -183,11 +339,11 @@ namespace strAppersBackend.Services.GoogleProxy
                 return;
             }
 
-            foreach (var scenario in scenarios)
+            foreach (var scenario in plan.Scenarios)
             {
                 var runs = new List<GradingRunResult>();
                 for (var i = 0; i < repetitions; i++)
-                    runs.Add(await GradeRunAsync(client, report, world, scenario));
+                    runs.Add(await GradeRunAsync(client, report, plan, scenario));
 
                 var passedRuns = runs.Count(r => r.Passed);
                 lock (report)
@@ -224,9 +380,9 @@ namespace strAppersBackend.Services.GoogleProxy
             catch (Exception) { return null; }
         }
 
-        private async Task<GradingRunResult> GradeRunAsync(HttpClient client, GradingReport report, FixtureWorld world, GradingScenario scenario)
+        private async Task<GradingRunResult> GradeRunAsync(HttpClient client, GradingReport report, GradingPlan plan, GradingScenario scenario)
         {
-            var runId = GoogleProxyFixtureRuns.Create(report.BoardId, world.WorldId, _config.TokenSecret, DateTimeOffset.UtcNow);
+            var runId = GoogleProxyFixtureRuns.Create(report.BoardId, plan.World.WorldId, _config.TokenSecret, DateTimeOffset.UtcNow);
             var result = new GradingRunResult { RunId = runId };
             var checks = result.Checks;
 
@@ -237,7 +393,7 @@ namespace strAppersBackend.Services.GoogleProxy
             var stopwatch = Stopwatch.StartNew();
             try
             {
-                using var request = new HttpRequestMessage(HttpMethod.Post, report.BackendUrl + "/api/agent/dinner")
+                using var request = new HttpRequestMessage(HttpMethod.Post, report.BackendUrl + plan.EndpointPath)
                 {
                     Content = new StringContent(payload.ToJsonString(), Encoding.UTF8, "application/json")
                 };
@@ -257,17 +413,18 @@ namespace strAppersBackend.Services.GoogleProxy
             var calls = _runStore.GetRun(report.BoardId, runId) ?? new List<GoogleProxyCallLog>();
             result.CallCounts = calls.GroupBy(c => c.Service + " " + c.Method + " " + PathOnly(c.Path)).ToDictionary(g => g.Key, g => g.Count());
 
-            if (body != null) GradeResponse(result, body, world, scenario, calls);
+            if (body != null) GradeResponse(result, body, plan.World, plan.Limits, scenario, calls);
+            TagRequirements(checks, scenario, plan.Limits);
             result.CriticalFailure = checks.Any(c => c.Critical && !c.Passed);
             result.Passed = checks.All(c => c.Passed);
             return result;
         }
 
-        private static void GradeResponse(GradingRunResult result, string body, FixtureWorld world, GradingScenario scenario, List<GoogleProxyCallLog> calls)
+        private static void GradeResponse(GradingRunResult result, string body, FixtureWorld world, ExerciseLimits limits, GradingScenario scenario, List<GoogleProxyCallLog> calls)
         {
             var checks = result.Checks;
             checks.Add(Check("contract.http200", "contract", true, result.HttpStatus == 200, $"HTTP {result.HttpStatus}"));
-            checks.Add(Check("contract.latency", "contract", false, result.LatencyMs <= MaxLatencyMs, $"{result.LatencyMs} ms (limit {MaxLatencyMs})"));
+            checks.Add(Check("contract.latency", "contract", false, result.LatencyMs <= limits.MaxLatencyMs, $"{result.LatencyMs} ms (limit {limits.MaxLatencyMs})"));
 
             JsonObject? json = null;
             try { json = JsonNode.Parse(body) as JsonObject; } catch (JsonException) { }
@@ -296,7 +453,7 @@ namespace strAppersBackend.Services.GoogleProxy
 
             if (status == "ok")
             {
-                checks.Add(Check("contract.resultCount", "contract", false, items.Count >= scenario.MinResults && items.Count <= 5, $"{items.Count} results (expected {scenario.MinResults} to 5)"));
+                checks.Add(Check("contract.resultCount", "contract", false, items.Count >= scenario.MinResults && items.Count <= limits.MaxResults, $"{items.Count} results (expected {scenario.MinResults} to {limits.MaxResults})"));
                 var trace = json["trace"] as JsonArray;
                 checks.Add(Check("contract.trace", "contract", false, trace != null && trace.Count > 0, "trace must be a non-empty array when status is ok"));
             }
@@ -318,7 +475,7 @@ namespace strAppersBackend.Services.GoogleProxy
                 if (Int(item["travelMinutes"]) == null) fieldProblems.Add(id + ": travelMinutes must be an integer");
                 if (!TravelModes.Contains(Str(item["travelMode"]) ?? "")) fieldProblems.Add(id + ": travelMode must be walking or driving");
                 var why = Str(item["why"]);
-                if (string.IsNullOrWhiteSpace(why) || why.Length > MaxWhyChars) fieldProblems.Add(id + $": why must be 1 to {MaxWhyChars} characters");
+                if (string.IsNullOrWhiteSpace(why) || why.Length > limits.MaxWhyChars) fieldProblems.Add(id + $": why must be 1 to {limits.MaxWhyChars} characters");
             }
             checks.Add(Check("contract.resultFields", "contract", false, fieldProblems.Count == 0, fieldProblems.Count == 0 ? "ok" : string.Join("; ", fieldProblems)));
 
@@ -371,11 +528,11 @@ namespace strAppersBackend.Services.GoogleProxy
             if (scenario.ExpectNoMapsCalls == true)
                 checks.Add(Check("behavior.noMapsCalls", "behavior", false, mapsCalls == 0, $"{mapsCalls} Maps/Places calls, expected none"));
             var detailsCalls = calls.Count(c => c.Service == "places" && c.Method == "GET");
-            checks.Add(Check("behavior.detailsLimit", "behavior", false, detailsCalls <= MaxDetailsCalls, $"{detailsCalls} Place Details calls (limit {MaxDetailsCalls})"));
+            checks.Add(Check("behavior.detailsLimit", "behavior", false, detailsCalls <= limits.MaxDetailsCalls, $"{detailsCalls} Place Details calls (limit {limits.MaxDetailsCalls})"));
             if (scenario.ExpectStatus == "ok")
             {
                 var geminiCalls = calls.Count(c => c.Service == "gemini");
-                checks.Add(Check("behavior.agentLoop", "behavior", false, geminiCalls >= MinGeminiCallsWhenOk, $"{geminiCalls} Gemini calls (at least {MinGeminiCallsWhenOk} expected)"));
+                checks.Add(Check("behavior.agentLoop", "behavior", false, geminiCalls >= limits.MinGeminiCallsWhenOk, $"{geminiCalls} Gemini calls (at least {limits.MinGeminiCallsWhenOk} expected)"));
             }
             foreach (var constraint in scenario.ExpectRelaxed)
                 checks.Add(Check($"behavior.relaxed[{constraint}]", "behavior", false, relaxedNames.Contains(constraint), "relaxed: " + string.Join(",", relaxedNames)));
@@ -387,6 +544,28 @@ namespace strAppersBackend.Services.GoogleProxy
             {
                 var traps = ids.Take(3).Intersect(scenario.MustNotBeInTop3).ToList();
                 checks.Add(Check("ranking.trapsOutOfTop3", "ranking", false, traps.Count == 0, traps.Count == 0 ? "ok" : "in top 3: " + string.Join(",", traps)));
+            }
+        }
+
+        /// <summary>
+        /// Sets each check's requirement code: the scenario's tag for the expectation it enforces, else the exercise's
+        /// code for the longest matching check-id prefix (checks every scenario runs: contract, grounding, limits).
+        /// </summary>
+        internal static void TagRequirements(List<GradingCheck> checks, GradingScenario scenario, ExerciseLimits limits)
+        {
+            foreach (var check in checks)
+            {
+                var expectation = ExpectationChecks.FirstOrDefault(e => check.Id.StartsWith(e.CheckPrefix, StringComparison.Ordinal)).Expectation;
+                if (expectation != null && scenario.Requirements.TryGetValue(expectation, out var code))
+                {
+                    check.Requirement = code;
+                    continue;
+                }
+                check.Requirement = limits.CheckRequirements
+                    .Where(kv => check.Id.StartsWith(kv.Key, StringComparison.OrdinalIgnoreCase))
+                    .OrderByDescending(kv => kv.Key.Length)
+                    .Select(kv => kv.Value)
+                    .FirstOrDefault();
             }
         }
 

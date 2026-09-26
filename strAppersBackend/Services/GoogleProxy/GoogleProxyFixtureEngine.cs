@@ -4,6 +4,8 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
+using Microsoft.EntityFrameworkCore;
+using strAppersBackend.Data;
 
 namespace strAppersBackend.Services.GoogleProxy
 {
@@ -13,8 +15,6 @@ namespace strAppersBackend.Services.GoogleProxy
         public string? Description { get; set; }
         public List<FixtureGeocode> Geocode { get; set; } = new();
         public List<FixturePlace> Places { get; set; } = new();
-        /// <summary>Expected answers per scenario, read by AgentGrader only. The proxy never returns it.</summary>
-        public FixtureGrading? Grading { get; set; }
     }
 
     public class FixtureGeocode
@@ -74,17 +74,49 @@ namespace strAppersBackend.Services.GoogleProxy
             "best", "good", "great", "top", "nice", "cheap", "affordable", "inexpensive", "expensive", "fancy", "open", "now", "tonight", "today"
         };
 
-        private readonly string _fixturesPath;
-        private readonly ILogger<GoogleProxyFixtureEngine> _logger;
-        private readonly ConcurrentDictionary<string, FixtureWorld?> _worlds = new();
+        // Worlds live in AgentWorlds (DataJson). Cached briefly: a grading run makes many calls against one world,
+        // and a short expiry lets an edited draft world take effect without a restart.
+        private static readonly TimeSpan WorldCacheTtl = TimeSpan.FromMinutes(5);
 
-        public GoogleProxyFixtureEngine(ILogger<GoogleProxyFixtureEngine> logger)
+        private readonly IServiceScopeFactory _scopeFactory;
+        private readonly ILogger<GoogleProxyFixtureEngine> _logger;
+        private readonly ConcurrentDictionary<string, (FixtureWorld? World, DateTime LoadedAt)> _worlds = new();
+
+        public GoogleProxyFixtureEngine(IServiceScopeFactory scopeFactory, ILogger<GoogleProxyFixtureEngine> logger)
         {
-            _fixturesPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "GoogleProxyFixtures");
+            _scopeFactory = scopeFactory;
             _logger = logger;
         }
 
-        public FixtureWorld? GetWorld(string worldId) => _worlds.GetOrAdd(worldId, LoadWorld);
+        /// <summary>The world stored under AgentWorlds.Key, or null when it does not exist or its DataJson is invalid.</summary>
+        public async Task<FixtureWorld?> GetWorldAsync(string worldKey, CancellationToken ct = default)
+        {
+            if (_worlds.TryGetValue(worldKey, out var cached) && DateTime.UtcNow - cached.LoadedAt < WorldCacheTtl)
+                return cached.World;
+
+            using var scope = _scopeFactory.CreateScope();
+            var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            var dataJson = await db.AgentWorlds.AsNoTracking().Where(w => w.Key == worldKey).Select(w => w.DataJson).FirstOrDefaultAsync(ct);
+            var world = dataJson == null ? null : ParseWorld(worldKey, dataJson, _logger);
+            _worlds[worldKey] = (world, DateTime.UtcNow);
+            return world;
+        }
+
+        /// <summary>Parses AgentWorlds.DataJson. The row's Key is the world id, whatever the JSON says.</summary>
+        public static FixtureWorld? ParseWorld(string worldKey, string dataJson, ILogger? logger = null)
+        {
+            try
+            {
+                var world = JsonSerializer.Deserialize<FixtureWorld>(dataJson, ReadOptions);
+                if (world != null) world.WorldId = worldKey;
+                return world;
+            }
+            catch (JsonException ex)
+            {
+                logger?.LogError(ex, "[GoogleProxy] Fixture world {WorldKey} has invalid DataJson", worldKey);
+                return null;
+            }
+        }
 
         /// <summary>The fixture response, or null when this service is not simulated (Gemini, Speech stay live).</summary>
         public (int Status, string Json)? Handle(FixtureWorld world, string service, string method, string path, IEnumerable<KeyValuePair<string, string>> query, byte[] body, string? fieldMask)
@@ -94,18 +126,6 @@ namespace strAppersBackend.Services.GoogleProxy
             if (service == "places" && method == "POST" && path == "v1/places:searchText") return SearchText(world, body, fieldMask);
             if (service == "places" && method == "GET" && path.StartsWith("v1/places/", StringComparison.Ordinal)) return Details(world, path["v1/places/".Length..], fieldMask);
             return null;
-        }
-
-        private FixtureWorld? LoadWorld(string worldId)
-        {
-            var file = Path.Combine(_fixturesPath, worldId + ".json");
-            if (!File.Exists(file)) return null;
-            try { return JsonSerializer.Deserialize<FixtureWorld>(File.ReadAllText(file), ReadOptions); }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "[GoogleProxy] Fixture world {WorldId} is not valid JSON", worldId);
-                return null;
-            }
         }
 
         // ---------- Geocoding ----------

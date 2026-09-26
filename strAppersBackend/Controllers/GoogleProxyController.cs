@@ -111,14 +111,14 @@ public class GoogleProxyController : ControllerBase
         }
 
         // Fixture runs (signed "fx." run ids created by the grader) answer Maps and Places from a simulated world
-        // (GoogleProxyFixtures/{worldId}.json) so every student is graded on the same fixed data. Gemini and Speech stay live.
+        // (AgentWorlds.DataJson, by key) so every student is graded on the same fixed data. Gemini and Speech stay live.
         FixtureWorld? fixtureWorld = null;
         switch (GoogleProxyFixtureRuns.Parse(runId, boardId!, _config.TokenSecret, _config.FixtureRunTtlMinutes, DateTimeOffset.UtcNow, out var worldId))
         {
             case GoogleProxyFixtureRuns.Kind.Invalid:
                 return StatusCode(403, new { error = "Invalid or expired fixture run id." });
             case GoogleProxyFixtureRuns.Kind.Valid:
-                fixtureWorld = _fixtures.GetWorld(worldId!);
+                fixtureWorld = await _fixtures.GetWorldAsync(worldId!, cancellationToken);
                 if (fixtureWorld == null)
                 {
                     _logger.LogError("[GoogleProxy] Fixture world {WorldId} not found or invalid", worldId);

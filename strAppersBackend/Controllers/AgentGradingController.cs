@@ -14,6 +14,7 @@ namespace strAppersBackend.Controllers;
 /// Starts and reads API-level gradings of a student's AI agent backend (AgentGrader).
 ///   POST /api/agent-grading/runs          header X-Grader-Key   body AgentGradingRequest  -> 202 { gradingId }
 ///   GET  /api/agent-grading/runs/{id}     header X-Grader-Key                             -> the report (status running | completed | failed)
+/// What gets graded comes from the DB: board -> institute project -> its graded (or practice) scenario set.
 /// Protected by GoogleProxy:GraderKey because a grading calls the student backend and spends Gemini quota.
 /// </summary>
 [ApiController]
@@ -21,8 +22,6 @@ namespace strAppersBackend.Controllers;
 [ApiExplorerSettings(IgnoreApi = true)]
 public class AgentGradingController : ControllerBase
 {
-    private static readonly JsonSerializerOptions ReportJson = new(JsonSerializerDefaults.Web);
-
     private readonly GoogleProxyConfig _config;
     private readonly AgentGrader _grader;
     private readonly ApplicationDbContext _context;
@@ -37,10 +36,11 @@ public class AgentGradingController : ControllerBase
     public class AgentGradingRequest
     {
         public string BoardId { get; set; } = "";
-        public string WorldId { get; set; } = "midtown-dinner-1";
+        /// <summary>"graded" (default) or "practice": which of the project's scenario sets to run.</summary>
+        public string Purpose { get; set; } = ProjectAgentScenarioSet.PurposeGraded;
         public int Repetitions { get; set; } = 3;
-        /// <summary>Optional subset of the world's scenario ids; all scenarios when empty.</summary>
-        public List<string>? ScenarioIds { get; set; }
+        /// <summary>Optional subset of the set's scenario keys; all scenarios when empty.</summary>
+        public List<string>? ScenarioKeys { get; set; }
         /// <summary>Optional override of the board's WebApiUrl (for example a local backend while testing).</summary>
         public string? BackendUrl { get; set; }
     }
@@ -50,6 +50,8 @@ public class AgentGradingController : ControllerBase
     {
         if (!TryAuthorize(out var failure)) return failure!;
         if (string.IsNullOrWhiteSpace(request.BoardId)) return BadRequest(new { error = "boardId is required." });
+        if (request.Purpose != ProjectAgentScenarioSet.PurposeGraded && request.Purpose != ProjectAgentScenarioSet.PurposePractice)
+            return BadRequest(new { error = "purpose must be 'graded' or 'practice'." });
 
         var rawUrl = request.BackendUrl;
         if (string.IsNullOrWhiteSpace(rawUrl))
@@ -68,8 +70,14 @@ public class AgentGradingController : ControllerBase
 
         try
         {
-            var report = _grader.Start(request.BoardId, backendUrl, request.WorldId, request.Repetitions, request.ScenarioIds);
-            return StatusCode(202, new { gradingId = report.GradingId, status = "running", backendUrl, statusUrl = $"/api/agent-grading/runs/{report.GradingId}" });
+            var plan = await AgentGrader.ResolvePlanAsync(_context, request.BoardId, request.Purpose, request.ScenarioKeys, cancellationToken);
+            var report = await _grader.StartAsync(plan, backendUrl, request.Repetitions, cancellationToken);
+            return StatusCode(202, new
+            {
+                gradingId = report.GradingId, status = "running", backendUrl,
+                scenarioSet = $"{plan.ScenarioSetName} v{plan.ScenarioSetVersion}", scenarios = plan.Scenarios.Count,
+                statusUrl = $"/api/agent-grading/runs/{report.GradingId}"
+            });
         }
         catch (ArgumentException ex)
         {
@@ -78,10 +86,10 @@ public class AgentGradingController : ControllerBase
     }
 
     [HttpGet("runs/{gradingId}")]
-    public IActionResult Get(string gradingId)
+    public async Task<IActionResult> Get(string gradingId, CancellationToken cancellationToken)
     {
         if (!TryAuthorize(out var failure)) return failure!;
-        var json = _grader.GetReportJson(gradingId, ReportJson);
+        var json = await _grader.GetReportJsonAsync(gradingId, cancellationToken);
         return json == null ? NotFound(new { error = "Unknown or expired grading id." }) : Content(json, "application/json");
     }
 

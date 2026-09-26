@@ -5,7 +5,7 @@ using System.Text.RegularExpressions;
 namespace strAppersBackend.Services.GoogleProxy
 {
     /// <summary>
-    /// Fixture run ids switch the proxy to a simulated world (GoogleProxyFixtures/{worldId}.json) for Maps and Places calls.
+    /// Fixture run ids switch the proxy to a simulated world (AgentWorlds row with Key = worldId) for Maps and Places calls.
     /// Format: "fx.{worldId}.{issuedUnixSeconds}.{nonce}.{signature}", signed with GoogleProxy:TokenSecret and bound to one board,
     /// so students cannot create them, and they expire (GoogleProxy:FixtureRunTtlMinutes) so a grading run id seen in a student's
     /// logs cannot be replayed later to explore the test world.
