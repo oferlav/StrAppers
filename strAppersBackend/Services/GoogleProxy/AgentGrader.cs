@@ -26,6 +26,8 @@ namespace strAppersBackend.Services.GoogleProxy
         public List<string> ExpectTop1In { get; set; } = new();
         public List<string> MustNotInclude { get; set; } = new();
         public List<string> MustNotBeInTop3 { get; set; } = new();
+        /// <summary>When set, every recommended place must be one of these (e.g. the only places of the requested cuisine).</summary>
+        public List<string> AllResultsIn { get; set; } = new();
         public List<string> ExpectRelaxed { get; set; } = new();
         public bool? ExpectGeocodeCall { get; set; }
         public bool? ExpectNoMapsCalls { get; set; }
@@ -140,7 +142,7 @@ namespace strAppersBackend.Services.GoogleProxy
         {
             ("hardRule.mustNotInclude", "mustNotInclude"), ("behavior.status", "expectStatus"), ("behavior.geocode", "expectGeocodeCall"),
             ("behavior.noMapsCalls", "expectNoMapsCalls"), ("behavior.relaxed", "expectRelaxed"), ("ranking.top1", "expectTop1In"),
-            ("ranking.trapsOutOfTop3", "mustNotBeInTop3"), ("contract.resultCount", "minResults")
+            ("ranking.trapsOutOfTop3", "mustNotBeInTop3"), ("ranking.allResultsFit", "allResultsIn"), ("contract.resultCount", "minResults")
         };
 
         private const int MaxStoredResponseChars = 20_000;
@@ -544,6 +546,11 @@ namespace strAppersBackend.Services.GoogleProxy
             {
                 var traps = ids.Take(3).Intersect(scenario.MustNotBeInTop3).ToList();
                 checks.Add(Check("ranking.trapsOutOfTop3", "ranking", false, traps.Count == 0, traps.Count == 0 ? "ok" : "in top 3: " + string.Join(",", traps)));
+            }
+            if (scenario.AllResultsIn.Count > 0)
+            {
+                var unfit = ids.Except(scenario.AllResultsIn).ToList();
+                checks.Add(Check("ranking.allResultsFit", "ranking", false, unfit.Count == 0, unfit.Count == 0 ? "ok" : "do not fit the request: " + string.Join(",", unfit)));
             }
         }
 

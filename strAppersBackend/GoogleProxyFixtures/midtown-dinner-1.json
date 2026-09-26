@@ -196,8 +196,15 @@
           "expectStatus": "R13",
           "expectTop1In": "R3",
           "mustNotInclude": "R7, R8",
-          "expectGeocodeCall": "R11"
-        }
+          "expectGeocodeCall": "R11",
+          "mustNotBeInTop3": "R3, R4, R5"
+        },
+        "mustNotBeInTop3": [
+          "ChIJFxPulseGarden",
+          "ChIJFxSproutBowl",
+          "ChIJFxHarvestHall",
+          "ChIJFxFarFields"
+        ]
       },
       {
         "id": "ethiopian-relax-distance",
@@ -215,8 +222,12 @@
           "expectStatus": "R13",
           "minResults": "R1",
           "expectTop1In": "R3",
-          "expectRelaxed": "R9"
-        }
+          "expectRelaxed": "R9",
+          "allResultsIn": "R3"
+        },
+        "allResultsIn": [
+          "ChIJFxBlueNile"
+        ]
       },
       {
         "id": "ambiguous-location",
@@ -229,6 +240,7 @@
           "expectNoMapsCalls": "R10"
         }
       }
-    ]
+    ],
+    "version": 2
   }
 }

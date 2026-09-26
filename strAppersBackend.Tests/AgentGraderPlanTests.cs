@@ -119,6 +119,21 @@ public class AgentGraderPlanTests
     }
 
     [Fact]
+    public void AllResultsIn_IsParsedFromExpectations_AndTagged()
+    {
+        var scenario = System.Text.Json.JsonSerializer.Deserialize<GradingScenario>(
+            """{ "allResultsIn": ["nile"], "requirements": { "allResultsIn": "R3" } }""",
+            new System.Text.Json.JsonSerializerOptions(System.Text.Json.JsonSerializerDefaults.Web))!;
+        scenario.Requirements = new Dictionary<string, string>(scenario.Requirements, StringComparer.OrdinalIgnoreCase);
+        var checks = new List<GradingCheck> { new() { Id = "ranking.allResultsFit" } };
+
+        AgentGrader.TagRequirements(checks, scenario, new ExerciseLimits());
+
+        Assert.Equal(new[] { "nile" }, scenario.AllResultsIn);
+        Assert.Equal("R3", checks[0].Requirement);
+    }
+
+    [Fact]
     public async Task Checks_AreTaggedFromScenarioFirst_ThenLongestExercisePrefix()
     {
         using var db = CreateDb();
