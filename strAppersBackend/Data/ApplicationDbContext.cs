@@ -47,6 +47,15 @@ public class ApplicationDbContext : DbContext
         public DbSet<AtsAssessmentInstance> AtsAssessmentInstances { get; set; }
     public DbSet<AIModel> AIModels { get; set; }
     public DbSet<Persona> Personas { get; set; }
+    public DbSet<InstituteProjectPersona> InstituteProjectPersonas { get; set; }
+    public DbSet<PersonaChatHistory> PersonaChatHistory { get; set; }
+    public DbSet<AgentExercise> AgentExercises { get; set; }
+    public DbSet<AgentRequirement> AgentRequirements { get; set; }
+    public DbSet<AgentWorld> AgentWorlds { get; set; }
+    public DbSet<AgentScenarioSet> AgentScenarioSets { get; set; }
+    public DbSet<AgentScenario> AgentScenarios { get; set; }
+    public DbSet<ProjectAgentScenarioSet> ProjectAgentScenarioSets { get; set; }
+    public DbSet<AgentGradingReport> AgentGradingReports { get; set; }
     public DbSet<MentorChatHistory> MentorChatHistory { get; set; }
     public DbSet<BoardState> BoardStates { get; set; }
     public DbSet<MarketingImages> MarketingImages { get; set; }
@@ -533,6 +542,13 @@ public class ApplicationDbContext : DbContext
             entity.HasOne(e => e.Organization)
                 .WithMany()
                 .HasForeignKey(e => e.OrganizationId)
+                .OnDelete(DeleteBehavior.SetNull);
+
+            // Project-level override of the institute persona (Migrations/agent_exercise_add.sql)
+            entity.HasIndex(e => e.MainAIPersonaId);
+            entity.HasOne(e => e.MainAIPersona)
+                .WithMany()
+                .HasForeignKey(e => e.MainAIPersonaId)
                 .OnDelete(DeleteBehavior.SetNull);
         });
 
@@ -1513,6 +1529,120 @@ public class ApplicationDbContext : DbContext
 
             entity.Property(e => e.Name).IsRequired().HasMaxLength(100);
             entity.Property(e => e.Prompt).HasColumnType("text");
+        });
+
+        // Side personas and agent exercises (Migrations/agent_exercise_add.sql). Two FK names are given
+        // explicitly because Postgres truncated them to 63 characters when the SQL ran.
+        modelBuilder.Entity<InstituteProjectPersona>(entity =>
+        {
+            entity.ToTable("InstituteProjectPersonas");
+            entity.HasKey(e => e.Id);
+            entity.Property(e => e.ContextText).HasColumnType("text");
+            entity.Property(e => e.CreatedAt).HasDefaultValueSql("now()");
+            entity.HasIndex(e => new { e.InstituteProjectId, e.PersonaId }).IsUnique();
+            entity.HasIndex(e => e.PersonaId);
+            entity.HasOne(e => e.InstituteProject).WithMany().HasForeignKey(e => e.InstituteProjectId)
+                .OnDelete(DeleteBehavior.Cascade)
+                .HasConstraintName("FK_InstituteProjectPersonas_InstituteProjects_InstituteProjectI");
+            entity.HasOne(e => e.Persona).WithMany().HasForeignKey(e => e.PersonaId).OnDelete(DeleteBehavior.Restrict);
+        });
+
+        modelBuilder.Entity<PersonaChatHistory>(entity =>
+        {
+            entity.ToTable("PersonaChatHistory");
+            entity.HasKey(e => e.Id);
+            entity.Property(e => e.CreatedAt).HasDefaultValueSql("now()");
+            entity.HasIndex(e => new { e.StudentId, e.PersonaId, e.SprintId });
+            entity.HasOne(e => e.Persona).WithMany().HasForeignKey(e => e.PersonaId).OnDelete(DeleteBehavior.Restrict);
+        });
+
+        modelBuilder.Entity<AgentExercise>(entity =>
+        {
+            entity.ToTable("AgentExercises");
+            entity.HasKey(e => e.Id);
+            entity.Property(e => e.Key).IsRequired().HasMaxLength(100);
+            entity.Property(e => e.Name).IsRequired().HasMaxLength(200);
+            entity.Property(e => e.EndpointPath).IsRequired().HasMaxLength(200);
+            entity.Property(e => e.LimitsJson).HasColumnType("text");
+            entity.Property(e => e.CreatedAt).HasDefaultValueSql("now()");
+            entity.HasIndex(e => e.Key).IsUnique();
+        });
+
+        modelBuilder.Entity<AgentRequirement>(entity =>
+        {
+            entity.ToTable("AgentRequirements");
+            entity.HasKey(e => e.Id);
+            entity.Property(e => e.Code).IsRequired().HasMaxLength(20);
+            entity.Property(e => e.Text).IsRequired().HasColumnType("text");
+            entity.HasIndex(e => new { e.ExerciseId, e.Code }).IsUnique();
+            entity.HasIndex(e => e.PersonaId);
+            entity.HasOne(e => e.Exercise).WithMany(x => x.Requirements).HasForeignKey(e => e.ExerciseId).OnDelete(DeleteBehavior.Cascade);
+            entity.HasOne(e => e.Persona).WithMany().HasForeignKey(e => e.PersonaId).OnDelete(DeleteBehavior.SetNull);
+        });
+
+        modelBuilder.Entity<AgentWorld>(entity =>
+        {
+            entity.ToTable("AgentWorlds");
+            entity.HasKey(e => e.Id);
+            entity.Property(e => e.Key).IsRequired().HasMaxLength(100);
+            entity.Property(e => e.Name).IsRequired().HasMaxLength(200);
+            entity.Property(e => e.DataJson).IsRequired().HasColumnType("text");
+            entity.Property(e => e.CreatedAt).HasDefaultValueSql("now()");
+            entity.HasIndex(e => e.Key).IsUnique();
+        });
+
+        modelBuilder.Entity<AgentScenarioSet>(entity =>
+        {
+            entity.ToTable("AgentScenarioSets");
+            entity.HasKey(e => e.Id);
+            entity.Property(e => e.Name).IsRequired().HasMaxLength(200);
+            entity.Property(e => e.Version).HasDefaultValue(1);
+            entity.Property(e => e.Status).IsRequired().HasMaxLength(20).HasDefaultValue(AgentScenarioSet.StatusDraft);
+            entity.Property(e => e.CreatedAt).HasDefaultValueSql("now()");
+            entity.HasIndex(e => new { e.ExerciseId, e.Name, e.Version }).IsUnique();
+            entity.HasIndex(e => e.WorldId);
+            entity.HasOne(e => e.Exercise).WithMany().HasForeignKey(e => e.ExerciseId).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne(e => e.World).WithMany().HasForeignKey(e => e.WorldId).OnDelete(DeleteBehavior.Restrict);
+        });
+
+        modelBuilder.Entity<AgentScenario>(entity =>
+        {
+            entity.ToTable("AgentScenarios");
+            entity.HasKey(e => e.Id);
+            entity.Property(e => e.Key).IsRequired().HasMaxLength(100);
+            entity.Property(e => e.Request).IsRequired().HasColumnType("text");
+            entity.Property(e => e.ExpectationsJson).IsRequired().HasColumnType("text");
+            entity.HasIndex(e => new { e.ScenarioSetId, e.Key }).IsUnique();
+            entity.HasOne(e => e.ScenarioSet).WithMany(x => x.Scenarios).HasForeignKey(e => e.ScenarioSetId).OnDelete(DeleteBehavior.Cascade);
+        });
+
+        modelBuilder.Entity<ProjectAgentScenarioSet>(entity =>
+        {
+            entity.ToTable("ProjectAgentScenarioSets");
+            entity.HasKey(e => e.Id);
+            entity.Property(e => e.Purpose).IsRequired().HasMaxLength(20);
+            entity.Property(e => e.CreatedAt).HasDefaultValueSql("now()");
+            entity.HasIndex(e => new { e.InstituteProjectId, e.Purpose }).IsUnique();
+            entity.HasIndex(e => e.ScenarioSetId);
+            entity.HasOne(e => e.InstituteProject).WithMany().HasForeignKey(e => e.InstituteProjectId)
+                .OnDelete(DeleteBehavior.Cascade)
+                .HasConstraintName("FK_ProjectAgentScenarioSets_InstituteProjects_InstituteProjectI");
+            entity.HasOne(e => e.ScenarioSet).WithMany().HasForeignKey(e => e.ScenarioSetId).OnDelete(DeleteBehavior.Restrict);
+        });
+
+        modelBuilder.Entity<AgentGradingReport>(entity =>
+        {
+            entity.ToTable("AgentGradingReports");
+            entity.HasKey(e => e.Id);
+            entity.Property(e => e.GradingId).IsRequired().HasMaxLength(32);
+            entity.Property(e => e.BoardId).IsRequired().HasMaxLength(50);
+            entity.Property(e => e.Status).IsRequired().HasMaxLength(20);
+            entity.Property(e => e.ReportJson).HasColumnType("text");
+            entity.Property(e => e.StartedAt).HasDefaultValueSql("now()");
+            entity.HasIndex(e => e.GradingId).IsUnique();
+            entity.HasIndex(e => e.BoardId);
+            entity.HasIndex(e => e.ScenarioSetId);
+            entity.HasOne(e => e.ScenarioSet).WithMany().HasForeignKey(e => e.ScenarioSetId).OnDelete(DeleteBehavior.Restrict);
         });
 
         // Configure AIModel entity

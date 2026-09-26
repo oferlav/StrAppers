@@ -1452,7 +1452,6 @@ public class StudentsController : ControllerBase
                     .ThenInclude(sr => sr.Role)
                 .Include(s => s.ProjectBoard)
                 .Include(s => s.Institute)
-                    .ThenInclude(i => i!.MainAIPersona)
                 .FirstOrDefaultAsync(s => s.Email == email);
 
             if (student == null)
@@ -1465,7 +1464,10 @@ public class StudentsController : ControllerBase
             
             // Get role information
             var roleInfo = student.StudentRoles?.FirstOrDefault(sr => sr.IsActive);
-            
+
+            // Main chat persona: board project override, else institute (Utilities.PersonaResolver)
+            var mainPersona = await Utilities.PersonaResolver.ForStudentAsync(_context, student.Id);
+
             // Return a simplified response to avoid serialization issues
             return Ok(new
             {
@@ -1520,7 +1522,7 @@ public class StudentsController : ControllerBase
                 SingleQuest = student.Institute?.SingleQuest ?? true,
                 // Label for the student-facing AI chat tab. Rides along here rather than needing its
                 // own request: the board room already loads this student before rendering the sidebar.
-                MainAIPersonaName = PersonasController.ResolvePersonaLabel(student.Institute?.MainAIPersona?.Name),
+                MainAIPersonaName = PersonasController.ResolvePersonaLabel(mainPersona?.Name),
                 Coupon = student.Coupon
             });
         }

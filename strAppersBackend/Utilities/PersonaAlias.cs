@@ -68,7 +68,8 @@ public static class PersonaAlias
     }
 
     /// <summary>
-    /// Alias block for a student's institute. Empty for B2C students, who have no institute at all.
+    /// Alias block for a student's main persona (board project override, else institute; see PersonaResolver).
+    /// Empty for B2C students, who have no institute at all.
     /// </summary>
     public static async Task<string> ResolveForStudentAsync(
         ApplicationDbContext context, int studentId, CancellationToken ct = default)
@@ -76,11 +77,6 @@ public static class PersonaAlias
         if (studentId <= 0)
             return string.Empty;
 
-        var name = await context.Students.AsNoTracking()
-            .Where(s => s.Id == studentId && s.Institute != null && s.Institute.MainAIPersonaId != null)
-            .Select(s => s.Institute!.MainAIPersona!.Name)
-            .FirstOrDefaultAsync(ct);
-
-        return BuildAliasBlock(name);
+        return BuildAliasBlock((await PersonaResolver.ForStudentAsync(context, studentId, ct))?.Name);
     }
 }

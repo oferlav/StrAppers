@@ -125,7 +125,7 @@ public partial class MetricsController
         // Renames the simulated stakeholder for this institute's persona — this prompt calls it the
         // "AI Customer" throughout. Empty, and therefore a no-op, when no persona is selected.
         systemPrompt = PersonaAlias.Prepend(
-            await PersonaAlias.ResolveForInstituteAsync(_context, student.InstituteId, cancellationToken),
+            await PersonaAlias.ResolveForStudentAsync(_context, student.Id, cancellationToken),
             systemPrompt);
         var userPromptText = new StringBuilder()
             .AppendLine("## CONTEXT (customer narrative, AI Customer chat, and optional module for this sprint)")

@@ -472,10 +472,7 @@ public partial class MetricsController
         var studentId = rows.Select(r => r.StudentId).FirstOrDefault(id => id > 0);
         if (studentId <= 0) return null;
 
-        return await _context.Students.AsNoTracking()
-            .Where(s => s.Id == studentId && s.Institute != null && s.Institute.MainAIPersonaId != null)
-            .Select(s => s.Institute!.MainAIPersona!.Name)
-            .FirstOrDefaultAsync(ct);
+        return (await PersonaResolver.ForStudentAsync(_context, studentId, ct))?.Name;
     }
 
     /// <summary>

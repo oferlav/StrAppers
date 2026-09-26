@@ -53,7 +53,7 @@ namespace strAppersBackend.Controllers
 
         /// <summary>
         /// System prompt precedence for the student-facing AI chat:
-        /// 1. the institute's <see cref="Persona.Prompt"/> (Institutes.MainAIPersonaId),
+        /// 1. the main persona's <see cref="Persona.Prompt"/> (project override, else institute: see PersonaResolver),
         /// 2. the configured <c>PromptConfig:Customer:SystemPrompt</c>,
         /// 3. <see cref="DefaultCustomerSystemPrompt"/>.
         ///
@@ -70,19 +70,11 @@ namespace strAppersBackend.Controllers
         }
 
         /// <summary>
-        /// The prompt of the persona the student's institute selected, or null when the student has no
-        /// institute (B2C), the institute selected no persona, or the persona row is gone.
+        /// The prompt of the main persona: the board project's override, else the persona the student's
+        /// institute selected; null when neither is set (B2C students, institutes with no persona).
         /// </summary>
-        private async Task<string?> ResolvePersonaPromptAsync(int? instituteId)
-        {
-            if (instituteId is null or <= 0)
-                return null;
-
-            return await _context.Institutes.AsNoTracking()
-                .Where(i => i.Id == instituteId.Value && i.MainAIPersonaId != null)
-                .Select(i => i.MainAIPersona!.Prompt)
-                .FirstOrDefaultAsync();
-        }
+        private async Task<string?> ResolvePersonaPromptAsync(int? instituteProjectId, int? instituteId) =>
+            (await PersonaResolver.ForProjectAsync(_context, instituteProjectId, instituteId))?.Prompt;
 
         /// <summary>
         /// Get the last X chat history messages for a student/sprint (X = ChatHistoryLength from appSettings). For frontend refresh of chat.
@@ -180,7 +172,7 @@ namespace strAppersBackend.Controllers
                 // The persona selected by the student's institute owns the system prompt; the configured
                 // PromptConfig:Customer:SystemPrompt is the fallback for institutes that selected none
                 // and for B2C students, who have no institute at all.
-                var personaPrompt = await ResolvePersonaPromptAsync(student.InstituteId);
+                var personaPrompt = await ResolvePersonaPromptAsync(boardInstituteProjectId, student.InstituteId);
                 var systemPrompt = ResolveCustomerSystemPrompt(personaPrompt, _promptConfig.Customer.SystemPrompt);
                 // Inject Projects.Description into placeholder [INSERT PROJECT DESCRIPTION HERE]
                 const string projectDescriptionPlaceholder = "[INSERT PROJECT DESCRIPTION HERE]";

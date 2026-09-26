@@ -1076,6 +1076,9 @@ namespace strAppersBackend.Migrations
                         .HasColumnType("TEXT")
                         .HasColumnName("CustomerPastStory");
 
+                    b.Property<int?>("MainAIPersonaId")
+                        .HasColumnType("integer");
+
                     b.Property<string>("DataSchema")
                         .HasColumnType("TEXT");
 
@@ -1185,6 +1188,8 @@ namespace strAppersBackend.Migrations
                     b.HasIndex("InstituteId");
 
                     b.HasIndex("OrganizationId");
+
+                    b.HasIndex("MainAIPersonaId");
 
                     b.ToTable("InstituteProjects", (string)null);
                 });
@@ -2024,6 +2029,371 @@ namespace strAppersBackend.Migrations
                     b.HasKey("Id");
 
                     b.ToTable("AIPersonas", (string)null);
+                });
+
+            modelBuilder.Entity("strAppersBackend.Models.AgentExercise", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
+
+                    b.Property<DateTime>("CreatedAt")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("timestamp with time zone")
+                        .HasDefaultValueSql("now()");
+
+                    b.Property<string>("EndpointPath")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)");
+
+                    b.Property<string>("Key")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)");
+
+                    b.Property<string>("LimitsJson")
+                        .HasColumnType("text");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("Key")
+                        .IsUnique();
+
+                    b.ToTable("AgentExercises", (string)null);
+                });
+
+            modelBuilder.Entity("strAppersBackend.Models.AgentGradingReport", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
+
+                    b.Property<string>("BoardId")
+                        .IsRequired()
+                        .HasMaxLength(50)
+                        .HasColumnType("character varying(50)");
+
+                    b.Property<bool?>("CriticalFailure")
+                        .HasColumnType("boolean");
+
+                    b.Property<DateTime?>("FinishedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("GradingId")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.Property<string>("ReportJson")
+                        .HasColumnType("text");
+
+                    b.Property<int>("ScenarioSetId")
+                        .HasColumnType("integer");
+
+                    b.Property<int?>("Score")
+                        .HasColumnType("integer");
+
+                    b.Property<DateTime>("StartedAt")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("timestamp with time zone")
+                        .HasDefaultValueSql("now()");
+
+                    b.Property<string>("Status")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("character varying(20)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("BoardId");
+
+                    b.HasIndex("GradingId")
+                        .IsUnique();
+
+                    b.HasIndex("ScenarioSetId");
+
+                    b.ToTable("AgentGradingReports", (string)null);
+                });
+
+            modelBuilder.Entity("strAppersBackend.Models.AgentRequirement", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
+
+                    b.Property<string>("Code")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("character varying(20)");
+
+                    b.Property<int>("ExerciseId")
+                        .HasColumnType("integer");
+
+                    b.Property<int?>("PersonaId")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("Text")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("PersonaId");
+
+                    b.HasIndex("ExerciseId", "Code")
+                        .IsUnique();
+
+                    b.ToTable("AgentRequirements", (string)null);
+                });
+
+            modelBuilder.Entity("strAppersBackend.Models.AgentScenario", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
+
+                    b.Property<string>("ExpectationsJson")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<string>("Key")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)");
+
+                    b.Property<double?>("PositionLat")
+                        .HasColumnType("double precision");
+
+                    b.Property<double?>("PositionLng")
+                        .HasColumnType("double precision");
+
+                    b.Property<string>("Request")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<int>("ScenarioSetId")
+                        .HasColumnType("integer");
+
+                    b.Property<int>("SortOrder")
+                        .HasColumnType("integer");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("ScenarioSetId", "Key")
+                        .IsUnique();
+
+                    b.ToTable("AgentScenarios", (string)null);
+                });
+
+            modelBuilder.Entity("strAppersBackend.Models.AgentScenarioSet", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
+
+                    b.Property<DateTime>("CreatedAt")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("timestamp with time zone")
+                        .HasDefaultValueSql("now()");
+
+                    b.Property<int>("ExerciseId")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)");
+
+                    b.Property<DateTime?>("PublishedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("Status")
+                        .ValueGeneratedOnAdd()
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("character varying(20)")
+                        .HasDefaultValue("draft");
+
+                    b.Property<int>("Version")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer")
+                        .HasDefaultValue(1);
+
+                    b.Property<int>("WorldId")
+                        .HasColumnType("integer");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("WorldId");
+
+                    b.HasIndex("ExerciseId", "Name", "Version")
+                        .IsUnique();
+
+                    b.ToTable("AgentScenarioSets", (string)null);
+                });
+
+            modelBuilder.Entity("strAppersBackend.Models.AgentWorld", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
+
+                    b.Property<DateTime>("CreatedAt")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("timestamp with time zone")
+                        .HasDefaultValueSql("now()");
+
+                    b.Property<string>("DataJson")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<string>("Key")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("Key")
+                        .IsUnique();
+
+                    b.ToTable("AgentWorlds", (string)null);
+                });
+
+            modelBuilder.Entity("strAppersBackend.Models.InstituteProjectPersona", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
+
+                    b.Property<string>("ContextText")
+                        .HasColumnType("text");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("timestamp with time zone")
+                        .HasDefaultValueSql("now()");
+
+                    b.Property<int>("InstituteProjectId")
+                        .HasColumnType("integer");
+
+                    b.Property<int>("PersonaId")
+                        .HasColumnType("integer");
+
+                    b.Property<int>("SortOrder")
+                        .HasColumnType("integer");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("PersonaId");
+
+                    b.HasIndex("InstituteProjectId", "PersonaId")
+                        .IsUnique();
+
+                    b.ToTable("InstituteProjectPersonas", (string)null);
+                });
+
+            modelBuilder.Entity("strAppersBackend.Models.PersonaChatHistory", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
+
+                    b.Property<string>("AIModelName")
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("timestamp with time zone")
+                        .HasDefaultValueSql("now()");
+
+                    b.Property<string>("Message")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<int>("PersonaId")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("Role")
+                        .IsRequired()
+                        .HasMaxLength(50)
+                        .HasColumnType("character varying(50)");
+
+                    b.Property<int>("SprintId")
+                        .HasColumnType("integer");
+
+                    b.Property<int>("StudentId")
+                        .HasColumnType("integer");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("PersonaId");
+
+                    b.HasIndex("StudentId", "PersonaId", "SprintId");
+
+                    b.ToTable("PersonaChatHistory", (string)null);
+                });
+
+            modelBuilder.Entity("strAppersBackend.Models.ProjectAgentScenarioSet", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
+
+                    b.Property<DateTime>("CreatedAt")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("timestamp with time zone")
+                        .HasDefaultValueSql("now()");
+
+                    b.Property<int>("InstituteProjectId")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("Purpose")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("character varying(20)");
+
+                    b.Property<int>("ScenarioSetId")
+                        .HasColumnType("integer");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("ScenarioSetId");
+
+                    b.HasIndex("InstituteProjectId", "Purpose")
+                        .IsUnique();
+
+                    b.ToTable("ProjectAgentScenarioSets", (string)null);
                 });
 
             modelBuilder.Entity("strAppersBackend.Models.PrivateChat", b =>
@@ -4273,6 +4643,11 @@ namespace strAppersBackend.Migrations
                         .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();
 
+                    b.HasOne("strAppersBackend.Models.Persona", "MainAIPersona")
+                        .WithMany()
+                        .HasForeignKey("MainAIPersonaId")
+                        .OnDelete(DeleteBehavior.SetNull);
+
                     b.HasOne("strAppersBackend.Models.Organization", "Organization")
                         .WithMany()
                         .HasForeignKey("OrganizationId")
@@ -4282,7 +4657,119 @@ namespace strAppersBackend.Migrations
 
                     b.Navigation("Institute");
 
+                    b.Navigation("MainAIPersona");
+
                     b.Navigation("Organization");
+                });
+
+            modelBuilder.Entity("strAppersBackend.Models.InstituteProjectPersona", b =>
+                {
+                    b.HasOne("strAppersBackend.Models.InstituteProject", "InstituteProject")
+                        .WithMany()
+                        .HasForeignKey("InstituteProjectId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .HasConstraintName("FK_InstituteProjectPersonas_InstituteProjects_InstituteProjectI")
+                        .IsRequired();
+
+                    b.HasOne("strAppersBackend.Models.Persona", "Persona")
+                        .WithMany()
+                        .HasForeignKey("PersonaId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.Navigation("InstituteProject");
+
+                    b.Navigation("Persona");
+                });
+
+            modelBuilder.Entity("strAppersBackend.Models.PersonaChatHistory", b =>
+                {
+                    b.HasOne("strAppersBackend.Models.Persona", "Persona")
+                        .WithMany()
+                        .HasForeignKey("PersonaId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.Navigation("Persona");
+                });
+
+            modelBuilder.Entity("strAppersBackend.Models.AgentRequirement", b =>
+                {
+                    b.HasOne("strAppersBackend.Models.AgentExercise", "Exercise")
+                        .WithMany("Requirements")
+                        .HasForeignKey("ExerciseId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("strAppersBackend.Models.Persona", "Persona")
+                        .WithMany()
+                        .HasForeignKey("PersonaId")
+                        .OnDelete(DeleteBehavior.SetNull);
+
+                    b.Navigation("Exercise");
+
+                    b.Navigation("Persona");
+                });
+
+            modelBuilder.Entity("strAppersBackend.Models.AgentScenarioSet", b =>
+                {
+                    b.HasOne("strAppersBackend.Models.AgentExercise", "Exercise")
+                        .WithMany()
+                        .HasForeignKey("ExerciseId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("strAppersBackend.Models.AgentWorld", "World")
+                        .WithMany()
+                        .HasForeignKey("WorldId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.Navigation("Exercise");
+
+                    b.Navigation("World");
+                });
+
+            modelBuilder.Entity("strAppersBackend.Models.AgentScenario", b =>
+                {
+                    b.HasOne("strAppersBackend.Models.AgentScenarioSet", "ScenarioSet")
+                        .WithMany("Scenarios")
+                        .HasForeignKey("ScenarioSetId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("ScenarioSet");
+                });
+
+            modelBuilder.Entity("strAppersBackend.Models.ProjectAgentScenarioSet", b =>
+                {
+                    b.HasOne("strAppersBackend.Models.InstituteProject", "InstituteProject")
+                        .WithMany()
+                        .HasForeignKey("InstituteProjectId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .HasConstraintName("FK_ProjectAgentScenarioSets_InstituteProjects_InstituteProjectI")
+                        .IsRequired();
+
+                    b.HasOne("strAppersBackend.Models.AgentScenarioSet", "ScenarioSet")
+                        .WithMany()
+                        .HasForeignKey("ScenarioSetId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.Navigation("InstituteProject");
+
+                    b.Navigation("ScenarioSet");
+                });
+
+            modelBuilder.Entity("strAppersBackend.Models.AgentGradingReport", b =>
+                {
+                    b.HasOne("strAppersBackend.Models.AgentScenarioSet", "ScenarioSet")
+                        .WithMany()
+                        .HasForeignKey("ScenarioSetId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.Navigation("ScenarioSet");
                 });
 
             modelBuilder.Entity("strAppersBackend.Models.InstituteProjectModule", b =>
@@ -4816,6 +5303,16 @@ namespace strAppersBackend.Migrations
                     b.Navigation("Students");
 
                     b.Navigation("Teachers");
+                });
+
+            modelBuilder.Entity("strAppersBackend.Models.AgentExercise", b =>
+                {
+                    b.Navigation("Requirements");
+                });
+
+            modelBuilder.Entity("strAppersBackend.Models.AgentScenarioSet", b =>
+                {
+                    b.Navigation("Scenarios");
                 });
 
             modelBuilder.Entity("strAppersBackend.Models.InstituteProject", b =>

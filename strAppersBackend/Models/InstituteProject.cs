@@ -84,6 +84,13 @@ public class InstituteProject
     [Column("CustomerPastStory", TypeName = "TEXT")]
     public string? CustomerPastStory { get; set; }
 
+    /// <summary>
+    /// Optional project-level override of <see cref="Institute.MainAIPersonaId"/> for the main (assessed) chat.
+    /// Null keeps the institute's persona. Resolved by <see cref="Utilities.PersonaResolver"/>.
+    /// </summary>
+    public int? MainAIPersonaId { get; set; }
+    public Persona? MainAIPersona { get; set; }
+
     [Column("ShortBrief", TypeName = "TEXT")]
     public string? ShortBrief { get; set; }
 
