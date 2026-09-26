@@ -258,6 +258,9 @@ namespace strAppersBackend.Services.GoogleProxy
                 candidates = candidates.Where(p => p.OpenNow);
 
             var priceLevels = request?["priceLevels"]?.AsArray().Select(n => n?.GetValue<string>()).Where(s => s != null).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            // Same as Google: FREE is not a searchable price level.
+            if (priceLevels != null && priceLevels.Contains("PRICE_LEVEL_FREE"))
+                return PlacesError(400, "INVALID_ARGUMENT", "Invalid price_levels: FREE. Search by FREE price_level is currently not supported. Please remove it and try again.");
             if (priceLevels != null && priceLevels.Count > 0)
                 candidates = candidates.Where(p => p.PriceLevel != null && priceLevels.Contains(p.PriceLevel));
 

@@ -44,6 +44,25 @@ public class FixtureWorldLoadingTests
     }
 
     [Fact]
+    public void Search_RejectsFreePriceLevel_LikeGoogle()
+    {
+        var (engine, services) = CreateEngine();
+        using (services)
+        {
+            var world = GoogleProxyFixtureEngine.ParseWorld("w", """{ "places": [ { "id": "p1", "displayName": "Green Table", "priceLevel": "PRICE_LEVEL_INEXPENSIVE", "keywords": ["vegetarian"] } ] }""")!;
+            byte[] Body(string levels) => System.Text.Encoding.UTF8.GetBytes($$"""{ "textQuery": "vegetarian", "priceLevels": [{{levels}}] }""");
+
+            var free = engine.Handle(world, "places", "POST", "v1/places:searchText", Array.Empty<KeyValuePair<string, string>>(), Body("\"PRICE_LEVEL_FREE\", \"PRICE_LEVEL_INEXPENSIVE\""), "places.id");
+            var cheap = engine.Handle(world, "places", "POST", "v1/places:searchText", Array.Empty<KeyValuePair<string, string>>(), Body("\"PRICE_LEVEL_INEXPENSIVE\""), "places.id");
+
+            Assert.Equal(400, free!.Value.Status);
+            Assert.Contains("FREE", free.Value.Json);
+            Assert.Equal(200, cheap!.Value.Status);
+            Assert.Contains("p1", cheap.Value.Json);
+        }
+    }
+
+    [Fact]
     public async Task UnknownKey_OrInvalidJson_ReturnsNull()
     {
         var (engine, services) = CreateEngine(new AgentWorld { Key = "broken", Name = "Broken", DataJson = "{ not json" });
