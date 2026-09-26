@@ -15,6 +15,8 @@ namespace strAppersBackend.Controllers;
 ///       headers, adds the real Google key, and returns Google's status, content type and body unchanged.
 ///   GET /api/google-proxy/runs/{runId}   header: X-Proxy-Token
 ///       The call log of that run, limited to the token's board.
+/// Fixture mode: when X-Run-Id is a signed fixture run id (GoogleProxyFixtureRuns), Maps and Places are answered by
+/// GoogleProxyFixtureEngine from a simulated world instead of Google.
 /// </summary>
 [ApiController]
 [Route("api/google-proxy")]
@@ -47,6 +49,7 @@ public class GoogleProxyController : ControllerBase
 
     private readonly GoogleProxyConfig _config;
     private readonly GoogleProxyRunStore _store;
+    private readonly GoogleProxyFixtureEngine _fixtures;
     private readonly IHttpClientFactory _httpClientFactory;
     private readonly IConfiguration _configuration;
     private readonly ILogger<GoogleProxyController> _logger;
@@ -54,12 +57,14 @@ public class GoogleProxyController : ControllerBase
     public GoogleProxyController(
         IOptions<GoogleProxyConfig> config,
         GoogleProxyRunStore store,
+        GoogleProxyFixtureEngine fixtures,
         IHttpClientFactory httpClientFactory,
         IConfiguration configuration,
         ILogger<GoogleProxyController> logger)
     {
         _config = config.Value;
         _store = store;
+        _fixtures = fixtures;
         _httpClientFactory = httpClientFactory;
         _configuration = configuration;
         _logger = logger;
@@ -105,14 +110,36 @@ public class GoogleProxyController : ControllerBase
             if (!RunIdPattern.IsMatch(runId)) return BadRequest(new { error = "Invalid X-Run-Id." });
         }
 
-        var apiKey = service == "gemini"
-            ? FirstNonEmpty(_configuration["GoogleApis:StudentBackendApiKey"], Environment.GetEnvironmentVariable("GOOGLE_API_KEY"))
-            : FirstNonEmpty(_configuration["GoogleApis:StudentMapsApiKey"], Environment.GetEnvironmentVariable("GOOGLE_MAPS_API_KEY"),
-                            _configuration["GoogleApis:StudentBackendApiKey"], Environment.GetEnvironmentVariable("GOOGLE_API_KEY"));
-        if (apiKey == null)
+        // Fixture runs (signed "fx." run ids created by the grader) answer Maps and Places from a simulated world
+        // (GoogleProxyFixtures/{worldId}.json) so every student is graded on the same fixed data. Gemini and Speech stay live.
+        FixtureWorld? fixtureWorld = null;
+        switch (GoogleProxyFixtureRuns.Parse(runId, boardId!, _config.TokenSecret, _config.FixtureRunTtlMinutes, DateTimeOffset.UtcNow, out var worldId))
         {
-            _logger.LogWarning("[GoogleProxy] No Google key configured for service {Service}", service);
-            return StatusCode(503, new { error = "The proxy has no Google key configured for this service." });
+            case GoogleProxyFixtureRuns.Kind.Invalid:
+                return StatusCode(403, new { error = "Invalid or expired fixture run id." });
+            case GoogleProxyFixtureRuns.Kind.Valid:
+                fixtureWorld = _fixtures.GetWorld(worldId!);
+                if (fixtureWorld == null)
+                {
+                    _logger.LogError("[GoogleProxy] Fixture world {WorldId} not found or invalid", worldId);
+                    return StatusCode(503, new { error = "Fixture world not available." });
+                }
+                break;
+        }
+        var simulated = fixtureWorld != null && (service == "maps" || service == "places");
+
+        string? apiKey = null;
+        if (!simulated)
+        {
+            apiKey = service == "gemini"
+                ? FirstNonEmpty(_configuration["GoogleApis:StudentBackendApiKey"], Environment.GetEnvironmentVariable("GOOGLE_API_KEY"))
+                : FirstNonEmpty(_configuration["GoogleApis:StudentMapsApiKey"], Environment.GetEnvironmentVariable("GOOGLE_MAPS_API_KEY"),
+                                _configuration["GoogleApis:StudentBackendApiKey"], Environment.GetEnvironmentVariable("GOOGLE_API_KEY"));
+            if (apiKey == null)
+            {
+                _logger.LogWarning("[GoogleProxy] No Google key configured for service {Service}", service);
+                return StatusCode(503, new { error = "The proxy has no Google key configured for this service." });
+            }
         }
 
         byte[] body = Array.Empty<byte>();
@@ -134,42 +161,52 @@ public class GoogleProxyController : ControllerBase
         }
 
         // The student's query string minus any 'key' they sent; the real key is added below for key-in-query services.
-        var query = Request.Query
+        var queryPairs = Request.Query
             .Where(q => !q.Key.Equals("key", StringComparison.OrdinalIgnoreCase))
-            .SelectMany(q => q.Value.Select(v => Uri.EscapeDataString(q.Key) + "=" + Uri.EscapeDataString(v ?? "")))
+            .SelectMany(q => q.Value.Select(v => new KeyValuePair<string, string>(q.Key, v ?? "")))
             .ToList();
+        var query = queryPairs.Select(q => Uri.EscapeDataString(q.Key) + "=" + Uri.EscapeDataString(q.Value)).ToList();
         var loggedPath = "/" + path + (query.Count > 0 ? "?" + string.Join("&", query) : "");
-        if (service == "maps" || service == "speech") query.Add("key=" + Uri.EscapeDataString(apiKey));
-        var upstreamUrl = upstreamHost + "/" + path + (query.Count > 0 ? "?" + string.Join("&", query) : "");
-
-        using var upstreamRequest = new HttpRequestMessage(new HttpMethod(method), upstreamUrl);
-        if (method == "POST")
-        {
-            upstreamRequest.Content = new ByteArrayContent(body);
-            upstreamRequest.Content.Headers.TryAddWithoutValidation("Content-Type", Request.ContentType ?? "application/json");
-        }
-        foreach (var header in ForwardedHeaders)
-            if (Request.Headers.TryGetValue(header, out var value)) upstreamRequest.Headers.TryAddWithoutValidation(header, value.ToString());
-        if (service == "gemini" || service == "places") upstreamRequest.Headers.TryAddWithoutValidation("X-Goog-Api-Key", apiKey);
 
         var stopwatch = Stopwatch.StartNew();
         int status;
-        string contentType;
+        string contentType = "application/json";
         byte[] responseBody;
-        try
+        if (simulated)
         {
-            var client = _httpClientFactory.CreateClient("GoogleProxy");
-            using var upstreamResponse = await client.SendAsync(upstreamRequest, cancellationToken);
-            status = (int)upstreamResponse.StatusCode;
-            contentType = upstreamResponse.Content.Headers.ContentType?.ToString() ?? "application/json";
-            responseBody = await upstreamResponse.Content.ReadAsByteArrayAsync(cancellationToken);
+            var fixture = _fixtures.Handle(fixtureWorld!, service, method, path, queryPairs, body, Request.Headers["X-Goog-FieldMask"].ToString());
+            status = fixture?.Status ?? 501;
+            responseBody = Encoding.UTF8.GetBytes(fixture?.Json ?? "{\"error\":\"This call is not simulated in fixture mode.\"}");
         }
-        catch (Exception ex) when (ex is HttpRequestException || ex is TaskCanceledException)
+        else
         {
-            _logger.LogWarning(ex, "[GoogleProxy] Upstream call failed: {Service} {Method} /{Path}", service, method, path);
-            status = 502;
-            contentType = "application/json";
-            responseBody = Encoding.UTF8.GetBytes(System.Text.Json.JsonSerializer.Serialize(new { error = "Google did not respond.", message = ex.Message }));
+            if (service == "maps" || service == "speech") query.Add("key=" + Uri.EscapeDataString(apiKey!));
+            var upstreamUrl = upstreamHost + "/" + path + (query.Count > 0 ? "?" + string.Join("&", query) : "");
+
+            using var upstreamRequest = new HttpRequestMessage(new HttpMethod(method), upstreamUrl);
+            if (method == "POST")
+            {
+                upstreamRequest.Content = new ByteArrayContent(body);
+                upstreamRequest.Content.Headers.TryAddWithoutValidation("Content-Type", Request.ContentType ?? "application/json");
+            }
+            foreach (var header in ForwardedHeaders)
+                if (Request.Headers.TryGetValue(header, out var value)) upstreamRequest.Headers.TryAddWithoutValidation(header, value.ToString());
+            if (service == "gemini" || service == "places") upstreamRequest.Headers.TryAddWithoutValidation("X-Goog-Api-Key", apiKey);
+
+            try
+            {
+                var client = _httpClientFactory.CreateClient("GoogleProxy");
+                using var upstreamResponse = await client.SendAsync(upstreamRequest, cancellationToken);
+                status = (int)upstreamResponse.StatusCode;
+                contentType = upstreamResponse.Content.Headers.ContentType?.ToString() ?? "application/json";
+                responseBody = await upstreamResponse.Content.ReadAsByteArrayAsync(cancellationToken);
+            }
+            catch (Exception ex) when (ex is HttpRequestException || ex is TaskCanceledException)
+            {
+                _logger.LogWarning(ex, "[GoogleProxy] Upstream call failed: {Service} {Method} /{Path}", service, method, path);
+                status = 502;
+                responseBody = Encoding.UTF8.GetBytes(System.Text.Json.JsonSerializer.Serialize(new { error = "Google did not respond.", message = ex.Message }));
+            }
         }
         stopwatch.Stop();
 
@@ -183,6 +220,7 @@ public class GoogleProxyController : ControllerBase
                 Path = loggedPath,
                 Status = status,
                 DurationMs = stopwatch.ElapsedMilliseconds,
+                FixtureWorld = simulated ? fixtureWorld!.WorldId : null,
                 RequestBody = Truncate(Encoding.UTF8.GetString(body)),
                 ResponseBody = Truncate(Encoding.UTF8.GetString(responseBody))
             });

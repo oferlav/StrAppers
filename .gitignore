@@ -405,6 +405,7 @@ appsettings.Development.json
 !tsconfig.json
 !**/Migrations/*.json
 !strAppersBackend/Courses/*.json
+!strAppersBackend/GoogleProxyFixtures/*.json
 
 # Exclude publish and build artifacts
 **/publish-azure/

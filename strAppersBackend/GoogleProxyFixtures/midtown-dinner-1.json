@@ -1,0 +1,186 @@
+{
+  "worldId": "midtown-dinner-1",
+  "description": "Simulated Midtown Manhattan for the Dinner Scout exercise. All places, reviews and ids are fictional. Opening hours are frozen: openNow is as listed. The 'grading' block is read by the grader only and never returned by the proxy.",
+  "geocode": [
+    { "match": ["times square"], "formattedAddress": "Times Square, New York, NY 10036, USA", "lat": 40.7580, "lng": -73.9855, "placeId": "ChIJFxAnchorTimesSquare" },
+    { "match": ["grand central"], "formattedAddress": "Grand Central Terminal, 89 E 42nd St, New York, NY 10017, USA", "lat": 40.7527, "lng": -73.9772, "placeId": "ChIJFxAnchorGrandCentral" }
+  ],
+  "places": [
+    {
+      "id": "ChIJFxGreenTable", "displayName": "Green Table", "formattedAddress": "210 W 46th St, New York, NY 10036, USA",
+      "lat": 40.7625, "lng": -73.9855, "rating": 4.6, "userRatingCount": 1840, "priceLevel": "PRICE_LEVEL_INEXPENSIVE",
+      "openNow": true, "servesVegetarianFood": true, "types": ["vegetarian_restaurant", "restaurant", "food"],
+      "keywords": ["vegetarian", "vegan", "salad", "bowls", "healthy"],
+      "reviews": [
+        { "rating": 5, "text": "Calm and intimate, soft lighting and you can actually hear each other. Perfect first date spot." },
+        { "rating": 5, "text": "Entirely vegetarian menu, great prices for Midtown. Quiet even on a Friday." },
+        { "rating": 4, "text": "Small room, cozy tables, service a bit slow but relaxed atmosphere." }
+      ]
+    },
+    {
+      "id": "ChIJFxLeafLantern", "displayName": "Leaf & Lantern", "formattedAddress": "341 W 45th St, New York, NY 10036, USA",
+      "lat": 40.7580, "lng": -73.9940, "rating": 4.5, "userRatingCount": 920, "priceLevel": "PRICE_LEVEL_INEXPENSIVE",
+      "openNow": true, "servesVegetarianFood": true, "types": ["vegan_restaurant", "restaurant", "food"],
+      "keywords": ["vegan", "vegetarian", "plant based", "tapas"],
+      "reviews": [
+        { "rating": 5, "text": "Candlelit and cozy, very romantic. All plant based." },
+        { "rating": 4, "text": "Quiet little place, good for conversation. Portions are small." },
+        { "rating": 5, "text": "Great value vegan tapas, lovely date night." }
+      ]
+    },
+    {
+      "id": "ChIJFxPulseGarden", "displayName": "Pulse Garden", "formattedAddress": "701 7th Ave, New York, NY 10036, USA",
+      "lat": 40.7555, "lng": -73.9830, "rating": 4.9, "userRatingCount": 2100, "priceLevel": "PRICE_LEVEL_INEXPENSIVE",
+      "openNow": true, "servesVegetarianFood": true, "types": ["vegetarian_restaurant", "bar", "restaurant", "food"],
+      "keywords": ["vegetarian", "vegan", "burgers", "cocktails"],
+      "reviews": [
+        { "rating": 5, "text": "Amazing veggie burgers but it is LOUD. DJ every night, you have to shout." },
+        { "rating": 5, "text": "Party vibe, great for big groups and birthdays. Not a place to talk." },
+        { "rating": 5, "text": "Music is blasting, food is fantastic and cheap." }
+      ]
+    },
+    {
+      "id": "ChIJFxSproutBowl", "displayName": "Sprout Bowl", "formattedAddress": "155 W 47th St, New York, NY 10036, USA",
+      "lat": 40.7600, "lng": -73.9820, "rating": 5.0, "userRatingCount": 4, "priceLevel": "PRICE_LEVEL_INEXPENSIVE",
+      "openNow": true, "servesVegetarianFood": true, "types": ["vegetarian_restaurant", "restaurant", "food"],
+      "keywords": ["vegetarian", "bowls", "salad"],
+      "reviews": [
+        { "rating": 5, "text": "Just opened, nice and quiet." },
+        { "rating": 5, "text": "Good bowls." }
+      ]
+    },
+    {
+      "id": "ChIJFxPrimeCut", "displayName": "Prime Cut Steakhouse", "formattedAddress": "1501 Broadway, New York, NY 10036, USA",
+      "lat": 40.7570, "lng": -73.9870, "rating": 4.8, "userRatingCount": 3200, "priceLevel": "PRICE_LEVEL_MODERATE",
+      "openNow": true, "servesVegetarianFood": false, "types": ["steak_house", "restaurant", "food"],
+      "keywords": ["steak", "steakhouse", "grill", "wine"],
+      "reviews": [
+        { "rating": 5, "text": "Quiet, romantic, perfect for a date. Best ribeye in the city." },
+        { "rating": 5, "text": "Elegant and calm. Almost nothing on the menu without meat." },
+        { "rating": 4, "text": "Great steak, reasonable for the area." }
+      ]
+    },
+    {
+      "id": "ChIJFxMoonflower", "displayName": "Moonflower Kitchen", "formattedAddress": "253 W 44th St, New York, NY 10036, USA",
+      "lat": 40.7595, "lng": -73.9880, "rating": 4.7, "userRatingCount": 1300, "priceLevel": "PRICE_LEVEL_INEXPENSIVE",
+      "openNow": false, "servesVegetarianFood": true, "types": ["vegetarian_restaurant", "restaurant", "food"],
+      "keywords": ["vegetarian", "vegan", "brunch", "cafe"],
+      "reviews": [
+        { "rating": 5, "text": "Peaceful, quiet, beautiful plants everywhere. Lovely for a date." },
+        { "rating": 5, "text": "All vegetarian and very affordable. Closes early though." },
+        { "rating": 4, "text": "Calm atmosphere, great brunch." }
+      ]
+    },
+    {
+      "id": "ChIJFxSaffronStreet", "displayName": "Saffron Street", "formattedAddress": "602 8th Ave, New York, NY 10018, USA",
+      "lat": 40.7540, "lng": -73.9875, "rating": 4.4, "userRatingCount": 2600, "priceLevel": "PRICE_LEVEL_INEXPENSIVE",
+      "openNow": true, "servesVegetarianFood": true, "types": ["indian_restaurant", "restaurant", "food"],
+      "keywords": ["indian", "vegetarian", "curry", "thali"],
+      "reviews": [
+        { "rating": 4, "text": "Busy but you can still talk. Huge vegetarian thali for the price." },
+        { "rating": 5, "text": "Cheap, fast and tasty. Half the menu is vegetarian." },
+        { "rating": 4, "text": "A bit crowded at peak hours." }
+      ]
+    },
+    {
+      "id": "ChIJFxHarvestHall", "displayName": "Harvest Hall", "formattedAddress": "120 W 48th St, New York, NY 10036, USA",
+      "lat": 40.7610, "lng": -73.9800, "rating": 4.8, "userRatingCount": 700, "priceLevel": "PRICE_LEVEL_VERY_EXPENSIVE",
+      "openNow": true, "servesVegetarianFood": true, "types": ["vegetarian_restaurant", "fine_dining_restaurant", "restaurant", "food"],
+      "keywords": ["vegetarian", "tasting menu", "fine dining"],
+      "reviews": [
+        { "rating": 5, "text": "Quiet, elegant, unforgettable vegetarian tasting menu. Very pricey." },
+        { "rating": 5, "text": "Special occasion place. Romantic and hushed." },
+        { "rating": 4, "text": "Worth it once, but it will cost you." }
+      ]
+    },
+    {
+      "id": "ChIJFxFarFields", "displayName": "Far Fields", "formattedAddress": "301 W 72nd St, New York, NY 10023, USA",
+      "lat": 40.7800, "lng": -73.9800, "rating": 4.7, "userRatingCount": 1500, "priceLevel": "PRICE_LEVEL_INEXPENSIVE",
+      "openNow": true, "servesVegetarianFood": true, "types": ["vegetarian_restaurant", "restaurant", "food"],
+      "keywords": ["vegetarian", "vegan", "farm to table"],
+      "reviews": [
+        { "rating": 5, "text": "Quiet neighborhood gem, romantic and affordable." },
+        { "rating": 5, "text": "All vegetarian, calm, lovely for a date." },
+        { "rating": 4, "text": "Worth the trip uptown." }
+      ]
+    },
+    {
+      "id": "ChIJFxNoodleRush", "displayName": "Noodle Rush", "formattedAddress": "1560 Broadway, New York, NY 10036, USA",
+      "lat": 40.7570, "lng": -73.9840, "rating": 4.3, "userRatingCount": 5100, "priceLevel": "PRICE_LEVEL_INEXPENSIVE",
+      "openNow": true, "servesVegetarianFood": false, "types": ["ramen_restaurant", "restaurant", "food"],
+      "keywords": ["ramen", "noodles", "japanese"],
+      "reviews": [
+        { "rating": 4, "text": "Fast, loud, packed. Pork broth is excellent." },
+        { "rating": 4, "text": "Long lines, communal tables." }
+      ]
+    },
+    {
+      "id": "ChIJFxOliveEmber", "displayName": "Olive & Ember", "formattedAddress": "358 W 51st St, New York, NY 10019, USA",
+      "lat": 40.7650, "lng": -73.9900, "rating": 4.5, "userRatingCount": 1100, "priceLevel": "PRICE_LEVEL_MODERATE",
+      "openNow": true, "servesVegetarianFood": true, "types": ["mediterranean_restaurant", "restaurant", "food"],
+      "keywords": ["mediterranean", "greek", "mezze", "vegetarian options"],
+      "reviews": [
+        { "rating": 5, "text": "Quiet back room, great for a date. Lots of vegetarian mezze." },
+        { "rating": 4, "text": "Relaxed, warm service, a bit pricier than expected." }
+      ]
+    },
+    {
+      "id": "ChIJFxCornerSlice", "displayName": "Corner Slice", "formattedAddress": "1580 Broadway, New York, NY 10036, USA",
+      "lat": 40.7585, "lng": -73.9850, "rating": 4.2, "userRatingCount": 6400, "priceLevel": "PRICE_LEVEL_INEXPENSIVE",
+      "openNow": true, "servesVegetarianFood": true, "types": ["pizza_restaurant", "restaurant", "food"],
+      "keywords": ["pizza", "slice", "italian"],
+      "reviews": [
+        { "rating": 4, "text": "Classic NY slice, standing room only, very noisy." },
+        { "rating": 4, "text": "Cheap and quick, tourists everywhere." }
+      ]
+    },
+    {
+      "id": "ChIJFxBlueNile", "displayName": "Blue Nile Table", "formattedAddress": "120 W 56th St, New York, NY 10019, USA",
+      "lat": 40.7680, "lng": -73.9790, "rating": 4.5, "userRatingCount": 860, "priceLevel": "PRICE_LEVEL_INEXPENSIVE",
+      "openNow": true, "servesVegetarianFood": true, "types": ["ethiopian_restaurant", "african_restaurant", "restaurant", "food"],
+      "keywords": ["ethiopian", "injera", "african", "vegetarian platter"],
+      "reviews": [
+        { "rating": 5, "text": "The only Ethiopian place in Midtown worth it. Huge vegetarian platter." },
+        { "rating": 4, "text": "Warm, relaxed, great value." }
+      ]
+    }
+  ],
+  "grading": {
+    "scenarios": [
+      {
+        "id": "vegetarian-quiet-date",
+        "request": "Cheap vegetarian place near Times Square, open now, quiet enough for a date",
+        "position": null,
+        "expectStatus": "ok",
+        "expectTop1In": ["ChIJFxGreenTable", "ChIJFxLeafLantern"],
+        "mustNotInclude": ["ChIJFxPrimeCut", "ChIJFxMoonflower", "ChIJFxNoodleRush"],
+        "mustNotBeInTop3": ["ChIJFxPulseGarden", "ChIJFxSproutBowl", "ChIJFxHarvestHall", "ChIJFxFarFields"],
+        "expectGeocodeCall": true
+      },
+      {
+        "id": "vegetarian-quiet-date-with-position",
+        "request": "Cheap vegetarian place near me, open now, quiet enough for a date",
+        "position": { "lat": 40.7580, "lng": -73.9855 },
+        "expectStatus": "ok",
+        "expectTop1In": ["ChIJFxGreenTable", "ChIJFxLeafLantern"],
+        "mustNotInclude": ["ChIJFxPrimeCut", "ChIJFxMoonflower", "ChIJFxNoodleRush"],
+        "expectGeocodeCall": false
+      },
+      {
+        "id": "ethiopian-relax-distance",
+        "request": "Ethiopian food within a 5 minute walk of Times Square, open now",
+        "position": null,
+        "expectStatus": "ok",
+        "expectTop1In": ["ChIJFxBlueNile"],
+        "expectRelaxed": ["distance"]
+      },
+      {
+        "id": "ambiguous-location",
+        "request": "Somewhere quiet for dinner near my office",
+        "position": null,
+        "expectStatus": "needs_clarification",
+        "expectNoMapsCalls": true
+      }
+    ]
+  }
+}

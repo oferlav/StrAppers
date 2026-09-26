@@ -38,6 +38,11 @@
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
     </Content>
+    <!-- Google proxy fixture worlds (simulated Maps/Places data for grading). Web SDK already includes *.json as Content, so Update not Include. -->
+    <Content Update="GoogleProxyFixtures\**\*.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </Content>
     <!-- Email assets (e.g. logo.png for inline embedding in notify-applicant email) -->
     <Content Include="Assets\**\*">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>

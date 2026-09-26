@@ -12,6 +12,8 @@ namespace strAppersBackend.Services.GoogleProxy
         public string Path { get; set; } = "";
         public int Status { get; set; }
         public long DurationMs { get; set; }
+        /// <summary>The fixture world that answered this call, or null when Google answered it.</summary>
+        public string? FixtureWorld { get; set; }
         public string RequestBody { get; set; } = "";
         public string ResponseBody { get; set; } = "";
     }

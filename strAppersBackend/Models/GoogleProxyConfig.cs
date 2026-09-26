@@ -29,6 +29,9 @@ namespace strAppersBackend.Models
         /// <summary>Request and response bodies longer than this are truncated in the log (forwarding is never truncated).</summary>
         public int MaxLoggedBodyChars { get; set; } = 200_000;
 
+        /// <summary>How long a signed fixture run id (grading run) stays valid after the grader creates it.</summary>
+        public int FixtureRunTtlMinutes { get; set; } = 60;
+
         /// <summary>Largest request body accepted from a student backend.</summary>
         public int MaxRequestBodyBytes { get; set; } = 10 * 1024 * 1024;
     }

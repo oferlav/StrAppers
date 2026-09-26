@@ -237,6 +237,7 @@ builder.Services.AddHttpClient("GoogleOAuth", client =>
 // Google API proxy for student backends (GoogleProxyController). Off unless GoogleProxy:Enabled and GoogleProxy:TokenSecret are set.
 builder.Services.Configure<GoogleProxyConfig>(builder.Configuration.GetSection("GoogleProxy"));
 builder.Services.AddSingleton<strAppersBackend.Services.GoogleProxy.GoogleProxyRunStore>();
+builder.Services.AddSingleton<strAppersBackend.Services.GoogleProxy.GoogleProxyFixtureEngine>();
 builder.Services.AddHttpClient("GoogleProxy", client =>
 {
     client.Timeout = TimeSpan.FromSeconds(60);
