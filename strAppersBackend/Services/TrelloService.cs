@@ -73,7 +73,7 @@ namespace strAppersBackend.Services
         Task<IReadOnlyList<(string Name, string Id, double Pos)>> GetBoardListsWithPositionsAsync(string boardId);
         /// <summary>Creates template cards for one sprint on an existing list (full content from request: description, checklist items, custom fields). Used when MergeType=Add to populate a newly added sprint list from Projects.TrelloBoardJson.</summary>
         Task<(int CardsCreated, string? Error)> CreateSprintCardsOnListAsync(string boardId, string listId, TrelloProjectCreationRequest request, string sprintListName, DateTime? dueDateForCards = null);
-        /// <summary>Invite a member to an existing Trello board by email (e.g. to add PM to a board created before allowBillableGuest fix).</summary>
+        /// <summary>Invite a member to an existing Trello board by email (e.g. to add a PM who was not added at board creation).</summary>
         Task<(bool Success, string? Error)> InviteMemberToBoardByEmailAsync(string boardId, string email);
         /// <summary>Gets board lists and cards with checklists for dashboard stats. Cards in the User Stories list are excluded.</summary>
         Task<TrelloDashboardData?> GetBoardDashboardDataAsync(string boardId);
@@ -206,8 +206,8 @@ namespace strAppersBackend.Services
                 var boardData = JsonSerializer.Deserialize<JsonElement>(boardJson);
                 var boardId = boardData.GetProperty("id").GetString();
 
-                // Invite user to the board (allowBillableGuest=true required in some workspaces to avoid 403)
-                var inviteUrl = $"https://api.trello.com/1/boards/{boardId}/members?email={Uri.EscapeDataString(email)}&type=normal&allowBillableGuest=true&key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
+                // Invite user to the board. No allowBillableGuest: Trello must refuse (403) any invite that would create a billable multi-board guest.
+                var inviteUrl = $"https://api.trello.com/1/boards/{boardId}/members?email={Uri.EscapeDataString(email)}&type=normal&key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
                 
                 var inviteResponse = await _httpClient.PutAsync(inviteUrl, null);
                 
@@ -319,7 +319,7 @@ namespace strAppersBackend.Services
                 return (false, "BoardId and email are required.");
             try
             {
-                var inviteUrl = $"https://api.trello.com/1/boards/{Uri.EscapeDataString(boardId)}/members?email={Uri.EscapeDataString(email)}&type=normal&allowBillableGuest=true&key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
+                var inviteUrl = $"https://api.trello.com/1/boards/{Uri.EscapeDataString(boardId)}/members?email={Uri.EscapeDataString(email)}&type=normal&key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
                 var response = await _httpClient.PutAsync(inviteUrl, null);
                 var responseContent = await response.Content.ReadAsStringAsync();
                 if (response.IsSuccessStatusCode)
@@ -413,6 +413,8 @@ namespace strAppersBackend.Services
                 return apiErrorResponse ?? "Unknown error";
             if (apiErrorResponse.Contains("reactivate", StringComparison.OrdinalIgnoreCase))
                 return "This email was previously an Atlassian user who was deleted. They must be reactivated in Atlassian admin (admin.atlassian.com) before they can be re-invited to boards.";
+            if (apiErrorResponse.Contains("multi-board guest", StringComparison.OrdinalIgnoreCase))
+                return "Not invited: this person is already a guest on another board in the Trello workspace, and a second board would make them a billable multi-board guest. Remove them from the other board first.";
             return apiErrorResponse;
         }
 
@@ -544,7 +546,7 @@ namespace strAppersBackend.Services
                 {
                     try
                     {
-                        var inviteUrl = $"https://api.trello.com/1/boards/{boardId}/members?email={Uri.EscapeDataString(member.Email)}&type=normal&allowBillableGuest=true&key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
+                        var inviteUrl = $"https://api.trello.com/1/boards/{boardId}/members?email={Uri.EscapeDataString(member.Email)}&type=normal&key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
                         var inviteResponse = await _httpClient.PutAsync(inviteUrl, null);
                         if (!inviteResponse.IsSuccessStatusCode)
                         {
@@ -727,9 +729,9 @@ namespace strAppersBackend.Services
                     {
                         try
                         {
-                            // Add as board member (type=normal). allowBillableGuest=true required by Trello API for invite-by-email in some workspaces
-                            // (403 "Member not allowed to add a multi-board guest without allowBillableGuest parameter" when false).
-                            var inviteUrl = $"https://api.trello.com/1/boards/{trelloBoardId}/members?email={Uri.EscapeDataString(member.Email)}&type=normal&allowBillableGuest=true&key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
+                            // Add as board member (type=normal). Never pass allowBillableGuest=true: it makes Trello bill anyone who ends up on 2+ workspace boards.
+                            // Without it Trello refuses such invites with a 403, which is logged as a failed invite and does not fail board creation.
+                            var inviteUrl = $"https://api.trello.com/1/boards/{trelloBoardId}/members?email={Uri.EscapeDataString(member.Email)}&type=normal&key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
                             var inviteResponse = await _httpClient.PutAsync(inviteUrl, null);
                             var responseContent = await inviteResponse.Content.ReadAsStringAsync();
 
@@ -929,9 +931,9 @@ namespace strAppersBackend.Services
                     {
                         try
                         {
-                            // Add as board member (type=normal). allowBillableGuest=true required by Trello API for invite-by-email in some workspaces
-                            // (403 "Member not allowed to add a multi-board guest without allowBillableGuest parameter" when false).
-                            var inviteUrl = $"https://api.trello.com/1/boards/{emptyBoardId}/members?email={Uri.EscapeDataString(member.Email)}&type=normal&allowBillableGuest=true&key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
+                            // Add as board member (type=normal). Never pass allowBillableGuest=true: it makes Trello bill anyone who ends up on 2+ workspace boards.
+                            // Without it Trello refuses such invites with a 403, which is logged as a failed invite and does not fail board creation.
+                            var inviteUrl = $"https://api.trello.com/1/boards/{emptyBoardId}/members?email={Uri.EscapeDataString(member.Email)}&type=normal&key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
                             var inviteResponse = await _httpClient.PutAsync(inviteUrl, null);
                             var inviteResponseContent = inviteResponse.IsSuccessStatusCode ? null : await inviteResponse.Content.ReadAsStringAsync();
 
@@ -1045,9 +1047,9 @@ namespace strAppersBackend.Services
                     {
                         try
                         {
-                            // Add as board member (type=normal). allowBillableGuest=true required by Trello API for invite-by-email in some workspaces
-                            // (403 "Member not allowed to add a multi-board guest without allowBillableGuest parameter" when false).
-                            var inviteUrl = $"https://api.trello.com/1/boards/{trelloBoardId}/members?email={Uri.EscapeDataString(member.Email)}&type=normal&allowBillableGuest=true&key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
+                            // Add as board member (type=normal). Never pass allowBillableGuest=true: it makes Trello bill anyone who ends up on 2+ workspace boards.
+                            // Without it Trello refuses such invites with a 403, which is logged as a failed invite and does not fail board creation.
+                            var inviteUrl = $"https://api.trello.com/1/boards/{trelloBoardId}/members?email={Uri.EscapeDataString(member.Email)}&type=normal&key={_trelloConfig.ApiKey}&token={_trelloConfig.ApiToken}";
                             var inviteResponse = await _httpClient.PutAsync(inviteUrl, null);
                             var inviteResponseContent = inviteResponse.IsSuccessStatusCode ? null : await inviteResponse.Content.ReadAsStringAsync();
 

@@ -2659,7 +2659,7 @@ Return only the JSON object:";
     }
 
     /// <summary>
-    /// Invite one or more members to an existing Trello board by email (e.g. to add PM to a board created before the allowBillableGuest fix).
+    /// Invite one or more members to an existing Trello board by email (e.g. to add a PM who was not added at board creation).
     /// POST api/Utilities/trello/invite-to-board
     /// </summary>
     [HttpPost("trello/invite-to-board")]
@@ -4936,6 +4936,6 @@ public class TrelloInviteToBoardRequest
     /// <summary>Trello board ID (e.g. 698f522ddffd39fa9da1a6a7).</summary>
     public string? BoardId { get; set; }
 
-    /// <summary>Email addresses to invite to the board (e.g. PM who was not added before allowBillableGuest fix).</summary>
+    /// <summary>Email addresses to invite to the board (e.g. a PM who was not added at board creation).</summary>
     public List<string>? Emails { get; set; }
 }
